@@ -3,13 +3,15 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Music Player API specification
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: tracks
+    description: Track search, streaming, and download operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,101 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /tracks/search:
+    post:
+      operationId: searchTracks
+      tags: [tracks]
+      summary: Search for track variants
+      description: Searches YouTube and SoundCloud for variants of a track. Returns all found variants (original, remix, live, cover) without auto-selecting.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+      responses:
+        "200":
+          description: List of track variants
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /tracks/{id}/stream:
+    get:
+      operationId: getTrackStream
+      tags: [tracks]
+      summary: Get stream URL for a track
+      description: Returns a direct audio stream URL for playback. URL may expire.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Track ID (prefixed with source, e.g. yt_VIDEO_ID or sc_TRACK_ID)
+      responses:
+        "200":
+          description: Stream URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StreamResponse"
+        "404":
+          description: Track not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /tracks/{id}/download:
+    get:
+      operationId: getTrackDownload
+      tags: [tracks]
+      summary: Get download URL for a track
+      description: Returns a direct download URL for the best quality audio. URL may expire.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Track ID (prefixed with source, e.g. yt_VIDEO_ID or sc_TRACK_ID)
+      responses:
+        "200":
+          description: Download URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadResponse"
+        "404":
+          description: Track not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
   schemas:
     HealthStatus:
@@ -34,3 +131,125 @@ components:
       required:
         - status
 
+    TrackType:
+      type: string
+      enum:
+        - original
+        - remix
+        - live
+        - cover
+
+    TrackSource:
+      type: string
+      enum:
+        - youtube
+        - soundcloud
+
+    TrackResult:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique track ID (prefixed with source, e.g. yt_VIDEO_ID)
+        title:
+          type: string
+        artist:
+          type: string
+        type:
+          $ref: "#/components/schemas/TrackType"
+        duration:
+          type: integer
+          description: Duration in seconds
+        source:
+          $ref: "#/components/schemas/TrackSource"
+        thumbnailUrl:
+          type: string
+          nullable: true
+        quality:
+          type: array
+          items:
+            type: string
+          description: Available quality options (e.g. ["128", "320"])
+        viewCount:
+          type: integer
+          nullable: true
+        score:
+          type: number
+          description: Ranking score (higher is better match)
+      required:
+        - id
+        - title
+        - artist
+        - type
+        - duration
+        - source
+        - quality
+        - score
+
+    SearchRequest:
+      type: object
+      properties:
+        artist:
+          type: string
+        title:
+          type: string
+      required:
+        - artist
+        - title
+
+    SearchResponse:
+      type: object
+      properties:
+        query:
+          type: string
+          description: The normalized search query used
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/TrackResult"
+        cached:
+          type: boolean
+          description: Whether results came from cache
+      required:
+        - query
+        - results
+        - cached
+
+    StreamResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        streamUrl:
+          type: string
+        mimeType:
+          type: string
+          nullable: true
+      required:
+        - id
+        - streamUrl
+
+    DownloadResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        downloadUrl:
+          type: string
+        filename:
+          type: string
+          nullable: true
+      required:
+        - id
+        - downloadUrl
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+      required:
+        - error
+        - message

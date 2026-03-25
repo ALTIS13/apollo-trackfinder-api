@@ -15,6 +15,23 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **Validation**: Zod (`zod/v4`), `drizzle-zod`
 - **API codegen**: Orval (from OpenAPI spec)
 - **Build**: esbuild (CJS bundle)
+- **Media search**: yt-dlp (system) + SoundCloud API (HTTP)
+- **System deps**: yt-dlp, ffmpeg (installed via Nix)
+
+## Music Player API
+
+### Endpoints
+- `POST /api/tracks/search` — search YouTube + SoundCloud for track variants, returns classified & ranked list
+- `GET /api/tracks/:id/stream` — get stream URL (HLS or direct audio) for a track
+- `GET /api/tracks/:id/download` — get download URL for a track
+
+### Architecture
+- Track IDs encode the source URL as `yt_<base64url>` (YouTube) or `sc_<base64url>` (SoundCloud)
+- Search results are cached in PostgreSQL (`track_search_cache`) with 1-hour TTL
+- Classification: `original | remix | live | cover` — rule-based regex on track title
+- Ranking: combined score from title similarity + type weight + view count + duration proximity
+- YouTube: uses `yt-dlp` CLI with `ytsearch:` prefix for search, `--get-url` for stream resolution
+- SoundCloud: HTTP fetch to SoundCloud API v2 with dynamic client_id extraction (cached 30 min)
 
 ## Structure
 
@@ -22,11 +39,16 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 artifacts-monorepo/
 ├── artifacts/              # Deployable applications
 │   └── api-server/         # Express API server
+│       └── src/
+│           ├── adapters/   # Source adapters (youtube.ts, soundcloud.ts)
+│           ├── lib/        # Shared utilities (ytdlp.ts, classifier.ts, ranker.ts, cache.ts, logger.ts)
+│           └── routes/     # Express routes (health.ts, tracks.ts)
 ├── lib/                    # Shared libraries
 │   ├── api-spec/           # OpenAPI spec + Orval codegen config
 │   ├── api-client-react/   # Generated React Query hooks
 │   ├── api-zod/            # Generated Zod schemas from OpenAPI
 │   └── db/                 # Drizzle ORM schema + DB connection
+│       └── src/schema/     # trackCache.ts (PostgreSQL cache table)
 ├── scripts/                # Utility scripts (single workspace package)
 │   └── src/                # Individual .ts scripts, run via `pnpm --filter @workspace/scripts run <script>`
 ├── pnpm-workspace.yaml     # pnpm workspace (artifacts/*, lib/*, lib/integrations/*, scripts)
