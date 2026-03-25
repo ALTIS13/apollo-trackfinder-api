@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { Play, Pause, Download, Music, Loader2, Disc3 } from "lucide-react";
+import { Play, Pause, Download, Music, Loader2 } from "lucide-react";
 import { formatDuration } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { usePlayer } from "@/hooks/use-player";
-import { getTrackDownload } from "@workspace/api-client-react";
+import { getGetTrackDownloadQueryOptions } from "@workspace/api-client-react";
 import type { TrackResult } from "@workspace/api-client-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { motion } from "framer-motion";
 
@@ -16,6 +17,7 @@ interface TrackCardProps {
 export function TrackCard({ track, index }: TrackCardProps) {
   const { currentTrack, isPlaying, playTrack, togglePlayPause, isLoading } = usePlayer();
   const [isDownloading, setIsDownloading] = useState(false);
+  const queryClient = useQueryClient();
   const { toast } = useToast();
 
   const isCurrentTrack = currentTrack?.id === track.id;
@@ -33,7 +35,7 @@ export function TrackCard({ track, index }: TrackCardProps) {
   const handleDownload = async () => {
     try {
       setIsDownloading(true);
-      const res = await getTrackDownload(track.id);
+      const res = await queryClient.fetchQuery(getGetTrackDownloadQueryOptions(track.id));
       
       if (!res.downloadUrl) {
         throw new Error("No download URL returned");

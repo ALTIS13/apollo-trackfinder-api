@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useRef, useEffect, ReactNode } from "react";
-import { getTrackStream } from "@workspace/api-client-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { getGetTrackStreamQueryOptions } from "@workspace/api-client-react";
 import type { TrackResult } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -22,8 +23,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
-  
+
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const queryClient = useQueryClient();
   const { toast } = useToast();
 
   useEffect(() => {
@@ -84,7 +86,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       audioRef.current.pause();
       audioRef.current.src = "";
 
-      const res = await getTrackStream(track.id);
+      const res = await queryClient.fetchQuery(getGetTrackStreamQueryOptions(track.id));
       
       if (!res.streamUrl) {
         throw new Error("Stream URL not provided by server");
