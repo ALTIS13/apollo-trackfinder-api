@@ -7,9 +7,9 @@ const COVER_PATTERNS = /\b(cover|tribute|cover version|originally by|sung by)\b/
 export function classify(title: string): TrackType {
   const t = title.toLowerCase();
 
-  if (COVER_PATTERNS.test(t)) return "cover";
-  if (LIVE_PATTERNS.test(t)) return "live";
   if (REMIX_PATTERNS.test(t)) return "remix";
+  if (LIVE_PATTERNS.test(t)) return "live";
+  if (COVER_PATTERNS.test(t)) return "cover";
 
   return "original";
 }

@@ -8,22 +8,46 @@ import { SearchTracksBody } from "@workspace/api-zod";
 
 const router: IRouter = Router();
 
+const ALLOWED_HOSTS: Record<"yt" | "sc", string[]> = {
+  yt: ["www.youtube.com", "youtube.com", "m.youtube.com", "youtu.be"],
+  sc: ["soundcloud.com", "www.soundcloud.com", "api.soundcloud.com", "api-v2.soundcloud.com"],
+};
+
 function decodeTrackUrl(id: string): { source: "yt" | "sc"; url: string } | null {
+  let source: "yt" | "sc";
+  let encodedPart: string;
+
   if (id.startsWith("yt_")) {
-    try {
-      return { source: "yt", url: Buffer.from(id.slice(3), "base64url").toString() };
-    } catch {
+    source = "yt";
+    encodedPart = id.slice(3);
+  } else if (id.startsWith("sc_")) {
+    source = "sc";
+    encodedPart = id.slice(3);
+  } else {
+    return null;
+  }
+
+  let url: string;
+  try {
+    url = Buffer.from(encodedPart, "base64url").toString("utf-8");
+  } catch {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    if (!ALLOWED_HOSTS[source].includes(hostname)) {
       return null;
     }
-  }
-  if (id.startsWith("sc_")) {
-    try {
-      return { source: "sc", url: Buffer.from(id.slice(3), "base64url").toString() };
-    } catch {
+    if (parsed.protocol !== "https:") {
       return null;
     }
+  } catch {
+    return null;
   }
-  return null;
+
+  return { source, url };
 }
 
 router.post("/tracks/search", async (req, res) => {
