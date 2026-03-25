@@ -1,0 +1,21 @@
+RESPONSE:
+
+{
+  "query": "Travis Scott - FE!N",
+  "results": [
+    {
+      "id": "yt_123",
+      "title": "FE!N",
+      "artist": "Travis Scott",
+      "type": "original",
+      "duration": 191,
+      "quality": ["128", "320"],
+      "source": "youtube"
+    },
+    {
+      "id": "yt_456",
+      "title": "FE!N (Remix)",
+      "type": "remix"
+    }
+  ]
+}

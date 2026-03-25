@@ -1,0 +1,20 @@
+ЗАДАЧА:
+Найти трек и вернуть НЕ один результат, а список
+
+ВХОД:
+artist: Travis Scott
+title: FE!N
+
+ОЖИДАЕМЫЙ РЕЗУЛЬТАТ:
+
+results:
+- type: original
+  title: FE!N
+  duration: 191
+- type: remix
+  title: FE!N (Remix)
+- type: live
+  title: FE!N Live Rolling Loud
+
+ПРИНЦИП:
+ничего не отбрасывать, только классифицировать

@@ -1,0 +1,16 @@
+ЗАДАЧА:
+Определить тип трека
+
+ВХОД:
+"Travis Scott - FE!N (Live at Rolling Loud)"
+
+ВЫХОД:
+type: live
+
+---
+
+ПРАВИЛА:
+- содержит "remix" → remix
+- содержит "live" → live
+- содержит "cover" → cover
+- иначе → original
