@@ -9,11 +9,11 @@ export interface RankableTrack {
   score?: number;
 }
 
-const TYPE_WEIGHT: Record<TrackType, number> = {
-  original: 100,
-  remix: 60,
-  live: 50,
-  cover: 40,
+const TYPE_TIER: Record<TrackType, number> = {
+  original: 0,
+  remix: 1,
+  live: 2,
+  cover: 3,
 };
 
 function similarity(a: string, b: string): number {
@@ -31,38 +31,47 @@ function similarity(a: string, b: string): number {
   return union === 0 ? 0 : intersection / union;
 }
 
+function computeWithinTierScore<T extends RankableTrack>(
+  track: T,
+  query: { artist: string; title: string },
+  referenceDuration?: number,
+): number {
+  const trackFull = `${track.artist} ${track.title}`;
+  const expectedQuery = `${query.artist} ${query.title}`.toLowerCase();
+
+  const titleSim = similarity(track.title, query.title);
+  const fullSim = similarity(trackFull, expectedQuery);
+  const artistSim = similarity(track.artist, query.artist);
+  const nameSimilarity = titleSim * 0.5 + fullSim * 0.3 + artistSim * 0.2;
+
+  let durationScore = 0;
+  if (referenceDuration && track.duration > 0) {
+    const diff = Math.abs(track.duration - referenceDuration);
+    durationScore = Math.max(0, 1 - diff / 120);
+  }
+
+  const popularityScore = track.viewCount
+    ? Math.min(1, Math.log10(track.viewCount + 1) / 8)
+    : 0;
+
+  return nameSimilarity * 70 + durationScore * 15 + popularityScore * 15;
+}
+
 export function rank<T extends RankableTrack>(
   tracks: T[],
   query: { artist: string; title: string },
   referenceDuration?: number,
 ): T[] {
-  const expectedQuery = `${query.artist} ${query.title}`.toLowerCase();
-
   const scored = tracks.map((track) => {
-    const trackFull = `${track.artist} ${track.title}`;
-    const titleSim = similarity(track.title, query.title);
-    const fullSim = similarity(trackFull, expectedQuery);
-    const artistSim = similarity(track.artist, query.artist);
-
-    const nameSimilarity = titleSim * 0.5 + fullSim * 0.3 + artistSim * 0.2;
-
-    let durationScore = 0;
-    if (referenceDuration && track.duration > 0 && track.type === "original") {
-      const diff = Math.abs(track.duration - referenceDuration);
-      durationScore = Math.max(0, 1 - diff / 120);
-    }
-
-    const typeScore = TYPE_WEIGHT[track.type] / 100;
-    const popularityScore = track.viewCount ? Math.min(1, Math.log10(track.viewCount + 1) / 8) : 0;
-
-    const score =
-      nameSimilarity * 50 +
-      typeScore * 30 +
-      durationScore * 10 +
-      popularityScore * 10;
-
-    return { ...track, score: Math.round(score * 100) / 100 } as T;
+    const withinTierScore = computeWithinTierScore(track, query, referenceDuration);
+    const score = Math.round(withinTierScore * 100) / 100;
+    return { ...track, score } as T;
   });
 
-  return scored.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  return scored.sort((a, b) => {
+    const tierA = TYPE_TIER[a.type];
+    const tierB = TYPE_TIER[b.type];
+    if (tierA !== tierB) return tierA - tierB;
+    return (b.score ?? 0) - (a.score ?? 0);
+  });
 }
