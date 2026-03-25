@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useSearchTracks } from "@workspace/api-client-react";
 import type { TrackType, TrackResult } from "@workspace/api-client-react";
 import { TrackCard } from "@/components/TrackCard";
@@ -8,12 +8,24 @@ import { motion, AnimatePresence } from "framer-motion";
 type FilterType = TrackType | "all";
 
 export default function Home() {
-  const [artist, setArtist] = useState("");
-  const [title, setTitle] = useState("");
+  const params = new URLSearchParams(window.location.search);
+  const [artist, setArtist] = useState(params.get("artist") ?? "");
+  const [title, setTitle] = useState(params.get("title") ?? "");
   const [activeFilter, setActiveFilter] = useState<FilterType>("all");
   const [hasSearched, setHasSearched] = useState(false);
 
   const searchMutation = useSearchTracks();
+
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    const a = p.get("artist");
+    const t = p.get("title");
+    if (a && t) {
+      setHasSearched(true);
+      searchMutation.mutate({ data: { artist: a, title: t } });
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();

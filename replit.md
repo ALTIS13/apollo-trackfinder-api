@@ -53,6 +53,35 @@ React + Vite SPA with dark professional design.
 - Skeleton loading cards shown during search; error/empty states handled
 - Player bar is hidden until first track is selected (hooks appear above early return to respect Rules of Hooks)
 
+## Spotify Favorites Integration
+
+### Setup Required
+Before Spotify OAuth works, you must add the redirect URI in the Spotify Developer Dashboard:
+- Go to https://developer.spotify.com/dashboard → your app → Edit Settings → Redirect URIs
+- Add: `https://<your-replit-domain>/api/spotify/callback`
+
+### Backend Endpoints (all under `/api/spotify/`)
+- `GET /spotify/login` — redirects to Spotify OAuth authorize page
+- `GET /spotify/callback` — OAuth callback; stores tokens in DB, redirects to `/favorites?spotify_connected=1`
+- `GET /spotify/status` — returns `{ connected, displayName, spotifyUserId }`
+- `GET /spotify/logout` — clears session + deletes DB token
+- `GET /spotify/liked?offset&limit` — paginated liked songs (50 per page)
+- `GET /spotify/playlists` — user's playlists (up to 50)
+- `GET /spotify/playlists/:id/tracks?offset&limit` — tracks in a playlist
+- `GET /spotify/top-tracks?time_range` — top tracks (short_term/medium_term/long_term)
+
+### Session & Auth
+- `express-session` stores session ID in a cookie (in-memory store in dev, persistent in prod via env)
+- `SESSION_SECRET` env var controls session signing
+- `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` required
+- Tokens stored in `spotify_tokens` PostgreSQL table with auto-refresh logic (refreshes if expiry < 60s)
+
+### Frontend
+- `src/hooks/use-spotify.ts` — all Spotify API hooks using React Query + `credentials: "include"`
+- `src/pages/Favorites.tsx` — full page: connect prompt, tabs (Liked/Playlists/Top Tracks), track list, pagination
+- Each track has a "Find variants" button → navigates to `/` with `?artist=...&title=...` to auto-search
+- `src/App.tsx` — NavBar with Discover/Favorites links, `/favorites` route
+
 ## Structure
 
 ```text
