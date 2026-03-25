@@ -1,0 +1,14 @@
+packages:
+  "framer-motion": "For smooth layout transitions and track card entry animations"
+  "clsx": "For conditional class names"
+  "tailwind-merge": "For merging tailwind classes safely"
+  "date-fns": "For formatting durations and times"
+
+images:
+  - path: "artifacts/music-player/public/images/hero-bg.png"
+    description: "Abstract minimal dark gradient background with subtle sleek soundwave lines in deep indigo and electric blue, soft glowing aesthetic, high quality"
+    aspect_ratio: "16:9"
+
+notes:
+  - The backend endpoints are available via @workspace/api-client-react using the generated hooks and fetchers.
+  - Using a React Context for the global audio player state to keep the audio instance persistent and out of the UI components.

@@ -33,12 +33,33 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - YouTube: uses `yt-dlp` CLI with `ytsearch:` prefix for search, `--get-url` for stream resolution
 - SoundCloud: HTTP fetch to SoundCloud API v2 with dynamic client_id extraction (cached 30 min)
 
+## Music Player Frontend (`artifacts/music-player`)
+
+React + Vite SPA with dark professional design.
+
+### Pages & Components
+- `src/pages/Home.tsx` — Hero search page + results list with filter tabs
+- `src/components/TrackCard.tsx` — Individual track card: thumbnail, title, artist, duration, type/source badges, play + download buttons
+- `src/components/Player.tsx` — Persistent bottom player bar: thumbnail, title, artist, progress bar, play/pause/skip controls, time display
+- `src/hooks/use-player.tsx` — PlayerContext: HTML5 Audio playback, stream URL fetching, progress tracking, seek
+- `src/components/ui/badge.tsx` — Extended Badge with variants: original (green), remix (purple), live (orange), cover (blue), youtube, soundcloud
+- `src/lib/utils.ts` — `cn()` helper + `formatDuration()` (seconds → mm:ss)
+
+### Key behaviors
+- Search calls `useSearchTracks` mutation; results are ordered originals-first by the API
+- Filter buttons (All/Original/Remix/Live/Cover) filter the already-sorted results client-side
+- Play click → fetches `/api/tracks/:id/stream` → sets `audio.src` → plays via HTML5 Audio
+- Download click → fetches `/api/tracks/:id/download` → triggers `<a download>` programmatic click
+- Skeleton loading cards shown during search; error/empty states handled
+- Player bar is hidden until first track is selected (hooks appear above early return to respect Rules of Hooks)
+
 ## Structure
 
 ```text
 artifacts-monorepo/
 ├── artifacts/              # Deployable applications
-│   └── api-server/         # Express API server
+│   ├── api-server/         # Express API server
+│   └── music-player/       # React + Vite frontend
 │       └── src/
 │           ├── adapters/   # Source adapters (youtube.ts, soundcloud.ts)
 │           ├── lib/        # Shared utilities (ytdlp.ts, classifier.ts, ranker.ts, cache.ts, logger.ts)
