@@ -23,15 +23,18 @@ function makeRedirectUri(hostname: string): string {
   return `https://${domain}/api/spotify/callback`;
 }
 
+function getSessionId(req: Parameters<typeof router.get>[1] extends (req: infer R, ...args: any[]) => any ? R : never): string | null {
+  const header = req.headers["x-client-session"];
+  if (typeof header === "string" && header.length > 8) return header;
+  return req.session?.session_id ?? null;
+}
+
 async function refreshIfExpired(sessionId: string) {
   const rows = await db.select().from(spotifyTokensTable).where(eq(spotifyTokensTable.sessionId, sessionId));
   const row = rows[0];
   if (!row) return null;
 
-  const now = new Date();
-  if (row.expiresAt > new Date(now.getTime() + 60_000)) {
-    return row;
-  }
+  if (row.expiresAt > new Date(Date.now() + 60_000)) return row;
 
   try {
     const body = new URLSearchParams({
@@ -57,12 +60,7 @@ async function refreshIfExpired(sessionId: string) {
 
     const updated = await db
       .update(spotifyTokensTable)
-      .set({
-        accessToken: data.access_token,
-        refreshToken: data.refresh_token ?? row.refreshToken,
-        expiresAt,
-        updatedAt: new Date(),
-      })
+      .set({ accessToken: data.access_token, refreshToken: data.refresh_token ?? row.refreshToken, expiresAt, updatedAt: new Date() })
       .where(eq(spotifyTokensTable.sessionId, sessionId))
       .returning();
 
@@ -79,10 +77,14 @@ router.get("/spotify/login", (req, res) => {
     return;
   }
 
-  const state = randomBytes(16).toString("hex");
-  const sessionId = req.session.session_id ?? randomBytes(16).toString("hex");
-  req.session.spotify_state = state;
-  req.session.session_id = sessionId;
+  const clientSessionId = (req.query["sid"] as string) ?? req.headers["x-client-session"] as string;
+  if (!clientSessionId) {
+    res.status(400).json({ error: "no_session", message: "No client session ID provided" });
+    return;
+  }
+
+  const nonce = randomBytes(8).toString("hex");
+  const state = `${encodeURIComponent(clientSessionId)}__${nonce}`;
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -99,17 +101,22 @@ router.get("/spotify/callback", async (req, res) => {
   const { code, state, error } = req.query as Record<string, string>;
 
   if (error) {
-    res.redirect(`/?spotify_error=${encodeURIComponent(error)}`);
+    res.redirect(`/favorites?spotify_error=${encodeURIComponent(error)}`);
     return;
   }
 
-  const storedState = req.session.spotify_state;
-  if (!state || state !== storedState) {
-    res.redirect("/?spotify_error=state_mismatch");
+  if (!state || !state.includes("__")) {
+    res.redirect("/favorites?spotify_error=invalid_state");
     return;
   }
 
-  delete req.session.spotify_state;
+  const [encodedSessionId] = state.split("__");
+  const clientSessionId = decodeURIComponent(encodedSessionId);
+
+  if (!clientSessionId || clientSessionId.length < 8) {
+    res.redirect("/favorites?spotify_error=state_mismatch");
+    return;
+  }
 
   try {
     const body = new URLSearchParams({
@@ -129,7 +136,7 @@ router.get("/spotify/callback", async (req, res) => {
     if (!resp.ok) {
       const text = await resp.text();
       logger.error({ status: resp.status, text }, "Spotify token exchange failed");
-      res.redirect("/?spotify_error=token_exchange_failed");
+      res.redirect("/favorites?spotify_error=token_exchange_failed");
       return;
     }
 
@@ -143,16 +150,12 @@ router.get("/spotify/callback", async (req, res) => {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
     });
     const me = meResp.ok ? ((await meResp.json()) as { id: string; display_name?: string }) : null;
-
-    const sessionId = req.session.session_id ?? randomBytes(16).toString("hex");
-    req.session.session_id = sessionId;
-
     const expiresAt = new Date(Date.now() + tokens.expires_in * 1000);
 
     await db
       .insert(spotifyTokensTable)
       .values({
-        sessionId,
+        sessionId: clientSessionId,
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
         expiresAt,
@@ -174,12 +177,12 @@ router.get("/spotify/callback", async (req, res) => {
     res.redirect("/favorites?spotify_connected=1");
   } catch (err) {
     logger.error({ err }, "Spotify callback error");
-    res.redirect("/?spotify_error=internal");
+    res.redirect("/favorites?spotify_error=internal");
   }
 });
 
 router.get("/spotify/status", async (req, res) => {
-  const sessionId = req.session.session_id;
+  const sessionId = getSessionId(req);
   if (!sessionId) {
     res.json({ connected: false });
     return;
@@ -191,18 +194,13 @@ router.get("/spotify/status", async (req, res) => {
     return;
   }
 
-  res.json({
-    connected: true,
-    displayName: tokens.displayName,
-    spotifyUserId: tokens.spotifyUserId,
-  });
+  res.json({ connected: true, displayName: tokens.displayName, spotifyUserId: tokens.spotifyUserId });
 });
 
 router.get("/spotify/logout", async (req, res) => {
-  const sessionId = req.session.session_id;
+  const sessionId = getSessionId(req);
   if (sessionId) {
     await db.delete(spotifyTokensTable).where(eq(spotifyTokensTable.sessionId, sessionId));
-    delete req.session.session_id;
   }
   res.json({ ok: true });
 });
@@ -223,15 +221,11 @@ async function spotifyGet<T>(token: string, path: string, params?: Record<string
   const url = new URL(`https://api.spotify.com/v1${path}`);
   if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
 
-  const resp = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-
+  const resp = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
   if (!resp.ok) {
     logger.error({ status: resp.status, path }, "Spotify API error");
     return null;
   }
-
   return resp.json() as Promise<T>;
 }
 
@@ -249,146 +243,76 @@ function mapTrack(track: SpotifyTrack) {
 }
 
 router.get("/spotify/liked", async (req, res) => {
-  const sessionId = req.session.session_id;
-  if (!sessionId) {
-    res.status(401).json({ error: "not_connected", message: "Not connected to Spotify" });
-    return;
-  }
-
+  const sessionId = getSessionId(req);
+  if (!sessionId) { res.status(401).json({ error: "not_connected" }); return; }
   const tokens = await refreshIfExpired(sessionId);
-  if (!tokens) {
-    res.status(401).json({ error: "not_connected", message: "Spotify session expired" });
-    return;
-  }
+  if (!tokens) { res.status(401).json({ error: "not_connected" }); return; }
 
   const offset = Number(req.query["offset"] ?? 0);
   const limit = Math.min(Number(req.query["limit"] ?? 50), 50);
 
-  const data = await spotifyGet<{
-    items: { track: SpotifyTrack }[];
-    total: number;
-    next: string | null;
-  }>(tokens.accessToken, "/me/tracks", { limit: String(limit), offset: String(offset) });
+  const data = await spotifyGet<{ items: { track: SpotifyTrack }[]; total: number }>(
+    tokens.accessToken, "/me/tracks", { limit: String(limit), offset: String(offset) }
+  );
+  if (!data) { res.status(502).json({ error: "spotify_error" }); return; }
 
-  if (!data) {
-    res.status(502).json({ error: "spotify_error", message: "Failed to fetch liked songs" });
-    return;
-  }
-
-  res.json({
-    tracks: data.items.map((item) => mapTrack(item.track)),
-    total: data.total,
-    offset,
-    limit,
-  });
+  res.json({ tracks: data.items.map((i) => mapTrack(i.track)), total: data.total, offset, limit });
 });
 
 router.get("/spotify/playlists", async (req, res) => {
-  const sessionId = req.session.session_id;
-  if (!sessionId) {
-    res.status(401).json({ error: "not_connected", message: "Not connected to Spotify" });
-    return;
-  }
-
+  const sessionId = getSessionId(req);
+  if (!sessionId) { res.status(401).json({ error: "not_connected" }); return; }
   const tokens = await refreshIfExpired(sessionId);
-  if (!tokens) {
-    res.status(401).json({ error: "not_connected", message: "Spotify session expired" });
-    return;
-  }
+  if (!tokens) { res.status(401).json({ error: "not_connected" }); return; }
 
   const data = await spotifyGet<{
-    items: {
-      id: string;
-      name: string;
-      description: string;
-      tracks: { total: number };
-      images: { url: string }[];
-      owner: { display_name: string };
-    }[];
+    items: { id: string; name: string; description: string; tracks: { total: number }; images: { url: string }[]; owner: { display_name: string } }[];
     total: number;
   }>(tokens.accessToken, "/me/playlists", { limit: "50" });
-
-  if (!data) {
-    res.status(502).json({ error: "spotify_error", message: "Failed to fetch playlists" });
-    return;
-  }
+  if (!data) { res.status(502).json({ error: "spotify_error" }); return; }
 
   res.json({
     playlists: data.items.map((p) => ({
-      id: p.id,
-      name: p.name,
-      description: p.description,
-      trackCount: p.tracks.total,
-      thumbnailUrl: p.images[0]?.url ?? null,
-      owner: p.owner.display_name,
+      id: p.id, name: p.name, description: p.description,
+      trackCount: p.tracks.total, thumbnailUrl: p.images[0]?.url ?? null, owner: p.owner.display_name,
     })),
     total: data.total,
   });
 });
 
 router.get("/spotify/playlists/:playlistId/tracks", async (req, res) => {
-  const sessionId = req.session.session_id;
-  if (!sessionId) {
-    res.status(401).json({ error: "not_connected", message: "Not connected to Spotify" });
-    return;
-  }
-
+  const sessionId = getSessionId(req);
+  if (!sessionId) { res.status(401).json({ error: "not_connected" }); return; }
   const tokens = await refreshIfExpired(sessionId);
-  if (!tokens) {
-    res.status(401).json({ error: "not_connected", message: "Spotify session expired" });
-    return;
-  }
+  if (!tokens) { res.status(401).json({ error: "not_connected" }); return; }
 
   const { playlistId } = req.params;
   const offset = Number(req.query["offset"] ?? 0);
   const limit = Math.min(Number(req.query["limit"] ?? 50), 50);
 
-  const data = await spotifyGet<{
-    items: { track: SpotifyTrack | null }[];
-    total: number;
-  }>(tokens.accessToken, `/playlists/${playlistId}/tracks`, {
-    limit: String(limit),
-    offset: String(offset),
-    fields: "items(track(id,name,artists,album,duration_ms,external_urls)),total",
-  });
-
-  if (!data) {
-    res.status(502).json({ error: "spotify_error", message: "Failed to fetch playlist tracks" });
-    return;
-  }
+  const data = await spotifyGet<{ items: { track: SpotifyTrack | null }[]; total: number }>(
+    tokens.accessToken, `/playlists/${playlistId}/tracks`,
+    { limit: String(limit), offset: String(offset), fields: "items(track(id,name,artists,album,duration_ms,external_urls)),total" }
+  );
+  if (!data) { res.status(502).json({ error: "spotify_error" }); return; }
 
   res.json({
     tracks: data.items.filter((i): i is { track: SpotifyTrack } => i.track != null).map((i) => mapTrack(i.track)),
-    total: data.total,
-    offset,
-    limit,
+    total: data.total, offset, limit,
   });
 });
 
 router.get("/spotify/top-tracks", async (req, res) => {
-  const sessionId = req.session.session_id;
-  if (!sessionId) {
-    res.status(401).json({ error: "not_connected", message: "Not connected to Spotify" });
-    return;
-  }
-
+  const sessionId = getSessionId(req);
+  if (!sessionId) { res.status(401).json({ error: "not_connected" }); return; }
   const tokens = await refreshIfExpired(sessionId);
-  if (!tokens) {
-    res.status(401).json({ error: "not_connected", message: "Spotify session expired" });
-    return;
-  }
+  if (!tokens) { res.status(401).json({ error: "not_connected" }); return; }
 
   const timeRange = (req.query["time_range"] as string) ?? "medium_term";
   const data = await spotifyGet<{ items: SpotifyTrack[] }>(
-    tokens.accessToken,
-    "/me/top/tracks",
-    { limit: "50", time_range: timeRange }
+    tokens.accessToken, "/me/top/tracks", { limit: "50", time_range: timeRange }
   );
-
-  if (!data) {
-    res.status(502).json({ error: "spotify_error", message: "Failed to fetch top tracks" });
-    return;
-  }
+  if (!data) { res.status(502).json({ error: "spotify_error" }); return; }
 
   res.json({ tracks: data.items.map(mapTrack), timeRange });
 });

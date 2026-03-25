@@ -2,7 +2,6 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { yandexTokensTable } from "@workspace/db/schema";
 import { eq } from "drizzle-orm";
-import { randomBytes } from "crypto";
 import { logger } from "../lib/logger.js";
 
 const router = Router();
@@ -13,16 +12,19 @@ const YM_HEADERS = {
   "Accept": "application/json",
 };
 
+function getSessionId(req: Parameters<typeof router.get>[1] extends (req: infer R, ...args: any[]) => any ? R : never): string | null {
+  const header = req.headers["x-client-session"];
+  if (typeof header === "string" && header.length > 8) return header;
+  return req.session?.session_id ?? null;
+}
+
 async function ymGet<T>(token: string, path: string, params?: Record<string, string>): Promise<T | null> {
   const url = new URL(`${YM_BASE}${path}`);
   if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
 
   try {
     const resp = await fetch(url.toString(), {
-      headers: {
-        ...YM_HEADERS,
-        Authorization: `OAuth ${token}`,
-      },
+      headers: { ...YM_HEADERS, Authorization: `OAuth ${token}` },
     });
 
     if (!resp.ok) {
@@ -38,7 +40,7 @@ async function ymGet<T>(token: string, path: string, params?: Record<string, str
   }
 }
 
-async function getYmTokenRow(sessionId: string) {
+async function getYmRow(sessionId: string) {
   const rows = await db.select().from(yandexTokensTable).where(eq(yandexTokensTable.sessionId, sessionId));
   return rows[0] ?? null;
 }
@@ -52,6 +54,12 @@ router.post("/yandex/token", async (req, res) => {
   }
 
   const trimmedToken = token.trim();
+  const sessionId = getSessionId(req);
+
+  if (!sessionId) {
+    res.status(400).json({ error: "no_session", message: "No client session ID provided" });
+    return;
+  }
 
   const accountData = await ymGet<{
     account: { uid: number; login: string; displayName?: string; fullName?: string };
@@ -63,8 +71,6 @@ router.post("/yandex/token", async (req, res) => {
   }
 
   const account = accountData.account;
-  const sessionId = req.session.session_id ?? randomBytes(16).toString("hex");
-  req.session.session_id = sessionId;
 
   await db
     .insert(yandexTokensTable)
@@ -95,13 +101,13 @@ router.post("/yandex/token", async (req, res) => {
 });
 
 router.get("/yandex/status", async (req, res) => {
-  const sessionId = req.session.session_id;
+  const sessionId = getSessionId(req);
   if (!sessionId) {
     res.json({ connected: false });
     return;
   }
 
-  const row = await getYmTokenRow(sessionId);
+  const row = await getYmRow(sessionId);
   if (!row) {
     res.json({ connected: false });
     return;
@@ -116,7 +122,7 @@ router.get("/yandex/status", async (req, res) => {
 });
 
 router.get("/yandex/logout", async (req, res) => {
-  const sessionId = req.session.session_id;
+  const sessionId = getSessionId(req);
   if (sessionId) {
     await db.delete(yandexTokensTable).where(eq(yandexTokensTable.sessionId, sessionId));
   }
@@ -149,13 +155,13 @@ function mapYmTrack(t: YmTrack) {
 }
 
 router.get("/yandex/liked", async (req, res) => {
-  const sessionId = req.session.session_id;
+  const sessionId = getSessionId(req);
   if (!sessionId) {
     res.status(401).json({ error: "not_connected", message: "Not connected to Yandex Music" });
     return;
   }
 
-  const row = await getYmTokenRow(sessionId);
+  const row = await getYmRow(sessionId);
   if (!row?.oauthToken || !row.yandexUserId) {
     res.status(401).json({ error: "not_connected", message: "Yandex Music session not found" });
     return;
@@ -200,13 +206,13 @@ router.get("/yandex/liked", async (req, res) => {
 });
 
 router.get("/yandex/playlists", async (req, res) => {
-  const sessionId = req.session.session_id;
+  const sessionId = getSessionId(req);
   if (!sessionId) {
     res.status(401).json({ error: "not_connected", message: "Not connected to Yandex Music" });
     return;
   }
 
-  const row = await getYmTokenRow(sessionId);
+  const row = await getYmRow(sessionId);
   if (!row?.oauthToken || !row.yandexUserId) {
     res.status(401).json({ error: "not_connected", message: "Yandex Music session not found" });
     return;
@@ -244,13 +250,13 @@ router.get("/yandex/playlists", async (req, res) => {
 });
 
 router.get("/yandex/playlists/:uid/:kind/tracks", async (req, res) => {
-  const sessionId = req.session.session_id;
+  const sessionId = getSessionId(req);
   if (!sessionId) {
     res.status(401).json({ error: "not_connected", message: "Not connected to Yandex Music" });
     return;
   }
 
-  const row = await getYmTokenRow(sessionId);
+  const row = await getYmRow(sessionId);
   if (!row?.oauthToken) {
     res.status(401).json({ error: "not_connected", message: "Yandex Music session not found" });
     return;

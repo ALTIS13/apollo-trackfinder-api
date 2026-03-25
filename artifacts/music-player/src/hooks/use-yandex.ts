@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { getClientSessionId } from "@/lib/client-session";
 
 const API_BASE = `${import.meta.env.BASE_URL}api`.replace(/\/+/g, "/").replace(":/", "://");
 
@@ -29,8 +30,19 @@ export interface YandexStatus {
   userId?: string;
 }
 
+function sessionHeaders(): Record<string, string> {
+  return { "X-Client-Session": getClientSessionId() };
+}
+
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
-  const resp = await fetch(path, { credentials: "include", ...options });
+  const resp = await fetch(path, {
+    credentials: "include",
+    ...options,
+    headers: {
+      ...sessionHeaders(),
+      ...(options?.headers ?? {}),
+    },
+  });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ message: resp.statusText }));
     throw new Error((err as { message?: string }).message ?? "Request failed");

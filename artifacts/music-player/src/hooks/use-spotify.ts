@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { getClientSessionId } from "@/lib/client-session";
 
 const API_BASE = `${import.meta.env.BASE_URL}api`.replace(/\/+/g, "/").replace(":/", "://");
 
@@ -27,13 +28,20 @@ export interface SpotifyStatus {
   spotifyUserId?: string;
 }
 
+function sessionHeaders(): Record<string, string> {
+  return { "X-Client-Session": getClientSessionId() };
+}
+
 async function apiFetch<T>(path: string, params?: Record<string, string>): Promise<T> {
   const url = new URL(path, window.location.origin);
   if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-  const resp = await fetch(url.toString(), { credentials: "include" });
+  const resp = await fetch(url.toString(), {
+    credentials: "include",
+    headers: sessionHeaders(),
+  });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ message: resp.statusText }));
-    throw new Error(err.message ?? "Request failed");
+    throw new Error((err as { message?: string }).message ?? "Request failed");
   }
   return resp.json();
 }
@@ -97,5 +105,6 @@ export function useSpotifyTopTracks(timeRange: "short_term" | "medium_term" | "l
 }
 
 export function spotifyLoginUrl(): string {
-  return `${API_BASE}/spotify/login`;
+  const sid = getClientSessionId();
+  return `${API_BASE}/spotify/login?sid=${encodeURIComponent(sid)}`;
 }
