@@ -1,0 +1,142 @@
+import { Audio } from 'expo-av';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
+
+import { apiFetch } from '@/hooks/use-session';
+
+export interface PlayerTrack {
+  id: string;
+  title: string;
+  artist: string;
+  thumbnailUrl: string | null;
+  duration: number;
+  localUri?: string;
+}
+
+interface PlayerState {
+  currentTrack: PlayerTrack | null;
+  isPlaying: boolean;
+  isLoading: boolean;
+  position: number;
+  duration: number;
+  play: (track: PlayerTrack) => Promise<void>;
+  pause: () => Promise<void>;
+  resume: () => Promise<void>;
+  stop: () => Promise<void>;
+  seek: (pos: number) => Promise<void>;
+}
+
+const PlayerContext = createContext<PlayerState | null>(null);
+
+export function PlayerProvider({ children }: { children: React.ReactNode }) {
+  const [currentTrack, setCurrentTrack] = useState<PlayerTrack | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [position, setPosition] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const soundRef = useRef<Audio.Sound | null>(null);
+
+  useEffect(() => {
+    Audio.setAudioModeAsync({
+      allowsRecordingIOS: false,
+      staysActiveInBackground: true,
+      playsInSilentModeIOS: true,
+    }).catch(() => {});
+    return () => {
+      soundRef.current?.unloadAsync().catch(() => {});
+    };
+  }, []);
+
+  const stop = useCallback(async () => {
+    if (soundRef.current) {
+      await soundRef.current.unloadAsync().catch(() => {});
+      soundRef.current = null;
+    }
+    setIsPlaying(false);
+    setPosition(0);
+    setDuration(0);
+    setCurrentTrack(null);
+  }, []);
+
+  const play = useCallback(
+    async (track: PlayerTrack) => {
+      try {
+        setIsLoading(true);
+        if (soundRef.current) {
+          await soundRef.current.unloadAsync().catch(() => {});
+          soundRef.current = null;
+        }
+        setIsPlaying(false);
+        setPosition(0);
+        setDuration(0);
+
+        let uri: string;
+        if (track.localUri) {
+          uri = track.localUri;
+        } else {
+          const resp = await apiFetch<{ url: string }>(`/tracks/${track.id}/stream`);
+          uri = resp.url;
+        }
+
+        const { sound } = await Audio.Sound.createAsync(
+          { uri },
+          { shouldPlay: true },
+          (status) => {
+            if (!status.isLoaded) return;
+            setIsPlaying(status.isPlaying);
+            setPosition(status.positionMillis / 1000);
+            setDuration((status.durationMillis ?? 0) / 1000);
+            if (status.didJustFinish) {
+              setIsPlaying(false);
+              setPosition(0);
+            }
+          },
+        );
+
+        soundRef.current = sound;
+        setCurrentTrack(track);
+        setIsPlaying(true);
+      } catch (e) {
+        console.error('Player error:', e);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [],
+  );
+
+  const pause = useCallback(async () => {
+    await soundRef.current?.pauseAsync().catch(() => {});
+    setIsPlaying(false);
+  }, []);
+
+  const resume = useCallback(async () => {
+    await soundRef.current?.playAsync().catch(() => {});
+    setIsPlaying(true);
+  }, []);
+
+  const seek = useCallback(async (pos: number) => {
+    await soundRef.current?.setPositionAsync(pos * 1000).catch(() => {});
+    setPosition(pos);
+  }, []);
+
+  return (
+    <PlayerContext.Provider
+      value={{ currentTrack, isPlaying, isLoading, position, duration, play, pause, resume, stop, seek }}
+    >
+      {children}
+    </PlayerContext.Provider>
+  );
+}
+
+export function usePlayer() {
+  const ctx = useContext(PlayerContext);
+  if (!ctx) throw new Error('usePlayer must be used within PlayerProvider');
+  return ctx;
+}

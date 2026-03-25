@@ -103,17 +103,38 @@ Before Spotify OAuth works, you must add the redirect URI in the Spotify Develop
 - Liked tracks come as `{ id, albumId }` refs → resolved via `GET /tracks?track-ids=id:albumId,...`
 - Cover art: `coverUri` field has `%%` placeholder → replace with `200x200` for thumbnails
 
+## TrackFinder Mobile (`artifacts/trackfinder-mobile`)
+
+Expo React Native app targeting Android + web (Windows PWA). Uses the same backend API.
+
+### Features
+- **Search tab**: Full track-variant search via backend API, filter by type, play & download
+- **Library tab**: Offline tracks downloaded to device storage (expo-file-system + expo-media-library)
+- **Favorites tab**: Spotify OAuth + Yandex Music token connect, catalog browse, "Find Variants" → Search tab
+- **Mini player**: Persistent bottom bar with progress, play/pause, stop (expo-av)
+
+### Session
+- Session ID stored in `AsyncStorage` (no cookies needed)
+- All API calls include `X-Client-Session` header
+- Spotify OAuth encodes session ID in `state` parameter
+
+### Key files
+- `app/(tabs)/index.tsx` — Search screen
+- `app/(tabs)/library.tsx` — Offline library
+- `app/(tabs)/favorites.tsx` — Spotify + Yandex favorites
+- `hooks/use-player.tsx` — PlayerContext (expo-av)
+- `hooks/use-library.tsx` — LibraryContext (AsyncStorage + expo-file-system)
+- `hooks/use-session.ts` — session ID + apiFetch helper
+- `constants/colors.ts` — dark theme + type/source color maps
+
 ## Structure
 
 ```text
 artifacts-monorepo/
 ├── artifacts/              # Deployable applications
 │   ├── api-server/         # Express API server
-│   └── music-player/       # React + Vite frontend
-│       └── src/
-│           ├── adapters/   # Source adapters (youtube.ts, soundcloud.ts)
-│           ├── lib/        # Shared utilities (ytdlp.ts, classifier.ts, ranker.ts, cache.ts, logger.ts)
-│           └── routes/     # Express routes (health.ts, tracks.ts)
+│   ├── music-player/       # React + Vite web frontend
+│   └── trackfinder-mobile/ # Expo React Native mobile app (Android + web)
 ├── lib/                    # Shared libraries
 │   ├── api-spec/           # OpenAPI spec + Orval codegen config
 │   ├── api-client-react/   # Generated React Query hooks
