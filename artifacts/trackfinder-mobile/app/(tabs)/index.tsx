@@ -16,6 +16,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { ServerSettings } from '@/components/ServerSettings';
 import { TrackCard, Track } from '@/components/TrackCard';
 import { COLORS, TrackType } from '@/constants/colors';
 import { usePlayer } from '@/hooks/use-player';
@@ -43,6 +44,7 @@ export default function SearchScreen() {
   const [isSearching, setIsSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [error, setError] = useState('');
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const inputRef = useRef<TextInput>(null);
 
   useEffect(() => {
@@ -94,10 +96,19 @@ export default function SearchScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={0}
     >
+      <ServerSettings visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
+
       <View style={[styles.header, { paddingTop: topPad }]}>
         <View style={styles.headerRow}>
           <Feather name="music" size={22} color={COLORS.accent} />
           <Text style={styles.headerTitle}>TrackFinder</Text>
+          <Pressable
+            style={styles.settingsBtn}
+            onPress={() => setSettingsOpen(true)}
+            hitSlop={12}
+          >
+            <Feather name="settings" size={18} color={COLORS.textSub} />
+          </Pressable>
         </View>
         <Text style={styles.headerSub}>Find every version of any track</Text>
       </View>
@@ -220,11 +231,23 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    justifyContent: 'space-between',
   },
   headerTitle: {
     fontSize: 26,
     fontFamily: 'Inter_700Bold',
     color: COLORS.text,
+    flex: 1,
+  },
+  settingsBtn: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
   headerSub: {
     fontSize: 13,
