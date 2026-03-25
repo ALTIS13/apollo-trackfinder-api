@@ -78,9 +78,30 @@ Before Spotify OAuth works, you must add the redirect URI in the Spotify Develop
 
 ### Frontend
 - `src/hooks/use-spotify.ts` — all Spotify API hooks using React Query + `credentials: "include"`
-- `src/pages/Favorites.tsx` — full page: connect prompt, tabs (Liked/Playlists/Top Tracks), track list, pagination
+- `src/hooks/use-yandex.ts` — all Yandex Music API hooks using React Query + `credentials: "include"`
+- `src/pages/Favorites.tsx` — full page with service switcher (Spotify | Yandex Music), connect prompts, catalog tabs, track list, pagination
 - Each track has a "Find variants" button → navigates to `/` with `?artist=...&title=...` to auto-search
 - `src/App.tsx` — NavBar with Discover/Favorites links, `/favorites` route
+
+## Yandex Music Integration
+
+### Auth
+- Token-based: user gets an OAuth token from Yandex and pastes it into the app
+- Backend validates token against `/account/status`, stores in `yandex_tokens` table keyed by session_id
+
+### Backend Endpoints (all under `/api/yandex/`)
+- `POST /yandex/token` — validate and store token; returns `{ ok, displayName, login, userId }`
+- `GET /yandex/status` — returns `{ connected, displayName, login, userId }`
+- `GET /yandex/logout` — clears session token from DB
+- `GET /yandex/liked?offset&limit` — paginated liked tracks (resolves track IDs in batches of 50)
+- `GET /yandex/playlists` — user's playlists list
+- `GET /yandex/playlists/:uid/:kind/tracks?offset&limit` — tracks in a specific playlist
+
+### Yandex Music API Notes
+- Base: `https://api.music.yandex.net`
+- Auth header: `Authorization: OAuth <token>` + `X-Yandex-Music-Client: YandexMusicAndroid/24023621`
+- Liked tracks come as `{ id, albumId }` refs → resolved via `GET /tracks?track-ids=id:albumId,...`
+- Cover art: `coverUri` field has `%%` placeholder → replace with `200x200` for thumbnails
 
 ## Structure
 
