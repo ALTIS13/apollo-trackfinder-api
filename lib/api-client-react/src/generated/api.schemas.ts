@@ -26,7 +26,7 @@ export const TrackSource = {
 } as const;
 
 export interface TrackResult {
-  /** Unique track ID (prefixed with source, e.g. yt_VIDEO_ID) */
+  /** Unique track ID. Format: yt_<base64url(https://www.youtube.com/watch?v=ID)> for YouTube or sc_<base64url(permalink_url)> for SoundCloud. Pass this ID to /stream or /download endpoints. */
   id: string;
   title: string;
   artist: string;

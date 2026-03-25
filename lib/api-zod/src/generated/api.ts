@@ -30,7 +30,9 @@ export const SearchTracksResponse = zod.object({
     zod.object({
       id: zod
         .string()
-        .describe("Unique track ID (prefixed with source, e.g. yt_VIDEO_ID)"),
+        .describe(
+          "Unique track ID. Format: yt_<base64url(https:\/\/www.youtube.com\/watch?v=ID)> for YouTube or sc_<base64url(permalink_url)> for SoundCloud. Pass this ID to \/stream or \/download endpoints.",
+        ),
       title: zod.string(),
       artist: zod.string(),
       type: zod.enum(["original", "remix", "live", "cover"]),
@@ -55,7 +57,7 @@ export const GetTrackStreamParams = zod.object({
   id: zod.coerce
     .string()
     .describe(
-      "Track ID (prefixed with source, e.g. yt_VIDEO_ID or sc_TRACK_ID)",
+      "Track ID from search results. Format: yt_<base64url> or sc_<base64url>.",
     ),
 });
 
@@ -73,7 +75,7 @@ export const GetTrackDownloadParams = zod.object({
   id: zod.coerce
     .string()
     .describe(
-      "Track ID (prefixed with source, e.g. yt_VIDEO_ID or sc_TRACK_ID)",
+      "Track ID from search results. Format: yt_<base64url> or sc_<base64url>.",
     ),
 });
 

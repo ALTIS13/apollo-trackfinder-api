@@ -69,7 +69,7 @@ paths:
           required: true
           schema:
             type: string
-          description: Track ID (prefixed with source, e.g. yt_VIDEO_ID or sc_TRACK_ID)
+          description: "Track ID from search results. Format: yt_<base64url> or sc_<base64url>."
       responses:
         "200":
           description: Stream URL
@@ -101,7 +101,7 @@ paths:
           required: true
           schema:
             type: string
-          description: Track ID (prefixed with source, e.g. yt_VIDEO_ID or sc_TRACK_ID)
+          description: "Track ID from search results. Format: yt_<base64url> or sc_<base64url>."
       responses:
         "200":
           description: Download URL
@@ -150,7 +150,7 @@ components:
       properties:
         id:
           type: string
-          description: Unique track ID (prefixed with source, e.g. yt_VIDEO_ID)
+          description: "Unique track ID. Format: yt_<base64url(https://www.youtube.com/watch?v=ID)> for YouTube or sc_<base64url(permalink_url)> for SoundCloud. Pass this ID to /stream or /download endpoints."
         title:
           type: string
         artist:
