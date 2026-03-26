@@ -6,6 +6,7 @@ import {
   useFonts,
 } from '@expo-google-fonts/inter';
 import { Feather } from '@expo/vector-icons';
+import * as Font from 'expo-font';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { setBaseUrl } from '@workspace/api-client-react';
 import { Stack } from 'expo-router';
@@ -44,11 +45,14 @@ export default function RootLayout() {
     Inter_500Medium,
     Inter_600SemiBold,
     Inter_700Bold,
-    ...Feather.font,
   });
 
   useEffect(() => {
     initSession();
+    // Load icon font independently so a failure here never blocks the app.
+    // Expo Go already bundles Feather; Font.loadAsync is a no-op if it's
+    // already registered, and silently ignored if it fails.
+    Font.loadAsync(Feather.font).catch(() => {});
   }, []);
 
   useEffect(() => {
