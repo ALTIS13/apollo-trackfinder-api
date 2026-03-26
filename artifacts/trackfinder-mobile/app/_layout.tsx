@@ -5,6 +5,7 @@ import {
   Inter_700Bold,
   useFonts,
 } from '@expo-google-fonts/inter';
+
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { setBaseUrl } from '@workspace/api-client-react';
 import { Stack } from 'expo-router';
@@ -43,6 +44,10 @@ export default function RootLayout() {
     Inter_500Medium,
     Inter_600SemiBold,
     Inter_700Bold,
+    // Load Feather from a local copy in assets to avoid pnpm symlink failures.
+    // @expo/vector-icons resolves its font via require() which breaks through
+    // pnpm symlinks. A local copy has a stable, direct require() path.
+    Feather: require('../assets/fonts/Feather.ttf'),
   });
 
   useEffect(() => {

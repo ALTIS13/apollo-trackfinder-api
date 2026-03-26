@@ -69,11 +69,11 @@ export default function SearchScreen() {
     setError('');
 
     try {
-      const data = await apiFetch<{ tracks: Track[] }>('/tracks/search', {
+      const data = await apiFetch<{ results: Track[] }>('/tracks/search', {
         method: 'POST',
         body: JSON.stringify({ artist: a, title: t }),
       });
-      setResults(data.tracks ?? []);
+      setResults(data.results ?? []);
       setFilter('all');
     } catch (e: any) {
       setError(e.message ?? 'Search failed');
