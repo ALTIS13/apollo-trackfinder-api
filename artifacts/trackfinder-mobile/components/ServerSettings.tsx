@@ -1,4 +1,4 @@
-import { Feather } from '@expo/vector-icons';
+import { MaterialIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import * as Linking from 'expo-linking';
 import React, { useEffect, useState } from 'react';
@@ -93,11 +93,11 @@ export function ServerSettings({ visible, onClose }: Props) {
 
               <View style={styles.header}>
                 <View style={styles.headerLeft}>
-                  <Feather name="server" size={20} color={COLORS.accent} />
+                  <MaterialIcons name="dns" size={20} color={COLORS.accent} />
                   <Text style={styles.title}>API Server</Text>
                 </View>
                 <Pressable onPress={onClose} style={styles.closeBtn} hitSlop={12}>
-                  <Feather name="x" size={20} color={COLORS.textSub} />
+                  <MaterialIcons name="close" size={20} color={COLORS.textSub} />
                 </Pressable>
               </View>
 
@@ -128,8 +128,8 @@ export function ServerSettings({ visible, onClose }: Props) {
 
                 {testMsg !== '' && (
                   <View style={[styles.testResult, testState === 'ok' ? styles.testOk : styles.testFail]}>
-                    <Feather
-                      name={testState === 'ok' ? 'check-circle' : 'alert-circle'}
+                    <MaterialIcons
+                      name={testState === 'ok' ? 'check-circle' : 'error'}
                       size={14}
                       color={testState === 'ok' ? COLORS.accent : COLORS.danger}
                     />
@@ -149,7 +149,7 @@ export function ServerSettings({ visible, onClose }: Props) {
                       <ActivityIndicator size="small" color={COLORS.text} />
                     ) : (
                       <>
-                        <Feather name="wifi" size={15} color={COLORS.text} />
+                        <MaterialIcons name="wifi" size={15} color={COLORS.text} />
                         <Text style={styles.btnOutlineText}>Test connection</Text>
                       </>
                     )}
@@ -169,7 +169,7 @@ export function ServerSettings({ visible, onClose }: Props) {
                 </View>
 
                 <Pressable style={styles.resetRow} onPress={handleReset}>
-                  <Feather name="refresh-cw" size={13} color={COLORS.textMuted} />
+                  <MaterialIcons name="refresh" size={13} color={COLORS.textMuted} />
                   <Text style={styles.resetText}>Reset to Replit default</Text>
                 </Pressable>
 
@@ -192,16 +192,16 @@ export function ServerSettings({ visible, onClose }: Props) {
 
                 <View style={styles.cloudLinks}>
                   {[
-                    { label: 'Railway', url: 'https://railway.app', icon: 'zap' as const },
+                    { label: 'Railway', url: 'https://railway.app', icon: 'bolt' as const },
                     { label: 'Render', url: 'https://render.com', icon: 'cloud' as const },
-                    { label: 'Fly.io', url: 'https://fly.io', icon: 'globe' as const },
+                    { label: 'Fly.io', url: 'https://fly.io', icon: 'public' as const },
                   ].map((item) => (
                     <Pressable
                       key={item.label}
                       style={styles.cloudLink}
                       onPress={() => Linking.openURL(item.url)}
                     >
-                      <Feather name={item.icon} size={13} color={COLORS.accent} />
+                      <MaterialIcons name={item.icon} size={13} color={COLORS.accent} />
                       <Text style={styles.cloudLinkText}>{item.label}</Text>
                     </Pressable>
                   ))}

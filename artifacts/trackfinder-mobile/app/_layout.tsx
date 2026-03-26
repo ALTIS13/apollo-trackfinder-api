@@ -47,7 +47,7 @@ export default function RootLayout() {
     // Load Feather from a local copy in assets to avoid pnpm symlink failures.
     // @expo/vector-icons resolves its font via require() which breaks through
     // pnpm symlinks. A local copy has a stable, direct require() path.
-    Feather: require('../assets/fonts/Feather.ttf'),
+    MaterialIcons: require('../assets/fonts/MaterialIcons.ttf'),
   });
 
   useEffect(() => {

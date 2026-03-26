@@ -1,4 +1,4 @@
-import { Feather } from '@expo/vector-icons';
+import { MaterialIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
 import React, { useState } from 'react';
@@ -65,7 +65,7 @@ function CatalogTrackRow({
         {thumbnailUrl ? (
           <Image source={{ uri: thumbnailUrl }} style={StyleSheet.absoluteFill} resizeMode="cover" />
         ) : (
-          <Feather name="music" size={16} color={COLORS.textMuted} />
+          <MaterialIcons name="music" size={16} color={COLORS.textMuted} />
         )}
       </View>
       <View style={styles.catalogInfo}>
@@ -77,7 +77,7 @@ function CatalogTrackRow({
         onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); onFindVariants(); }}
         hitSlop={8}
       >
-        <Feather name="search" size={15} color={COLORS.accent} />
+        <MaterialIcons name="search" size={15} color={COLORS.accent} />
       </Pressable>
     </View>
   );
@@ -100,7 +100,7 @@ function PlaylistCard({
         {thumbnailUrl ? (
           <Image source={{ uri: thumbnailUrl }} style={StyleSheet.absoluteFill} resizeMode="cover" />
         ) : (
-          <Feather name="list" size={20} color={COLORS.textMuted} />
+          <MaterialIcons name="list" size={20} color={COLORS.textMuted} />
         )}
       </View>
       <Text style={styles.playlistName} numberOfLines={2}>{name}</Text>
@@ -126,7 +126,7 @@ function SpotifySection({ onVariants }: { onVariants: (artist: string, title: st
     return (
       <View style={styles.connectPrompt}>
         <View style={[styles.serviceIconBig, { backgroundColor: COLORS.spotifyBg }]}>
-          <Feather name="music" size={32} color={COLORS.spotifyGreen} />
+          <MaterialIcons name="music" size={32} color={COLORS.spotifyGreen} />
         </View>
         <Text style={styles.connectTitle}>Connect Spotify</Text>
         <Text style={styles.connectText}>Browse your liked songs, playlists and top tracks</Text>
@@ -179,14 +179,14 @@ function SpotifySection({ onVariants }: { onVariants: (artist: string, title: st
           <View style={styles.pagination}>
             {likedPage > 0 && (
               <Pressable style={styles.pageBtn} onPress={() => setLikedPage((p) => p - 1)}>
-                <Feather name="chevron-left" size={16} color={COLORS.text} />
+                <MaterialIcons name="chevron-left" size={16} color={COLORS.text} />
                 <Text style={styles.pageBtnText}>Prev</Text>
               </Pressable>
             )}
             {likedQuery.data?.hasMore && (
               <Pressable style={styles.pageBtn} onPress={() => setLikedPage((p) => p + 1)}>
                 <Text style={styles.pageBtnText}>Next</Text>
-                <Feather name="chevron-right" size={16} color={COLORS.text} />
+                <MaterialIcons name="chevron-right" size={16} color={COLORS.text} />
               </Pressable>
             )}
           </View>
@@ -200,7 +200,7 @@ function SpotifySection({ onVariants }: { onVariants: (artist: string, title: st
       return (
         <>
           <Pressable style={styles.backBtn} onPress={() => setSelectedPlaylist(null)}>
-            <Feather name="arrow-left" size={16} color={COLORS.text} />
+            <MaterialIcons name="arrow-left" size={16} color={COLORS.text} />
             <Text style={styles.backBtnText}>{selectedPlaylist.name}</Text>
           </Pressable>
           {playlistTracksQuery.isFetching ? (
@@ -277,7 +277,7 @@ function SpotifySection({ onVariants }: { onVariants: (artist: string, title: st
       <View style={styles.connectedHeader}>
         <View style={styles.connectedInfo}>
           <View style={[styles.serviceIcon, { backgroundColor: COLORS.spotifyBg }]}>
-            <Feather name="music" size={16} color={COLORS.spotifyGreen} />
+            <MaterialIcons name="music" size={16} color={COLORS.spotifyGreen} />
           </View>
           <Text style={styles.connectedName}>{status.displayName ?? 'Spotify'}</Text>
         </View>
@@ -325,7 +325,7 @@ function YandexSection({ onVariants }: { onVariants: (artist: string, title: str
     return (
       <View style={styles.connectPrompt}>
         <View style={[styles.serviceIconBig, { backgroundColor: COLORS.yandexBg }]}>
-          <Feather name="headphones" size={32} color={COLORS.yandexYellow} />
+          <MaterialIcons name="headphones" size={32} color={COLORS.yandexYellow} />
         </View>
         <Text style={styles.connectTitle}>Connect Yandex Music</Text>
         <Text style={styles.connectText}>
@@ -404,7 +404,7 @@ function YandexSection({ onVariants }: { onVariants: (artist: string, title: str
       return (
         <>
           <Pressable style={styles.backBtn} onPress={() => setSelectedPlaylist(null)}>
-            <Feather name="arrow-left" size={16} color={COLORS.text} />
+            <MaterialIcons name="arrow-left" size={16} color={COLORS.text} />
             <Text style={styles.backBtnText}>{selectedPlaylist.title}</Text>
           </Pressable>
           {playlistTracksQuery.isFetching ? (
@@ -455,7 +455,7 @@ function YandexSection({ onVariants }: { onVariants: (artist: string, title: str
       <View style={styles.connectedHeader}>
         <View style={styles.connectedInfo}>
           <View style={[styles.serviceIcon, { backgroundColor: COLORS.yandexBg }]}>
-            <Feather name="headphones" size={16} color={COLORS.yandexYellow} />
+            <MaterialIcons name="headphones" size={16} color={COLORS.yandexYellow} />
           </View>
           <Text style={styles.connectedName}>{status.login ?? 'Yandex Music'}</Text>
         </View>
@@ -502,7 +502,7 @@ export default function FavoritesScreen() {
     <View style={[styles.root, { backgroundColor: COLORS.bg }]}>
       <View style={[styles.header, { paddingTop: topPad }]}>
         <View style={styles.headerRow}>
-          <Feather name="heart" size={22} color={COLORS.accent} />
+          <MaterialIcons name="heart" size={22} color={COLORS.accent} />
           <Text style={styles.headerTitle}>Favorites</Text>
         </View>
         <Text style={styles.headerSub}>Find variants of your saved tracks</Text>

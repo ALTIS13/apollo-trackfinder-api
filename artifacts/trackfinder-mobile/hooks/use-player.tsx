@@ -17,6 +17,8 @@ export interface PlayerTrack {
   thumbnailUrl: string | null;
   duration: number;
   localUri?: string;
+  source?: string;
+  type?: string;
 }
 
 interface PlayerState {
@@ -25,11 +27,14 @@ interface PlayerState {
   isLoading: boolean;
   position: number;
   duration: number;
+  showFullPlayer: boolean;
   play: (track: PlayerTrack) => Promise<void>;
   pause: () => Promise<void>;
   resume: () => Promise<void>;
   stop: () => Promise<void>;
   seek: (pos: number) => Promise<void>;
+  openFullPlayer: () => void;
+  closeFullPlayer: () => void;
 }
 
 const PlayerContext = createContext<PlayerState | null>(null);
@@ -40,7 +45,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [isLoading, setIsLoading] = useState(false);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [showFullPlayer, setShowFullPlayer] = useState(false);
   const soundRef = useRef<Audio.Sound | null>(null);
+  const openFullPlayer = useCallback(() => setShowFullPlayer(true), []);
+  const closeFullPlayer = useCallback(() => setShowFullPlayer(false), []);
 
   useEffect(() => {
     Audio.setAudioModeAsync({
@@ -128,7 +136,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <PlayerContext.Provider
-      value={{ currentTrack, isPlaying, isLoading, position, duration, play, pause, resume, stop, seek }}
+      value={{ currentTrack, isPlaying, isLoading, position, duration, showFullPlayer, play, pause, resume, stop, seek, openFullPlayer, closeFullPlayer }}
     >
       {children}
     </PlayerContext.Provider>

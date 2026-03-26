@@ -1,4 +1,4 @@
-import { Feather } from '@expo/vector-icons';
+import { MaterialIcons } from '@expo/vector-icons';
 import React from 'react';
 import { FlatList, Platform, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -31,7 +31,7 @@ export default function LibraryScreen() {
     <View style={[styles.root, { backgroundColor: COLORS.bg }]}>
       <View style={[styles.header, { paddingTop: topPad }]}>
         <View style={styles.headerRow}>
-          <Feather name="download" size={22} color={COLORS.accent} />
+          <MaterialIcons name="file-download" size={22} color={COLORS.accent} />
           <Text style={styles.headerTitle}>Library</Text>
         </View>
         {tracks.length > 0 && (
@@ -43,7 +43,7 @@ export default function LibraryScreen() {
 
       {tracks.length === 0 ? (
         <View style={styles.empty}>
-          <Feather name="download" size={48} color={COLORS.textMuted} />
+          <MaterialIcons name="file-download" size={48} color={COLORS.textMuted} />
           <Text style={styles.emptyTitle}>No downloads yet</Text>
           <Text style={styles.emptyText}>
             Tap the download icon on any search result to save it to your device for offline playback

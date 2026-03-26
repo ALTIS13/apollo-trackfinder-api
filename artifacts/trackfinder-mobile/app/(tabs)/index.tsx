@@ -1,4 +1,4 @@
-import { Feather } from '@expo/vector-icons';
+import { MaterialIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
@@ -100,14 +100,14 @@ export default function SearchScreen() {
 
       <View style={[styles.header, { paddingTop: topPad }]}>
         <View style={styles.headerRow}>
-          <Feather name="music" size={22} color={COLORS.accent} />
+          <MaterialIcons name="music" size={22} color={COLORS.accent} />
           <Text style={styles.headerTitle}>Apollo TrackFinder</Text>
           <Pressable
             style={styles.settingsBtn}
             onPress={() => setSettingsOpen(true)}
             hitSlop={12}
           >
-            <Feather name="settings" size={18} color={COLORS.textSub} />
+            <MaterialIcons name="settings" size={18} color={COLORS.textSub} />
           </Pressable>
         </View>
         <Text style={styles.headerSub}>Find every version of any track</Text>
@@ -115,7 +115,7 @@ export default function SearchScreen() {
 
       <View style={styles.searchRow}>
         <View style={styles.searchInput}>
-          <Feather name="search" size={16} color={COLORS.textMuted} style={styles.searchIcon} />
+          <MaterialIcons name="search" size={16} color={COLORS.textMuted} style={styles.searchIcon} />
           <TextInput
             ref={inputRef}
             style={styles.input}
@@ -129,7 +129,7 @@ export default function SearchScreen() {
           />
           {query.length > 0 && (
             <Pressable onPress={() => { setQuery(''); setResults([]); setHasSearched(false); }}>
-              <Feather name="x" size={16} color={COLORS.textMuted} />
+              <MaterialIcons name="x" size={16} color={COLORS.textMuted} />
             </Pressable>
           )}
         </View>
@@ -141,7 +141,7 @@ export default function SearchScreen() {
           {isSearching ? (
             <ActivityIndicator size="small" color={COLORS.white} />
           ) : (
-            <Feather name="search" size={18} color={COLORS.white} />
+            <MaterialIcons name="search" size={18} color={COLORS.white} />
           )}
         </Pressable>
       </View>
@@ -176,7 +176,7 @@ export default function SearchScreen() {
 
       {error ? (
         <View style={styles.centerMsg}>
-          <Feather name="alert-circle" size={32} color={COLORS.danger} />
+          <MaterialIcons name="alert-circle" size={32} color={COLORS.danger} />
           <Text style={styles.errorText}>{error}</Text>
           <Pressable style={styles.retryBtn} onPress={() => doSearch()}>
             <Text style={styles.retryText}>Try again</Text>
@@ -190,14 +190,14 @@ export default function SearchScreen() {
         </View>
       ) : hasSearched && filtered.length === 0 ? (
         <View style={styles.centerMsg}>
-          <Feather name="inbox" size={40} color={COLORS.textMuted} />
+          <MaterialIcons name="inbox" size={40} color={COLORS.textMuted} />
           <Text style={styles.emptyTitle}>No results</Text>
           <Text style={styles.emptyText}>Try a different search or filter</Text>
         </View>
       ) : !hasSearched ? (
         <View style={styles.centerMsg}>
           <View style={styles.hero}>
-            <Feather name="search" size={48} color={COLORS.textMuted} />
+            <MaterialIcons name="search" size={48} color={COLORS.textMuted} />
             <Text style={styles.heroTitle}>Search any track</Text>
             <Text style={styles.heroText}>
               Enter an artist and song name to find all versions — originals, remixes, live performances, and covers

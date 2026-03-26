@@ -1,4 +1,4 @@
-import { Feather } from '@expo/vector-icons';
+import { MaterialIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import React from 'react';
@@ -9,7 +9,7 @@ import { COLORS } from '@/constants/colors';
 import { usePlayer } from '@/hooks/use-player';
 
 export function MiniPlayer() {
-  const { currentTrack, isPlaying, isLoading, position, duration, pause, resume, stop, seek } =
+  const { currentTrack, isPlaying, isLoading, position, duration, pause, resume, stop, openFullPlayer } =
     usePlayer();
 
   if (!currentTrack) return null;
@@ -18,15 +18,22 @@ export function MiniPlayer() {
   const fmtTime = (s: number) =>
     `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, '0')}`;
 
-  const handlePlayPause = async () => {
+  const handlePlayPause = async (e: any) => {
+    e.stopPropagation?.();
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (isPlaying) await pause();
     else await resume();
   };
 
-  const handleStop = async () => {
+  const handleStop = async (e: any) => {
+    e.stopPropagation?.();
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     await stop();
+  };
+
+  const handleOpen = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    openFullPlayer();
   };
 
   return (
@@ -39,7 +46,7 @@ export function MiniPlayer() {
         <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
       </View>
 
-      <View style={styles.content}>
+      <Pressable style={styles.content} onPress={handleOpen}>
         <View style={styles.thumb}>
           {currentTrack.thumbnailUrl ? (
             <Image
@@ -49,7 +56,7 @@ export function MiniPlayer() {
             />
           ) : (
             <View style={styles.thumbPlaceholder}>
-              <Feather name="music" size={16} color={COLORS.textMuted} />
+              <MaterialIcons name="music-note" size={16} color={COLORS.textMuted} />
             </View>
           )}
         </View>
@@ -65,14 +72,14 @@ export function MiniPlayer() {
           {isLoading ? (
             <ActivityIndicator size="small" color={COLORS.accent} />
           ) : (
-            <Feather name={isPlaying ? 'pause' : 'play'} size={22} color={COLORS.accent} />
+            <MaterialIcons name={isPlaying ? 'pause' : 'play-arrow'} size={26} color={COLORS.accent} />
           )}
         </Pressable>
 
         <Pressable style={styles.btn} onPress={handleStop}>
-          <Feather name="x" size={20} color={COLORS.textSub} />
+          <MaterialIcons name="close" size={22} color={COLORS.textSub} />
         </Pressable>
-      </View>
+      </Pressable>
     </Animated.View>
   );
 }

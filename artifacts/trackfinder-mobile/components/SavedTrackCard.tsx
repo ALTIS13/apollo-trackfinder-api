@@ -1,4 +1,4 @@
-import { Feather } from '@expo/vector-icons';
+import { MaterialIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import React from 'react';
@@ -66,12 +66,12 @@ export function SavedTrackCard({ track }: Props) {
           />
         ) : (
           <View style={styles.thumbPlaceholder}>
-            <Feather name="music" size={20} color={COLORS.textMuted} />
+            <MaterialIcons name="music-note" size={20} color={COLORS.textMuted} />
           </View>
         )}
         {isCurrentTrack && (
           <View style={styles.thumbOverlay}>
-            <Feather name={isPlaying ? 'pause' : 'play'} size={18} color={COLORS.white} />
+            <MaterialIcons name={isPlaying ? 'pause' : 'play-arrow'} size={18} color={COLORS.white} />
           </View>
         )}
       </View>
@@ -80,7 +80,7 @@ export function SavedTrackCard({ track }: Props) {
         <Text style={styles.title} numberOfLines={2}>{track.title}</Text>
         <Text style={styles.artist} numberOfLines={1}>{track.artist}</Text>
         <View style={styles.meta}>
-          <Feather name="download" size={10} color={COLORS.accent} />
+          <MaterialIcons name="file-download" size={12} color={COLORS.accent} />
           <Text style={styles.metaText}>{formatDuration(track.duration)}</Text>
           {!!track.fileSize && (
             <>
@@ -92,7 +92,7 @@ export function SavedTrackCard({ track }: Props) {
       </View>
 
       <Pressable style={styles.deleteBtn} onPress={handleDelete} hitSlop={8}>
-        <Feather name="trash-2" size={16} color={COLORS.textMuted} />
+        <MaterialIcons name="delete" size={18} color={COLORS.textMuted} />
       </Pressable>
     </Pressable>
   );

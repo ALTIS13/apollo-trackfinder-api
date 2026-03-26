@@ -1,4 +1,4 @@
-import { Feather } from '@expo/vector-icons';
+import { MaterialIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import React, { useState } from 'react';
@@ -57,6 +57,8 @@ export function TrackCard({ track, onFindVariants }: Props) {
       artist: track.artist,
       thumbnailUrl: track.thumbnailUrl,
       duration: track.duration,
+      source: track.source,
+      type: track.type,
     };
     await play(pt);
   };
@@ -85,7 +87,7 @@ export function TrackCard({ track, onFindVariants }: Props) {
             />
           ) : (
             <View style={styles.thumbPlaceholder}>
-              <Feather name="music" size={20} color={COLORS.textMuted} />
+              <MaterialIcons name="music-note" size={20} color={COLORS.textMuted} />
             </View>
           )}
           {isCurrentTrack && (
@@ -93,7 +95,7 @@ export function TrackCard({ track, onFindVariants }: Props) {
               {isLoading ? (
                 <ActivityIndicator size="small" color={COLORS.white} />
               ) : (
-                <Feather name={isPlaying ? 'pause' : 'play'} size={18} color={COLORS.white} />
+                <MaterialIcons name={isPlaying ? 'pause' : 'play-arrow'} size={18} color={COLORS.white} />
               )}
             </View>
           )}
@@ -131,9 +133,9 @@ export function TrackCard({ track, onFindVariants }: Props) {
           {isCurrentTrack && isLoading ? (
             <ActivityIndicator size="small" color={COLORS.accent} />
           ) : (
-            <Feather
-              name={isCurrentTrack && isPlaying ? 'pause' : 'play'}
-              size={18}
+            <MaterialIcons
+              name={isCurrentTrack && isPlaying ? 'pause' : 'play-arrow'}
+              size={20}
               color={isCurrentTrack ? COLORS.accent : COLORS.textSub}
             />
           )}
@@ -150,9 +152,9 @@ export function TrackCard({ track, onFindVariants }: Props) {
               <ActivityIndicator size="small" color={COLORS.accent} />
             </View>
           ) : (
-            <Feather
-              name={saved ? 'check-circle' : downloadError ? 'alert-circle' : 'download'}
-              size={18}
+            <MaterialIcons
+              name={saved ? 'check-circle' : downloadError ? 'error' : 'file-download'}
+              size={20}
               color={
                 saved ? COLORS.accent
                 : downloadError ? COLORS.danger
@@ -170,7 +172,7 @@ export function TrackCard({ track, onFindVariants }: Props) {
               onFindVariants(track);
             }}
           >
-            <Feather name="search" size={18} color={COLORS.textSub} />
+            <MaterialIcons name="search" size={20} color={COLORS.textSub} />
           </Pressable>
         )}
       </View>

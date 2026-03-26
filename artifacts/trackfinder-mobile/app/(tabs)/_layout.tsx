@@ -55,21 +55,21 @@ function PlayerAwareTabLayout() {
           name="index"
           options={{
             title: 'Search',
-            tabBarIcon: ({ color, size }) => <Feather name="search" size={size} color={color} />,
+            tabBarIcon: ({ color, size }) => <MaterialIcons name="search" size={size} color={color} />,
           }}
         />
         <Tabs.Screen
           name="library"
           options={{
             title: 'Library',
-            tabBarIcon: ({ color, size }) => <Feather name="download" size={size} color={color} />,
+            tabBarIcon: ({ color, size }) => <MaterialIcons name="download" size={size} color={color} />,
           }}
         />
         <Tabs.Screen
           name="favorites"
           options={{
             title: 'Favorites',
-            tabBarIcon: ({ color, size }) => <Feather name="heart" size={size} color={color} />,
+            tabBarIcon: ({ color, size }) => <MaterialIcons name="heart" size={size} color={color} />,
           }}
         />
       </Tabs>
