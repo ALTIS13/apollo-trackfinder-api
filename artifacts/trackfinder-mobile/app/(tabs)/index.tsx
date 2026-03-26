@@ -186,6 +186,7 @@ export default function SearchScreen() {
         <View style={styles.centerMsg}>
           <ActivityIndicator size="large" color={COLORS.accent} />
           <Text style={styles.loadingText}>Searching YouTube + SoundCloud...</Text>
+          <Text style={styles.loadingSubText}>First search may take up to 30 sec</Text>
         </View>
       ) : hasSearched && filtered.length === 0 ? (
         <View style={styles.centerMsg}>
@@ -350,6 +351,13 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter_400Regular',
     color: COLORS.textSub,
     marginTop: 8,
+  },
+  loadingSubText: {
+    fontSize: 12,
+    fontFamily: 'Inter_400Regular',
+    color: COLORS.textMuted,
+    marginTop: 2,
+    textAlign: 'center',
   },
   errorText: {
     fontSize: 14,
