@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "TrackFinder",
+    "name": "Apollo TrackFinder",
     "slug": "trackfinder-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -16,18 +16,14 @@
     "ios": {
       "supportsTablet": false,
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "TrackFinder needs microphone access for audio playback.",
+        "NSMicrophoneUsageDescription": "Apollo TrackFinder needs microphone access for audio playback.",
         "UIBackgroundModes": [
           "audio"
         ]
       }
     },
     "android": {
-      "permissions": [
-        "android.permission.READ_MEDIA_AUDIO",
-        "android.permission.WRITE_EXTERNAL_STORAGE",
-        "android.permission.READ_EXTERNAL_STORAGE"
-      ]
+      "permissions": []
     },
     "web": {
       "favicon": "./assets/images/icon.png"
@@ -44,9 +40,9 @@
       [
         "expo-media-library",
         {
-          "photosPermission": "Allow TrackFinder to save downloaded tracks to your music library.",
-          "savePhotosPermission": "Allow TrackFinder to save downloaded tracks.",
-          "isAccessMediaLocationEnabled": true
+          "photosPermission": "Allow Apollo TrackFinder to access your music library.",
+          "savePhotosPermission": "Allow Apollo TrackFinder to save downloaded tracks.",
+          "isAccessMediaLocationEnabled": false
         }
       ],
       "expo-av"

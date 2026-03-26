@@ -30,11 +30,22 @@ interface LibraryState {
 
 const LibraryContext = createContext<LibraryState | null>(null);
 
+async function tryGrantMediaPermission(): Promise<boolean> {
+  if (Platform.OS !== 'android' && Platform.OS !== 'ios') return false;
+  try {
+    const { status } = await MediaLibrary.getPermissionsAsync();
+    if (status === 'granted') return true;
+    const { status: asked } = await MediaLibrary.requestPermissionsAsync();
+    return asked === 'granted';
+  } catch {
+    return false;
+  }
+}
+
 export function LibraryProvider({ children }: { children: React.ReactNode }) {
   const [tracks, setTracks] = useState<SavedTrack[]>([]);
   const [isDownloading, setIsDownloading] = useState<Record<string, boolean>>({});
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
-  const [mediaPermission, requestMediaPermission] = MediaLibrary.usePermissions();
 
   useEffect(() => {
     AsyncStorage.getItem(LIBRARY_KEY).then((raw) => {
@@ -78,12 +89,9 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         const result = await downloadResumable.downloadAsync();
         if (!result) throw new Error('Download failed');
 
-        if (Platform.OS === 'android' || Platform.OS === 'ios') {
-          let perm = mediaPermission;
-          if (!perm?.granted) perm = await requestMediaPermission();
-          if (perm?.granted) {
-            try { await MediaLibrary.createAssetAsync(result.uri); } catch {}
-          }
+        const granted = await tryGrantMediaPermission();
+        if (granted) {
+          try { await MediaLibrary.createAssetAsync(result.uri); } catch {}
         }
 
         const info = await FileSystem.getInfoAsync(result.uri);
@@ -118,7 +126,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         });
       }
     },
-    [isDownloading, mediaPermission, requestMediaPermission],
+    [isDownloading],
   );
 
   const remove = useCallback(

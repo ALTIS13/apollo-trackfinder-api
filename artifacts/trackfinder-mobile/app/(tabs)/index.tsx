@@ -101,7 +101,7 @@ export default function SearchScreen() {
       <View style={[styles.header, { paddingTop: topPad }]}>
         <View style={styles.headerRow}>
           <Feather name="music" size={22} color={COLORS.accent} />
-          <Text style={styles.headerTitle}>TrackFinder</Text>
+          <Text style={styles.headerTitle}>Apollo TrackFinder</Text>
           <Pressable
             style={styles.settingsBtn}
             onPress={() => setSettingsOpen(true)}

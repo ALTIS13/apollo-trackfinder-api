@@ -108,7 +108,7 @@ export function ServerSettings({ visible, onClose }: Props) {
               >
                 <Text style={styles.sectionTitle}>Server URL</Text>
                 <Text style={styles.sectionDesc}>
-                  Enter the URL of your TrackFinder API server. This lets you run the backend on your own machine or cloud, completely independent of Replit.
+                  Enter the URL of your Apollo TrackFinder API server. This lets you run the backend on your own machine or cloud, completely independent of Replit.
                 </Text>
 
                 <View style={styles.inputRow}>
