@@ -105,7 +105,13 @@ export function FullPlayer() {
 
   const syncedLines = lyrics?.syncedLyrics ? parseSyncedLyrics(lyrics.syncedLyrics) : null;
   const activeLyricIndex = syncedLines
-    ? syncedLines.findLastIndex((l) => l.time <= position)
+    ? (() => {
+        let idx = -1;
+        for (let i = 0; i < syncedLines.length; i++) {
+          if (syncedLines[i].time <= position) idx = i;
+        }
+        return idx;
+      })()
     : -1;
 
   useEffect(() => {

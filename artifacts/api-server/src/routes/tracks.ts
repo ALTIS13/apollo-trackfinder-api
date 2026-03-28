@@ -5,6 +5,7 @@ import { rank } from "../lib/ranker.js";
 import { getCached, setCached } from "../lib/cache.js";
 import { getStreamUrl, spawnAudioDownload, type AudioQuality } from "../lib/ytdlp.js";
 import { searchBandcamp } from "../adapters/bandcamp.js";
+import { searchDeezer } from "../adapters/deezer.js";
 import { SearchTracksBody } from "@workspace/api-zod";
 
 const router: IRouter = Router();
@@ -13,10 +14,11 @@ const ALLOWED_HOSTS: Record<string, string[]> = {
   yt: ["www.youtube.com", "youtube.com", "m.youtube.com", "youtu.be"],
   sc: ["soundcloud.com", "www.soundcloud.com", "api.soundcloud.com", "api-v2.soundcloud.com"],
   bc: ["bandcamp.com"],
+  dz: ["dzcdn.net", "cdns-preview-e.dzcdn.net"],
 };
 
 function decodeTrackUrl(id: string): { source: string; url: string } | null {
-  const prefixes = ["yt_", "sc_", "bc_"];
+  const prefixes = ["yt_", "sc_", "bc_", "dz_"];
   let source: string | null = null;
   let encodedPart: string | null = null;
 
@@ -73,16 +75,18 @@ router.post("/tracks/search", async (req, res) => {
 
   const perSource = Math.ceil(maxResults / 2);
 
-  const [ytResults, scResults, bcResults] = await Promise.allSettled([
+  const [ytResults, scResults, bcResults, dzResults] = await Promise.allSettled([
     searchYouTube(query, maxResults),
     searchSoundCloud(query, maxResults),
     searchBandcamp(query, perSource),
+    searchDeezer(query, perSource),
   ]);
 
   const allResults = [
     ...(ytResults.status === "fulfilled" ? ytResults.value : []),
     ...(scResults.status === "fulfilled" ? scResults.value : []),
     ...(bcResults.status === "fulfilled" ? bcResults.value : []),
+    ...(dzResults.status === "fulfilled" ? dzResults.value : []),
   ];
 
   if (ytResults.status === "rejected") {
@@ -93,6 +97,9 @@ router.post("/tracks/search", async (req, res) => {
   }
   if (bcResults.status === "rejected") {
     req.log.warn({ err: bcResults.reason }, "Bandcamp search failed");
+  }
+  if (dzResults.status === "rejected") {
+    req.log.warn({ err: dzResults.reason }, "Deezer search failed");
   }
 
   const referenceDuration =
@@ -135,16 +142,18 @@ router.post("/tracks/batch-search", async (req, res) => {
     if (cached) return { matches: cached as Record<string, unknown>[], cached: true };
 
     const query = `${artist} ${title}`.trim();
-    const [ytResults, scResults, bcResults] = await Promise.allSettled([
+    const [ytResults, scResults, bcResults, dzResults] = await Promise.allSettled([
       searchYouTube(query, 8),
       searchSoundCloud(query, 8),
       searchBandcamp(query, 4),
+      searchDeezer(query, 8),
     ]);
 
     const allResults = [
       ...(ytResults.status === "fulfilled" ? ytResults.value : []),
       ...(scResults.status === "fulfilled" ? scResults.value : []),
       ...(bcResults.status === "fulfilled" ? bcResults.value : []),
+      ...(dzResults.status === "fulfilled" ? dzResults.value : []),
     ];
 
     const referenceDuration =
@@ -215,6 +224,10 @@ router.get("/tracks/:id/stream", async (req, res) => {
   }
 
   try {
+    if (decoded.source === "dz") {
+      res.json({ id, streamUrl: decoded.url, mimeType: "audio/mpeg" });
+      return;
+    }
     const { url, mimeType } = await getStreamUrl(decoded.url);
     res.json({ id, streamUrl: url, mimeType: mimeType ?? null });
   } catch (err) {
@@ -246,8 +259,23 @@ router.get("/tracks/:id/download", async (req, res) => {
 
   try {
     const filename = `track_${id.slice(0, 16)}.${ext}`;
-    res.setHeader("Content-Type", mimeType);
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+    if (decoded.source === "dz") {
+      res.setHeader("Content-Type", "audio/mpeg");
+      const upstream = await fetch(decoded.url, { signal: AbortSignal.timeout(30000) });
+      if (!upstream.ok) {
+        res.status(502).json({ error: "download_error", message: "Preview unavailable" });
+        return;
+      }
+      const reader = upstream.body;
+      if (!reader) { res.status(502).end(); return; }
+      const { Readable } = await import("stream");
+      Readable.fromWeb(reader as import("stream/web").ReadableStream).pipe(res);
+      return;
+    }
+
+    res.setHeader("Content-Type", mimeType);
 
     const proc = spawnAudioDownload(decoded.url, quality);
     proc.stdout.pipe(res);
@@ -276,6 +304,59 @@ router.get("/tracks/:id/download", async (req, res) => {
   }
 });
 
+async function fetchLrclib(artist: string, title: string, duration: number): Promise<{ plainLyrics: string | null; syncedLyrics: string | null } | null> {
+  try {
+    const params = new URLSearchParams({ artist_name: artist, track_name: title });
+    if (duration > 0) params.set("duration", String(Math.round(duration)));
+    const r = await fetch(`https://lrclib.net/api/get?${params}`, {
+      headers: { "Lrclib-Client": "Apollo TrackFinder/1.0" },
+      signal: AbortSignal.timeout(7000),
+    });
+    if (r.status === 404) return { plainLyrics: null, syncedLyrics: null };
+    if (!r.ok) return null;
+    const d = await r.json() as { plainLyrics?: string | null; syncedLyrics?: string | null };
+    const plain = d.plainLyrics?.trim() ?? null;
+    const synced = d.syncedLyrics?.trim() ?? null;
+    if (!plain && !synced) return null;
+    return { plainLyrics: plain, syncedLyrics: synced };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchLrcLibSearch(artist: string, title: string): Promise<{ plainLyrics: string | null; syncedLyrics: string | null } | null> {
+  try {
+    const params = new URLSearchParams({ artist_name: artist, track_name: title, limit: "3" });
+    const r = await fetch(`https://lrclib.net/api/search?${params}`, {
+      headers: { "Lrclib-Client": "Apollo TrackFinder/1.0" },
+      signal: AbortSignal.timeout(7000),
+    });
+    if (!r.ok) return null;
+    const results = await r.json() as Array<{ plainLyrics?: string | null; syncedLyrics?: string | null }>;
+    for (const item of results) {
+      const plain = item.plainLyrics?.trim() ?? null;
+      const synced = item.syncedLyrics?.trim() ?? null;
+      if (plain || synced) return { plainLyrics: plain, syncedLyrics: synced };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchLyricsOvh(artist: string, title: string): Promise<{ plainLyrics: string | null; syncedLyrics: null } | null> {
+  try {
+    const url = `https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(title)}`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    if (!r.ok) return null;
+    const d = await r.json() as { lyrics?: string; error?: string };
+    if (d.error || !d.lyrics?.trim()) return null;
+    return { plainLyrics: d.lyrics.trim(), syncedLyrics: null };
+  } catch {
+    return null;
+  }
+}
+
 router.get("/tracks/lyrics", async (req, res) => {
   const artist = String(req.query["artist"] ?? "").trim();
   const title = String(req.query["title"] ?? "").trim();
@@ -287,33 +368,25 @@ router.get("/tracks/lyrics", async (req, res) => {
   }
 
   try {
-    const params = new URLSearchParams({ artist_name: artist, track_name: title });
-    if (duration > 0) params.set("duration", String(Math.round(duration)));
-
-    const response = await fetch(`https://lrclib.net/api/get?${params}`, {
-      headers: { "Lrclib-Client": "Apollo TrackFinder/1.0" },
-      signal: AbortSignal.timeout(8000),
-    });
-
-    if (response.status === 404) {
-      res.json({ plainLyrics: null, syncedLyrics: null });
+    const lrclibExact = await fetchLrclib(artist, title, duration);
+    if (lrclibExact && (lrclibExact.plainLyrics || lrclibExact.syncedLyrics)) {
+      res.json(lrclibExact);
       return;
     }
 
-    if (!response.ok) {
-      res.status(502).json({ error: "lyrics_unavailable", message: "Lyrics service error" });
+    const lrclibSearch = await fetchLrcLibSearch(artist, title);
+    if (lrclibSearch) {
+      res.json(lrclibSearch);
       return;
     }
 
-    const data = await response.json() as {
-      plainLyrics?: string | null;
-      syncedLyrics?: string | null;
-    };
+    const ovh = await fetchLyricsOvh(artist, title);
+    if (ovh) {
+      res.json(ovh);
+      return;
+    }
 
-    res.json({
-      plainLyrics: data.plainLyrics ?? null,
-      syncedLyrics: data.syncedLyrics ?? null,
-    });
+    res.json({ plainLyrics: null, syncedLyrics: null });
   } catch (err) {
     req.log.warn({ err }, "Lyrics fetch failed");
     res.json({ plainLyrics: null, syncedLyrics: null });

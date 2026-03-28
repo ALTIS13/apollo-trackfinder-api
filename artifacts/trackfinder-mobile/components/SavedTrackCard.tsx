@@ -30,9 +30,11 @@ function formatFileSize(bytes?: number): string {
   return `${(bytes / 1024).toFixed(0)} КБ`;
 }
 
-function getQualityLabel(source?: string): string | null {
-  if (source === 'youtube') return '~160 kbps';
-  if (source === 'soundcloud') return '~128 kbps';
+function getQualityLabel(downloadQuality?: string, source?: string): string | null {
+  if (downloadQuality) {
+    if (downloadQuality === 'flac') return 'FLAC';
+    return `${downloadQuality} kbps`;
+  }
   return null;
 }
 
@@ -62,7 +64,7 @@ export const SavedTrackCard = React.memo(function SavedTrackCard({
   const downloaded = !!track.localUri;
   const downloading = !!isDownloading[track.id];
   const progress = downloadProgress[track.id] ?? 0;
-  const quality = getQualityLabel(track.source);
+  const quality = getQualityLabel(track.downloadQuality, track.source);
 
   const handlePlay = async () => {
     if (selectionMode) {

@@ -1,11 +1,11 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library';
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Platform } from 'react-native';
 
 import { getApiBase, getSessionId } from '@/hooks/use-session';
-import { getQuality, loadQuality } from '@/hooks/use-settings';
+import { getQuality, loadQuality, type DownloadQuality } from '@/hooks/use-settings';
 
 const LIBRARY_KEY = 'trackfinder_library';
 
@@ -19,14 +19,25 @@ export interface SavedTrack {
   savedAt: number;
   fileSize?: number;
   source?: string;
+  downloadQuality?: DownloadQuality;
+}
+
+export interface BulkProgress {
+  total: number;
+  done: number;
+  failed: number;
+  active: boolean;
 }
 
 interface LibraryState {
   tracks: SavedTrack[];
   isDownloading: Record<string, boolean>;
   downloadProgress: Record<string, number>;
+  bulkProgress: BulkProgress;
   saveToLibrary: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; source?: string }) => Promise<void>;
   download: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }) => Promise<void>;
+  bulkDownload: (tracks: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }[]) => Promise<{ failed: number }>;
+  cancelBulkDownload: () => void;
   remove: (id: string) => Promise<void>;
   bulkRemove: (ids: string[]) => Promise<void>;
   isSaved: (id: string) => boolean;
@@ -51,6 +62,8 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
   const [tracks, setTracks] = useState<SavedTrack[]>([]);
   const [isDownloading, setIsDownloading] = useState<Record<string, boolean>>({});
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
+  const [bulkProgress, setBulkProgress] = useState<BulkProgress>({ total: 0, done: 0, failed: 0, active: false });
+  const bulkCancelRef = useRef(false);
 
   useEffect(() => {
     loadQuality();
@@ -83,8 +96,8 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
-  const download = useCallback(
-    async (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }) => {
+  const downloadSingle = useCallback(
+    async (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }): Promise<void> => {
       if (isDownloading[track.id]) return;
       setIsDownloading((p) => ({ ...p, [track.id]: true }));
       setDownloadProgress((p) => ({ ...p, [track.id]: 0 }));
@@ -94,8 +107,8 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         const ext = quality === 'flac' ? 'flac' : 'mp3';
         const downloadUrl = `${getApiBase()}/tracks/${track.id}/download?quality=${quality}`;
 
-        const safe = track.title.replace(/[^a-z0-9_\-\s]/gi, '').replace(/\s+/g, '_');
-        const filename = `${safe}_${track.id.slice(-6)}.${ext}`;
+        const safe = track.title.replace(/[^а-яёa-z0-9_\-\s]/gi, '').replace(/\s+/g, '_');
+        const filename = `${safe || track.id.slice(-8)}_${track.id.slice(-6)}.${ext}`;
         const localUri = (FileSystem.documentDirectory ?? '') + filename;
 
         const downloadResumable = FileSystem.createDownloadResumable(
@@ -111,7 +124,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         );
 
         const result = await downloadResumable.downloadAsync();
-        if (!result) throw new Error('Download failed');
+        if (!result) throw new Error('Download returned null');
 
         const granted = await tryGrantMediaPermission();
         if (granted) {
@@ -132,6 +145,8 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
             localUri: result.uri,
             savedAt: existing?.savedAt ?? Date.now(),
             fileSize,
+            source: existing?.source,
+            downloadQuality: quality,
           };
           const filtered = prev.filter((t) => t.id !== track.id);
           const next = [updated, ...filtered];
@@ -152,6 +167,41 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     },
     [isDownloading],
   );
+
+  const bulkDownload = useCallback(
+    async (tracksToDownload: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }[]): Promise<{ failed: number }> => {
+      const queue = tracksToDownload.filter((t) => !isDownloading[t.id]);
+      if (queue.length === 0) return { failed: 0 };
+
+      bulkCancelRef.current = false;
+      setBulkProgress({ total: queue.length, done: 0, failed: 0, active: true });
+
+      let failed = 0;
+      let done = 0;
+
+      for (const track of queue) {
+        if (bulkCancelRef.current) break;
+        try {
+          await downloadSingle(track);
+        } catch {
+          failed++;
+        }
+        done++;
+        if (!bulkCancelRef.current) {
+          setBulkProgress({ total: queue.length, done, failed, active: done < queue.length && !bulkCancelRef.current });
+        }
+      }
+
+      setBulkProgress({ total: queue.length, done, failed, active: false });
+      return { failed };
+    },
+    [isDownloading, downloadSingle],
+  );
+
+  const cancelBulkDownload = useCallback(() => {
+    bulkCancelRef.current = true;
+    setBulkProgress((p) => ({ ...p, active: false }));
+  }, []);
 
   const remove = useCallback(
     async (id: string) => {
@@ -188,7 +238,20 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
   const isDownloaded = useCallback((id: string) => tracks.some((t) => t.id === id && !!t.localUri), [tracks]);
 
   return (
-    <LibraryContext.Provider value={{ tracks, isDownloading, downloadProgress, saveToLibrary, download, remove, bulkRemove, isSaved, isDownloaded }}>
+    <LibraryContext.Provider value={{
+      tracks,
+      isDownloading,
+      downloadProgress,
+      bulkProgress,
+      saveToLibrary,
+      download: downloadSingle,
+      bulkDownload,
+      cancelBulkDownload,
+      remove,
+      bulkRemove,
+      isSaved,
+      isDownloaded,
+    }}>
       {children}
     </LibraryContext.Provider>
   );

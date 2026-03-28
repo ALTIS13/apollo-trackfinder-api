@@ -7,6 +7,7 @@ import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import React, { useCallback, useMemo, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   FlatList,
   ListRenderItemInfo,
@@ -49,12 +50,11 @@ function pluralSelected(n: number): string {
 
 export default function LibraryScreen() {
   const insets = useSafeAreaInsets();
-  const { tracks, download, bulkRemove, isDownloading } = useLibrary();
+  const { tracks, bulkDownload, cancelBulkDownload, bulkProgress, bulkRemove, isDownloading } = useLibrary();
   const { currentTrack } = usePlayer();
 
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [bulkDownloading, setBulkDownloading] = useState(false);
 
   const topPad = insets.top + (Platform.OS === 'web' ? 67 : 0);
   const bottomPad = TAB_BAR + (currentTrack ? PLAYER_HEIGHT : 0) + (Platform.OS === 'web' ? 34 : 0);
@@ -104,18 +104,13 @@ export default function LibraryScreen() {
   const handleBulkDownload = useCallback(async () => {
     const toDownload = tracks.filter((t) => selectedIds.has(t.id) && !t.localUri && !isDownloading[t.id]);
     if (toDownload.length === 0) return;
-    setBulkDownloading(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     exitSelectionMode();
-    let failed = 0;
-    for (const track of toDownload) {
-      try { await download(track); } catch { failed++; }
-    }
-    setBulkDownloading(false);
+    const { failed } = await bulkDownload(toDownload);
     if (failed > 0) {
       Alert.alert('Ошибка', `Не удалось скачать ${failed} ${failed === 1 ? 'трек' : 'трека'}. Проверьте соединение.`);
     }
-  }, [tracks, selectedIds, isDownloading, download, exitSelectionMode]);
+  }, [tracks, selectedIds, isDownloading, bulkDownload, exitSelectionMode]);
 
   const handleBulkDelete = useCallback(() => {
     const count = selectedIds.size;
@@ -149,12 +144,7 @@ export default function LibraryScreen() {
         {
           text: 'Скачать',
           onPress: async () => {
-            setBulkDownloading(true);
-            let failed = 0;
-            for (const track of toDownload) {
-              try { await download(track); } catch { failed++; }
-            }
-            setBulkDownloading(false);
+            const { failed } = await bulkDownload(toDownload);
             if (failed > 0) {
               Alert.alert('Ошибка', `Не удалось скачать ${failed} трека.`);
             }
@@ -162,7 +152,7 @@ export default function LibraryScreen() {
         },
       ],
     );
-  }, [onlineTracks, isDownloading, download]);
+  }, [onlineTracks, isDownloading, bulkDownload]);
 
   const getItemLayout = useCallback(
     (_: unknown, index: number) => ({
@@ -191,6 +181,8 @@ export default function LibraryScreen() {
 
   const allSelected = tracks.length > 0 && selectedIds.size === tracks.length;
 
+  const { active: bulkActive, done: bulkDone, total: bulkTotal, failed: bulkFailed } = bulkProgress;
+
   return (
     <View style={[styles.root, { backgroundColor: COLORS.bg }]}>
       <View style={[styles.header, { paddingTop: topPad }]}>
@@ -211,11 +203,11 @@ export default function LibraryScreen() {
                 <Pressable
                   style={[styles.bulkBtn, styles.bulkBtnDownload]}
                   onPress={handleBulkDownload}
-                  disabled={bulkDownloading}
+                  disabled={bulkActive}
                 >
                   <MaterialIcons name="file-download" size={18} color={COLORS.white} />
                   <Text style={styles.bulkBtnText}>
-                    Скачать{selectedOnlineCount > 0 ? ` (${selectedOnlineCount})` : ''}
+                    Скачать ({selectedOnlineCount})
                   </Text>
                 </Pressable>
               )}
@@ -226,7 +218,7 @@ export default function LibraryScreen() {
                 >
                   <MaterialIcons name="delete" size={18} color={COLORS.white} />
                   <Text style={styles.bulkBtnText}>
-                    Удалить{selectedIds.size > 0 ? ` (${selectedIds.size})` : ''}
+                    Удалить ({selectedIds.size})
                   </Text>
                 </Pressable>
               )}
@@ -258,11 +250,10 @@ export default function LibraryScreen() {
                     {downloadedTracks.length} скачано · {formatBytes(totalSize)}
                   </Text>
                 )}
-                {onlineTracks.length > 0 && (
+                {onlineTracks.length > 0 && !bulkActive && (
                   <Pressable
                     style={styles.statChipOnlineBtn}
                     onPress={handleDownloadAllOnline}
-                    disabled={bulkDownloading}
                   >
                     <MaterialIcons name="file-download" size={12} color={COLORS.accent} />
                     <Text style={styles.statChipOnlineText}>
@@ -278,6 +269,29 @@ export default function LibraryScreen() {
           </>
         )}
       </View>
+
+      {bulkActive && (
+        <View style={styles.bulkProgressBar}>
+          <View style={styles.bulkProgressLeft}>
+            <ActivityIndicator size="small" color={COLORS.accent} />
+            <Text style={styles.bulkProgressText}>
+              Скачивание {bulkDone + 1}/{bulkTotal}
+              {bulkFailed > 0 ? ` · ${bulkFailed} ошибок` : ''}
+            </Text>
+          </View>
+          <Pressable
+            style={styles.bulkCancelBtn}
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              cancelBulkDownload();
+            }}
+            hitSlop={8}
+          >
+            <MaterialIcons name="close" size={16} color={COLORS.danger} />
+            <Text style={styles.bulkCancelText}>Стоп</Text>
+          </Pressable>
+        </View>
+      )}
 
       {tracks.length === 0 ? (
         <View style={styles.empty}>
@@ -298,7 +312,7 @@ export default function LibraryScreen() {
           windowSize={7}
           maxToRenderPerBatch={20}
           removeClippedSubviews={Platform.OS !== 'web'}
-          extraData={selectionMode ? `${selectionMode}-${[...selectedIds].join(',')}` : selectionMode}
+          extraData={selectionMode ? `${selectionMode}-${[...selectedIds].join(',')}` : `${selectionMode}-${bulkActive}`}
         />
       )}
     </View>
@@ -431,6 +445,43 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter_400Regular',
     color: COLORS.textMuted,
     marginTop: 2,
+  },
+  bulkProgressBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: COLORS.card,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+    gap: 8,
+  },
+  bulkProgressLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  bulkProgressText: {
+    fontSize: 13,
+    fontFamily: 'Inter_500Medium',
+    color: COLORS.text,
+  },
+  bulkCancelBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.danger + '60',
+  },
+  bulkCancelText: {
+    fontSize: 12,
+    fontFamily: 'Inter_600SemiBold',
+    color: COLORS.danger,
   },
   empty: {
     flex: 1,

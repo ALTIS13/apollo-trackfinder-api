@@ -25,6 +25,10 @@ export const COLORS = {
   youtubeBg: 'rgba(255,0,0,0.12)',
   soundcloud: '#ff5500',
   soundcloudBg: 'rgba(255,85,0,0.12)',
+  bandcamp: '#1da0c3',
+  bandcampBg: 'rgba(29,160,195,0.12)',
+  deezer: '#a259ff',
+  deezerBg: 'rgba(162,89,255,0.12)',
 
   spotifyGreen: '#1DB954',
   spotifyBg: 'rgba(29,185,84,0.12)',
@@ -39,7 +43,7 @@ export const COLORS = {
 };
 
 export type TrackType = 'original' | 'remix' | 'live' | 'cover';
-export type TrackSource = 'youtube' | 'soundcloud';
+export type TrackSource = 'youtube' | 'soundcloud' | 'bandcamp' | 'deezer';
 
 export const TYPE_COLORS: Record<TrackType, { text: string; bg: string; label: string }> = {
   original:  { text: COLORS.original,   bg: COLORS.originalBg,   label: 'Original' },
@@ -48,7 +52,9 @@ export const TYPE_COLORS: Record<TrackType, { text: string; bg: string; label: s
   cover:     { text: COLORS.cover,      bg: COLORS.coverBg,      label: 'Cover' },
 };
 
-export const SOURCE_COLORS: Record<TrackSource, { text: string; bg: string; label: string }> = {
+export const SOURCE_COLORS: Record<string, { text: string; bg: string; label: string }> = {
   youtube:    { text: COLORS.youtube,    bg: COLORS.youtubeBg,    label: 'YouTube' },
   soundcloud: { text: COLORS.soundcloud, bg: COLORS.soundcloudBg, label: 'SoundCloud' },
+  bandcamp:   { text: COLORS.bandcamp,   bg: COLORS.bandcampBg,   label: 'Bandcamp' },
+  deezer:     { text: COLORS.deezer,     bg: COLORS.deezerBg,     label: 'Deezer 30s' },
 };

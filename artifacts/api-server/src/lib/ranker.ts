@@ -16,19 +16,41 @@ const TYPE_TIER: Record<TrackType, number> = {
   cover: 3,
 };
 
-function similarity(a: string, b: string): number {
-  const na = a.toLowerCase().replace(/[^a-z0-9\s]/g, "");
-  const nb = b.toLowerCase().replace(/[^a-z0-9\s]/g, "");
+function normalize(str: string): string {
+  return str
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-  if (na === nb) return 1;
-  if (nb.length === 0) return 0;
+function tokenize(str: string): string[] {
+  return normalize(str).split(" ").filter(Boolean);
+}
 
-  const wordsA = new Set(na.split(/\s+/).filter(Boolean));
-  const wordsB = new Set(nb.split(/\s+/).filter(Boolean));
-  const intersection = [...wordsA].filter((w) => wordsB.has(w)).length;
-  const union = new Set([...wordsA, ...wordsB]).size;
+function jaccardSimilarity(a: string, b: string): number {
+  const tokensA = new Set(tokenize(a));
+  const tokensB = new Set(tokenize(b));
+  if (tokensA.size === 0 && tokensB.size === 0) return 1;
+  if (tokensA.size === 0 || tokensB.size === 0) return 0;
 
+  const intersection = [...tokensA].filter((t) => tokensB.has(t)).length;
+  const union = new Set([...tokensA, ...tokensB]).size;
   return union === 0 ? 0 : intersection / union;
+}
+
+function containsQuery(text: string, query: string): boolean {
+  const n = normalize(text);
+  const q = normalize(query);
+  return n.includes(q);
+}
+
+function titleSimilarity(trackTitle: string, queryTitle: string): number {
+  const jaccard = jaccardSimilarity(trackTitle, queryTitle);
+  const exact = containsQuery(trackTitle, queryTitle) ? 0.2 : 0;
+  return Math.min(1, jaccard + exact);
 }
 
 function computeWithinTierScore<T extends RankableTrack>(
@@ -37,24 +59,28 @@ function computeWithinTierScore<T extends RankableTrack>(
   referenceDuration?: number,
 ): number {
   const trackFull = `${track.artist} ${track.title}`;
-  const expectedQuery = `${query.artist} ${query.title}`.toLowerCase();
+  const expectedQuery = `${query.artist} ${query.title}`;
 
-  const titleSim = similarity(track.title, query.title);
-  const fullSim = similarity(trackFull, expectedQuery);
-  const artistSim = similarity(track.artist, query.artist);
-  const nameSimilarity = titleSim * 0.5 + fullSim * 0.3 + artistSim * 0.2;
+  const titleSim = titleSimilarity(track.title, query.title);
+  const fullSim = jaccardSimilarity(trackFull, expectedQuery);
+  const artistSim = jaccardSimilarity(track.artist, query.artist);
+  const artistContains = containsQuery(track.artist, query.artist) || containsQuery(query.artist, track.artist)
+    ? 0.15
+    : 0;
+
+  const nameSimilarity = Math.min(1, titleSim * 0.45 + fullSim * 0.25 + artistSim * 0.15 + artistContains);
 
   let durationScore = 0;
   if (referenceDuration && track.duration > 0) {
     const diff = Math.abs(track.duration - referenceDuration);
-    durationScore = Math.max(0, 1 - diff / 120);
+    durationScore = Math.max(0, 1 - diff / 90);
   }
 
   const popularityScore = track.viewCount
     ? Math.min(1, Math.log10(track.viewCount + 1) / 8)
     : 0;
 
-  return nameSimilarity * 70 + durationScore * 15 + popularityScore * 15;
+  return nameSimilarity * 70 + durationScore * 20 + popularityScore * 10;
 }
 
 export function rank<T extends RankableTrack>(
