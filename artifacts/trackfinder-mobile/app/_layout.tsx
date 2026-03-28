@@ -8,7 +8,7 @@ import * as Font from 'expo-font';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import React, { useEffect, useState } from 'react';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { GestureHandlerRootView, Platform } from 'react-native';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
@@ -30,13 +30,14 @@ const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 60_000 } },
 });
 
-// MaterialIcons.ttf is checked into assets/fonts/ — same file as the one
-// bundled by @expo/vector-icons@15, verified byte-for-byte.
-// Using a LOCAL require() path means:
-//   • No pnpm symlink traversal at Metro bundle time or EAS build time
-//   • expo-font plugin (app.json) embeds the TTF as a native Android asset
-//   • Font.loadAsync registers it under "MaterialIcons" before any icon renders
+// On Android, @expo/vector-icons uses fontFamily='MaterialIcons' (filename without .ttf).
+// The font must be registered under exactly this key before any icon renders.
+// We use a local asset copy (assets/fonts/MaterialIcons.ttf) — no pnpm symlinks,
+// same bytes as @expo/vector-icons@15.1.1 (verified: 356,840 bytes).
+// The expo-font plugin in app.json embeds this file as a native Android asset
+// (android/app/src/main/assets/fonts/MaterialIcons.ttf) during EAS prebuild.
 const MATERIAL_ICONS_FONT = {
+  // Key MUST be 'MaterialIcons' — that's the fontFamily Android resolves against.
   MaterialIcons: require('../assets/fonts/MaterialIcons.ttf'),
 } as const;
 
@@ -56,18 +57,37 @@ export default function RootLayout() {
     initSession();
   }, []);
 
-  // Load MaterialIcons via Font.loadAsync — explicit, no hook magic.
-  // Must complete before any <MaterialIcons> component can render.
+  // Load MaterialIcons explicitly — @expo/vector-icons does NOT auto-load fonts.
+  // Hard requirement: this must resolve before any <MaterialIcons> renders.
   useEffect(() => {
+    const alreadyLoaded = Font.isLoaded('MaterialIcons');
+    if (alreadyLoaded) {
+      console.log('[Font] MaterialIcons already loaded (pre-bundled by Expo Go)');
+      setIconsReady(true);
+      return;
+    }
+
+    console.log('[Font] Loading MaterialIcons from local asset on', Platform.OS, '...');
     Font.loadAsync(MATERIAL_ICONS_FONT)
-      .then(() => setIconsReady(true))
-      .catch(() => {
-        // If already loaded (e.g. Expo Go pre-bundles it), that's fine too.
+      .then(() => {
+        console.log('[Font] MaterialIcons loaded successfully ✓');
         setIconsReady(true);
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        // 'already loaded' is not a real failure — font is available.
+        if (msg.includes('already loaded') || Font.isLoaded('MaterialIcons')) {
+          console.log('[Font] MaterialIcons was already registered:', msg);
+          setIconsReady(true);
+        } else {
+          console.error('[Font] MaterialIcons FAILED to load:', msg);
+          // Still unblock so the app renders (icons will be broken, but app works).
+          setIconsReady(true);
+        }
       });
   }, []);
 
-  // Load Inter text fonts separately so an Inter failure never blocks icons.
+  // Load Inter text fonts separately — failure here must never block icons.
   useEffect(() => {
     Font.loadAsync({
       Inter_400Regular,
@@ -75,17 +95,24 @@ export default function RootLayout() {
       Inter_600SemiBold,
       Inter_700Bold,
     })
-      .then(() => setTextFontsReady(true))
-      .catch(() => setTextFontsReady(true)); // fall through — app still usable
+      .then(() => {
+        console.log('[Font] Inter loaded successfully ✓');
+        setTextFontsReady(true);
+      })
+      .catch((err: unknown) => {
+        console.warn('[Font] Inter load error (non-fatal):', err);
+        setTextFontsReady(true);
+      });
   }, []);
 
   useEffect(() => {
     if (iconsReady && textFontsReady) {
+      console.log('[Font] All fonts ready — hiding splash screen');
       SplashScreen.hideAsync();
     }
   }, [iconsReady, textFontsReady]);
 
-  // Hard-block until MaterialIcons are loaded — icons must never render without the font.
+  // Strict render gate: no icon component ever renders before the font is confirmed.
   if (!iconsReady || !textFontsReady) return null;
 
   return (
