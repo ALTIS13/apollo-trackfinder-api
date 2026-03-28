@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { spawn, ChildProcess } from "child_process";
 
 export interface YtDlpEntry {
   id: string;
@@ -88,27 +88,70 @@ export async function scdlpSearch(query: string, maxResults = 10): Promise<YtDlp
   return entries;
 }
 
+const YT_PLAYER_CLIENTS = [
+  "mweb",
+  "tv_embedded",
+  "web",
+  "ios",
+];
+
 export async function getStreamUrl(trackUrl: string): Promise<{ url: string; mimeType?: string }> {
   const isYouTube = trackUrl.includes("youtube.com") || trackUrl.includes("youtu.be");
-  const ytArgs = isYouTube ? ["--extractor-args", "youtube:player_client=mweb"] : [];
-  const output = await runYtDlp(
-    [trackUrl, "--get-url", "-f", "bestaudio/best", "--no-warnings", ...ytArgs],
-    30000,
-  );
 
-  const url = output.trim().split("\n")[0]?.trim() ?? "";
-  if (!url) throw new Error("No stream URL returned by yt-dlp");
+  const clientList = isYouTube ? YT_PLAYER_CLIENTS : [""];
 
-  let mimeType = "audio/webm";
-  if (url.includes(".m3u8") || url.includes("manifest") || url.includes("playlist")) {
-    mimeType = "application/x-mpegURL";
-  } else if (url.includes(".mp4") || url.includes("itag=140")) {
-    mimeType = "audio/mp4";
-  } else if (url.includes(".mp3")) {
-    mimeType = "audio/mpeg";
-  } else if (url.includes(".opus") || url.includes("itag=251")) {
-    mimeType = "audio/opus";
+  let lastErr: Error = new Error("Unknown error");
+
+  for (const client of clientList) {
+    const extraArgs = client
+      ? ["--extractor-args", `youtube:player_client=${client}`]
+      : [];
+    try {
+      const output = await runYtDlp(
+        [trackUrl, "--get-url", "-f", "bestaudio/best", "--no-warnings", ...extraArgs],
+        30000,
+      );
+
+      const url = output.trim().split("\n")[0]?.trim() ?? "";
+      if (!url) throw new Error("No stream URL returned by yt-dlp");
+
+      let mimeType = "audio/webm";
+      if (url.includes(".m3u8") || url.includes("manifest") || url.includes("playlist")) {
+        mimeType = "application/x-mpegURL";
+      } else if (url.includes(".mp4") || url.includes("itag=140")) {
+        mimeType = "audio/mp4";
+      } else if (url.includes(".mp3")) {
+        mimeType = "audio/mpeg";
+      } else if (url.includes(".opus") || url.includes("itag=251")) {
+        mimeType = "audio/opus";
+      }
+
+      return { url, mimeType };
+    } catch (e) {
+      lastErr = e as Error;
+    }
   }
 
-  return { url, mimeType };
+  throw lastErr;
+}
+
+export function spawnAudioDownload(trackUrl: string): ChildProcess {
+  const isYouTube = trackUrl.includes("youtube.com") || trackUrl.includes("youtu.be");
+  const extraArgs = isYouTube
+    ? ["--extractor-args", "youtube:player_client=mweb"]
+    : [];
+
+  return spawn(
+    "yt-dlp",
+    [
+      trackUrl,
+      "-x",
+      "--audio-format", "mp3",
+      "--audio-quality", "5",
+      "-o", "-",
+      "--no-warnings",
+      ...extraArgs,
+    ],
+    { env: { ...process.env, PYTHONIOENCODING: "utf-8" } },
+  );
 }

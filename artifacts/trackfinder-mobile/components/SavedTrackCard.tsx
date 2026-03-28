@@ -106,10 +106,12 @@ export const SavedTrackCard = React.memo(function SavedTrackCard({
   };
 
   const handleLongPress = () => {
-    if (selectionMode) return;
+    if (selectionMode) {
+      onToggleSelect?.();
+      return;
+    }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-    onEnterSelection?.();
-    onToggleSelect?.();
+    setSheetVisible(true);
   };
 
   const sheetActions = [
@@ -122,9 +124,16 @@ export const SavedTrackCard = React.memo(function SavedTrackCard({
       : []),
     ...(onSearchArtist
       ? [{
-          label: `Поиск по артисту`,
+          label: `Найти варианты артиста`,
           icon: 'search' as const,
           onPress: () => onSearchArtist(track.artist),
+        }]
+      : []),
+    ...(onEnterSelection
+      ? [{
+          label: 'Выбрать несколько',
+          icon: 'check-circle' as const,
+          onPress: () => { onEnterSelection(); onToggleSelect?.(); },
         }]
       : []),
     {

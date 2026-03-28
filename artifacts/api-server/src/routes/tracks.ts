@@ -3,7 +3,7 @@ import { searchYouTube } from "../adapters/youtube.js";
 import { searchSoundCloud } from "../adapters/soundcloud.js";
 import { rank } from "../lib/ranker.js";
 import { getCached, setCached } from "../lib/cache.js";
-import { getStreamUrl } from "../lib/ytdlp.js";
+import { getStreamUrl, spawnAudioDownload } from "../lib/ytdlp.js";
 import { SearchTracksBody } from "@workspace/api-zod";
 
 const router: IRouter = Router();
@@ -228,12 +228,34 @@ router.get("/tracks/:id/download", async (req, res) => {
   }
 
   try {
-    const { url } = await getStreamUrl(decoded.url);
     const filename = `track_${id.slice(0, 16)}.mp3`;
-    res.json({ id, downloadUrl: url, filename });
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+    const proc = spawnAudioDownload(decoded.url);
+    proc.stdout.pipe(res);
+    proc.stderr.on("data", () => {});
+
+    req.on("close", () => proc.kill("SIGKILL"));
+
+    proc.on("close", (code) => {
+      if (code !== 0 && !res.writableEnded) {
+        res.destroy();
+      }
+    });
+    proc.on("error", (err) => {
+      req.log.error({ err, id }, "yt-dlp spawn error");
+      if (!res.headersSent) {
+        res.status(500).json({ error: "download_error", message: "Failed to start downloader" });
+      } else {
+        res.destroy();
+      }
+    });
   } catch (err) {
-    req.log.error({ err, id }, "Failed to get download URL");
-    res.status(500).json({ error: "download_error", message: "Could not resolve download URL" });
+    req.log.error({ err, id }, "Failed to start audio download");
+    if (!res.headersSent) {
+      res.status(500).json({ error: "download_error", message: "Could not resolve download URL" });
+    }
   }
 });
 

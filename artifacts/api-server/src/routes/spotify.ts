@@ -284,7 +284,7 @@ router.get("/spotify/liked-all", async (req, res) => {
   let offset = 0;
   let total = Infinity;
 
-  while (offset < total && allTracks.length < 500) {
+  while (offset < total) {
     const data = await spotifyGet<{ items: { track: SpotifyTrack }[]; total: number }>(
       tokens.accessToken, "/me/tracks", { limit: String(pageSize), offset: String(offset) }
     );

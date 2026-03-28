@@ -4,7 +4,7 @@ import * as MediaLibrary from 'expo-media-library';
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { Platform } from 'react-native';
 
-import { apiFetch } from '@/hooks/use-session';
+import { getApiBase, getSessionId } from '@/hooks/use-session';
 
 const LIBRARY_KEY = 'trackfinder_library';
 
@@ -88,8 +88,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       setDownloadProgress((p) => ({ ...p, [track.id]: 0 }));
 
       try {
-        const resp = await apiFetch<{ downloadUrl: string }>(`/tracks/${track.id}/download`);
-        const downloadUrl = resp.downloadUrl;
+        const downloadUrl = `${getApiBase()}/tracks/${track.id}/download`;
 
         const safe = track.title.replace(/[^a-z0-9_\-\s]/gi, '').replace(/\s+/g, '_');
         const filename = `${safe}_${track.id.slice(-6)}.mp3`;
@@ -98,7 +97,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         const downloadResumable = FileSystem.createDownloadResumable(
           downloadUrl,
           localUri,
-          {},
+          { headers: { 'X-Client-Session': getSessionId() } },
           (progress) => {
             const pct = progress.totalBytesExpectedToWrite > 0
               ? progress.totalBytesWritten / progress.totalBytesExpectedToWrite

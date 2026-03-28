@@ -273,7 +273,7 @@ export default function LibraryScreen() {
               </View>
             )}
             <Text style={styles.hint}>
-              Свайп влево — скачать / удалить · Удерживать — выделение
+              Свайп влево — скачать / удалить · Удерживать — меню
             </Text>
           </>
         )}
