@@ -3,6 +3,7 @@ import Svg, { Path } from 'react-native-svg';
 
 export type MaterialIconName =
   | 'arrow-back'
+  | 'arrow-upward'
   | 'check-circle'
   | 'chevron-left'
   | 'chevron-right'
@@ -36,6 +37,8 @@ const PATHS: Record<MaterialIconName, string> = {
     'M20 2H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7.53 12L9 10.5l1.4-1.41 2.07 2.08 4.13-4.17L18 8.41 12.47 14zM4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6z',
   'arrow-back':
     'M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z',
+  'arrow-upward':
+    'M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z',
   'chevron-left':
     'M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z',
   'chevron-right':

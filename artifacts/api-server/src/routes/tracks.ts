@@ -114,7 +114,7 @@ router.post("/tracks/batch-search", async (req, res) => {
     return;
   }
 
-  const CONCURRENCY = 5;
+  const CONCURRENCY = 8;
 
   async function searchOne(artist: string, title: string): Promise<{ matches: Record<string, unknown>[]; cached: boolean }> {
     const cached = await getCached<Record<string, unknown>>(artist, title);

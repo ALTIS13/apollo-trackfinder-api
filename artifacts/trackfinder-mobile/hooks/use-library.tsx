@@ -23,9 +23,11 @@ interface LibraryState {
   tracks: SavedTrack[];
   isDownloading: Record<string, boolean>;
   downloadProgress: Record<string, number>;
+  saveToLibrary: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }) => Promise<void>;
   download: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }) => Promise<void>;
   remove: (id: string) => Promise<void>;
   isSaved: (id: string) => boolean;
+  isDownloaded: (id: string) => boolean;
 }
 
 const LibraryContext = createContext<LibraryState | null>(null);
@@ -55,10 +57,26 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const save = useCallback(async (updated: SavedTrack[]) => {
-    setTracks(updated);
-    await AsyncStorage.setItem(LIBRARY_KEY, JSON.stringify(updated));
-  }, []);
+  const saveToLibrary = useCallback(
+    async (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }) => {
+      setTracks((prev) => {
+        if (prev.some((t) => t.id === track.id)) return prev;
+        const entry: SavedTrack = {
+          id: track.id,
+          title: track.title,
+          artist: track.artist,
+          thumbnailUrl: track.thumbnailUrl,
+          duration: track.duration,
+          localUri: '',
+          savedAt: Date.now(),
+        };
+        const updated = [entry, ...prev];
+        AsyncStorage.setItem(LIBRARY_KEY, JSON.stringify(updated));
+        return updated;
+      });
+    },
+    [],
+  );
 
   const download = useCallback(
     async (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }) => {
@@ -97,22 +115,22 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         const info = await FileSystem.getInfoAsync(result.uri);
         const fileSize = info.exists ? (info as { size?: number }).size : undefined;
 
-        const saved: SavedTrack = {
-          id: track.id,
-          title: track.title,
-          artist: track.artist,
-          thumbnailUrl: track.thumbnailUrl,
-          duration: track.duration,
-          localUri: result.uri,
-          savedAt: Date.now(),
-          fileSize,
-        };
-
         setTracks((prev) => {
+          const existing = prev.find((t) => t.id === track.id);
+          const updated: SavedTrack = {
+            id: track.id,
+            title: track.title,
+            artist: track.artist,
+            thumbnailUrl: track.thumbnailUrl,
+            duration: track.duration,
+            localUri: result.uri,
+            savedAt: existing?.savedAt ?? Date.now(),
+            fileSize,
+          };
           const filtered = prev.filter((t) => t.id !== track.id);
-          const updated = [saved, ...filtered];
-          AsyncStorage.setItem(LIBRARY_KEY, JSON.stringify(updated));
-          return updated;
+          const next = [updated, ...filtered];
+          AsyncStorage.setItem(LIBRARY_KEY, JSON.stringify(next));
+          return next;
         });
       } catch (e) {
         console.error('Download error:', e);
@@ -136,15 +154,17 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         try { await FileSystem.deleteAsync(track.localUri, { idempotent: true }); } catch {}
       }
       const updated = tracks.filter((t) => t.id !== id);
-      await save(updated);
+      setTracks(updated);
+      await AsyncStorage.setItem(LIBRARY_KEY, JSON.stringify(updated));
     },
-    [tracks, save],
+    [tracks],
   );
 
   const isSaved = useCallback((id: string) => tracks.some((t) => t.id === id), [tracks]);
+  const isDownloaded = useCallback((id: string) => tracks.some((t) => t.id === id && !!t.localUri), [tracks]);
 
   return (
-    <LibraryContext.Provider value={{ tracks, isDownloading, downloadProgress, download, remove, isSaved }}>
+    <LibraryContext.Provider value={{ tracks, isDownloading, downloadProgress, saveToLibrary, download, remove, isSaved, isDownloaded }}>
       {children}
     </LibraryContext.Provider>
   );

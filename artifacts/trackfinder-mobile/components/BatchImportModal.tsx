@@ -141,7 +141,7 @@ function MatchRow({
 
 export function BatchImportModal({ visible, tracks, onClose }: Props) {
   const insets = useSafeAreaInsets();
-  const { download, isSaved } = useLibrary();
+  const { saveToLibrary, isSaved } = useLibrary();
   const [phase, setPhase] = useState<PhaseType>('idle');
   const [results, setResults] = useState<BatchMatch[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -248,6 +248,7 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
     const toImport = results.filter(r => selected.has(r.index) && r.matches[0]);
     if (!toImport.length) return;
 
+    abortRef.current = false;
     setPhase('importing');
     setImportTotal(toImport.length);
     setImportProgress(0);
@@ -255,20 +256,18 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
     let errors = 0;
 
     for (const item of toImport) {
-      if (abortRef.current) break;
       const best = item.matches[0];
       if (isSaved(best.id)) {
         setImportProgress(p => p + 1);
         continue;
       }
       try {
-        await download(best);
+        await saveToLibrary(best);
       } catch {
         errors++;
       }
       setImportErrors(errors);
       setImportProgress(p => p + 1);
-      await new Promise(r => setTimeout(r, 80));
     }
 
     setPhase('done');
@@ -383,9 +382,9 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
                 onPress={startImport}
                 disabled={!selectedCount}
               >
-                <MaterialIcons name="file-download" size={18} color={COLORS.white} />
+                <MaterialIcons name="library-add-check" size={18} color={COLORS.white} />
                 <Text style={styles.importBtnText}>
-                  Скачать {selectedCount} {plural(selectedCount, 'трек', 'трека', 'треков')}
+                  Сохранить {selectedCount} {plural(selectedCount, 'трек', 'трека', 'треков')}
                 </Text>
               </Pressable>
             </View>
@@ -396,7 +395,7 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
           <View style={styles.center}>
             <ActivityIndicator size="large" color={COLORS.accent} />
             <Text style={styles.searchingText}>
-              Скачивание {importProgress} / {importTotal}
+              Сохранение {importProgress} / {importTotal}
             </Text>
             <View style={styles.progressBarWrap}>
               <View style={[styles.progressBarFill, { width: `${importTotal ? (importProgress / importTotal) * 100 : 0}%` as any }]} />
@@ -410,10 +409,11 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
         {phase === 'done' && (
           <View style={styles.center}>
             <MaterialIcons name="check-circle" size={56} color="#22c55e" />
-            <Text style={styles.doneTitle}>Импорт завершён</Text>
+            <Text style={styles.doneTitle}>Сохранено в библиотеку</Text>
             <Text style={styles.doneSub}>
-              {importProgress - importErrors} сохранено · {importErrors} ошибок
+              {importProgress - importErrors} {plural(importProgress - importErrors, 'трек', 'трека', 'треков')} · {importErrors} ошибок
             </Text>
+            <Text style={styles.doneHint}>Откройте библиотеку, чтобы скачать треки на устройство</Text>
             <Pressable style={styles.doneBtn} onPress={onClose}>
               <Text style={styles.doneBtnText}>Готово</Text>
             </Pressable>
@@ -716,6 +716,13 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: 'Inter_400Regular',
     color: COLORS.textSub,
+  },
+  doneHint: {
+    fontSize: 12,
+    fontFamily: 'Inter_400Regular',
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    marginTop: -4,
   },
   doneBtn: {
     paddingHorizontal: 32,

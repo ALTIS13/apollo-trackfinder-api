@@ -1,13 +1,12 @@
 import { BatchImportModal, ImportTrackInput } from '@/components/BatchImportModal';
 import { MaterialIcons } from '@/components/MaterialIcons';
 import * as Haptics from 'expo-haptics';
+import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import React, { memo, useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
-  Image,
-  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -22,7 +21,6 @@ import { COLORS } from '@/constants/colors';
 import { usePlayer } from '@/hooks/use-player';
 import {
   SpotifyPlaylist,
-  SpotifyTrack,
   useSpotifyLikedAllQuery,
   useSpotifyLogin,
   useSpotifyLogout,
@@ -33,7 +31,6 @@ import {
 } from '@/hooks/use-spotify';
 import {
   YandexPlaylist,
-  YandexTrack,
   useYandexConnect,
   useYandexDisconnect,
   useYandexLiked,
@@ -44,12 +41,14 @@ import {
 
 const PLAYER_HEIGHT = 62;
 const TAB_BAR = Platform.OS === 'web' ? 84 : 50;
+const ROW_HEIGHT = 65;
 
 type Service = 'spotify' | 'yandex';
 type SpotifyTab = 'liked' | 'playlists' | 'top';
 type YandexTab = 'liked' | 'playlists';
+type CatalogTrack = { id: string; title: string; artist: string; thumbnailUrl: string | null };
 
-function CatalogTrackRow({
+const CatalogTrackRow = memo(function CatalogTrackRow({
   title,
   artist,
   thumbnailUrl,
@@ -64,7 +63,7 @@ function CatalogTrackRow({
     <View style={styles.catalogRow}>
       <View style={styles.catalogThumb}>
         {thumbnailUrl ? (
-          <Image source={{ uri: thumbnailUrl }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+          <Image source={{ uri: thumbnailUrl }} style={StyleSheet.absoluteFill} contentFit="cover" />
         ) : (
           <MaterialIcons name="music-note" size={16} color={COLORS.textMuted} />
         )}
@@ -82,7 +81,7 @@ function CatalogTrackRow({
       </Pressable>
     </View>
   );
-}
+});
 
 function PlaylistCard({
   name,
@@ -99,60 +98,93 @@ function PlaylistCard({
     <Pressable style={styles.playlistCard} onPress={onPress}>
       <View style={styles.playlistThumb}>
         {thumbnailUrl ? (
-          <Image source={{ uri: thumbnailUrl }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+          <Image source={{ uri: thumbnailUrl }} style={StyleSheet.absoluteFill} contentFit="cover" />
         ) : (
           <MaterialIcons name="list" size={20} color={COLORS.textMuted} />
         )}
       </View>
       <Text style={styles.playlistName} numberOfLines={2}>{name}</Text>
-      <Text style={styles.playlistCount}>{trackCount} tracks</Text>
+      <Text style={styles.playlistCount}>{trackCount} треков</Text>
     </Pressable>
   );
 }
 
-function SpotifySection({ onVariants, onImportAll }: { onVariants: (artist: string, title: string) => void; onImportAll?: (tracks: ImportTrackInput[]) => void }) {
-  const { data: status } = useSpotifyStatus();
-  const login = useSpotifyLogin();
-  const logout = useSpotifyLogout();
-  const [tab, setTab] = useState<SpotifyTab>('liked');
-  const [selectedPlaylist, setSelectedPlaylist] = useState<SpotifyPlaylist | null>(null);
+export default function FavoritesScreen() {
+  const insets = useSafeAreaInsets();
+  const router = useRouter();
+  const { currentTrack } = usePlayer();
+  const listRef = useRef<FlatList>(null);
 
-  const likedAllQuery = useSpotifyLikedAllQuery(status?.connected === true && tab === 'liked');
-  const playlistsQuery = useSpotifyPlaylists();
-  const topQuery = useSpotifyTopTracks();
-  const playlistTracksQuery = useSpotifyPlaylistTracks(selectedPlaylist?.id ?? null, 0);
+  const [service, setService] = useState<Service>('spotify');
+  const [spotifyTab, setSpotifyTab] = useState<SpotifyTab>('liked');
+  const [yandexTab, setYandexTab] = useState<YandexTab>('liked');
+  const [selectedSpotifyPlaylist, setSelectedSpotifyPlaylist] = useState<SpotifyPlaylist | null>(null);
+  const [selectedYandexPlaylist, setSelectedYandexPlaylist] = useState<YandexPlaylist | null>(null);
+  const [batchTracks, setBatchTracks] = useState<ImportTrackInput[]>([]);
+  const [showScrollTop, setShowScrollTop] = useState(false);
+  const [yandexToken, setYandexToken] = useState('');
+  const [showTokenInput, setShowTokenInput] = useState(false);
 
-  if (!status?.connected) {
-    return (
-      <View style={styles.connectPrompt}>
-        <View style={[styles.serviceIconBig, { backgroundColor: COLORS.spotifyBg }]}>
-          <MaterialIcons name="music-note" size={32} color={COLORS.spotifyGreen} />
-        </View>
-        <Text style={styles.connectTitle}>Подключить Spotify</Text>
-        <Text style={styles.connectText}>Слушайте понравившиеся треки, плейлисты и чарты</Text>
-        <Pressable
-          style={[styles.connectBtn, { backgroundColor: COLORS.spotifyGreen }]}
-          onPress={() => login.mutate()}
-          disabled={login.isPending}
-        >
-          {login.isPending ? (
-            <ActivityIndicator size="small" color={COLORS.white} />
-          ) : (
-            <Text style={styles.connectBtnText}>Войти через Spotify</Text>
-          )}
-        </Pressable>
-        <Text style={styles.connectNote}>Только чтение · мы не изменяем вашу библиотеку</Text>
-      </View>
-    );
-  }
+  const topPad = insets.top + (Platform.OS === 'web' ? 67 : 0);
+  const bottomPad = TAB_BAR + (currentTrack ? PLAYER_HEIGHT : 0) + (Platform.OS === 'web' ? 34 : 0);
 
-  const tabs: { id: SpotifyTab; label: string }[] = [
-    { id: 'liked', label: 'Понравилось' },
-    { id: 'playlists', label: 'Плейлисты' },
-    { id: 'top', label: 'Чарты' },
-  ];
+  const { data: spotifyStatus } = useSpotifyStatus();
+  const spotifyLogin = useSpotifyLogin();
+  const spotifyLogout = useSpotifyLogout();
 
-  const renderLiked = () => {
+  const isSpotifyLikedEnabled = spotifyStatus?.connected === true && service === 'spotify' && spotifyTab === 'liked';
+  const likedAllQuery = useSpotifyLikedAllQuery(isSpotifyLikedEnabled);
+  const spotifyPlaylistsQuery = useSpotifyPlaylists();
+  const spotifyTopQuery = useSpotifyTopTracks();
+  const spotifyPlaylistTracksQuery = useSpotifyPlaylistTracks(selectedSpotifyPlaylist?.id ?? null, 0);
+
+  const { data: yandexStatus } = useYandexStatus();
+  const yandexConnect = useYandexConnect();
+  const yandexDisconnect = useYandexDisconnect();
+  const yandexLikedQuery = useYandexLiked(0);
+  const yandexPlaylistsQuery = useYandexPlaylists();
+  const yandexPlaylistTracksQuery = useYandexPlaylistTracks(
+    selectedYandexPlaylist?.uid ?? null,
+    selectedYandexPlaylist?.kind ?? null,
+  );
+
+  const activeTab = service === 'spotify' ? spotifyTab : yandexTab;
+  const isLikedTab = activeTab === 'liked';
+
+  const spotifyLikedTracks: CatalogTrack[] = likedAllQuery.data?.tracks ?? [];
+  const yandexLikedTracks: CatalogTrack[] = yandexLikedQuery.data?.tracks ?? [];
+  const likedTracks = service === 'spotify' ? spotifyLikedTracks : yandexLikedTracks;
+
+  const handleFindVariants = useCallback((artist: string, title: string) => {
+    router.navigate({ pathname: '/', params: { artist, title } });
+  }, [router]);
+
+  const handleImportAll = useCallback((tracks: ImportTrackInput[]) => {
+    setBatchTracks(tracks);
+  }, []);
+
+  const scrollToTop = useCallback(() => {
+    listRef.current?.scrollToOffset({ offset: 0, animated: true });
+  }, []);
+
+  const renderItem = useCallback(({ item }: { item: CatalogTrack }) => (
+    <CatalogTrackRow
+      title={item.title}
+      artist={item.artist}
+      thumbnailUrl={item.thumbnailUrl}
+      onFindVariants={() => handleFindVariants(item.artist, item.title)}
+    />
+  ), [handleFindVariants]);
+
+  const keyExtractor = useCallback((item: CatalogTrack) => item.id, []);
+
+  const getItemLayout = useCallback((_: any, index: number) => ({
+    length: ROW_HEIGHT,
+    offset: ROW_HEIGHT * index,
+    index,
+  }), []);
+
+  const spotifyLikedHeader = useMemo(() => {
     if (likedAllQuery.isFetching && !likedAllQuery.data) {
       return (
         <View style={styles.fetchPrompt}>
@@ -161,8 +193,7 @@ function SpotifySection({ onVariants, onImportAll }: { onVariants: (artist: stri
         </View>
       );
     }
-    const tracks = likedAllQuery.data?.tracks ?? [];
-    if (!tracks.length) {
+    if (spotifyLikedTracks.length === 0) {
       return (
         <View style={styles.fetchPrompt}>
           <Pressable style={styles.loadBtn} onPress={() => likedAllQuery.refetch()}>
@@ -172,369 +203,330 @@ function SpotifySection({ onVariants, onImportAll }: { onVariants: (artist: stri
       );
     }
     return (
-      <>
-        {onImportAll && (
-          <View style={styles.importAllRow}>
-            <Pressable
-              style={styles.importAllBtn}
-              onPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                onImportAll(tracks.map(t => ({ artist: t.artist, title: t.title, thumbnailUrl: t.thumbnailUrl })));
-              }}
-            >
-              <MaterialIcons name="file-download" size={14} color={COLORS.accent} />
-              <Text style={styles.importAllText}>Импортировать все {tracks.length} треков</Text>
-            </Pressable>
-          </View>
-        )}
-        {tracks.map((t) => (
-          <CatalogTrackRow
-            key={t.id}
-            title={t.title}
-            artist={t.artist}
-            thumbnailUrl={t.thumbnailUrl}
-            onFindVariants={() => onVariants(t.artist, t.title)}
-          />
-        ))}
-      </>
-    );
-  };
-
-  const renderPlaylists = () => {
-    if (selectedPlaylist) {
-      return (
-        <>
-          <Pressable style={styles.backBtn} onPress={() => setSelectedPlaylist(null)}>
-            <MaterialIcons name="arrow-back" size={16} color={COLORS.text} />
-            <Text style={styles.backBtnText}>{selectedPlaylist.name}</Text>
-          </Pressable>
-          {playlistTracksQuery.isFetching ? (
-            <ActivityIndicator style={styles.loader} color={COLORS.accent} />
-          ) : (
-            (playlistTracksQuery.data?.tracks ?? []).map((t) => (
-              <CatalogTrackRow
-                key={t.id}
-                title={t.title}
-                artist={t.artist}
-                thumbnailUrl={t.thumbnailUrl}
-                onFindVariants={() => onVariants(t.artist, t.title)}
-              />
-            ))
-          )}
-        </>
-      );
-    }
-
-    if (!playlistsQuery.data && !playlistsQuery.isFetching) {
-      return (
-        <View style={styles.fetchPrompt}>
-          <Pressable style={styles.loadBtn} onPress={() => playlistsQuery.refetch()}>
-            <Text style={styles.loadBtnText}>Загрузить плейлисты</Text>
-          </Pressable>
-        </View>
-      );
-    }
-    if (playlistsQuery.isFetching) return <ActivityIndicator style={styles.loader} color={COLORS.accent} />;
-    const playlists = playlistsQuery.data?.playlists ?? [];
-    return (
-      <View style={styles.playlistGrid}>
-        {playlists.map((pl) => (
-          <PlaylistCard
-            key={pl.id}
-            name={pl.name}
-            trackCount={pl.trackCount}
-            thumbnailUrl={pl.thumbnailUrl}
-            onPress={() => setSelectedPlaylist(pl)}
-          />
-        ))}
-      </View>
-    );
-  };
-
-  const renderTop = () => {
-    if (!topQuery.data && !topQuery.isFetching) {
-      return (
-        <View style={styles.fetchPrompt}>
-          <Pressable style={styles.loadBtn} onPress={() => topQuery.refetch()}>
-            <Text style={styles.loadBtnText}>Загрузить чарты</Text>
-          </Pressable>
-        </View>
-      );
-    }
-    if (topQuery.isFetching) return <ActivityIndicator style={styles.loader} color={COLORS.accent} />;
-    return (
-      <>
-        {(topQuery.data?.tracks ?? []).map((t) => (
-          <CatalogTrackRow
-            key={t.id}
-            title={t.title}
-            artist={t.artist}
-            thumbnailUrl={t.thumbnailUrl}
-            onFindVariants={() => onVariants(t.artist, t.title)}
-          />
-        ))}
-      </>
-    );
-  };
-
-  return (
-    <View>
-      <View style={styles.connectedHeader}>
-        <View style={styles.connectedInfo}>
-          <View style={[styles.serviceIcon, { backgroundColor: COLORS.spotifyBg }]}>
-            <MaterialIcons name="music-note" size={16} color={COLORS.spotifyGreen} />
-          </View>
-          <Text style={styles.connectedName}>{status.displayName ?? 'Spotify'}</Text>
-        </View>
-        <Pressable onPress={() => logout.mutate()} style={styles.disconnectBtn}>
-          <Text style={styles.disconnectText}>Отключить</Text>
+      <View style={styles.importAllRow}>
+        <Pressable
+          style={styles.importAllBtn}
+          onPress={() => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+            handleImportAll(spotifyLikedTracks.map(t => ({ artist: t.artist, title: t.title, thumbnailUrl: t.thumbnailUrl })));
+          }}
+        >
+          <MaterialIcons name="file-download" size={14} color={COLORS.accent} />
+          <Text style={styles.importAllText}>Импортировать все {spotifyLikedTracks.length} треков</Text>
         </Pressable>
       </View>
-
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabsRow}>
-        {tabs.map((t) => (
-          <Pressable
-            key={t.id}
-            style={[styles.tabChip, tab === t.id && styles.tabChipActive]}
-            onPress={() => { setTab(t.id); Haptics.selectionAsync(); }}
-          >
-            <Text style={[styles.tabChipText, tab === t.id && styles.tabChipTextActive]}>{t.label}</Text>
-          </Pressable>
-        ))}
-      </ScrollView>
-
-      {tab === 'liked' && renderLiked()}
-      {tab === 'playlists' && renderPlaylists()}
-      {tab === 'top' && renderTop()}
-    </View>
-  );
-}
-
-function YandexSection({ onVariants, onImportAll }: { onVariants: (artist: string, title: string) => void; onImportAll?: (tracks: ImportTrackInput[]) => void }) {
-  const { data: status } = useYandexStatus();
-  const connect = useYandexConnect();
-  const disconnect = useYandexDisconnect();
-  const [tab, setTab] = useState<YandexTab>('liked');
-  const [token, setToken] = useState('');
-  const [showTokenInput, setShowTokenInput] = useState(false);
-  const [selectedPlaylist, setSelectedPlaylist] = useState<YandexPlaylist | null>(null);
-
-  const likedQuery = useYandexLiked(0);
-  const playlistsQuery = useYandexPlaylists();
-  const playlistTracksQuery = useYandexPlaylistTracks(
-    selectedPlaylist?.uid ?? null,
-    selectedPlaylist?.kind ?? null,
-  );
-
-  if (!status?.connected) {
-    return (
-      <View style={styles.connectPrompt}>
-        <View style={[styles.serviceIconBig, { backgroundColor: COLORS.yandexBg }]}>
-          <MaterialIcons name="headphones" size={32} color={COLORS.yandexYellow} />
-        </View>
-        <Text style={styles.connectTitle}>Подключить Яндекс Музыку</Text>
-        <Text style={styles.connectText}>
-          Получите OAuth-токен на oauth.yandex.ru и вставьте его ниже
-        </Text>
-        {showTokenInput ? (
-          <View style={styles.tokenInputWrap}>
-            <TextInput
-              style={styles.tokenInput}
-              value={token}
-              onChangeText={setToken}
-              placeholder="Вставьте OAuth-токен"
-              placeholderTextColor={COLORS.textMuted}
-              multiline
-              selectionColor={COLORS.yandexYellow}
-            />
-            <Pressable
-              style={[styles.connectBtn, { backgroundColor: COLORS.yandexYellow }, !token.trim() && styles.btnDisabled]}
-              onPress={async () => {
-                if (!token.trim()) return;
-                await connect.mutateAsync(token.trim());
-              }}
-              disabled={!token.trim() || connect.isPending}
-            >
-              {connect.isPending ? (
-                <ActivityIndicator size="small" color={COLORS.black} />
-              ) : (
-                <Text style={[styles.connectBtnText, { color: COLORS.black }]}>Подключить</Text>
-              )}
-            </Pressable>
-          </View>
-        ) : (
-          <Pressable
-            style={[styles.connectBtn, { backgroundColor: COLORS.yandexYellow }]}
-            onPress={() => setShowTokenInput(true)}
-          >
-            <Text style={[styles.connectBtnText, { color: COLORS.black }]}>Ввести токен</Text>
-          </Pressable>
-        )}
-        {connect.isError && (
-          <Text style={styles.errorMsg}>Неверный токен. Попробуйте ещё раз.</Text>
-        )}
-      </View>
     );
-  }
+  }, [likedAllQuery.isFetching, likedAllQuery.data, spotifyLikedTracks, handleImportAll]);
 
-  const tabs: { id: YandexTab; label: string }[] = [
-    { id: 'liked', label: 'Понравилось' },
-    { id: 'playlists', label: 'Плейлисты' },
-  ];
-
-  const renderLiked = () => {
-    if (!likedQuery.data && !likedQuery.isFetching) {
+  const yandexLikedHeader = useMemo(() => {
+    if (!yandexLikedQuery.data && !yandexLikedQuery.isFetching) {
       return (
         <View style={styles.fetchPrompt}>
-          <Pressable style={styles.loadBtn} onPress={() => likedQuery.refetch()}>
+          <Pressable style={styles.loadBtn} onPress={() => yandexLikedQuery.refetch()}>
             <Text style={styles.loadBtnText}>Загрузить треки</Text>
           </Pressable>
         </View>
       );
     }
-    if (likedQuery.isFetching) return <ActivityIndicator style={styles.loader} color={COLORS.accent} />;
-    const tracks = likedQuery.data?.tracks ?? [];
+    if (yandexLikedQuery.isFetching) {
+      return <ActivityIndicator style={styles.loader} color={COLORS.accent} />;
+    }
+    if (yandexLikedTracks.length === 0) return null;
     return (
-      <>
-        {tracks.length > 0 && onImportAll && (
-          <View style={styles.importAllRow}>
-            <Pressable
-              style={styles.importAllBtn}
-              onPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                onImportAll(tracks.map(t => ({ artist: t.artist, title: t.title, thumbnailUrl: t.thumbnailUrl })));
-              }}
-            >
-              <MaterialIcons name="file-download" size={14} color={COLORS.accent} />
-              <Text style={styles.importAllText}>Импортировать все {tracks.length} треков</Text>
-            </Pressable>
-          </View>
-        )}
-        {tracks.map((t) => (
-          <CatalogTrackRow
-            key={t.id}
-            title={t.title}
-            artist={t.artist}
-            thumbnailUrl={t.thumbnailUrl}
-            onFindVariants={() => onVariants(t.artist, t.title)}
-          />
-        ))}
-      </>
+      <View style={styles.importAllRow}>
+        <Pressable
+          style={styles.importAllBtn}
+          onPress={() => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+            handleImportAll(yandexLikedTracks.map(t => ({ artist: t.artist, title: t.title, thumbnailUrl: t.thumbnailUrl })));
+          }}
+        >
+          <MaterialIcons name="file-download" size={14} color={COLORS.accent} />
+          <Text style={styles.importAllText}>Импортировать все {yandexLikedTracks.length} треков</Text>
+        </Pressable>
+      </View>
     );
-  };
+  }, [yandexLikedQuery.data, yandexLikedQuery.isFetching, yandexLikedTracks, handleImportAll]);
 
-  const renderPlaylists = () => {
-    if (selectedPlaylist) {
+  const renderSpotifyPlaylists = () => {
+    if (selectedSpotifyPlaylist) {
       return (
         <>
-          <Pressable style={styles.backBtn} onPress={() => setSelectedPlaylist(null)}>
+          <Pressable style={styles.backBtn} onPress={() => setSelectedSpotifyPlaylist(null)}>
             <MaterialIcons name="arrow-back" size={16} color={COLORS.text} />
-            <Text style={styles.backBtnText}>{selectedPlaylist.title}</Text>
+            <Text style={styles.backBtnText}>{selectedSpotifyPlaylist.name}</Text>
           </Pressable>
-          {playlistTracksQuery.isFetching ? (
+          {spotifyPlaylistTracksQuery.isFetching ? (
             <ActivityIndicator style={styles.loader} color={COLORS.accent} />
           ) : (
-            (playlistTracksQuery.data?.tracks ?? []).map((t) => (
+            (spotifyPlaylistTracksQuery.data?.tracks ?? []).map((t) => (
               <CatalogTrackRow
                 key={t.id}
                 title={t.title}
                 artist={t.artist}
                 thumbnailUrl={t.thumbnailUrl}
-                onFindVariants={() => onVariants(t.artist, t.title)}
+                onFindVariants={() => handleFindVariants(t.artist, t.title)}
               />
             ))
           )}
         </>
       );
     }
-
-    if (!playlistsQuery.data && !playlistsQuery.isFetching) {
+    if (!spotifyPlaylistsQuery.data && !spotifyPlaylistsQuery.isFetching) {
       return (
         <View style={styles.fetchPrompt}>
-          <Pressable style={styles.loadBtn} onPress={() => playlistsQuery.refetch()}>
+          <Pressable style={styles.loadBtn} onPress={() => spotifyPlaylistsQuery.refetch()}>
             <Text style={styles.loadBtnText}>Загрузить плейлисты</Text>
           </Pressable>
         </View>
       );
     }
-    if (playlistsQuery.isFetching) return <ActivityIndicator style={styles.loader} color={COLORS.accent} />;
-    const playlists = playlistsQuery.data?.playlists ?? [];
+    if (spotifyPlaylistsQuery.isFetching) return <ActivityIndicator style={styles.loader} color={COLORS.accent} />;
     return (
       <View style={styles.playlistGrid}>
-        {playlists.map((pl) => (
+        {(spotifyPlaylistsQuery.data?.playlists ?? []).map((pl) => (
           <PlaylistCard
-            key={`${pl.uid}_${pl.kind}`}
-            name={pl.title}
+            key={pl.id}
+            name={pl.name}
             trackCount={pl.trackCount}
             thumbnailUrl={pl.thumbnailUrl}
-            onPress={() => setSelectedPlaylist(pl)}
+            onPress={() => setSelectedSpotifyPlaylist(pl)}
           />
         ))}
       </View>
     );
   };
 
-  return (
-    <View>
-      <View style={styles.connectedHeader}>
-        <View style={styles.connectedInfo}>
-          <View style={[styles.serviceIcon, { backgroundColor: COLORS.yandexBg }]}>
-            <MaterialIcons name="headphones" size={16} color={COLORS.yandexYellow} />
-          </View>
-          <Text style={styles.connectedName}>{status.login ?? 'Yandex Music'}</Text>
-        </View>
-        <Pressable onPress={() => disconnect.mutate()} style={styles.disconnectBtn}>
-          <Text style={styles.disconnectText}>Отключить</Text>
-        </Pressable>
-      </View>
-
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabsRow}>
-        {tabs.map((t) => (
-          <Pressable
-            key={t.id}
-            style={[styles.tabChip, tab === t.id && styles.tabChipActive]}
-            onPress={() => { setTab(t.id); Haptics.selectionAsync(); }}
-          >
-            <Text style={[styles.tabChipText, tab === t.id && styles.tabChipTextActive]}>{t.label}</Text>
+  const renderSpotifyTop = () => {
+    if (!spotifyTopQuery.data && !spotifyTopQuery.isFetching) {
+      return (
+        <View style={styles.fetchPrompt}>
+          <Pressable style={styles.loadBtn} onPress={() => spotifyTopQuery.refetch()}>
+            <Text style={styles.loadBtnText}>Загрузить чарты</Text>
           </Pressable>
+        </View>
+      );
+    }
+    if (spotifyTopQuery.isFetching) return <ActivityIndicator style={styles.loader} color={COLORS.accent} />;
+    return (
+      <>
+        {(spotifyTopQuery.data?.tracks ?? []).map((t) => (
+          <CatalogTrackRow
+            key={t.id}
+            title={t.title}
+            artist={t.artist}
+            thumbnailUrl={t.thumbnailUrl}
+            onFindVariants={() => handleFindVariants(t.artist, t.title)}
+          />
         ))}
-      </ScrollView>
-
-      {tab === 'liked' && renderLiked()}
-      {tab === 'playlists' && renderPlaylists()}
-    </View>
-  );
-}
-
-export default function FavoritesScreen() {
-  const insets = useSafeAreaInsets();
-  const router = useRouter();
-  const { currentTrack } = usePlayer();
-  const [service, setService] = useState<Service>('spotify');
-  const [batchTracks, setBatchTracks] = useState<ImportTrackInput[]>([]);
-
-  const topPad = insets.top + (Platform.OS === 'web' ? 67 : 0);
-  const bottomPad = TAB_BAR + (currentTrack ? PLAYER_HEIGHT : 0) + (Platform.OS === 'web' ? 34 : 0);
-
-  const handleFindVariants = (artist: string, title: string) => {
-    router.navigate({
-      pathname: '/',
-      params: { artist, title },
-    });
+      </>
+    );
   };
 
-  const handleImportAll = (tracks: ImportTrackInput[]) => {
-    setBatchTracks(tracks);
+  const renderYandexPlaylists = () => {
+    if (selectedYandexPlaylist) {
+      return (
+        <>
+          <Pressable style={styles.backBtn} onPress={() => setSelectedYandexPlaylist(null)}>
+            <MaterialIcons name="arrow-back" size={16} color={COLORS.text} />
+            <Text style={styles.backBtnText}>{selectedYandexPlaylist.title}</Text>
+          </Pressable>
+          {yandexPlaylistTracksQuery.isFetching ? (
+            <ActivityIndicator style={styles.loader} color={COLORS.accent} />
+          ) : (
+            (yandexPlaylistTracksQuery.data?.tracks ?? []).map((t) => (
+              <CatalogTrackRow
+                key={t.id}
+                title={t.title}
+                artist={t.artist}
+                thumbnailUrl={t.thumbnailUrl}
+                onFindVariants={() => handleFindVariants(t.artist, t.title)}
+              />
+            ))
+          )}
+        </>
+      );
+    }
+    if (!yandexPlaylistsQuery.data && !yandexPlaylistsQuery.isFetching) {
+      return (
+        <View style={styles.fetchPrompt}>
+          <Pressable style={styles.loadBtn} onPress={() => yandexPlaylistsQuery.refetch()}>
+            <Text style={styles.loadBtnText}>Загрузить плейлисты</Text>
+          </Pressable>
+        </View>
+      );
+    }
+    if (yandexPlaylistsQuery.isFetching) return <ActivityIndicator style={styles.loader} color={COLORS.accent} />;
+    return (
+      <View style={styles.playlistGrid}>
+        {(yandexPlaylistsQuery.data?.playlists ?? []).map((pl) => (
+          <PlaylistCard
+            key={`${pl.uid}_${pl.kind}`}
+            name={pl.title}
+            trackCount={pl.trackCount}
+            thumbnailUrl={pl.thumbnailUrl}
+            onPress={() => setSelectedYandexPlaylist(pl)}
+          />
+        ))}
+      </View>
+    );
   };
 
-  return (
-    <View style={[styles.root, { backgroundColor: COLORS.bg }]}>
-      <BatchImportModal
-        visible={batchTracks.length > 0}
-        tracks={batchTracks}
-        onClose={() => setBatchTracks([])}
-      />
+  const renderSpotifySection = () => {
+    if (!spotifyStatus?.connected) {
+      return (
+        <View style={styles.connectPrompt}>
+          <View style={[styles.serviceIconBig, { backgroundColor: COLORS.spotifyBg }]}>
+            <MaterialIcons name="music-note" size={32} color={COLORS.spotifyGreen} />
+          </View>
+          <Text style={styles.connectTitle}>Подключить Spotify</Text>
+          <Text style={styles.connectText}>Слушайте понравившиеся треки, плейлисты и чарты</Text>
+          <Pressable
+            style={[styles.connectBtn, { backgroundColor: COLORS.spotifyGreen }]}
+            onPress={() => spotifyLogin.mutate()}
+            disabled={spotifyLogin.isPending}
+          >
+            {spotifyLogin.isPending ? (
+              <ActivityIndicator size="small" color={COLORS.white} />
+            ) : (
+              <Text style={styles.connectBtnText}>Войти через Spotify</Text>
+            )}
+          </Pressable>
+          <Text style={styles.connectNote}>Только чтение · мы не изменяем вашу библиотеку</Text>
+        </View>
+      );
+    }
 
+    const spotifyTabs: { id: SpotifyTab; label: string }[] = [
+      { id: 'liked', label: 'Понравилось' },
+      { id: 'playlists', label: 'Плейлисты' },
+      { id: 'top', label: 'Чарты' },
+    ];
+
+    return (
+      <View>
+        <View style={styles.connectedHeader}>
+          <View style={styles.connectedInfo}>
+            <View style={[styles.serviceIcon, { backgroundColor: COLORS.spotifyBg }]}>
+              <MaterialIcons name="music-note" size={16} color={COLORS.spotifyGreen} />
+            </View>
+            <Text style={styles.connectedName}>{spotifyStatus.displayName ?? 'Spotify'}</Text>
+          </View>
+          <Pressable onPress={() => spotifyLogout.mutate()} style={styles.disconnectBtn}>
+            <Text style={styles.disconnectText}>Отключить</Text>
+          </Pressable>
+        </View>
+
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabsRow}>
+          {spotifyTabs.map((t) => (
+            <Pressable
+              key={t.id}
+              style={[styles.tabChip, spotifyTab === t.id && styles.tabChipActive]}
+              onPress={() => { setSpotifyTab(t.id); Haptics.selectionAsync(); }}
+            >
+              <Text style={[styles.tabChipText, spotifyTab === t.id && styles.tabChipTextActive]}>{t.label}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+
+        {spotifyTab === 'liked' && spotifyLikedHeader}
+        {spotifyTab === 'playlists' && renderSpotifyPlaylists()}
+        {spotifyTab === 'top' && renderSpotifyTop()}
+      </View>
+    );
+  };
+
+  const renderYandexSection = () => {
+    if (!yandexStatus?.connected) {
+      return (
+        <View style={styles.connectPrompt}>
+          <View style={[styles.serviceIconBig, { backgroundColor: COLORS.yandexBg }]}>
+            <MaterialIcons name="headphones" size={32} color={COLORS.yandexYellow} />
+          </View>
+          <Text style={styles.connectTitle}>Подключить Яндекс Музыку</Text>
+          <Text style={styles.connectText}>
+            Получите OAuth-токен на oauth.yandex.ru и вставьте его ниже
+          </Text>
+          {showTokenInput ? (
+            <View style={styles.tokenInputWrap}>
+              <TextInput
+                style={styles.tokenInput}
+                value={yandexToken}
+                onChangeText={setYandexToken}
+                placeholder="Вставьте OAuth-токен"
+                placeholderTextColor={COLORS.textMuted}
+                multiline
+                selectionColor={COLORS.yandexYellow}
+              />
+              <Pressable
+                style={[styles.connectBtn, { backgroundColor: COLORS.yandexYellow }, !yandexToken.trim() && styles.btnDisabled]}
+                onPress={async () => {
+                  if (!yandexToken.trim()) return;
+                  await yandexConnect.mutateAsync(yandexToken.trim());
+                }}
+                disabled={!yandexToken.trim() || yandexConnect.isPending}
+              >
+                {yandexConnect.isPending ? (
+                  <ActivityIndicator size="small" color={COLORS.black} />
+                ) : (
+                  <Text style={[styles.connectBtnText, { color: COLORS.black }]}>Подключить</Text>
+                )}
+              </Pressable>
+            </View>
+          ) : (
+            <Pressable
+              style={[styles.connectBtn, { backgroundColor: COLORS.yandexYellow }]}
+              onPress={() => setShowTokenInput(true)}
+            >
+              <Text style={[styles.connectBtnText, { color: COLORS.black }]}>Ввести токен</Text>
+            </Pressable>
+          )}
+          {yandexConnect.isError && (
+            <Text style={styles.errorMsg}>Неверный токен. Попробуйте ещё раз.</Text>
+          )}
+        </View>
+      );
+    }
+
+    const yandexTabs: { id: YandexTab; label: string }[] = [
+      { id: 'liked', label: 'Понравилось' },
+      { id: 'playlists', label: 'Плейлисты' },
+    ];
+
+    return (
+      <View>
+        <View style={styles.connectedHeader}>
+          <View style={styles.connectedInfo}>
+            <View style={[styles.serviceIcon, { backgroundColor: COLORS.yandexBg }]}>
+              <MaterialIcons name="headphones" size={16} color={COLORS.yandexYellow} />
+            </View>
+            <Text style={styles.connectedName}>{yandexStatus.login ?? 'Яндекс Музыка'}</Text>
+          </View>
+          <Pressable onPress={() => yandexDisconnect.mutate()} style={styles.disconnectBtn}>
+            <Text style={styles.disconnectText}>Отключить</Text>
+          </Pressable>
+        </View>
+
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabsRow}>
+          {yandexTabs.map((t) => (
+            <Pressable
+              key={t.id}
+              style={[styles.tabChip, yandexTab === t.id && styles.tabChipActive]}
+              onPress={() => { setYandexTab(t.id); Haptics.selectionAsync(); }}
+            >
+              <Text style={[styles.tabChipText, yandexTab === t.id && styles.tabChipTextActive]}>{t.label}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+
+        {yandexTab === 'liked' && yandexLikedHeader}
+        {yandexTab === 'playlists' && renderYandexPlaylists()}
+      </View>
+    );
+  };
+
+  const ListHeader = useMemo(() => (
+    <View>
       <View style={[styles.header, { paddingTop: topPad }]}>
         <View style={styles.headerRow}>
           <MaterialIcons name="favorite" size={22} color={COLORS.accent} />
@@ -564,23 +556,57 @@ export default function FavoritesScreen() {
                 service === s && (s === 'spotify' ? styles.serviceTabSpotify : styles.serviceTabYandex),
               ]}
             >
-              {s === 'spotify' ? 'Spotify' : 'Yandex Music'}
+              {s === 'spotify' ? 'Spotify' : 'Яндекс Музыка'}
             </Text>
           </Pressable>
         ))}
       </View>
 
-      <ScrollView
-        contentContainerStyle={{ paddingBottom: bottomPad }}
-        showsVerticalScrollIndicator={false}
+      {service === 'spotify' ? renderSpotifySection() : renderYandexSection()}
+    </View>
+  ), [
+    topPad, service,
+    spotifyStatus, spotifyLogin.isPending, spotifyTab, spotifyLikedHeader,
+    spotifyPlaylistsQuery.data, spotifyPlaylistsQuery.isFetching,
+    spotifyTopQuery.data, spotifyTopQuery.isFetching,
+    selectedSpotifyPlaylist, spotifyPlaylistTracksQuery.data, spotifyPlaylistTracksQuery.isFetching,
+    yandexStatus, yandexConnect.isPending, yandexConnect.isError, yandexTab, yandexLikedHeader,
+    yandexToken, showTokenInput,
+    yandexPlaylistsQuery.data, yandexPlaylistsQuery.isFetching,
+    selectedYandexPlaylist, yandexPlaylistTracksQuery.data, yandexPlaylistTracksQuery.isFetching,
+  ]);
+
+  return (
+    <View style={[styles.root, { backgroundColor: COLORS.bg }]}>
+      <BatchImportModal
+        visible={batchTracks.length > 0}
+        tracks={batchTracks}
+        onClose={() => setBatchTracks([])}
+      />
+
+      <FlatList
+        ref={listRef}
+        data={isLikedTab ? likedTracks : []}
+        keyExtractor={keyExtractor}
+        renderItem={renderItem}
+        getItemLayout={getItemLayout}
+        ListHeaderComponent={ListHeader}
+        ListFooterComponent={<View style={{ height: bottomPad }} />}
+        maxToRenderPerBatch={15}
+        initialNumToRender={20}
+        windowSize={5}
+        removeClippedSubviews={Platform.OS !== 'web'}
+        onScroll={(e) => setShowScrollTop(e.nativeEvent.contentOffset.y > 300)}
+        scrollEventThrottle={100}
         keyboardShouldPersistTaps="handled"
-      >
-        {service === 'spotify' ? (
-          <SpotifySection onVariants={handleFindVariants} onImportAll={handleImportAll} />
-        ) : (
-          <YandexSection onVariants={handleFindVariants} onImportAll={handleImportAll} />
-        )}
-      </ScrollView>
+        showsVerticalScrollIndicator={false}
+      />
+
+      {showScrollTop && (
+        <Pressable style={styles.scrollTopBtn} onPress={scrollToTop}>
+          <MaterialIcons name="arrow-upward" size={20} color={COLORS.white} />
+        </Pressable>
+      )}
     </View>
   );
 }
@@ -824,6 +850,7 @@ const styles = StyleSheet.create({
     gap: 12,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
+    height: ROW_HEIGHT,
   },
   catalogThumb: {
     width: 44,
@@ -893,28 +920,6 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter_400Regular',
     color: COLORS.textMuted,
   },
-  pagination: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 16,
-    paddingVertical: 16,
-  },
-  pageBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: COLORS.card,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  pageBtnText: {
-    fontSize: 13,
-    fontFamily: 'Inter_600SemiBold',
-    color: COLORS.text,
-  },
   backBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -929,5 +934,21 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter_600SemiBold',
     color: COLORS.text,
     flex: 1,
+  },
+  scrollTopBtn: {
+    position: 'absolute',
+    right: 16,
+    bottom: TAB_BAR + 16,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: COLORS.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 6,
   },
 });
