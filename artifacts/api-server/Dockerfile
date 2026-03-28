@@ -22,7 +22,7 @@ RUN pnpm --filter @workspace/api-server run build
 
 FROM node:20-alpine AS runner
 
-RUN apk add --no-cache python3 py3-pip yt-dlp ffmpeg
+RUN apk add --no-cache python3 yt-dlp ffmpeg
 
 WORKDIR /app
 
@@ -33,4 +33,4 @@ EXPOSE 8080
 ENV NODE_ENV=production
 ENV PORT=8080
 
-CMD ["node", "dist/index.cjs"]
+CMD ["node", "dist/index.mjs"]

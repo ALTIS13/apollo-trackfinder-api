@@ -65,7 +65,7 @@ function CatalogTrackRow({
         {thumbnailUrl ? (
           <Image source={{ uri: thumbnailUrl }} style={StyleSheet.absoluteFill} resizeMode="cover" />
         ) : (
-          <MaterialIcons name="music" size={16} color={COLORS.textMuted} />
+          <MaterialIcons name="music-note" size={16} color={COLORS.textMuted} />
         )}
       </View>
       <View style={styles.catalogInfo}>
@@ -126,7 +126,7 @@ function SpotifySection({ onVariants }: { onVariants: (artist: string, title: st
     return (
       <View style={styles.connectPrompt}>
         <View style={[styles.serviceIconBig, { backgroundColor: COLORS.spotifyBg }]}>
-          <MaterialIcons name="music" size={32} color={COLORS.spotifyGreen} />
+          <MaterialIcons name="music-note" size={32} color={COLORS.spotifyGreen} />
         </View>
         <Text style={styles.connectTitle}>Connect Spotify</Text>
         <Text style={styles.connectText}>Browse your liked songs, playlists and top tracks</Text>
@@ -200,7 +200,7 @@ function SpotifySection({ onVariants }: { onVariants: (artist: string, title: st
       return (
         <>
           <Pressable style={styles.backBtn} onPress={() => setSelectedPlaylist(null)}>
-            <MaterialIcons name="arrow-left" size={16} color={COLORS.text} />
+            <MaterialIcons name="arrow-back" size={16} color={COLORS.text} />
             <Text style={styles.backBtnText}>{selectedPlaylist.name}</Text>
           </Pressable>
           {playlistTracksQuery.isFetching ? (
@@ -277,7 +277,7 @@ function SpotifySection({ onVariants }: { onVariants: (artist: string, title: st
       <View style={styles.connectedHeader}>
         <View style={styles.connectedInfo}>
           <View style={[styles.serviceIcon, { backgroundColor: COLORS.spotifyBg }]}>
-            <MaterialIcons name="music" size={16} color={COLORS.spotifyGreen} />
+            <MaterialIcons name="music-note" size={16} color={COLORS.spotifyGreen} />
           </View>
           <Text style={styles.connectedName}>{status.displayName ?? 'Spotify'}</Text>
         </View>
@@ -404,7 +404,7 @@ function YandexSection({ onVariants }: { onVariants: (artist: string, title: str
       return (
         <>
           <Pressable style={styles.backBtn} onPress={() => setSelectedPlaylist(null)}>
-            <MaterialIcons name="arrow-left" size={16} color={COLORS.text} />
+            <MaterialIcons name="arrow-back" size={16} color={COLORS.text} />
             <Text style={styles.backBtnText}>{selectedPlaylist.title}</Text>
           </Pressable>
           {playlistTracksQuery.isFetching ? (
@@ -502,7 +502,7 @@ export default function FavoritesScreen() {
     <View style={[styles.root, { backgroundColor: COLORS.bg }]}>
       <View style={[styles.header, { paddingTop: topPad }]}>
         <View style={styles.headerRow}>
-          <MaterialIcons name="heart" size={22} color={COLORS.accent} />
+          <MaterialIcons name="favorite" size={22} color={COLORS.accent} />
           <Text style={styles.headerTitle}>Favorites</Text>
         </View>
         <Text style={styles.headerSub}>Find variants of your saved tracks</Text>
@@ -515,8 +515,8 @@ export default function FavoritesScreen() {
             style={[styles.serviceTab, service === s && styles.serviceTabActive]}
             onPress={() => { setService(s); Haptics.selectionAsync(); }}
           >
-            <Feather
-              name={s === 'spotify' ? 'music' : 'headphones'}
+            <MaterialIcons
+              name={s === 'spotify' ? 'music-note' : 'headphones'}
               size={15}
               color={service === s
                 ? (s === 'spotify' ? COLORS.spotifyGreen : COLORS.yandexYellow)

@@ -15,6 +15,7 @@
     },
     "ios": {
       "supportsTablet": false,
+      "bundleIdentifier": "com.altis13.apollotrackfinder",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Apollo TrackFinder needs microphone access for audio playback.",
         "UIBackgroundModes": [
@@ -23,7 +24,17 @@
       }
     },
     "android": {
-      "permissions": []
+      "package": "com.altis13.apollotrackfinder",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_AUDIO"
+      ],
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/icon.png",
+        "backgroundColor": "#0a0a0a"
+      }
     },
     "web": {
       "favicon": "./assets/images/icon.png"
@@ -39,7 +50,7 @@
         "expo-font",
         {
           "fonts": [
-            "./assets/fonts/Feather.ttf"
+            "./assets/fonts/MaterialIcons.ttf"
           ]
         }
       ],

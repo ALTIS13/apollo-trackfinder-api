@@ -100,7 +100,7 @@ export default function SearchScreen() {
 
       <View style={[styles.header, { paddingTop: topPad }]}>
         <View style={styles.headerRow}>
-          <MaterialIcons name="music" size={22} color={COLORS.accent} />
+          <MaterialIcons name="music-note" size={22} color={COLORS.accent} />
           <Text style={styles.headerTitle}>Apollo TrackFinder</Text>
           <Pressable
             style={styles.settingsBtn}
@@ -129,7 +129,7 @@ export default function SearchScreen() {
           />
           {query.length > 0 && (
             <Pressable onPress={() => { setQuery(''); setResults([]); setHasSearched(false); }}>
-              <MaterialIcons name="x" size={16} color={COLORS.textMuted} />
+              <MaterialIcons name="close" size={16} color={COLORS.textMuted} />
             </Pressable>
           )}
         </View>
@@ -176,7 +176,7 @@ export default function SearchScreen() {
 
       {error ? (
         <View style={styles.centerMsg}>
-          <MaterialIcons name="alert-circle" size={32} color={COLORS.danger} />
+          <MaterialIcons name="error" size={32} color={COLORS.danger} />
           <Text style={styles.errorText}>{error}</Text>
           <Pressable style={styles.retryBtn} onPress={() => doSearch()}>
             <Text style={styles.retryText}>Try again</Text>

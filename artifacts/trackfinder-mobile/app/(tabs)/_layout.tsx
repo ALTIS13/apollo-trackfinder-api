@@ -1,9 +1,11 @@
-import { Feather } from '@expo/vector-icons';
+import { MaterialIcons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { Tabs } from 'expo-router';
 import React from 'react';
-import { Platform, StyleSheet, View, useColorScheme } from 'react-native';
+import { Platform, StyleSheet, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { FullPlayer } from '@/components/FullPlayer';
 import { MiniPlayer } from '@/components/MiniPlayer';
 import { COLORS } from '@/constants/colors';
 import { usePlayer } from '@/hooks/use-player';
@@ -17,7 +19,8 @@ export const BOTTOM_OFFSET_FOR_PLAYER = PLAYER_HEIGHT;
 function PlayerAwareTabLayout() {
   const { currentTrack } = usePlayer();
   const isWeb = Platform.OS === 'web';
-  const tabBarHeight = isWeb ? TAB_BAR_HEIGHT_WEB : TAB_BAR_HEIGHT_NATIVE;
+  const insets = useSafeAreaInsets();
+  const tabBarHeight = isWeb ? TAB_BAR_HEIGHT_WEB : TAB_BAR_HEIGHT_NATIVE + insets.bottom;
 
   return (
     <View style={{ flex: 1 }}>
@@ -33,7 +36,7 @@ function PlayerAwareTabLayout() {
             borderTopColor: COLORS.border,
             elevation: 0,
             height: tabBarHeight,
-            paddingBottom: isWeb ? 34 : 4,
+            paddingBottom: isWeb ? 34 : insets.bottom + 4,
           },
           tabBarBackground: () =>
             Platform.OS === 'ios' ? (
@@ -62,14 +65,14 @@ function PlayerAwareTabLayout() {
           name="library"
           options={{
             title: 'Library',
-            tabBarIcon: ({ color, size }) => <MaterialIcons name="download" size={size} color={color} />,
+            tabBarIcon: ({ color, size }) => <MaterialIcons name="file-download" size={size} color={color} />,
           }}
         />
         <Tabs.Screen
           name="favorites"
           options={{
             title: 'Favorites',
-            tabBarIcon: ({ color, size }) => <MaterialIcons name="heart" size={size} color={color} />,
+            tabBarIcon: ({ color, size }) => <MaterialIcons name="favorite" size={size} color={color} />,
           }}
         />
       </Tabs>
@@ -78,6 +81,7 @@ function PlayerAwareTabLayout() {
           <MiniPlayer />
         </View>
       )}
+      <FullPlayer />
     </View>
   );
 }
