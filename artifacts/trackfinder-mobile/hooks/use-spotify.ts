@@ -97,6 +97,15 @@ export function useSpotifyLikedAll() {
   });
 }
 
+export function useSpotifyLikedAllQuery(enabled: boolean) {
+  return useQuery({
+    queryKey: ['spotify', 'liked-all'],
+    queryFn: () => apiFetch<{ tracks: SpotifyTrack[]; total: number }>('/spotify/liked-all'),
+    enabled,
+    staleTime: 5 * 60 * 1000,
+  });
+}
+
 export function useSpotifyTopTracks() {
   return useQuery({
     queryKey: ['spotify', 'top-tracks'],

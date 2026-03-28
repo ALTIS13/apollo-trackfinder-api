@@ -23,8 +23,7 @@ import { usePlayer } from '@/hooks/use-player';
 import {
   SpotifyPlaylist,
   SpotifyTrack,
-  useSpotifyLiked,
-  useSpotifyLikedAll,
+  useSpotifyLikedAllQuery,
   useSpotifyLogin,
   useSpotifyLogout,
   useSpotifyPlaylists,
@@ -115,12 +114,10 @@ function SpotifySection({ onVariants, onImportAll }: { onVariants: (artist: stri
   const { data: status } = useSpotifyStatus();
   const login = useSpotifyLogin();
   const logout = useSpotifyLogout();
-  const likedAll = useSpotifyLikedAll();
   const [tab, setTab] = useState<SpotifyTab>('liked');
   const [selectedPlaylist, setSelectedPlaylist] = useState<SpotifyPlaylist | null>(null);
-  const [likedPage, setLikedPage] = useState(0);
 
-  const likedQuery = useSpotifyLiked(likedPage);
+  const likedAllQuery = useSpotifyLikedAllQuery(status?.connected === true && tab === 'liked');
   const playlistsQuery = useSpotifyPlaylists();
   const topQuery = useSpotifyTopTracks();
   const playlistTracksQuery = useSpotifyPlaylistTracks(selectedPlaylist?.id ?? null, 0);
@@ -131,8 +128,8 @@ function SpotifySection({ onVariants, onImportAll }: { onVariants: (artist: stri
         <View style={[styles.serviceIconBig, { backgroundColor: COLORS.spotifyBg }]}>
           <MaterialIcons name="music-note" size={32} color={COLORS.spotifyGreen} />
         </View>
-        <Text style={styles.connectTitle}>Connect Spotify</Text>
-        <Text style={styles.connectText}>Browse your liked songs, playlists and top tracks</Text>
+        <Text style={styles.connectTitle}>Подключить Spotify</Text>
+        <Text style={styles.connectText}>Слушайте понравившиеся треки, плейлисты и чарты</Text>
         <Pressable
           style={[styles.connectBtn, { backgroundColor: COLORS.spotifyGreen }]}
           onPress={() => login.mutate()}
@@ -141,57 +138,52 @@ function SpotifySection({ onVariants, onImportAll }: { onVariants: (artist: stri
           {login.isPending ? (
             <ActivityIndicator size="small" color={COLORS.white} />
           ) : (
-            <Text style={styles.connectBtnText}>Connect with Spotify</Text>
+            <Text style={styles.connectBtnText}>Войти через Spotify</Text>
           )}
         </Pressable>
-        <Text style={styles.connectNote}>Read-only · we never modify your library</Text>
+        <Text style={styles.connectNote}>Только чтение · мы не изменяем вашу библиотеку</Text>
       </View>
     );
   }
 
   const tabs: { id: SpotifyTab; label: string }[] = [
-    { id: 'liked', label: 'Liked' },
-    { id: 'playlists', label: 'Playlists' },
-    { id: 'top', label: 'Top Tracks' },
+    { id: 'liked', label: 'Понравилось' },
+    { id: 'playlists', label: 'Плейлисты' },
+    { id: 'top', label: 'Чарты' },
   ];
 
   const renderLiked = () => {
-    if (!likedQuery.data && !likedQuery.isFetching) {
+    if (likedAllQuery.isFetching && !likedAllQuery.data) {
       return (
         <View style={styles.fetchPrompt}>
-          <Pressable style={styles.loadBtn} onPress={() => likedQuery.refetch()}>
-            <Text style={styles.loadBtnText}>Load liked songs</Text>
+          <ActivityIndicator color={COLORS.accent} />
+          <Text style={styles.loadBtnText}>Загрузка библиотеки…</Text>
+        </View>
+      );
+    }
+    const tracks = likedAllQuery.data?.tracks ?? [];
+    if (!tracks.length) {
+      return (
+        <View style={styles.fetchPrompt}>
+          <Pressable style={styles.loadBtn} onPress={() => likedAllQuery.refetch()}>
+            <Text style={styles.loadBtnText}>Загрузить треки</Text>
           </Pressable>
         </View>
       );
     }
-    if (likedQuery.isFetching) return <ActivityIndicator style={styles.loader} color={COLORS.accent} />;
-    const tracks = likedQuery.data?.tracks ?? [];
     return (
       <>
-        {tracks.length > 0 && onImportAll && (
+        {onImportAll && (
           <View style={styles.importAllRow}>
             <Pressable
-              style={[styles.importAllBtn, likedAll.isPending && { opacity: 0.6 }]}
-              disabled={likedAll.isPending}
-              onPress={async () => {
+              style={styles.importAllBtn}
+              onPress={() => {
                 Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                try {
-                  const result = await likedAll.mutateAsync();
-                  onImportAll(result.tracks.map(t => ({ artist: t.artist, title: t.title, thumbnailUrl: t.thumbnailUrl })));
-                } catch {
-                  onImportAll(tracks.map(t => ({ artist: t.artist, title: t.title, thumbnailUrl: t.thumbnailUrl })));
-                }
+                onImportAll(tracks.map(t => ({ artist: t.artist, title: t.title, thumbnailUrl: t.thumbnailUrl })));
               }}
             >
-              {likedAll.isPending ? (
-                <ActivityIndicator size="small" color={COLORS.accent} style={{ marginRight: 6 }} />
-              ) : (
-                <MaterialIcons name="file-download" size={14} color={COLORS.accent} />
-              )}
-              <Text style={styles.importAllText}>
-                {likedAll.isPending ? 'Fetching all tracks…' : `Import all ${likedQuery.data?.total ?? tracks.length} tracks`}
-              </Text>
+              <MaterialIcons name="file-download" size={14} color={COLORS.accent} />
+              <Text style={styles.importAllText}>Импортировать все {tracks.length} треков</Text>
             </Pressable>
           </View>
         )}
@@ -204,22 +196,6 @@ function SpotifySection({ onVariants, onImportAll }: { onVariants: (artist: stri
             onFindVariants={() => onVariants(t.artist, t.title)}
           />
         ))}
-        {(likedQuery.data?.hasMore || likedPage > 0) && (
-          <View style={styles.pagination}>
-            {likedPage > 0 && (
-              <Pressable style={styles.pageBtn} onPress={() => setLikedPage((p) => p - 1)}>
-                <MaterialIcons name="chevron-left" size={16} color={COLORS.text} />
-                <Text style={styles.pageBtnText}>Prev</Text>
-              </Pressable>
-            )}
-            {likedQuery.data?.hasMore && (
-              <Pressable style={styles.pageBtn} onPress={() => setLikedPage((p) => p + 1)}>
-                <Text style={styles.pageBtnText}>Next</Text>
-                <MaterialIcons name="chevron-right" size={16} color={COLORS.text} />
-              </Pressable>
-            )}
-          </View>
-        )}
       </>
     );
   };
@@ -253,7 +229,7 @@ function SpotifySection({ onVariants, onImportAll }: { onVariants: (artist: stri
       return (
         <View style={styles.fetchPrompt}>
           <Pressable style={styles.loadBtn} onPress={() => playlistsQuery.refetch()}>
-            <Text style={styles.loadBtnText}>Load playlists</Text>
+            <Text style={styles.loadBtnText}>Загрузить плейлисты</Text>
           </Pressable>
         </View>
       );
@@ -280,7 +256,7 @@ function SpotifySection({ onVariants, onImportAll }: { onVariants: (artist: stri
       return (
         <View style={styles.fetchPrompt}>
           <Pressable style={styles.loadBtn} onPress={() => topQuery.refetch()}>
-            <Text style={styles.loadBtnText}>Load top tracks</Text>
+            <Text style={styles.loadBtnText}>Загрузить чарты</Text>
           </Pressable>
         </View>
       );
@@ -311,7 +287,7 @@ function SpotifySection({ onVariants, onImportAll }: { onVariants: (artist: stri
           <Text style={styles.connectedName}>{status.displayName ?? 'Spotify'}</Text>
         </View>
         <Pressable onPress={() => logout.mutate()} style={styles.disconnectBtn}>
-          <Text style={styles.disconnectText}>Disconnect</Text>
+          <Text style={styles.disconnectText}>Отключить</Text>
         </Pressable>
       </View>
 
@@ -356,9 +332,9 @@ function YandexSection({ onVariants, onImportAll }: { onVariants: (artist: strin
         <View style={[styles.serviceIconBig, { backgroundColor: COLORS.yandexBg }]}>
           <MaterialIcons name="headphones" size={32} color={COLORS.yandexYellow} />
         </View>
-        <Text style={styles.connectTitle}>Connect Yandex Music</Text>
+        <Text style={styles.connectTitle}>Подключить Яндекс Музыку</Text>
         <Text style={styles.connectText}>
-          Get your OAuth token from oauth.yandex.ru and paste it below
+          Получите OAuth-токен на oauth.yandex.ru и вставьте его ниже
         </Text>
         {showTokenInput ? (
           <View style={styles.tokenInputWrap}>
@@ -366,7 +342,7 @@ function YandexSection({ onVariants, onImportAll }: { onVariants: (artist: strin
               style={styles.tokenInput}
               value={token}
               onChangeText={setToken}
-              placeholder="Paste OAuth token"
+              placeholder="Вставьте OAuth-токен"
               placeholderTextColor={COLORS.textMuted}
               multiline
               selectionColor={COLORS.yandexYellow}
@@ -382,7 +358,7 @@ function YandexSection({ onVariants, onImportAll }: { onVariants: (artist: strin
               {connect.isPending ? (
                 <ActivityIndicator size="small" color={COLORS.black} />
               ) : (
-                <Text style={[styles.connectBtnText, { color: COLORS.black }]}>Connect</Text>
+                <Text style={[styles.connectBtnText, { color: COLORS.black }]}>Подключить</Text>
               )}
             </Pressable>
           </View>
@@ -391,19 +367,19 @@ function YandexSection({ onVariants, onImportAll }: { onVariants: (artist: strin
             style={[styles.connectBtn, { backgroundColor: COLORS.yandexYellow }]}
             onPress={() => setShowTokenInput(true)}
           >
-            <Text style={[styles.connectBtnText, { color: COLORS.black }]}>Enter Token</Text>
+            <Text style={[styles.connectBtnText, { color: COLORS.black }]}>Ввести токен</Text>
           </Pressable>
         )}
         {connect.isError && (
-          <Text style={styles.errorMsg}>Invalid token. Please try again.</Text>
+          <Text style={styles.errorMsg}>Неверный токен. Попробуйте ещё раз.</Text>
         )}
       </View>
     );
   }
 
   const tabs: { id: YandexTab; label: string }[] = [
-    { id: 'liked', label: 'Liked' },
-    { id: 'playlists', label: 'Playlists' },
+    { id: 'liked', label: 'Понравилось' },
+    { id: 'playlists', label: 'Плейлисты' },
   ];
 
   const renderLiked = () => {
@@ -411,7 +387,7 @@ function YandexSection({ onVariants, onImportAll }: { onVariants: (artist: strin
       return (
         <View style={styles.fetchPrompt}>
           <Pressable style={styles.loadBtn} onPress={() => likedQuery.refetch()}>
-            <Text style={styles.loadBtnText}>Load liked tracks</Text>
+            <Text style={styles.loadBtnText}>Загрузить треки</Text>
           </Pressable>
         </View>
       );
@@ -430,7 +406,7 @@ function YandexSection({ onVariants, onImportAll }: { onVariants: (artist: strin
               }}
             >
               <MaterialIcons name="file-download" size={14} color={COLORS.accent} />
-              <Text style={styles.importAllText}>Import all {tracks.length} tracks</Text>
+              <Text style={styles.importAllText}>Импортировать все {tracks.length} треков</Text>
             </Pressable>
           </View>
         )}
@@ -476,7 +452,7 @@ function YandexSection({ onVariants, onImportAll }: { onVariants: (artist: strin
       return (
         <View style={styles.fetchPrompt}>
           <Pressable style={styles.loadBtn} onPress={() => playlistsQuery.refetch()}>
-            <Text style={styles.loadBtnText}>Load playlists</Text>
+            <Text style={styles.loadBtnText}>Загрузить плейлисты</Text>
           </Pressable>
         </View>
       );
@@ -508,7 +484,7 @@ function YandexSection({ onVariants, onImportAll }: { onVariants: (artist: strin
           <Text style={styles.connectedName}>{status.login ?? 'Yandex Music'}</Text>
         </View>
         <Pressable onPress={() => disconnect.mutate()} style={styles.disconnectBtn}>
-          <Text style={styles.disconnectText}>Disconnect</Text>
+          <Text style={styles.disconnectText}>Отключить</Text>
         </Pressable>
       </View>
 
@@ -562,9 +538,9 @@ export default function FavoritesScreen() {
       <View style={[styles.header, { paddingTop: topPad }]}>
         <View style={styles.headerRow}>
           <MaterialIcons name="favorite" size={22} color={COLORS.accent} />
-          <Text style={styles.headerTitle}>Favorites</Text>
+          <Text style={styles.headerTitle}>Избранное</Text>
         </View>
-        <Text style={styles.headerSub}>Find variants of your saved tracks</Text>
+        <Text style={styles.headerSub}>Найдите варианты ваших сохранённых треков</Text>
       </View>
 
       <View style={styles.serviceSwitcher}>

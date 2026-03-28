@@ -7,7 +7,6 @@ import {
   FlatList,
   Modal,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -38,6 +37,8 @@ interface BatchSearchResponse {
 }
 
 type PhaseType = 'idle' | 'searching' | 'review' | 'importing' | 'done';
+
+const CHUNK_SIZE = 20;
 
 interface Props {
   visible: boolean;
@@ -72,12 +73,10 @@ function MatchRow({
   match,
   isSelected,
   onToggle,
-  sourceTrack,
 }: {
   match: BatchMatch;
   isSelected: boolean;
   onToggle: () => void;
-  sourceTrack?: ImportTrackInput;
 }) {
   const best = match.matches[0];
   const hasResult = !!best;
@@ -133,7 +132,7 @@ function MatchRow({
             <ScoreBar score={match.bestScore} />
           </View>
         ) : (
-          <Text style={styles.noMatchText}>No match found</Text>
+          <Text style={styles.noMatchText}>Совпадений не найдено</Text>
         )}
       </View>
     </Pressable>
@@ -146,6 +145,7 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
   const [phase, setPhase] = useState<PhaseType>('idle');
   const [results, setResults] = useState<BatchMatch[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [searchProgress, setSearchProgress] = useState(0);
   const [importProgress, setImportProgress] = useState(0);
   const [importTotal, setImportTotal] = useState(0);
   const [importErrors, setImportErrors] = useState(0);
@@ -157,26 +157,56 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
     setPhase('searching');
     setResults([]);
     setSelected(new Set());
+    setSearchProgress(0);
     setImportErrors(0);
 
-    try {
-      const data = await apiFetch<BatchSearchResponse>('/tracks/batch-search', {
-        method: 'POST',
-        body: JSON.stringify({ tracks: tracks.map(t => ({ artist: t.artist, title: t.title })) }),
-      });
+    const accumulated: BatchMatch[] = [];
+    const autoSel = new Set<number>();
 
-      if (abortRef.current) return;
+    for (let i = 0; i < tracks.length; i += CHUNK_SIZE) {
+      if (abortRef.current) break;
 
-      const autoSel = new Set<number>();
-      data.results.forEach(r => {
-        if (r.autoSelected) autoSel.add(r.index);
-      });
+      const chunk = tracks.slice(i, i + CHUNK_SIZE);
+      const offsetIndex = i;
 
-      setResults(data.results);
-      setSelected(autoSel);
+      try {
+        const data = await apiFetch<BatchSearchResponse>('/tracks/batch-search', {
+          method: 'POST',
+          body: JSON.stringify({
+            tracks: chunk.map(t => ({ artist: t.artist, title: t.title })),
+          }),
+        });
+
+        if (abortRef.current) break;
+
+        const shifted = data.results.map(r => ({
+          ...r,
+          index: r.index + offsetIndex,
+        }));
+
+        shifted.forEach(r => {
+          if (r.autoSelected) autoSel.add(r.index);
+        });
+        accumulated.push(...shifted);
+        setResults([...accumulated]);
+        setSelected(new Set(autoSel));
+      } catch {
+        const fallback = chunk.map((t, ci) => ({
+          index: offsetIndex + ci,
+          query: { artist: t.artist, title: t.title },
+          matches: [] as Track[],
+          bestScore: 0,
+          autoSelected: false,
+        }));
+        accumulated.push(...fallback);
+        setResults([...accumulated]);
+      }
+
+      setSearchProgress(Math.min(i + CHUNK_SIZE, tracks.length));
+    }
+
+    if (!abortRef.current) {
       setPhase('review');
-    } catch {
-      setPhase('idle');
     }
   }, [tracks]);
 
@@ -187,6 +217,9 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
     if (!visible) {
       abortRef.current = true;
       setPhase('idle');
+      setResults([]);
+      setSelected(new Set());
+      setSearchProgress(0);
     }
   }, [visible]);
 
@@ -205,6 +238,11 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
   };
 
   const deselectAll = () => setSelected(new Set());
+
+  const stopAndReview = () => {
+    abortRef.current = true;
+    setPhase('review');
+  };
 
   const startImport = async () => {
     const toImport = results.filter(r => selected.has(r.index) && r.matches[0]);
@@ -230,7 +268,7 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
       }
       setImportErrors(errors);
       setImportProgress(p => p + 1);
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise(r => setTimeout(r, 80));
     }
 
     setPhase('done');
@@ -239,6 +277,9 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
   const autoCount = results.filter(r => r.autoSelected && r.matches.length > 0).length;
   const noMatchCount = results.filter(r => r.matches.length === 0).length;
   const selectedCount = selected.size;
+  const isSearching = phase === 'searching';
+  const searchDone = searchProgress >= tracks.length;
+  const progressPct = tracks.length > 0 ? (searchProgress / tracks.length) * 100 : 0;
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
@@ -246,48 +287,78 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
         <View style={styles.header}>
           <View style={styles.headerLeft}>
             <MaterialIcons name="library-add-check" size={22} color={COLORS.accent} />
-            <Text style={styles.headerTitle}>Batch Import</Text>
+            <Text style={styles.headerTitle}>Пакетный импорт</Text>
           </View>
           <Pressable style={styles.closeBtn} onPress={onClose} hitSlop={12}>
             <MaterialIcons name="close" size={22} color={COLORS.textSub} />
           </Pressable>
         </View>
 
-        {phase === 'searching' && (
+        {isSearching && results.length === 0 && (
           <View style={styles.center}>
             <ActivityIndicator size="large" color={COLORS.accent} />
-            <Text style={styles.searchingText}>Searching {tracks.length} tracks…</Text>
-            <Text style={styles.searchingSub}>Matching against YouTube & SoundCloud</Text>
+            <Text style={styles.searchingText}>Поиск совпадений…</Text>
+            <Text style={styles.searchingSub}>
+              {searchProgress} из {tracks.length} треков
+            </Text>
+            <View style={styles.progressBarWrap}>
+              <View style={[styles.progressBarFill, { width: `${progressPct}%` as any }]} />
+            </View>
+            <Pressable style={styles.cancelBtn} onPress={stopAndReview}>
+              <Text style={styles.cancelBtnText}>Остановить и показать найденное</Text>
+            </Pressable>
           </View>
         )}
 
-        {phase === 'review' && (
+        {(phase === 'review' || (isSearching && results.length > 0)) && (
           <>
             <View style={styles.statsRow}>
               <View style={styles.statChip}>
                 <Text style={[styles.statNum, { color: '#22c55e' }]}>{autoCount}</Text>
-                <Text style={styles.statLabel}>Auto</Text>
+                <Text style={styles.statLabel}>Авто</Text>
               </View>
               <View style={styles.statChip}>
                 <Text style={[styles.statNum, { color: COLORS.accent }]}>{selectedCount}</Text>
-                <Text style={styles.statLabel}>Selected</Text>
+                <Text style={styles.statLabel}>Выбрано</Text>
               </View>
               {noMatchCount > 0 && (
                 <View style={styles.statChip}>
                   <Text style={[styles.statNum, { color: COLORS.danger }]}>{noMatchCount}</Text>
-                  <Text style={styles.statLabel}>No match</Text>
+                  <Text style={styles.statLabel}>Не найдено</Text>
+                </View>
+              )}
+              {isSearching && (
+                <View style={[styles.statChip, { flex: 1 }]}>
+                  <ActivityIndicator size="small" color={COLORS.accent} />
+                  <Text style={styles.statLabel}>{searchProgress}/{tracks.length}</Text>
                 </View>
               )}
             </View>
 
+            {isSearching && (
+              <View style={styles.searchingBanner}>
+                <View style={styles.progressBarWrap}>
+                  <View style={[styles.progressBarFill, { width: `${progressPct}%` as any }]} />
+                </View>
+                <View style={styles.searchingBannerRow}>
+                  <Text style={styles.searchingBannerText}>
+                    Обрабатывается {searchProgress} из {tracks.length}…
+                  </Text>
+                  <Pressable onPress={stopAndReview}>
+                    <Text style={styles.stopText}>Стоп</Text>
+                  </Pressable>
+                </View>
+              </View>
+            )}
+
             <View style={styles.selectActions}>
-              <Text style={styles.hintText}>≥80% are auto-selected. Tap to toggle.</Text>
+              <Text style={styles.hintText}>≥80% — автовыбор. Нажмите для переключения.</Text>
               <View style={styles.selectBtns}>
                 <Pressable style={styles.smallBtn} onPress={selectAll}>
-                  <Text style={styles.smallBtnText}>All</Text>
+                  <Text style={styles.smallBtnText}>Все</Text>
                 </Pressable>
                 <Pressable style={styles.smallBtn} onPress={deselectAll}>
-                  <Text style={styles.smallBtnText}>None</Text>
+                  <Text style={styles.smallBtnText}>Сброс</Text>
                 </Pressable>
               </View>
             </View>
@@ -300,7 +371,6 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
                   match={item}
                   isSelected={selected.has(item.index)}
                   onToggle={() => toggleSelect(item.index)}
-                  sourceTrack={tracks[item.index]}
                 />
               )}
               contentContainerStyle={styles.list}
@@ -315,7 +385,7 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
               >
                 <MaterialIcons name="file-download" size={18} color={COLORS.white} />
                 <Text style={styles.importBtnText}>
-                  Import {selectedCount} track{selectedCount !== 1 ? 's' : ''}
+                  Скачать {selectedCount} {plural(selectedCount, 'трек', 'трека', 'треков')}
                 </Text>
               </Pressable>
             </View>
@@ -326,13 +396,13 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
           <View style={styles.center}>
             <ActivityIndicator size="large" color={COLORS.accent} />
             <Text style={styles.searchingText}>
-              Importing {importProgress} / {importTotal}
+              Скачивание {importProgress} / {importTotal}
             </Text>
             <View style={styles.progressBarWrap}>
               <View style={[styles.progressBarFill, { width: `${importTotal ? (importProgress / importTotal) * 100 : 0}%` as any }]} />
             </View>
             {importErrors > 0 && (
-              <Text style={styles.errorNote}>{importErrors} failed</Text>
+              <Text style={styles.errorNote}>{importErrors} ошибок</Text>
             )}
           </View>
         )}
@@ -340,18 +410,27 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
         {phase === 'done' && (
           <View style={styles.center}>
             <MaterialIcons name="check-circle" size={56} color="#22c55e" />
-            <Text style={styles.doneTitle}>Import complete</Text>
+            <Text style={styles.doneTitle}>Импорт завершён</Text>
             <Text style={styles.doneSub}>
-              {importProgress - importErrors} saved · {importErrors} failed
+              {importProgress - importErrors} сохранено · {importErrors} ошибок
             </Text>
             <Pressable style={styles.doneBtn} onPress={onClose}>
-              <Text style={styles.doneBtnText}>Done</Text>
+              <Text style={styles.doneBtnText}>Готово</Text>
             </Pressable>
           </View>
         )}
       </View>
     </Modal>
   );
+}
+
+function plural(n: number, one: string, few: string, many: string): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 14) return many;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
 }
 
 const styles = StyleSheet.create({
@@ -399,6 +478,40 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter_400Regular',
     color: COLORS.textMuted,
     textAlign: 'center',
+  },
+  cancelBtn: {
+    marginTop: 8,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.card,
+  },
+  cancelBtnText: {
+    fontSize: 13,
+    fontFamily: 'Inter_600SemiBold',
+    color: COLORS.textSub,
+  },
+  searchingBanner: {
+    paddingHorizontal: 20,
+    paddingBottom: 8,
+    gap: 6,
+  },
+  searchingBannerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  searchingBannerText: {
+    fontSize: 12,
+    fontFamily: 'Inter_400Regular',
+    color: COLORS.textMuted,
+  },
+  stopText: {
+    fontSize: 12,
+    fontFamily: 'Inter_600SemiBold',
+    color: COLORS.accent,
   },
   statsRow: {
     flexDirection: 'row',
