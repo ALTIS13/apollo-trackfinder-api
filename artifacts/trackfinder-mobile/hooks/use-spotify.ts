@@ -3,6 +3,8 @@ import * as WebBrowser from 'expo-web-browser';
 
 import { apiFetch, getApiBase, getSessionId } from '@/hooks/use-session';
 
+WebBrowser.maybeCompleteAuthSession();
+
 
 export interface SpotifyStatus {
   connected: boolean;
@@ -36,11 +38,16 @@ export function useSpotifyStatus() {
 }
 
 export function useSpotifyLogin() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: async () => {
       const sid = getSessionId();
-      const loginUrl = `${getApiBase()}/spotify/login?sid=${encodeURIComponent(sid)}`;
-      await WebBrowser.openBrowserAsync(loginUrl);
+      const loginUrl = `${getApiBase()}/spotify/login?sid=${encodeURIComponent(sid)}&mobile=1`;
+      const result = await WebBrowser.openAuthSessionAsync(loginUrl, 'trackfinder://');
+      if (result.type === 'success') {
+        await qc.invalidateQueries({ queryKey: ['spotify'] });
+      }
+      return result;
     },
   });
 }

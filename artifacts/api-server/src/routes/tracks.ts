@@ -101,6 +101,89 @@ router.post("/tracks/search", async (req, res) => {
   res.json({ query, results: apiResults, cached: false });
 });
 
+router.post("/tracks/batch-search", async (req, res) => {
+  const { tracks } = req.body as { tracks?: { artist: string; title: string }[] };
+
+  if (!Array.isArray(tracks) || tracks.length === 0) {
+    res.status(400).json({ error: "bad_request", message: "tracks array is required" });
+    return;
+  }
+
+  if (tracks.length > 100) {
+    res.status(400).json({ error: "too_many", message: "Maximum 100 tracks per batch" });
+    return;
+  }
+
+  const CONCURRENCY = 5;
+
+  async function searchOne(artist: string, title: string): Promise<{ matches: Record<string, unknown>[]; cached: boolean }> {
+    const cached = await getCached<Record<string, unknown>>(artist, title);
+    if (cached) return { matches: cached as Record<string, unknown>[], cached: true };
+
+    const query = `${artist} ${title}`.trim();
+    const [ytResults, scResults] = await Promise.allSettled([
+      searchYouTube(query, 8),
+      searchSoundCloud(query, 8),
+    ]);
+
+    const allResults = [
+      ...(ytResults.status === "fulfilled" ? ytResults.value : []),
+      ...(scResults.status === "fulfilled" ? scResults.value : []),
+    ];
+
+    const referenceDuration =
+      allResults
+        .filter((r) => r.type === "original" && r.duration > 0)
+        .map((r) => r.duration)
+        .sort((a, b) => a - b)
+        .at(Math.floor(allResults.filter((r) => r.type === "original").length / 2)) ?? undefined;
+
+    const ranked = rank(allResults, { artist, title }, referenceDuration);
+    const apiResults = ranked.map(({ _sourceUrl: _, ...r }) => r) as Record<string, unknown>[];
+
+    await setCached(artist, title, apiResults).catch(() => null);
+    return { matches: apiResults, cached: false };
+  }
+
+  const results: {
+    index: number;
+    query: { artist: string; title: string };
+    matches: Record<string, unknown>[];
+    bestScore: number;
+    autoSelected: boolean;
+  }[] = [];
+
+  for (let i = 0; i < tracks.length; i += CONCURRENCY) {
+    const chunk = tracks.slice(i, i + CONCURRENCY);
+    const chunkResults = await Promise.all(
+      chunk.map(async (t, ci) => {
+        try {
+          const { matches } = await searchOne(t.artist, t.title);
+          const bestScore = typeof matches[0]?.score === "number" ? matches[0].score : 0;
+          return {
+            index: i + ci,
+            query: { artist: t.artist, title: t.title },
+            matches: matches.slice(0, 5),
+            bestScore,
+            autoSelected: bestScore >= 80,
+          };
+        } catch {
+          return {
+            index: i + ci,
+            query: { artist: t.artist, title: t.title },
+            matches: [],
+            bestScore: 0,
+            autoSelected: false,
+          };
+        }
+      }),
+    );
+    results.push(...chunkResults);
+  }
+
+  res.json({ results });
+});
+
 router.get("/tracks/:id/stream", async (req, res) => {
   const { id } = req.params;
 

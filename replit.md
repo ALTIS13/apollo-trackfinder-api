@@ -21,7 +21,8 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 ## Music Player API
 
 ### Endpoints
-- `POST /api/tracks/search` — search YouTube + SoundCloud for track variants, returns classified & ranked list
+- `POST /api/tracks/search` — search YouTube + SoundCloud for track variants, returns classified & ranked list with `score` (0-100)
+- `POST /api/tracks/batch-search` — bulk search up to 100 tracks; returns best match + similarity score per track; auto-selection at ≥80%
 - `GET /api/tracks/:id/stream` — get stream URL (HLS or direct audio) for a track
 - `GET /api/tracks/:id/download` — get download URL for a track
 

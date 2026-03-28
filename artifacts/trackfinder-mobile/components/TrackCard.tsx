@@ -17,6 +17,14 @@ export interface Track {
   source: TrackSource;
   type: TrackType;
   viewCount?: number;
+  score?: number;
+}
+
+function getScoreColor(score: number): string {
+  if (score >= 80) return '#22c55e';
+  if (score >= 60) return '#f59e0b';
+  if (score >= 40) return '#f97316';
+  return '#ef4444';
 }
 
 function formatDuration(sec: number): string {
@@ -110,6 +118,11 @@ export function TrackCard({ track, onFindVariants }: Props) {
           <View style={[styles.badge, { backgroundColor: srcC.bg }]}>
             <Text style={[styles.badgeText, { color: srcC.text }]}>{srcC.label}</Text>
           </View>
+          {track.score != null && (
+            <View style={[styles.badge, { backgroundColor: getScoreColor(track.score) + '22', borderWidth: 1, borderColor: getScoreColor(track.score) + '55' }]}>
+              <Text style={[styles.badgeText, { color: getScoreColor(track.score) }]}>{Math.round(track.score)}%</Text>
+            </View>
+          )}
         </View>
         <Text style={styles.title} numberOfLines={2}>{track.title}</Text>
         <Text style={styles.artist} numberOfLines={1}>{track.artist}</Text>

@@ -3,17 +3,20 @@ import Svg, { Path } from 'react-native-svg';
 
 export type MaterialIconName =
   | 'arrow-back'
+  | 'check-circle'
   | 'chevron-left'
   | 'chevron-right'
   | 'close'
   | 'delete'
   | 'dns'
+  | 'download-done'
   | 'error'
   | 'favorite'
   | 'file-download'
   | 'headphones'
   | 'inbox'
   | 'keyboard-arrow-down'
+  | 'library-add-check'
   | 'list'
   | 'music-note'
   | 'pause'
@@ -25,6 +28,12 @@ export type MaterialIconName =
   | 'wifi';
 
 const PATHS: Record<MaterialIconName, string> = {
+  'check-circle':
+    'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z',
+  'download-done':
+    'M20 6h-2.18c.07-.31.18-.61.18-.93C18 3.39 16.61 2 14.93 2c-.93 0-1.74.45-2.27 1.12L12 4l-.66-.88C10.81 2.45 10 2 9.07 2 7.39 2 6 3.39 6 5.07c0 .32.11.62.18.93H4c-1.1 0-2 .9-2 2v11c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-5-2.5c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm-6 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm11 15.5H4v-2h16v2zm0-5H4V8h5.08L7 10.83 8.62 12 11 8.76l1-1.36 1 1.36L15.38 12 17 10.83 14.92 8H20v6z',
+  'library-add-check':
+    'M20 2H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7.53 12L9 10.5l1.4-1.41 2.07 2.08 4.13-4.17L18 8.41 12.47 14zM4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6z',
   'arrow-back':
     'M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z',
   'chevron-left':

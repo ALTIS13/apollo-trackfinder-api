@@ -1,3 +1,4 @@
+import { BatchImportModal, ImportTrackInput } from '@/components/BatchImportModal';
 import { MaterialIcons } from '@/components/MaterialIcons';
 import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
@@ -109,7 +110,7 @@ function PlaylistCard({
   );
 }
 
-function SpotifySection({ onVariants }: { onVariants: (artist: string, title: string) => void }) {
+function SpotifySection({ onVariants, onImportAll }: { onVariants: (artist: string, title: string) => void; onImportAll?: (tracks: ImportTrackInput[]) => void }) {
   const { data: status } = useSpotifyStatus();
   const login = useSpotifyLogin();
   const logout = useSpotifyLogout();
@@ -166,6 +167,20 @@ function SpotifySection({ onVariants }: { onVariants: (artist: string, title: st
     const tracks = likedQuery.data?.tracks ?? [];
     return (
       <>
+        {tracks.length > 0 && onImportAll && (
+          <View style={styles.importAllRow}>
+            <Pressable
+              style={styles.importAllBtn}
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                onImportAll(tracks.map(t => ({ artist: t.artist, title: t.title, thumbnailUrl: t.thumbnailUrl })));
+              }}
+            >
+              <MaterialIcons name="file-download" size={14} color={COLORS.accent} />
+              <Text style={styles.importAllText}>Import all {tracks.length} tracks</Text>
+            </Pressable>
+          </View>
+        )}
         {tracks.map((t) => (
           <CatalogTrackRow
             key={t.id}
@@ -305,7 +320,7 @@ function SpotifySection({ onVariants }: { onVariants: (artist: string, title: st
   );
 }
 
-function YandexSection({ onVariants }: { onVariants: (artist: string, title: string) => void }) {
+function YandexSection({ onVariants, onImportAll }: { onVariants: (artist: string, title: string) => void; onImportAll?: (tracks: ImportTrackInput[]) => void }) {
   const { data: status } = useYandexStatus();
   const connect = useYandexConnect();
   const disconnect = useYandexDisconnect();
@@ -388,15 +403,34 @@ function YandexSection({ onVariants }: { onVariants: (artist: string, title: str
       );
     }
     if (likedQuery.isFetching) return <ActivityIndicator style={styles.loader} color={COLORS.accent} />;
-    return (likedQuery.data?.tracks ?? []).map((t) => (
-      <CatalogTrackRow
-        key={t.id}
-        title={t.title}
-        artist={t.artist}
-        thumbnailUrl={t.thumbnailUrl}
-        onFindVariants={() => onVariants(t.artist, t.title)}
-      />
-    ));
+    const tracks = likedQuery.data?.tracks ?? [];
+    return (
+      <>
+        {tracks.length > 0 && onImportAll && (
+          <View style={styles.importAllRow}>
+            <Pressable
+              style={styles.importAllBtn}
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                onImportAll(tracks.map(t => ({ artist: t.artist, title: t.title, thumbnailUrl: t.thumbnailUrl })));
+              }}
+            >
+              <MaterialIcons name="file-download" size={14} color={COLORS.accent} />
+              <Text style={styles.importAllText}>Import all {tracks.length} tracks</Text>
+            </Pressable>
+          </View>
+        )}
+        {tracks.map((t) => (
+          <CatalogTrackRow
+            key={t.id}
+            title={t.title}
+            artist={t.artist}
+            thumbnailUrl={t.thumbnailUrl}
+            onFindVariants={() => onVariants(t.artist, t.title)}
+          />
+        ))}
+      </>
+    );
   };
 
   const renderPlaylists = () => {
@@ -487,6 +521,7 @@ export default function FavoritesScreen() {
   const router = useRouter();
   const { currentTrack } = usePlayer();
   const [service, setService] = useState<Service>('spotify');
+  const [batchTracks, setBatchTracks] = useState<ImportTrackInput[]>([]);
 
   const topPad = insets.top + (Platform.OS === 'web' ? 67 : 0);
   const bottomPad = TAB_BAR + (currentTrack ? PLAYER_HEIGHT : 0) + (Platform.OS === 'web' ? 34 : 0);
@@ -498,8 +533,18 @@ export default function FavoritesScreen() {
     });
   };
 
+  const handleImportAll = (tracks: ImportTrackInput[]) => {
+    setBatchTracks(tracks);
+  };
+
   return (
     <View style={[styles.root, { backgroundColor: COLORS.bg }]}>
+      <BatchImportModal
+        visible={batchTracks.length > 0}
+        tracks={batchTracks}
+        onClose={() => setBatchTracks([])}
+      />
+
       <View style={[styles.header, { paddingTop: topPad }]}>
         <View style={styles.headerRow}>
           <MaterialIcons name="favorite" size={22} color={COLORS.accent} />
@@ -541,9 +586,9 @@ export default function FavoritesScreen() {
         keyboardShouldPersistTaps="handled"
       >
         {service === 'spotify' ? (
-          <SpotifySection onVariants={handleFindVariants} />
+          <SpotifySection onVariants={handleFindVariants} onImportAll={handleImportAll} />
         ) : (
-          <YandexSection onVariants={handleFindVariants} />
+          <YandexSection onVariants={handleFindVariants} onImportAll={handleImportAll} />
         )}
       </ScrollView>
     </View>
@@ -737,6 +782,29 @@ const styles = StyleSheet.create({
   },
   tabChipTextActive: { color: COLORS.accent },
 
+  importAllRow: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  importAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 9,
+    backgroundColor: COLORS.accentDim,
+    borderWidth: 1,
+    borderColor: COLORS.accent + '40',
+    alignSelf: 'flex-start',
+  },
+  importAllText: {
+    fontSize: 13,
+    fontFamily: 'Inter_600SemiBold',
+    color: COLORS.accent,
+  },
   fetchPrompt: {
     alignItems: 'center',
     paddingVertical: 24,

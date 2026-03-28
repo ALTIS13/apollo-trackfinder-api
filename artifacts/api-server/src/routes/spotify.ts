@@ -83,8 +83,9 @@ router.get("/spotify/login", (req, res) => {
     return;
   }
 
+  const isMobile = req.query["mobile"] === "1";
   const nonce = randomBytes(8).toString("hex");
-  const state = `${encodeURIComponent(clientSessionId)}__${nonce}`;
+  const state = `${encodeURIComponent(clientSessionId)}__${nonce}${isMobile ? "__m" : ""}`;
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -100,21 +101,33 @@ router.get("/spotify/login", (req, res) => {
 router.get("/spotify/callback", async (req, res) => {
   const { code, state, error } = req.query as Record<string, string>;
 
+  const stateParts = (state ?? "").split("__");
+  const isMobile = stateParts[stateParts.length - 1] === "m";
+
+  function mobileOrWebRedirect(path: string, params: Record<string, string>) {
+    const qs = new URLSearchParams(params).toString();
+    if (isMobile) {
+      res.redirect(`trackfinder://${path}?${qs}`);
+    } else {
+      res.redirect(`/${path}?${qs}`);
+    }
+  }
+
   if (error) {
-    res.redirect(`/favorites?spotify_error=${encodeURIComponent(error)}`);
+    mobileOrWebRedirect("favorites", { spotify_error: error });
     return;
   }
 
   if (!state || !state.includes("__")) {
-    res.redirect("/favorites?spotify_error=invalid_state");
+    mobileOrWebRedirect("favorites", { spotify_error: "invalid_state" });
     return;
   }
 
-  const [encodedSessionId] = state.split("__");
+  const [encodedSessionId] = stateParts;
   const clientSessionId = decodeURIComponent(encodedSessionId);
 
   if (!clientSessionId || clientSessionId.length < 8) {
-    res.redirect("/favorites?spotify_error=state_mismatch");
+    mobileOrWebRedirect("favorites", { spotify_error: "state_mismatch" });
     return;
   }
 
@@ -136,7 +149,7 @@ router.get("/spotify/callback", async (req, res) => {
     if (!resp.ok) {
       const text = await resp.text();
       logger.error({ status: resp.status, text }, "Spotify token exchange failed");
-      res.redirect("/favorites?spotify_error=token_exchange_failed");
+      mobileOrWebRedirect("favorites", { spotify_error: "token_exchange_failed" });
       return;
     }
 
@@ -174,10 +187,10 @@ router.get("/spotify/callback", async (req, res) => {
         },
       });
 
-    res.redirect("/favorites?spotify_connected=1");
+    mobileOrWebRedirect("favorites", { spotify_connected: "1" });
   } catch (err) {
     logger.error({ err }, "Spotify callback error");
-    res.redirect("/favorites?spotify_error=internal");
+    mobileOrWebRedirect("favorites", { spotify_error: "internal" });
   }
 });
 
