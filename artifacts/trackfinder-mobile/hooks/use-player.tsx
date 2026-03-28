@@ -47,6 +47,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [duration, setDuration] = useState(0);
   const [showFullPlayer, setShowFullPlayer] = useState(false);
   const soundRef = useRef<Audio.Sound | null>(null);
+  const reqIdRef = useRef(0);
   const openFullPlayer = useCallback(() => setShowFullPlayer(true), []);
   const closeFullPlayer = useCallback(() => setShowFullPlayer(false), []);
 
@@ -62,6 +63,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const stop = useCallback(async () => {
+    reqIdRef.current += 1;
     if (soundRef.current) {
       await soundRef.current.unloadAsync().catch(() => {});
       soundRef.current = null;
@@ -72,52 +74,64 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     setCurrentTrack(null);
   }, []);
 
-  const play = useCallback(
-    async (track: PlayerTrack) => {
-      try {
-        setIsLoading(true);
-        if (soundRef.current) {
-          await soundRef.current.unloadAsync().catch(() => {});
-          soundRef.current = null;
-        }
-        setIsPlaying(false);
-        setPosition(0);
-        setDuration(0);
+  const play = useCallback(async (track: PlayerTrack) => {
+    const reqId = ++reqIdRef.current;
 
-        let uri: string;
-        if (track.localUri) {
-          uri = track.localUri;
-        } else {
-          const resp = await apiFetch<{ streamUrl: string }>(`/tracks/${track.id}/stream`);
-          uri = resp.streamUrl;
-        }
+    try {
+      setIsLoading(true);
 
-        const { sound } = await Audio.Sound.createAsync(
-          { uri },
-          { shouldPlay: true },
-          (status) => {
-            if (!status.isLoaded) return;
-            setIsPlaying(status.isPlaying);
-            setPosition(status.positionMillis / 1000);
-            setDuration((status.durationMillis ?? 0) / 1000);
-            if (status.didJustFinish) {
-              setIsPlaying(false);
-              setPosition(0);
-            }
-          },
-        );
+      if (soundRef.current) {
+        await soundRef.current.unloadAsync().catch(() => {});
+        soundRef.current = null;
+      }
+      setIsPlaying(false);
+      setPosition(0);
+      setDuration(0);
 
-        soundRef.current = sound;
-        setCurrentTrack(track);
-        setIsPlaying(true);
-      } catch (e) {
-        console.error('Player error:', e);
-      } finally {
+      if (reqId !== reqIdRef.current) return;
+
+      let uri: string;
+      if (track.localUri) {
+        uri = track.localUri;
+      } else {
+        const resp = await apiFetch<{ streamUrl: string }>(`/tracks/${track.id}/stream`);
+        uri = resp.streamUrl;
+      }
+
+      if (reqId !== reqIdRef.current) return;
+
+      const { sound } = await Audio.Sound.createAsync(
+        { uri },
+        { shouldPlay: true },
+        (status) => {
+          if (reqId !== reqIdRef.current) return;
+          if (!status.isLoaded) return;
+          setIsPlaying(status.isPlaying);
+          setPosition(status.positionMillis / 1000);
+          setDuration((status.durationMillis ?? 0) / 1000);
+          if (status.didJustFinish) {
+            setIsPlaying(false);
+            setPosition(0);
+          }
+        },
+      );
+
+      if (reqId !== reqIdRef.current) {
+        sound.unloadAsync().catch(() => {});
+        return;
+      }
+
+      soundRef.current = sound;
+      setCurrentTrack(track);
+      setIsPlaying(true);
+    } catch (e) {
+      console.error('Player error:', e);
+    } finally {
+      if (reqId === reqIdRef.current) {
         setIsLoading(false);
       }
-    },
-    [],
-  );
+    }
+  }, []);
 
   const pause = useCallback(async () => {
     await soundRef.current?.pauseAsync().catch(() => {});

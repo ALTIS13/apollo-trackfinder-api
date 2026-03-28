@@ -27,6 +27,7 @@ interface LibraryState {
   saveToLibrary: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; source?: string }) => Promise<void>;
   download: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }) => Promise<void>;
   remove: (id: string) => Promise<void>;
+  bulkRemove: (ids: string[]) => Promise<void>;
   isSaved: (id: string) => boolean;
   isDownloaded: (id: string) => boolean;
 }
@@ -162,11 +163,29 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     [tracks],
   );
 
+  const bulkRemove = useCallback(
+    async (ids: string[]) => {
+      const idSet = new Set(ids);
+      setTracks((prev) => {
+        const toDelete = prev.filter((t) => idSet.has(t.id));
+        toDelete.forEach((t) => {
+          if (t.localUri) {
+            FileSystem.deleteAsync(t.localUri, { idempotent: true }).catch(() => {});
+          }
+        });
+        const updated = prev.filter((t) => !idSet.has(t.id));
+        AsyncStorage.setItem(LIBRARY_KEY, JSON.stringify(updated));
+        return updated;
+      });
+    },
+    [],
+  );
+
   const isSaved = useCallback((id: string) => tracks.some((t) => t.id === id), [tracks]);
   const isDownloaded = useCallback((id: string) => tracks.some((t) => t.id === id && !!t.localUri), [tracks]);
 
   return (
-    <LibraryContext.Provider value={{ tracks, isDownloading, downloadProgress, saveToLibrary, download, remove, isSaved, isDownloaded }}>
+    <LibraryContext.Provider value={{ tracks, isDownloading, downloadProgress, saveToLibrary, download, remove, bulkRemove, isSaved, isDownloaded }}>
       {children}
     </LibraryContext.Provider>
   );

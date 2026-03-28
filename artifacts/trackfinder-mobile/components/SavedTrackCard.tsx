@@ -39,9 +39,20 @@ function getQualityLabel(source?: string): string | null {
 interface Props {
   track: SavedTrack;
   onSearchArtist?: (artist: string) => void;
+  selectionMode?: boolean;
+  isSelected?: boolean;
+  onToggleSelect?: () => void;
+  onEnterSelection?: () => void;
 }
 
-export const SavedTrackCard = React.memo(function SavedTrackCard({ track, onSearchArtist }: Props) {
+export const SavedTrackCard = React.memo(function SavedTrackCard({
+  track,
+  onSearchArtist,
+  selectionMode = false,
+  isSelected = false,
+  onToggleSelect,
+  onEnterSelection,
+}: Props) {
   const { play, currentTrack, isPlaying, isLoading } = usePlayer();
   const { remove, download, isDownloading, downloadProgress } = useLibrary();
   const swipeRef = useRef<Swipeable>(null);
@@ -54,6 +65,10 @@ export const SavedTrackCard = React.memo(function SavedTrackCard({ track, onSear
   const quality = getQualityLabel(track.source);
 
   const handlePlay = async () => {
+    if (selectionMode) {
+      onToggleSelect?.();
+      return;
+    }
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     const pt: PlayerTrack = {
       id: track.id,
@@ -91,8 +106,10 @@ export const SavedTrackCard = React.memo(function SavedTrackCard({ track, onSear
   };
 
   const handleLongPress = () => {
+    if (selectionMode) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-    setSheetVisible(true);
+    onEnterSelection?.();
+    onToggleSelect?.();
   };
 
   const sheetActions = [
@@ -146,6 +163,109 @@ export const SavedTrackCard = React.memo(function SavedTrackCard({ track, onSear
     );
   };
 
+  const cardContent = (
+    <Pressable
+      style={[
+        styles.card,
+        isCurrentTrack && !selectionMode && styles.cardActive,
+        isSelected && styles.cardSelected,
+      ]}
+      onPress={handlePlay}
+      onLongPress={handleLongPress}
+      delayLongPress={400}
+    >
+      {selectionMode && (
+        <View style={[styles.checkbox, isSelected && styles.checkboxChecked]}>
+          {isSelected && (
+            <MaterialIcons name="check-circle" size={20} color={COLORS.accent} />
+          )}
+        </View>
+      )}
+
+      <View style={styles.thumb}>
+        {track.thumbnailUrl ? (
+          <Image
+            source={{ uri: track.thumbnailUrl }}
+            style={StyleSheet.absoluteFill}
+            contentFit="cover"
+          />
+        ) : (
+          <View style={styles.thumbPlaceholder}>
+            <MaterialIcons name="music-note" size={20} color={COLORS.textMuted} />
+          </View>
+        )}
+        {isCurrentTrack && !selectionMode && (
+          <View style={styles.thumbOverlay}>
+            {isLoading ? (
+              <ActivityIndicator size="small" color={COLORS.white} />
+            ) : (
+              <MaterialIcons name={isPlaying ? 'pause' : 'play-arrow'} size={18} color={COLORS.white} />
+            )}
+          </View>
+        )}
+      </View>
+
+      <View style={styles.info}>
+        <Text style={[styles.title, isCurrentTrack && !selectionMode && styles.titleActive]} numberOfLines={1}>
+          {track.title}
+        </Text>
+        <Text style={styles.artist} numberOfLines={1}>{track.artist}</Text>
+        <View style={styles.metaRow}>
+          <Text style={styles.metaText}>{formatDuration(track.duration)}</Text>
+          {!!track.fileSize && (
+            <>
+              <Text style={styles.dot}>·</Text>
+              <Text style={styles.metaText}>{formatFileSize(track.fileSize)}</Text>
+            </>
+          )}
+          {quality && (
+            <>
+              <Text style={styles.dot}>·</Text>
+              <Text style={styles.metaText}>{quality}</Text>
+            </>
+          )}
+        </View>
+      </View>
+
+      {!selectionMode && (
+        <View style={styles.statusCol}>
+          {downloading ? (
+            <View style={styles.downloadingWrap}>
+              <ActivityIndicator size="small" color={COLORS.accent} />
+              {progress > 0 && (
+                <Text style={styles.progressText}>{Math.round(progress * 100)}%</Text>
+              )}
+            </View>
+          ) : downloaded ? (
+            <View style={styles.downloadedBadge}>
+              <MaterialIcons name="check-circle" size={18} color={COLORS.accent} />
+            </View>
+          ) : (
+            <View style={styles.onlineBadge}>
+              <MaterialIcons name="cloud-download" size={16} color={COLORS.textMuted} />
+              <Text style={styles.onlineText}>Онлайн</Text>
+            </View>
+          )}
+        </View>
+      )}
+    </Pressable>
+  );
+
+  if (selectionMode) {
+    return (
+      <>
+        <TrackActionSheet
+          visible={sheetVisible}
+          onClose={() => setSheetVisible(false)}
+          title={track.title}
+          subtitle={track.artist}
+          actions={sheetActions}
+        />
+        {cardContent}
+      </>
+    );
+  }
+
   return (
     <>
       <TrackActionSheet
@@ -155,7 +275,6 @@ export const SavedTrackCard = React.memo(function SavedTrackCard({ track, onSear
         subtitle={track.artist}
         actions={sheetActions}
       />
-
       <Swipeable
         ref={swipeRef}
         renderRightActions={renderRightActions}
@@ -163,77 +282,7 @@ export const SavedTrackCard = React.memo(function SavedTrackCard({ track, onSear
         overshootRight={false}
         friction={2}
       >
-        <Pressable
-          style={[styles.card, isCurrentTrack && styles.cardActive]}
-          onPress={handlePlay}
-          onLongPress={handleLongPress}
-          delayLongPress={400}
-        >
-          <View style={styles.thumb}>
-            {track.thumbnailUrl ? (
-              <Image
-                source={{ uri: track.thumbnailUrl }}
-                style={StyleSheet.absoluteFill}
-                contentFit="cover"
-              />
-            ) : (
-              <View style={styles.thumbPlaceholder}>
-                <MaterialIcons name="music-note" size={20} color={COLORS.textMuted} />
-              </View>
-            )}
-            {isCurrentTrack && (
-              <View style={styles.thumbOverlay}>
-                {isLoading ? (
-                  <ActivityIndicator size="small" color={COLORS.white} />
-                ) : (
-                  <MaterialIcons name={isPlaying ? 'pause' : 'play-arrow'} size={18} color={COLORS.white} />
-                )}
-              </View>
-            )}
-          </View>
-
-          <View style={styles.info}>
-            <Text style={[styles.title, isCurrentTrack && styles.titleActive]} numberOfLines={1}>
-              {track.title}
-            </Text>
-            <Text style={styles.artist} numberOfLines={1}>{track.artist}</Text>
-            <View style={styles.metaRow}>
-              <Text style={styles.metaText}>{formatDuration(track.duration)}</Text>
-              {!!track.fileSize && (
-                <>
-                  <Text style={styles.dot}>·</Text>
-                  <Text style={styles.metaText}>{formatFileSize(track.fileSize)}</Text>
-                </>
-              )}
-              {quality && (
-                <>
-                  <Text style={styles.dot}>·</Text>
-                  <Text style={styles.metaText}>{quality}</Text>
-                </>
-              )}
-            </View>
-          </View>
-
-          <View style={styles.statusCol}>
-            {downloading ? (
-              <View style={styles.downloadingWrap}>
-                <ActivityIndicator size="small" color={COLORS.accent} />
-                {progress > 0 && (
-                  <Text style={styles.progressText}>{Math.round(progress * 100)}%</Text>
-                )}
-              </View>
-            ) : downloaded ? (
-              <View style={styles.downloadedBadge}>
-                <MaterialIcons name="check-circle" size={18} color={COLORS.accent} />
-              </View>
-            ) : (
-              <View style={styles.onlineBadge}>
-                <MaterialIcons name="cloud-download" size={16} color={COLORS.textMuted} />
-                <Text style={styles.onlineText}>Онлайн</Text>
-              </View>
-            )}
-          </View>
-        </Pressable>
+        {cardContent}
       </Swipeable>
     </>
   );
@@ -252,6 +301,22 @@ const styles = StyleSheet.create({
   },
   cardActive: {
     backgroundColor: COLORS.accentDim,
+  },
+  cardSelected: {
+    backgroundColor: COLORS.accentDim + '88',
+  },
+  checkbox: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: COLORS.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  checkboxChecked: {
+    borderColor: 'transparent',
   },
   thumb: {
     width: 50,
@@ -342,7 +407,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 4,
-    ...(Platform.OS === 'web' ? {} : {}),
   },
   swipeBtnDownload: {
     backgroundColor: '#2563eb',
