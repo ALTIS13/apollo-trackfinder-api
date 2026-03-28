@@ -1,4 +1,4 @@
-import { MaterialIcons } from '@expo/vector-icons';
+import { MaterialIcons } from '@/components/MaterialIcons';
 import { Image } from 'expo-image';
 import React, { useRef } from 'react';
 import {

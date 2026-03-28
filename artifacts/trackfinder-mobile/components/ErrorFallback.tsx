@@ -1,4 +1,4 @@
-import { MaterialIcons } from "@expo/vector-icons";
+import { MaterialIcons } from "@/components/MaterialIcons";
 import { reloadAppAsync } from "expo";
 import React, { useState } from "react";
 import {

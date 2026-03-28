@@ -1,4 +1,4 @@
-import { MaterialIcons } from '@expo/vector-icons';
+import { MaterialIcons } from '@/components/MaterialIcons';
 import * as Haptics from 'expo-haptics';
 import * as Linking from 'expo-linking';
 import React, { useEffect, useState } from 'react';
