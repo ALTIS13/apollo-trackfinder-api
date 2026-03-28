@@ -33,14 +33,24 @@ const queryClient = new QueryClient({
 
 // On Android, @expo/vector-icons uses fontFamily='MaterialIcons' (filename without .ttf).
 // The font must be registered under exactly this key before any icon renders.
-// We use a local asset copy (assets/fonts/MaterialIcons.ttf) — no pnpm symlinks,
-// same bytes as @expo/vector-icons@15.1.1 (verified: 356,840 bytes).
-// The expo-font plugin in app.json embeds this file as a native Android asset
-// (android/app/src/main/assets/fonts/MaterialIcons.ttf) during EAS prebuild.
+//
+// Root-cause: Replit's Metro proxy truncates large binary asset downloads (>~200 KB).
+// MaterialIcons.ttf is 356 KB — the download gets cut short, Typeface.createFromFile()
+// silently falls back to Roboto, and every icon renders as a tofu box □.
+// Inter fonts (~75 KB each) are small enough to transfer cleanly, so text works fine.
+//
+// Fix: in dev / Expo Go, fetch the font from jsDelivr CDN (bypasses the Replit proxy).
+// In production EAS builds, the expo-font plugin embeds the TTF as a native Android
+// asset (android/app/src/main/assets/fonts/MaterialIcons.ttf) — local require() is fine.
+const CDN_MATERIAL_ICONS_URI =
+  'https://cdn.jsdelivr.net/npm/@expo/vector-icons@15.1.1/build/vendor/react-native-vector-icons/Fonts/MaterialIcons.ttf';
+
 const MATERIAL_ICONS_FONT = {
   // Key MUST be 'MaterialIcons' — that's the fontFamily Android resolves against.
-  MaterialIcons: require('../assets/fonts/MaterialIcons.ttf'),
-} as const;
+  MaterialIcons: __DEV__
+    ? ({ uri: CDN_MATERIAL_ICONS_URI } as const)
+    : require('../assets/fonts/MaterialIcons.ttf'),
+};
 
 function RootLayoutNav() {
   return (
@@ -68,7 +78,11 @@ export default function RootLayout() {
       return;
     }
 
-    console.log('[Font] Loading MaterialIcons from local asset on', Platform.OS, '...');
+    console.log(
+      '[Font] Loading MaterialIcons via',
+      __DEV__ ? 'CDN (bypasses Replit proxy)' : 'local asset',
+      'on', Platform.OS, '...'
+    );
     Font.loadAsync(MATERIAL_ICONS_FONT)
       .then(() => {
         console.log('[Font] MaterialIcons loaded successfully ✓');
