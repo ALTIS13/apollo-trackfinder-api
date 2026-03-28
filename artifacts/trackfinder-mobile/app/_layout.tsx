@@ -44,9 +44,11 @@ export default function RootLayout() {
     Inter_500Medium,
     Inter_600SemiBold,
     Inter_700Bold,
-    // Load Feather from a local copy in assets to avoid pnpm symlink failures.
-    // @expo/vector-icons resolves its font via require() which breaks through
-    // pnpm symlinks. A local copy has a stable, direct require() path.
+    // Pre-load MaterialIcons from a local asset copy.
+    // pnpm uses a virtual store with symlinks that Metro cannot resolve on Android
+    // when @expo/vector-icons tries to require() its bundled font.
+    // Loading from a local direct path bypasses the symlink and ensures
+    // the font is registered before any icon components render.
     MaterialIcons: require('../assets/fonts/MaterialIcons.ttf'),
   });
 
