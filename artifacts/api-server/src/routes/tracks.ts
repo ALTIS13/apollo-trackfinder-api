@@ -348,6 +348,75 @@ router.get("/tracks/:id/download", async (req, res) => {
   }
 });
 
+router.get("/tracks/:id/audio-stream", async (req, res) => {
+  const { id } = req.params;
+
+  if (!id) {
+    res.status(400).json({ error: "bad_request", message: "id is required" });
+    return;
+  }
+
+  const decoded = decodeTrackUrl(id);
+  if (!decoded) {
+    res.status(400).json({ error: "bad_request", message: "Invalid track id format" });
+    return;
+  }
+
+  res.setHeader("Content-Type", "audio/mpeg");
+  res.setHeader("Content-Disposition", "inline");
+  res.setHeader("Cache-Control", "no-cache");
+
+  const pipeProc = (sourceUrl: string) => {
+    const proc = spawnAudioDownload(sourceUrl, "128");
+    proc.stdout.pipe(res);
+    proc.stderr.on("data", () => {});
+    req.on("close", () => proc.kill("SIGKILL"));
+    proc.on("close", (code) => { if (code !== 0 && !res.writableEnded) res.destroy(); });
+    proc.on("error", (err) => {
+      req.log.error({ err }, "yt-dlp error in audio-stream");
+      if (!res.headersSent) res.status(500).json({ error: "stream_error" });
+      else res.destroy();
+    });
+  };
+
+  try {
+    if (decoded.source === "dz") {
+      const dzArtist = String(req.query["artist"] ?? "").trim();
+      const dzTitle = String(req.query["title"] ?? "").trim();
+
+      if (dzArtist && dzTitle) {
+        try {
+          const ytResults = await searchYouTube(`${dzArtist} ${dzTitle}`, 3);
+          const ytTrack = ytResults.find((r) => r._sourceUrl) ?? ytResults[0];
+          if (ytTrack?._sourceUrl) {
+            req.log.info({ id, artist: dzArtist, title: dzTitle }, "Deezer→YouTube audio-stream fallback");
+            pipeProc(ytTrack._sourceUrl);
+            return;
+          }
+        } catch (e) {
+          req.log.warn({ e }, "Deezer→YouTube audio-stream fallback failed, using preview");
+        }
+      }
+
+      const upstream = await fetch(decoded.url, { signal: AbortSignal.timeout(30000) });
+      if (!upstream.ok || !upstream.body) {
+        res.status(502).json({ error: "stream_error", message: "Preview unavailable" });
+        return;
+      }
+      const { Readable } = await import("stream");
+      Readable.fromWeb(upstream.body as import("stream/web").ReadableStream).pipe(res);
+      return;
+    }
+
+    pipeProc(decoded.url);
+  } catch (err) {
+    req.log.error({ err, id }, "Failed to start audio stream");
+    if (!res.headersSent) {
+      res.status(500).json({ error: "stream_error", message: "Could not start audio stream" });
+    }
+  }
+});
+
 async function fetchLrclib(artist: string, title: string, duration: number): Promise<{ plainLyrics: string | null; syncedLyrics: string | null } | null> {
   try {
     const params = new URLSearchParams({ artist_name: artist, track_name: title });

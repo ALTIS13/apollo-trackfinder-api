@@ -8,7 +8,7 @@ import React, {
   useState,
 } from 'react';
 
-import { apiFetch } from '@/hooks/use-session';
+import { getApiBase } from '@/hooks/use-session';
 
 export interface PlayerTrack {
   id: string;
@@ -86,7 +86,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       }
       setIsPlaying(false);
       setPosition(0);
-      setDuration(0);
+      // Seed duration from track metadata immediately so UI isn't stuck at 0
+      setDuration(track.duration > 0 ? track.duration : 0);
 
       if (reqId !== reqIdRef.current) return;
 
@@ -94,25 +95,33 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       if (track.localUri) {
         uri = track.localUri;
       } else {
+        // Use the server-side audio-stream proxy so the mobile never touches
+        // IP-bound YouTube HLS URLs directly.
         const isDeezer = track.id.startsWith('dz_');
-        const streamParams = isDeezer
-          ? `?artist=${encodeURIComponent(track.artist)}&title=${encodeURIComponent(track.title)}`
-          : '';
-        const resp = await apiFetch<{ streamUrl: string }>(`/tracks/${track.id}/stream${streamParams}`);
-        uri = resp.streamUrl;
+        const params = new URLSearchParams();
+        if (isDeezer) {
+          params.set('artist', track.artist);
+          params.set('title', track.title);
+        }
+        const qs = params.toString() ? `?${params}` : '';
+        uri = `${getApiBase()}/tracks/${track.id}/audio-stream${qs}`;
       }
 
       if (reqId !== reqIdRef.current) return;
 
       const { sound } = await Audio.Sound.createAsync(
         { uri },
-        { shouldPlay: true },
+        { shouldPlay: true, progressUpdateIntervalMillis: 500 },
         (status) => {
           if (reqId !== reqIdRef.current) return;
           if (!status.isLoaded) return;
           setIsPlaying(status.isPlaying);
           setPosition(status.positionMillis / 1000);
-          setDuration((status.durationMillis ?? 0) / 1000);
+          // Only override duration if expo-av reports a valid value;
+          // otherwise keep the track-metadata seed set above.
+          if (status.durationMillis && status.durationMillis > 0) {
+            setDuration(status.durationMillis / 1000);
+          }
           if (status.didJustFinish) {
             setIsPlaying(false);
             setPosition(0);
