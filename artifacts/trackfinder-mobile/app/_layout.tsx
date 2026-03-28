@@ -3,8 +3,8 @@ import {
   Inter_500Medium,
   Inter_600SemiBold,
   Inter_700Bold,
-  useFonts,
 } from '@expo-google-fonts/inter';
+import { useFonts } from 'expo-font';
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { setBaseUrl } from '@workspace/api-client-react';
@@ -39,17 +39,21 @@ function RootLayoutNav() {
 }
 
 export default function RootLayout() {
-  const [fontsLoaded, fontError] = useFonts({
+  // Load MaterialIcons explicitly before any icon component renders.
+  // On Android with pnpm, Metro cannot follow the virtual-store symlinks to
+  // resolve @expo/vector-icons' bundled font. We point Metro at the package
+  // path directly; metro.config.js has unstable_enableSymlinks:true so this
+  // resolves correctly. The local assets/fonts/MaterialIcons.ttf is kept as
+  // a fallback reference (same bytes, same version as @expo/vector-icons@15).
+  const [iconsLoaded] = useFonts({
+    MaterialIcons: require('@expo/vector-icons/build/vendor/react-native-vector-icons/Fonts/MaterialIcons.ttf'),
+  });
+
+  const [textFontsLoaded, textFontError] = useFonts({
     Inter_400Regular,
     Inter_500Medium,
     Inter_600SemiBold,
     Inter_700Bold,
-    // Pre-load MaterialIcons from a local asset copy.
-    // pnpm uses a virtual store with symlinks that Metro cannot resolve on Android
-    // when @expo/vector-icons tries to require() its bundled font.
-    // Loading from a local direct path bypasses the symlink and ensures
-    // the font is registered before any icon components render.
-    MaterialIcons: require('../assets/fonts/MaterialIcons.ttf'),
   });
 
   useEffect(() => {
@@ -57,12 +61,15 @@ export default function RootLayout() {
   }, []);
 
   useEffect(() => {
-    if (fontsLoaded || fontError) {
+    // Hide splash once text fonts and icons are both ready (or have errored).
+    if ((textFontsLoaded || textFontError) && iconsLoaded !== false) {
       SplashScreen.hideAsync();
     }
-  }, [fontsLoaded, fontError]);
+  }, [textFontsLoaded, textFontError, iconsLoaded]);
 
-  if (!fontsLoaded && !fontError) return null;
+  // Block render until MaterialIcons are confirmed loaded.
+  // Text fonts use the same guard; if they error we still show the app.
+  if (!iconsLoaded || (!textFontsLoaded && !textFontError)) return null;
 
   return (
     <SafeAreaProvider>
