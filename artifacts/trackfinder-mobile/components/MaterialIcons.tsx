@@ -8,6 +8,7 @@ export type MaterialIconName =
   | 'chevron-left'
   | 'chevron-right'
   | 'close'
+  | 'cloud-download'
   | 'delete'
   | 'dns'
   | 'download-done'
@@ -19,8 +20,10 @@ export type MaterialIconName =
   | 'keyboard-arrow-down'
   | 'library-add-check'
   | 'list'
+  | 'more-vert'
   | 'music-note'
   | 'pause'
+  | 'person'
   | 'play-arrow'
   | 'refresh'
   | 'search'
@@ -31,6 +34,12 @@ export type MaterialIconName =
 const PATHS: Record<MaterialIconName, string> = {
   'check-circle':
     'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z',
+  'cloud-download':
+    'M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z',
+  'more-vert':
+    'M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z',
+  'person':
+    'M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z',
   'download-done':
     'M20 6h-2.18c.07-.31.18-.61.18-.93C18 3.39 16.61 2 14.93 2c-.93 0-1.74.45-2.27 1.12L12 4l-.66-.88C10.81 2.45 10 2 9.07 2 7.39 2 6 3.39 6 5.07c0 .32.11.62.18.93H4c-1.1 0-2 .9-2 2v11c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-5-2.5c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm-6 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm11 15.5H4v-2h16v2zm0-5H4V8h5.08L7 10.83 8.62 12 11 8.76l1-1.36 1 1.36L15.38 12 17 10.83 14.92 8H20v6z',
   'library-add-check':

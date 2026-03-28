@@ -17,13 +17,14 @@ export interface SavedTrack {
   localUri: string;
   savedAt: number;
   fileSize?: number;
+  source?: string;
 }
 
 interface LibraryState {
   tracks: SavedTrack[];
   isDownloading: Record<string, boolean>;
   downloadProgress: Record<string, number>;
-  saveToLibrary: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }) => Promise<void>;
+  saveToLibrary: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; source?: string }) => Promise<void>;
   download: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }) => Promise<void>;
   remove: (id: string) => Promise<void>;
   isSaved: (id: string) => boolean;
@@ -58,7 +59,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const saveToLibrary = useCallback(
-    async (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }) => {
+    async (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; source?: string }) => {
       setTracks((prev) => {
         if (prev.some((t) => t.id === track.id)) return prev;
         const entry: SavedTrack = {
@@ -69,6 +70,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
           duration: track.duration,
           localUri: '',
           savedAt: Date.now(),
+          source: track.source,
         };
         const updated = [entry, ...prev];
         AsyncStorage.setItem(LIBRARY_KEY, JSON.stringify(updated));
@@ -85,8 +87,8 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       setDownloadProgress((p) => ({ ...p, [track.id]: 0 }));
 
       try {
-        const resp = await apiFetch<{ url: string }>(`/tracks/${track.id}/download`);
-        const downloadUrl = resp.url;
+        const resp = await apiFetch<{ downloadUrl: string }>(`/tracks/${track.id}/download`);
+        const downloadUrl = resp.downloadUrl;
 
         const safe = track.title.replace(/[^a-z0-9_\-\s]/gi, '').replace(/\s+/g, '_');
         const filename = `${safe}_${track.id.slice(-6)}.mp3`;

@@ -88,8 +88,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         if (track.localUri) {
           uri = track.localUri;
         } else {
-          const resp = await apiFetch<{ url: string }>(`/tracks/${track.id}/stream`);
-          uri = resp.url;
+          const resp = await apiFetch<{ streamUrl: string }>(`/tracks/${track.id}/stream`);
+          uri = resp.streamUrl;
         }
 
         const { sound } = await Audio.Sound.createAsync(

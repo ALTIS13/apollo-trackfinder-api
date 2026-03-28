@@ -35,7 +35,7 @@ const TAB_BAR = Platform.OS === 'web' ? 84 : 50;
 
 export default function SearchScreen() {
   const insets = useSafeAreaInsets();
-  const params = useLocalSearchParams<{ artist?: string; title?: string }>();
+  const params = useLocalSearchParams<{ artist?: string; title?: string; q?: string }>();
   const { currentTrack } = usePlayer();
 
   const [query, setQuery] = useState('');
@@ -52,6 +52,9 @@ export default function SearchScreen() {
       const q = `${params.artist} — ${params.title}`;
       setQuery(q);
       doSearch(params.artist, params.title);
+    } else if (params.artist && !params.title) {
+      setQuery(params.artist);
+      doSearch(params.artist, '');
     }
   }, [params.artist, params.title]);
 
