@@ -225,6 +225,23 @@ router.get("/tracks/:id/stream", async (req, res) => {
 
   try {
     if (decoded.source === "dz") {
+      const dzArtist = String(req.query["artist"] ?? "").trim();
+      const dzTitle = String(req.query["title"] ?? "").trim();
+
+      if (dzArtist && dzTitle) {
+        try {
+          const ytResults = await searchYouTube(`${dzArtist} ${dzTitle}`, 3);
+          const ytTrack = ytResults.find((r) => r._sourceUrl) ?? ytResults[0];
+          if (ytTrack?._sourceUrl) {
+            const { url, mimeType } = await getStreamUrl(ytTrack._sourceUrl);
+            res.json({ id, streamUrl: url, mimeType: mimeType ?? "audio/mpeg" });
+            return;
+          }
+        } catch (e) {
+          req.log.warn({ e }, "Deezer→YouTube stream fallback failed, using preview");
+        }
+      }
+
       res.json({ id, streamUrl: decoded.url, mimeType: "audio/mpeg" });
       return;
     }

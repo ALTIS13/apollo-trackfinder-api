@@ -94,7 +94,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       if (track.localUri) {
         uri = track.localUri;
       } else {
-        const resp = await apiFetch<{ streamUrl: string }>(`/tracks/${track.id}/stream`);
+        const isDeezer = track.id.startsWith('dz_');
+        const streamParams = isDeezer
+          ? `?artist=${encodeURIComponent(track.artist)}&title=${encodeURIComponent(track.title)}`
+          : '';
+        const resp = await apiFetch<{ streamUrl: string }>(`/tracks/${track.id}/stream${streamParams}`);
         uri = resp.streamUrl;
       }
 

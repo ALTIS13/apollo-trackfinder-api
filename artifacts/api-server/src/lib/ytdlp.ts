@@ -50,8 +50,7 @@ function runYtDlp(args: string[], timeoutMs = 30000): Promise<string> {
 export async function ytdlpSearch(query: string, maxResults = 10): Promise<YtDlpEntry[]> {
   const prefix = `ytsearch${maxResults}:${query}`;
   const output = await runYtDlp(
-    [prefix, "--no-download", "--dump-json", "--no-warnings", "--no-playlist",
-      "--extractor-args", "youtube:player_client=mweb"],
+    [prefix, "--no-download", "--dump-json", "--no-warnings", "--no-playlist"],
     45000,
   );
 
@@ -108,17 +107,17 @@ export async function bcdlpSearch(query: string, maxResults = 10): Promise<YtDlp
   return entries;
 }
 
-const YT_PLAYER_CLIENTS = [
-  "mweb",
-  "tv_embedded",
-  "web",
-  "ios",
-];
-
+/**
+ * Get a playable stream URL for a track.
+ * YouTube now serves audio as HLS (m3u8), so we use "bestaudio*" to accept
+ * HLS audio-only streams. Fallback player clients are tried if the first fails.
+ */
 export async function getStreamUrl(trackUrl: string): Promise<{ url: string; mimeType?: string }> {
   const isYouTube = trackUrl.includes("youtube.com") || trackUrl.includes("youtu.be");
 
-  const clientList = isYouTube ? YT_PLAYER_CLIENTS : [""];
+  // For YouTube: try without player-client override first (default works with HLS),
+  // then try explicit clients as fallback. Non-YouTube sources need no client arg.
+  const clientList = isYouTube ? ["", "tv_embedded", "ios"] : [""];
 
   let lastErr: Error = new Error("Unknown error");
 
@@ -126,9 +125,13 @@ export async function getStreamUrl(trackUrl: string): Promise<{ url: string; mim
     const extraArgs = client
       ? ["--extractor-args", `youtube:player_client=${client}`]
       : [];
+
+    // Use "bestaudio*" so yt-dlp accepts HLS audio-only streams (format 233/234)
+    const formatSelector = isYouTube ? "bestaudio*" : "bestaudio/best";
+
     try {
       const output = await runYtDlp(
-        [trackUrl, "--get-url", "-f", "bestaudio/best", "--no-warnings", ...extraArgs],
+        [trackUrl, "--get-url", "-f", formatSelector, "--no-warnings", ...extraArgs],
         30000,
       );
 
@@ -136,7 +139,7 @@ export async function getStreamUrl(trackUrl: string): Promise<{ url: string; mim
       if (!url) throw new Error("No stream URL returned by yt-dlp");
 
       let mimeType = "audio/webm";
-      if (url.includes(".m3u8") || url.includes("manifest") || url.includes("playlist")) {
+      if (url.includes(".m3u8") || url.includes("manifest") || url.includes("hls_playlist")) {
         mimeType = "application/x-mpegURL";
       } else if (url.includes(".mp4") || url.includes("itag=140")) {
         mimeType = "audio/mp4";
@@ -157,12 +160,12 @@ export async function getStreamUrl(trackUrl: string): Promise<{ url: string; mim
 
 export type AudioQuality = "128" | "192" | "256" | "320" | "flac";
 
+/**
+ * Spawn a yt-dlp process that downloads audio and pipes it to stdout.
+ * NOTE: Do NOT use "--extractor-args youtube:player_client=mweb" — mweb
+ * produces 0 bytes when piping to stdout. The default client works correctly.
+ */
 export function spawnAudioDownload(trackUrl: string, quality: AudioQuality = "256"): ChildProcess {
-  const isYouTube = trackUrl.includes("youtube.com") || trackUrl.includes("youtu.be");
-  const extraArgs = isYouTube
-    ? ["--extractor-args", "youtube:player_client=mweb"]
-    : [];
-
   const isFlac = quality === "flac";
   const formatArgs = isFlac
     ? ["--audio-format", "flac"]
@@ -176,7 +179,6 @@ export function spawnAudioDownload(trackUrl: string, quality: AudioQuality = "25
       ...formatArgs,
       "-o", "-",
       "--no-warnings",
-      ...extraArgs,
     ],
     { env: { ...process.env, PYTHONIOENCODING: "utf-8" } },
   );
