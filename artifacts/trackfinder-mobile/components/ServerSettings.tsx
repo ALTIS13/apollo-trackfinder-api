@@ -192,9 +192,9 @@ export function ServerSettings({ visible, onClose }: Props) {
 
                 <View style={styles.cloudLinks}>
                   {[
-                    { label: 'Railway', url: 'https://railway.app', icon: 'bolt' as const },
-                    { label: 'Render', url: 'https://render.com', icon: 'cloud' as const },
-                    { label: 'Fly.io', url: 'https://fly.io', icon: 'public' as const },
+                    { label: 'Railway', url: 'https://railway.app', icon: 'arrow-upward' as const },
+                    { label: 'Render', url: 'https://render.com', icon: 'arrow-upward' as const },
+                    { label: 'Fly.io', url: 'https://fly.io', icon: 'arrow-upward' as const },
                   ].map((item) => (
                     <Pressable
                       key={item.label}

@@ -1,11 +1,17 @@
 import { MaterialIcons } from '@/components/MaterialIcons';
+import { TrackCard, Track } from '@/components/TrackCard';
+import { ServerSettings } from '@/components/ServerSettings';
+import { COLORS, TrackType } from '@/constants/colors';
+import { usePlayer } from '@/hooks/use-player';
+import { apiFetch } from '@/hooks/use-session';
 import * as Haptics from 'expo-haptics';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useEffect, useRef, useState } from 'react';
+import { useLocalSearchParams } from 'expo-router';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
   KeyboardAvoidingView,
+  ListRenderItemInfo,
   Platform,
   Pressable,
   ScrollView,
@@ -16,22 +22,18 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { ServerSettings } from '@/components/ServerSettings';
-import { TrackCard, Track } from '@/components/TrackCard';
-import { COLORS, TrackType } from '@/constants/colors';
-import { usePlayer } from '@/hooks/use-player';
-import { apiFetch } from '@/hooks/use-session';
-
 const FILTERS: { label: string; value: TrackType | 'all' }[] = [
-  { label: 'All', value: 'all' },
-  { label: 'Original', value: 'original' },
-  { label: 'Remix', value: 'remix' },
-  { label: 'Live', value: 'live' },
-  { label: 'Cover', value: 'cover' },
+  { label: 'Все', value: 'all' },
+  { label: 'Оригинал', value: 'original' },
+  { label: 'Ремикс', value: 'remix' },
+  { label: 'Живое', value: 'live' },
+  { label: 'Кавер', value: 'cover' },
 ];
 
 const PLAYER_HEIGHT = 62;
 const TAB_BAR = Platform.OS === 'web' ? 84 : 50;
+const PAGE_SIZE = 20;
+const LOAD_MORE_SIZE = 40;
 
 export default function SearchScreen() {
   const insets = useSafeAreaInsets();
@@ -42,49 +44,79 @@ export default function SearchScreen() {
   const [results, setResults] = useState<Track[]>([]);
   const [filter, setFilter] = useState<TrackType | 'all'>('all');
   const [isSearching, setIsSearching] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
+  const [canLoadMore, setCanLoadMore] = useState(false);
   const [error, setError] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const inputRef = useRef<TextInput>(null);
+  const lastSearchRef = useRef<{ artist: string; title: string } | null>(null);
 
   useEffect(() => {
     if (params.artist && params.title) {
       const q = `${params.artist} — ${params.title}`;
       setQuery(q);
-      doSearch(params.artist, params.title);
+      doSearch(params.artist, params.title, PAGE_SIZE);
     } else if (params.artist && !params.title) {
       setQuery(params.artist);
-      doSearch(params.artist, '');
+      doSearch(params.artist, '', PAGE_SIZE);
     }
   }, [params.artist, params.title]);
 
-  async function doSearch(artist?: string, title?: string) {
-    const q = (artist && title)
-      ? undefined
-      : query.trim();
-
+  async function doSearch(artist?: string, title?: string, maxResults = PAGE_SIZE) {
     const a = artist ?? query.split('—')[0]?.trim() ?? query.trim();
     const t = title ?? query.split('—')[1]?.trim() ?? '';
 
     if (!a) return;
+    lastSearchRef.current = { artist: a, title: t };
+
     setIsSearching(true);
     setHasSearched(false);
     setError('');
+    setCanLoadMore(false);
 
     try {
       const data = await apiFetch<{ results: Track[] }>('/tracks/search', {
         method: 'POST',
-        body: JSON.stringify({ artist: a, title: t }),
+        body: JSON.stringify({ artist: a, title: t, maxResults }),
       });
-      setResults(data.results ?? []);
+      const fetched = data.results ?? [];
+      setResults(fetched);
       setFilter('all');
+      setCanLoadMore(fetched.length >= maxResults);
     } catch (e: any) {
-      setError(e.message ?? 'Search failed');
+      setError(e.message ?? 'Ошибка поиска');
     } finally {
       setIsSearching(false);
       setHasSearched(true);
     }
   }
+
+  async function loadMore() {
+    if (!lastSearchRef.current || isLoadingMore) return;
+    setIsLoadingMore(true);
+    setCanLoadMore(false);
+    const { artist, title } = lastSearchRef.current;
+    try {
+      const data = await apiFetch<{ results: Track[] }>('/tracks/search', {
+        method: 'POST',
+        body: JSON.stringify({ artist, title, maxResults: LOAD_MORE_SIZE }),
+      });
+      const fetched = data.results ?? [];
+      setResults(fetched);
+      setCanLoadMore(false);
+    } catch {
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }
+
+  const handleFindVariants = useCallback((track: Track) => {
+    const q = `${track.artist} — ${track.title}`;
+    setQuery(q);
+    setFilter('all');
+    doSearch(track.artist, track.title, PAGE_SIZE);
+  }, []);
 
   const filtered = filter === 'all'
     ? results
@@ -92,6 +124,31 @@ export default function SearchScreen() {
 
   const topPad = insets.top + (Platform.OS === 'web' ? 67 : 0);
   const bottomPad = TAB_BAR + (currentTrack ? PLAYER_HEIGHT : 0) + (Platform.OS === 'web' ? 34 : 0);
+
+  const keyExtractor = useCallback((item: Track) => item.id, []);
+
+  const renderItem = useCallback(
+    ({ item }: ListRenderItemInfo<Track>) => (
+      <TrackCard track={item} onFindVariants={handleFindVariants} />
+    ),
+    [handleFindVariants],
+  );
+
+  const ListFooter = useCallback(() => {
+    if (!canLoadMore && !isLoadingMore) return null;
+    return (
+      <View style={styles.loadMoreRow}>
+        {isLoadingMore ? (
+          <ActivityIndicator color={COLORS.accent} />
+        ) : canLoadMore ? (
+          <Pressable style={styles.loadMoreBtn} onPress={loadMore}>
+            <MaterialIcons name="keyboard-arrow-down" size={18} color={COLORS.text} />
+            <Text style={styles.loadMoreText}>Загрузить ещё</Text>
+          </Pressable>
+        ) : null}
+      </View>
+    );
+  }, [canLoadMore, isLoadingMore]);
 
   return (
     <KeyboardAvoidingView
@@ -113,7 +170,7 @@ export default function SearchScreen() {
             <MaterialIcons name="settings" size={18} color={COLORS.textSub} />
           </Pressable>
         </View>
-        <Text style={styles.headerSub}>Find every version of any track</Text>
+        <Text style={styles.headerSub}>Найди все версии любого трека</Text>
       </View>
 
       <View style={styles.searchRow}>
@@ -124,21 +181,21 @@ export default function SearchScreen() {
             style={styles.input}
             value={query}
             onChangeText={setQuery}
-            placeholder="Artist — Song title"
+            placeholder="Артист — Название трека"
             placeholderTextColor={COLORS.textMuted}
             returnKeyType="search"
-            onSubmitEditing={() => doSearch()}
+            onSubmitEditing={() => doSearch(undefined, undefined, PAGE_SIZE)}
             selectionColor={COLORS.accent}
           />
           {query.length > 0 && (
-            <Pressable onPress={() => { setQuery(''); setResults([]); setHasSearched(false); }}>
+            <Pressable onPress={() => { setQuery(''); setResults([]); setHasSearched(false); setCanLoadMore(false); }}>
               <MaterialIcons name="close" size={16} color={COLORS.textMuted} />
             </Pressable>
           )}
         </View>
         <Pressable
-          style={[styles.searchBtn, isSearching && styles.searchBtnDisabled]}
-          onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); doSearch(); }}
+          style={[styles.searchBtn, (isSearching || !query.trim()) && styles.searchBtnDisabled]}
+          onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); doSearch(undefined, undefined, PAGE_SIZE); }}
           disabled={isSearching || !query.trim()}
         >
           {isSearching ? (
@@ -181,41 +238,42 @@ export default function SearchScreen() {
         <View style={styles.centerMsg}>
           <MaterialIcons name="error" size={32} color={COLORS.danger} />
           <Text style={styles.errorText}>{error}</Text>
-          <Pressable style={styles.retryBtn} onPress={() => doSearch()}>
-            <Text style={styles.retryText}>Try again</Text>
+          <Pressable style={styles.retryBtn} onPress={() => doSearch(undefined, undefined, PAGE_SIZE)}>
+            <Text style={styles.retryText}>Попробовать снова</Text>
           </Pressable>
         </View>
       ) : isSearching ? (
         <View style={styles.centerMsg}>
           <ActivityIndicator size="large" color={COLORS.accent} />
-          <Text style={styles.loadingText}>Searching YouTube + SoundCloud...</Text>
-          <Text style={styles.loadingSubText}>First search may take up to 30 sec</Text>
+          <Text style={styles.loadingText}>Ищем на YouTube + SoundCloud...</Text>
+          <Text style={styles.loadingSubText}>Первый поиск может занять до 30 секунд</Text>
         </View>
       ) : hasSearched && filtered.length === 0 ? (
         <View style={styles.centerMsg}>
           <MaterialIcons name="inbox" size={40} color={COLORS.textMuted} />
-          <Text style={styles.emptyTitle}>No results</Text>
-          <Text style={styles.emptyText}>Try a different search or filter</Text>
+          <Text style={styles.emptyTitle}>Ничего не найдено</Text>
+          <Text style={styles.emptyText}>Попробуй другой запрос или фильтр</Text>
         </View>
       ) : !hasSearched ? (
         <View style={styles.centerMsg}>
           <View style={styles.hero}>
             <MaterialIcons name="search" size={48} color={COLORS.textMuted} />
-            <Text style={styles.heroTitle}>Search any track</Text>
+            <Text style={styles.heroTitle}>Найти трек</Text>
             <Text style={styles.heroText}>
-              Enter an artist and song name to find all versions — originals, remixes, live performances, and covers
+              Введи исполнителя и название — найдём все версии: оригинал, ремиксы, живые выступления и каверы
             </Text>
           </View>
         </View>
       ) : (
         <FlatList
           data={filtered}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item }) => <TrackCard track={item} />}
+          keyExtractor={keyExtractor}
+          renderItem={renderItem}
           contentContainerStyle={{ paddingTop: 8, paddingBottom: bottomPad }}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
-          scrollEnabled
+          ListFooterComponent={ListFooter}
+          removeClippedSubviews={Platform.OS !== 'web'}
         />
       )}
     </KeyboardAvoidingView>
@@ -407,5 +465,25 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     textAlign: 'center',
     lineHeight: 20,
+  },
+  loadMoreRow: {
+    paddingVertical: 16,
+    alignItems: 'center',
+  },
+  loadMoreBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  loadMoreText: {
+    fontSize: 14,
+    fontFamily: 'Inter_600SemiBold',
+    color: COLORS.text,
   },
 });

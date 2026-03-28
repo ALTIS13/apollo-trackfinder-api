@@ -59,16 +59,20 @@ router.post("/tracks/search", async (req, res) => {
 
   const { artist, title } = parseResult.data;
   const query = `${artist} ${title}`.trim();
+  const maxResults = Math.min(Math.max(Number((req.body as Record<string, unknown>).maxResults ?? 20), 5), 40);
+  const isExtendedSearch = maxResults > 20;
 
-  const cached = await getCached<Record<string, unknown>>(artist, title);
-  if (cached) {
-    res.json({ query, results: cached, cached: true });
-    return;
+  if (!isExtendedSearch) {
+    const cached = await getCached<Record<string, unknown>>(artist, title);
+    if (cached) {
+      res.json({ query, results: cached, cached: true });
+      return;
+    }
   }
 
   const [ytResults, scResults] = await Promise.allSettled([
-    searchYouTube(query, 10),
-    searchSoundCloud(query, 10),
+    searchYouTube(query, maxResults),
+    searchSoundCloud(query, maxResults),
   ]);
 
   const allResults = [
@@ -94,9 +98,11 @@ router.post("/tracks/search", async (req, res) => {
 
   const apiResults = ranked.map(({ _sourceUrl: _, ...r }) => r);
 
-  await setCached(artist, title, apiResults).catch((err) => {
-    req.log.warn({ err }, "Failed to save to cache");
-  });
+  if (!isExtendedSearch) {
+    await setCached(artist, title, apiResults).catch((err) => {
+      req.log.warn({ err }, "Failed to save to cache");
+    });
+  }
 
   res.json({ query, results: apiResults, cached: false });
 });

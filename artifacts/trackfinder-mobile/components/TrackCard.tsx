@@ -16,6 +16,7 @@ export interface Track {
   thumbnailUrl: string | null;
   source: TrackSource;
   type: TrackType;
+  quality?: string[];
   viewCount?: number;
   score?: number;
 }
@@ -128,10 +129,16 @@ export function TrackCard({ track, onFindVariants }: Props) {
         <Text style={styles.artist} numberOfLines={1}>{track.artist}</Text>
         <View style={styles.meta}>
           <Text style={styles.metaText}>{formatDuration(track.duration)}</Text>
+          {track.quality && track.quality.length > 0 && (
+            <>
+              <Text style={styles.metaDot}>·</Text>
+              <Text style={styles.metaText}>{Math.max(...track.quality.map(Number))} kbps</Text>
+            </>
+          )}
           {!!track.viewCount && (
             <>
               <Text style={styles.metaDot}>·</Text>
-              <Text style={styles.metaText}>{formatViews(track.viewCount)} views</Text>
+              <Text style={styles.metaText}>{formatViews(track.viewCount)} просм.</Text>
             </>
           )}
         </View>
