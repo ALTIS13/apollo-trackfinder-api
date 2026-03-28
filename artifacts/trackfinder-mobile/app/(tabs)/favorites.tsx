@@ -24,6 +24,7 @@ import {
   SpotifyPlaylist,
   SpotifyTrack,
   useSpotifyLiked,
+  useSpotifyLikedAll,
   useSpotifyLogin,
   useSpotifyLogout,
   useSpotifyPlaylists,
@@ -114,6 +115,7 @@ function SpotifySection({ onVariants, onImportAll }: { onVariants: (artist: stri
   const { data: status } = useSpotifyStatus();
   const login = useSpotifyLogin();
   const logout = useSpotifyLogout();
+  const likedAll = useSpotifyLikedAll();
   const [tab, setTab] = useState<SpotifyTab>('liked');
   const [selectedPlaylist, setSelectedPlaylist] = useState<SpotifyPlaylist | null>(null);
   const [likedPage, setLikedPage] = useState(0);
@@ -170,14 +172,26 @@ function SpotifySection({ onVariants, onImportAll }: { onVariants: (artist: stri
         {tracks.length > 0 && onImportAll && (
           <View style={styles.importAllRow}>
             <Pressable
-              style={styles.importAllBtn}
-              onPress={() => {
+              style={[styles.importAllBtn, likedAll.isPending && { opacity: 0.6 }]}
+              disabled={likedAll.isPending}
+              onPress={async () => {
                 Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                onImportAll(tracks.map(t => ({ artist: t.artist, title: t.title, thumbnailUrl: t.thumbnailUrl })));
+                try {
+                  const result = await likedAll.mutateAsync();
+                  onImportAll(result.tracks.map(t => ({ artist: t.artist, title: t.title, thumbnailUrl: t.thumbnailUrl })));
+                } catch {
+                  onImportAll(tracks.map(t => ({ artist: t.artist, title: t.title, thumbnailUrl: t.thumbnailUrl })));
+                }
               }}
             >
-              <MaterialIcons name="file-download" size={14} color={COLORS.accent} />
-              <Text style={styles.importAllText}>Import all {tracks.length} tracks</Text>
+              {likedAll.isPending ? (
+                <ActivityIndicator size="small" color={COLORS.accent} style={{ marginRight: 6 }} />
+              ) : (
+                <MaterialIcons name="file-download" size={14} color={COLORS.accent} />
+              )}
+              <Text style={styles.importAllText}>
+                {likedAll.isPending ? 'Fetching all tracks…' : `Import all ${likedQuery.data?.total ?? tracks.length} tracks`}
+              </Text>
             </Pressable>
           </View>
         )}

@@ -269,7 +269,33 @@ router.get("/spotify/liked", async (req, res) => {
   );
   if (!data) { res.status(502).json({ error: "spotify_error" }); return; }
 
-  res.json({ tracks: data.items.map((i) => mapTrack(i.track)), total: data.total, offset, limit });
+  const tracks = data.items.map((i) => mapTrack(i.track));
+  res.json({ tracks, total: data.total, offset, limit, hasMore: offset + tracks.length < data.total });
+});
+
+router.get("/spotify/liked-all", async (req, res) => {
+  const sessionId = getSessionId(req);
+  if (!sessionId) { res.status(401).json({ error: "not_connected" }); return; }
+  const tokens = await refreshIfExpired(sessionId);
+  if (!tokens) { res.status(401).json({ error: "not_connected" }); return; }
+
+  const allTracks: ReturnType<typeof mapTrack>[] = [];
+  const pageSize = 50;
+  let offset = 0;
+  let total = Infinity;
+
+  while (offset < total && allTracks.length < 500) {
+    const data = await spotifyGet<{ items: { track: SpotifyTrack }[]; total: number }>(
+      tokens.accessToken, "/me/tracks", { limit: String(pageSize), offset: String(offset) }
+    );
+    if (!data) break;
+    total = data.total;
+    allTracks.push(...data.items.map((i) => mapTrack(i.track)));
+    offset += pageSize;
+    if (data.items.length < pageSize) break;
+  }
+
+  res.json({ tracks: allTracks, total: allTracks.length });
 });
 
 router.get("/spotify/playlists", async (req, res) => {

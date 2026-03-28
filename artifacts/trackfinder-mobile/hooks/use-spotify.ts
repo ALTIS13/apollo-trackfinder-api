@@ -90,6 +90,13 @@ export function useSpotifyPlaylistTracks(id: string | null, page = 0, limit = 20
   });
 }
 
+export function useSpotifyLikedAll() {
+  return useMutation({
+    mutationFn: () =>
+      apiFetch<{ tracks: SpotifyTrack[]; total: number }>('/spotify/liked-all'),
+  });
+}
+
 export function useSpotifyTopTracks() {
   return useQuery({
     queryKey: ['spotify', 'top-tracks'],

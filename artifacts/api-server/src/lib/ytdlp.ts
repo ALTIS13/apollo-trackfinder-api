@@ -50,7 +50,8 @@ function runYtDlp(args: string[], timeoutMs = 30000): Promise<string> {
 export async function ytdlpSearch(query: string, maxResults = 10): Promise<YtDlpEntry[]> {
   const prefix = `ytsearch${maxResults}:${query}`;
   const output = await runYtDlp(
-    [prefix, "--no-download", "--dump-json", "--no-warnings", "--no-playlist"],
+    [prefix, "--no-download", "--dump-json", "--no-warnings", "--no-playlist",
+      "--extractor-args", "youtube:player_client=mweb"],
     45000,
   );
 
@@ -88,8 +89,10 @@ export async function scdlpSearch(query: string, maxResults = 10): Promise<YtDlp
 }
 
 export async function getStreamUrl(trackUrl: string): Promise<{ url: string; mimeType?: string }> {
+  const isYouTube = trackUrl.includes("youtube.com") || trackUrl.includes("youtu.be");
+  const ytArgs = isYouTube ? ["--extractor-args", "youtube:player_client=mweb"] : [];
   const output = await runYtDlp(
-    [trackUrl, "--get-url", "-f", "bestaudio/best", "--no-warnings"],
+    [trackUrl, "--get-url", "-f", "bestaudio/best", "--no-warnings", ...ytArgs],
     30000,
   );
 
