@@ -281,41 +281,52 @@ router.get("/tracks/:id/download", async (req, res) => {
     if (decoded.source === "dz") {
       const dzArtist = String(req.query["artist"] ?? "").trim();
       const dzTitle = String(req.query["title"] ?? "").trim();
+      const query = `${dzArtist} ${dzTitle}`.trim();
 
-      if (dzArtist && dzTitle) {
+      const pipeFallback = (sourceUrl: string, label: string) => {
+        req.log.info({ id, artist: dzArtist, title: dzTitle }, `Deezer→${label} download fallback`);
+        res.setHeader("Content-Type", mimeType);
+        const proc = spawnAudioDownload(sourceUrl, quality);
+        proc.stdout.pipe(res);
+        proc.stderr.on("data", () => {});
+        req.on("close", () => proc.kill("SIGKILL"));
+        proc.on("close", (code) => { if (code !== 0 && !res.writableEnded) res.destroy(); });
+        proc.on("error", (err) => {
+          req.log.error({ err }, `yt-dlp error during deezer ${label} fallback`);
+          if (!res.headersSent) res.status(500).json({ error: "download_error" });
+          else res.destroy();
+        });
+      };
+
+      if (query) {
+        // Try YouTube first
         try {
-          const ytResults = await searchYouTube(`${dzArtist} ${dzTitle}`, 3);
+          const ytResults = await searchYouTube(query, 3);
           const ytTrack = ytResults.find((r) => r._sourceUrl) ?? ytResults[0];
           if (ytTrack?._sourceUrl) {
-            req.log.info({ id, artist: dzArtist, title: dzTitle }, "Deezer→YouTube download fallback");
-            res.setHeader("Content-Type", mimeType);
-            const proc = spawnAudioDownload(ytTrack._sourceUrl, quality);
-            proc.stdout.pipe(res);
-            proc.stderr.on("data", () => {});
-            req.on("close", () => proc.kill("SIGKILL"));
-            proc.on("close", (code) => { if (code !== 0 && !res.writableEnded) res.destroy(); });
-            proc.on("error", (err) => {
-              req.log.error({ err }, "yt-dlp error during deezer fallback");
-              if (!res.headersSent) res.status(500).json({ error: "download_error" });
-              else res.destroy();
-            });
+            pipeFallback(ytTrack._sourceUrl, "YouTube");
             return;
           }
         } catch (e) {
-          req.log.warn({ e }, "Deezer→YouTube fallback failed, falling through to preview");
+          req.log.warn({ e }, "Deezer→YouTube fallback failed, trying SoundCloud");
+        }
+
+        // Try SoundCloud as secondary fallback
+        try {
+          const scResults = await searchSoundCloud(query, 3);
+          const scTrack = scResults.find((r) => r._sourceUrl) ?? scResults[0];
+          if (scTrack?._sourceUrl) {
+            pipeFallback(scTrack._sourceUrl, "SoundCloud");
+            return;
+          }
+        } catch (e) {
+          req.log.warn({ e }, "Deezer→SoundCloud fallback also failed");
         }
       }
 
-      res.setHeader("Content-Type", "audio/mpeg");
-      const upstream = await fetch(decoded.url, { signal: AbortSignal.timeout(30000) });
-      if (!upstream.ok) {
-        res.status(502).json({ error: "download_error", message: "Preview unavailable" });
-        return;
-      }
-      const reader = upstream.body;
-      if (!reader) { res.status(502).end(); return; }
-      const { Readable } = await import("stream");
-      Readable.fromWeb(reader as import("stream/web").ReadableStream).pipe(res);
+      // All fallbacks exhausted — return a clear error so the mobile doesn't
+      // save a 0-byte or expired-CDN file as a valid download.
+      res.status(502).json({ error: "download_error", message: "Could not find a downloadable source for this track" });
       return;
     }
 
@@ -383,10 +394,12 @@ router.get("/tracks/:id/audio-stream", async (req, res) => {
     if (decoded.source === "dz") {
       const dzArtist = String(req.query["artist"] ?? "").trim();
       const dzTitle = String(req.query["title"] ?? "").trim();
+      const query = `${dzArtist} ${dzTitle}`.trim();
 
-      if (dzArtist && dzTitle) {
+      if (query) {
+        // Try YouTube first
         try {
-          const ytResults = await searchYouTube(`${dzArtist} ${dzTitle}`, 3);
+          const ytResults = await searchYouTube(query, 3);
           const ytTrack = ytResults.find((r) => r._sourceUrl) ?? ytResults[0];
           if (ytTrack?._sourceUrl) {
             req.log.info({ id, artist: dzArtist, title: dzTitle }, "Deezer→YouTube audio-stream fallback");
@@ -394,17 +407,24 @@ router.get("/tracks/:id/audio-stream", async (req, res) => {
             return;
           }
         } catch (e) {
-          req.log.warn({ e }, "Deezer→YouTube audio-stream fallback failed, using preview");
+          req.log.warn({ e }, "Deezer→YouTube audio-stream fallback failed, trying SoundCloud");
+        }
+
+        // Try SoundCloud as secondary fallback
+        try {
+          const scResults = await searchSoundCloud(query, 3);
+          const scTrack = scResults.find((r) => r._sourceUrl) ?? scResults[0];
+          if (scTrack?._sourceUrl) {
+            req.log.info({ id, artist: dzArtist, title: dzTitle }, "Deezer→SoundCloud audio-stream fallback");
+            pipeProc(scTrack._sourceUrl);
+            return;
+          }
+        } catch (e) {
+          req.log.warn({ e }, "Deezer→SoundCloud audio-stream fallback also failed");
         }
       }
 
-      const upstream = await fetch(decoded.url, { signal: AbortSignal.timeout(30000) });
-      if (!upstream.ok || !upstream.body) {
-        res.status(502).json({ error: "stream_error", message: "Preview unavailable" });
-        return;
-      }
-      const { Readable } = await import("stream");
-      Readable.fromWeb(upstream.body as import("stream/web").ReadableStream).pipe(res);
+      res.status(502).json({ error: "stream_error", message: "Could not find a streamable source for this track" });
       return;
     }
 

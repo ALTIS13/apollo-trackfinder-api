@@ -1,4 +1,5 @@
 import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system/legacy';
 import React, {
   createContext,
   useCallback,
@@ -92,8 +93,17 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       if (reqId !== reqIdRef.current) return;
 
       let uri: string;
-      if (track.localUri) {
-        uri = track.localUri;
+      // If a local file exists, make sure it's non-empty before using it.
+      // A 0-byte file (from a failed download) causes ExoPlayer to throw
+      // "None of the available extractors could read the stream".
+      const localUriValid = track.localUri
+        ? await FileSystem.getInfoAsync(track.localUri)
+            .then((info) => info.exists && ((info as { size?: number }).size ?? 0) > 0)
+            .catch(() => false)
+        : false;
+
+      if (localUriValid) {
+        uri = track.localUri!;
       } else {
         // Use the server-side audio-stream proxy so the mobile never touches
         // IP-bound YouTube HLS URLs directly.

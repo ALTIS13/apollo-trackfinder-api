@@ -133,6 +133,10 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
 
         const result = await downloadResumable.downloadAsync();
         if (!result) throw new Error('Download returned null');
+        if (result.status && result.status >= 400) {
+          await FileSystem.deleteAsync(result.uri, { idempotent: true }).catch(() => {});
+          throw new Error(`Server returned HTTP ${result.status}`);
+        }
 
         const granted = await tryGrantMediaPermission();
         if (granted) {
@@ -141,6 +145,13 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
 
         const info = await FileSystem.getInfoAsync(result.uri);
         const fileSize = info.exists ? (info as { size?: number }).size : undefined;
+
+        // Reject 0-byte files — these come from failed Deezer CDN downloads
+        // or yt-dlp errors. Don't save a broken localUri into the library.
+        if (!fileSize || fileSize < 1024) {
+          await FileSystem.deleteAsync(result.uri, { idempotent: true }).catch(() => {});
+          throw new Error(`Download produced an empty or corrupt file (${fileSize ?? 0} bytes)`);
+        }
 
         setTracks((prev) => {
           const existing = prev.find((t) => t.id === track.id);
