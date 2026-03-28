@@ -4,16 +4,16 @@ import {
   Inter_600SemiBold,
   Inter_700Bold,
 } from '@expo-google-fonts/inter';
-import { useFonts } from 'expo-font';
-
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { setBaseUrl } from '@workspace/api-client-react';
+import * as Font from 'expo-font';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { setBaseUrl } from '@workspace/api-client-react';
 
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { LibraryProvider } from '@/hooks/use-library';
@@ -30,6 +30,16 @@ const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 60_000 } },
 });
 
+// MaterialIcons.ttf is checked into assets/fonts/ — same file as the one
+// bundled by @expo/vector-icons@15, verified byte-for-byte.
+// Using a LOCAL require() path means:
+//   • No pnpm symlink traversal at Metro bundle time or EAS build time
+//   • expo-font plugin (app.json) embeds the TTF as a native Android asset
+//   • Font.loadAsync registers it under "MaterialIcons" before any icon renders
+const MATERIAL_ICONS_FONT = {
+  MaterialIcons: require('../assets/fonts/MaterialIcons.ttf'),
+} as const;
+
 function RootLayoutNav() {
   return (
     <Stack screenOptions={{ headerShown: false }}>
@@ -39,37 +49,44 @@ function RootLayoutNav() {
 }
 
 export default function RootLayout() {
-  // Load MaterialIcons explicitly before any icon component renders.
-  // On Android with pnpm, Metro cannot follow the virtual-store symlinks to
-  // resolve @expo/vector-icons' bundled font. We point Metro at the package
-  // path directly; metro.config.js has unstable_enableSymlinks:true so this
-  // resolves correctly. The local assets/fonts/MaterialIcons.ttf is kept as
-  // a fallback reference (same bytes, same version as @expo/vector-icons@15).
-  const [iconsLoaded] = useFonts({
-    MaterialIcons: require('@expo/vector-icons/build/vendor/react-native-vector-icons/Fonts/MaterialIcons.ttf'),
-  });
-
-  const [textFontsLoaded, textFontError] = useFonts({
-    Inter_400Regular,
-    Inter_500Medium,
-    Inter_600SemiBold,
-    Inter_700Bold,
-  });
+  const [iconsReady, setIconsReady] = useState(false);
+  const [textFontsReady, setTextFontsReady] = useState(false);
 
   useEffect(() => {
     initSession();
   }, []);
 
+  // Load MaterialIcons via Font.loadAsync — explicit, no hook magic.
+  // Must complete before any <MaterialIcons> component can render.
   useEffect(() => {
-    // Hide splash once text fonts and icons are both ready (or have errored).
-    if ((textFontsLoaded || textFontError) && iconsLoaded !== false) {
+    Font.loadAsync(MATERIAL_ICONS_FONT)
+      .then(() => setIconsReady(true))
+      .catch(() => {
+        // If already loaded (e.g. Expo Go pre-bundles it), that's fine too.
+        setIconsReady(true);
+      });
+  }, []);
+
+  // Load Inter text fonts separately so an Inter failure never blocks icons.
+  useEffect(() => {
+    Font.loadAsync({
+      Inter_400Regular,
+      Inter_500Medium,
+      Inter_600SemiBold,
+      Inter_700Bold,
+    })
+      .then(() => setTextFontsReady(true))
+      .catch(() => setTextFontsReady(true)); // fall through — app still usable
+  }, []);
+
+  useEffect(() => {
+    if (iconsReady && textFontsReady) {
       SplashScreen.hideAsync();
     }
-  }, [textFontsLoaded, textFontError, iconsLoaded]);
+  }, [iconsReady, textFontsReady]);
 
-  // Block render until MaterialIcons are confirmed loaded.
-  // Text fonts use the same guard; if they error we still show the app.
-  if (!iconsLoaded || (!textFontsLoaded && !textFontError)) return null;
+  // Hard-block until MaterialIcons are loaded — icons must never render without the font.
+  if (!iconsReady || !textFontsReady) return null;
 
   return (
     <SafeAreaProvider>
