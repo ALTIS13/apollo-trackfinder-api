@@ -25,6 +25,102 @@ import {
   setApiUrl,
   testServerConnection,
 } from '@/hooks/use-session';
+import { type DownloadQuality, useDownloadQuality } from '@/hooks/use-settings';
+
+const QUALITY_OPTIONS: { value: DownloadQuality; label: string; desc: string }[] = [
+  { value: '128', label: '128 kbps', desc: 'Эконом' },
+  { value: '192', label: '192 kbps', desc: 'Стандарт' },
+  { value: '256', label: '256 kbps', desc: 'Высокое' },
+  { value: '320', label: '320 kbps', desc: 'Максимум' },
+  { value: 'flac', label: 'FLAC', desc: 'Без потерь' },
+];
+
+function QualitySelector() {
+  const { quality, changeQuality } = useDownloadQuality();
+
+  return (
+    <>
+      <Text style={qualStyles.title}>Качество загрузки</Text>
+      <Text style={qualStyles.desc}>
+        Применяется при скачивании треков. FLAC — без потерь, самый большой размер файла.
+      </Text>
+      <View style={qualStyles.chips}>
+        {QUALITY_OPTIONS.map((opt) => {
+          const active = quality === opt.value;
+          return (
+            <Pressable
+              key={opt.value}
+              style={[qualStyles.chip, active && qualStyles.chipActive]}
+              onPress={() => changeQuality(opt.value)}
+            >
+              <Text style={[qualStyles.chipLabel, active && qualStyles.chipLabelActive]}>
+                {opt.label}
+              </Text>
+              <Text style={[qualStyles.chipDesc, active && qualStyles.chipDescActive]}>
+                {opt.desc}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    </>
+  );
+}
+
+const qualStyles = StyleSheet.create({
+  title: {
+    fontSize: 12,
+    fontFamily: 'Inter_600SemiBold',
+    color: COLORS.textSub,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: 6,
+  },
+  desc: {
+    fontSize: 13,
+    fontFamily: 'Inter_400Regular',
+    color: COLORS.textMuted,
+    lineHeight: 19,
+    marginBottom: 12,
+  },
+  chips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 4,
+  },
+  chip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.card,
+    alignItems: 'center',
+    minWidth: 70,
+  },
+  chipActive: {
+    borderColor: COLORS.accent,
+    backgroundColor: COLORS.accentDim ?? COLORS.card,
+  },
+  chipLabel: {
+    fontSize: 12,
+    fontFamily: 'Inter_600SemiBold',
+    color: COLORS.textSub,
+  },
+  chipLabelActive: {
+    color: COLORS.accent,
+  },
+  chipDesc: {
+    fontSize: 10,
+    fontFamily: 'Inter_400Regular',
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  chipDescActive: {
+    color: COLORS.accent,
+  },
+});
 
 interface Props {
   visible: boolean;
@@ -172,6 +268,10 @@ export function ServerSettings({ visible, onClose }: Props) {
                   <MaterialIcons name="refresh" size={13} color={COLORS.textMuted} />
                   <Text style={styles.resetText}>Reset to Replit default</Text>
                 </Pressable>
+
+                <View style={styles.divider} />
+
+                <QualitySelector />
 
                 <View style={styles.divider} />
 

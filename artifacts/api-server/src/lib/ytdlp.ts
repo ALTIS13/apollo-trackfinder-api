@@ -88,6 +88,26 @@ export async function scdlpSearch(query: string, maxResults = 10): Promise<YtDlp
   return entries;
 }
 
+export async function bcdlpSearch(query: string, maxResults = 10): Promise<YtDlpEntry[]> {
+  const prefix = `bcsearch${maxResults}:${query}`;
+  const output = await runYtDlp(
+    [prefix, "--no-download", "--dump-json", "--no-warnings", "--no-playlist"],
+    45000,
+  );
+
+  const entries: YtDlpEntry[] = [];
+  for (const line of output.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      entries.push(JSON.parse(trimmed) as YtDlpEntry);
+    } catch {
+      // skip malformed lines
+    }
+  }
+  return entries;
+}
+
 const YT_PLAYER_CLIENTS = [
   "mweb",
   "tv_embedded",
@@ -135,19 +155,25 @@ export async function getStreamUrl(trackUrl: string): Promise<{ url: string; mim
   throw lastErr;
 }
 
-export function spawnAudioDownload(trackUrl: string): ChildProcess {
+export type AudioQuality = "128" | "192" | "256" | "320" | "flac";
+
+export function spawnAudioDownload(trackUrl: string, quality: AudioQuality = "256"): ChildProcess {
   const isYouTube = trackUrl.includes("youtube.com") || trackUrl.includes("youtu.be");
   const extraArgs = isYouTube
     ? ["--extractor-args", "youtube:player_client=mweb"]
     : [];
+
+  const isFlac = quality === "flac";
+  const formatArgs = isFlac
+    ? ["--audio-format", "flac"]
+    : ["--audio-format", "mp3", "--audio-quality", `${quality}K`];
 
   return spawn(
     "yt-dlp",
     [
       trackUrl,
       "-x",
-      "--audio-format", "mp3",
-      "--audio-quality", "5",
+      ...formatArgs,
       "-o", "-",
       "--no-warnings",
       ...extraArgs,

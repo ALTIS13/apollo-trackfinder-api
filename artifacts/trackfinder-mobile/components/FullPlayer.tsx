@@ -1,11 +1,12 @@
 import { MaterialIcons } from '@/components/MaterialIcons';
 import { Image } from 'expo-image';
-import React, { useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Dimensions,
   Modal,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -14,6 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { COLORS, SOURCE_COLORS, TYPE_COLORS } from '@/constants/colors';
 import { usePlayer } from '@/hooks/use-player';
+import { apiFetch } from '@/hooks/use-session';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const ARTWORK_SIZE = SCREEN_W - 80;
@@ -22,6 +24,25 @@ function fmt(s: number): string {
   const m = Math.floor(s / 60);
   const sec = Math.floor(s % 60);
   return `${m}:${sec.toString().padStart(2, '0')}`;
+}
+
+interface LyricsData {
+  plainLyrics: string | null;
+  syncedLyrics: string | null;
+}
+
+function parseSyncedLyrics(lrc: string): { time: number; text: string }[] {
+  const lines: { time: number; text: string }[] = [];
+  for (const line of lrc.split('\n')) {
+    const match = line.match(/^\[(\d+):(\d+\.\d+)\](.*)/);
+    if (match) {
+      const mins = Number(match[1]);
+      const secs = Number(match[2]);
+      const text = match[3]?.trim() ?? '';
+      lines.push({ time: mins * 60 + secs, text });
+    }
+  }
+  return lines;
 }
 
 export function FullPlayer() {
@@ -42,6 +63,56 @@ export function FullPlayer() {
 
   const seekBarRef = useRef<View>(null);
   const touchStartY = useRef(0);
+  const lyricsScrollRef = useRef<ScrollView>(null);
+
+  const [activeTab, setActiveTab] = useState<'artwork' | 'lyrics'>('artwork');
+  const [lyrics, setLyrics] = useState<LyricsData | null>(null);
+  const [lyricsLoading, setLyricsLoading] = useState(false);
+  const [lyricsTrackId, setLyricsTrackId] = useState<string | null>(null);
+
+  const fetchLyrics = useCallback(async (track: typeof currentTrack) => {
+    if (!track) return;
+    if (lyricsTrackId === track.id && lyrics !== null) return;
+    setLyricsLoading(true);
+    try {
+      const params = new URLSearchParams({
+        artist: track.artist,
+        title: track.title,
+      });
+      if (track.duration) params.set('duration', String(Math.round(track.duration)));
+      const data = await apiFetch<LyricsData>(`/tracks/lyrics?${params}`);
+      setLyrics(data);
+      setLyricsTrackId(track.id);
+    } catch {
+      setLyrics({ plainLyrics: null, syncedLyrics: null });
+    } finally {
+      setLyricsLoading(false);
+    }
+  }, [lyricsTrackId, lyrics]);
+
+  useEffect(() => {
+    if (activeTab === 'lyrics' && currentTrack) {
+      fetchLyrics(currentTrack);
+    }
+  }, [activeTab, currentTrack?.id]);
+
+  useEffect(() => {
+    if (currentTrack?.id !== lyricsTrackId) {
+      setLyrics(null);
+      setLyricsTrackId(null);
+    }
+  }, [currentTrack?.id]);
+
+  const syncedLines = lyrics?.syncedLyrics ? parseSyncedLyrics(lyrics.syncedLyrics) : null;
+  const activeLyricIndex = syncedLines
+    ? syncedLines.findLastIndex((l) => l.time <= position)
+    : -1;
+
+  useEffect(() => {
+    if (syncedLines && activeLyricIndex >= 0 && lyricsScrollRef.current) {
+      lyricsScrollRef.current.scrollTo({ y: activeLyricIndex * 36, animated: true });
+    }
+  }, [activeLyricIndex]);
 
   const handlePlayPause = async () => {
     if (isPlaying) await pause();
@@ -72,6 +143,10 @@ export function FullPlayer() {
 
   if (!showFullPlayer || !currentTrack) return null;
 
+  const lyricsText = syncedLines
+    ? syncedLines.map((l) => l.text).filter(Boolean)
+    : (lyrics?.plainLyrics?.split('\n') ?? []);
+
   return (
     <Modal
       visible={showFullPlayer}
@@ -84,7 +159,7 @@ export function FullPlayer() {
         onTouchStart={(e) => { touchStartY.current = e.nativeEvent.pageY; }}
         onTouchEnd={(e) => {
           const delta = e.nativeEvent.pageY - touchStartY.current;
-          if (delta > 80) closeFullPlayer();
+          if (delta > 80 && activeTab === 'artwork') closeFullPlayer();
         }}
       >
         <View style={styles.handle} />
@@ -93,41 +168,105 @@ export function FullPlayer() {
           <Pressable style={styles.closeBtn} onPress={closeFullPlayer} hitSlop={12}>
             <MaterialIcons name="keyboard-arrow-down" size={28} color={COLORS.textSub} />
           </Pressable>
-          <Text style={styles.headerTitle}>Now Playing</Text>
+          <View style={styles.tabs}>
+            <Pressable
+              style={[styles.tab, activeTab === 'artwork' && styles.tabActive]}
+              onPress={() => setActiveTab('artwork')}
+            >
+              <Text style={[styles.tabText, activeTab === 'artwork' && styles.tabTextActive]}>Обложка</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.tab, activeTab === 'lyrics' && styles.tabActive]}
+              onPress={() => { setActiveTab('lyrics'); fetchLyrics(currentTrack); }}
+            >
+              <Text style={[styles.tabText, activeTab === 'lyrics' && styles.tabTextActive]}>Текст</Text>
+            </Pressable>
+          </View>
           <View style={{ width: 44 }} />
         </View>
 
-        <View style={styles.artworkWrap}>
-          {currentTrack.thumbnailUrl ? (
-            <Image
-              source={{ uri: currentTrack.thumbnailUrl }}
-              style={styles.artwork}
-              contentFit="cover"
-            />
-          ) : (
-            <View style={[styles.artwork, styles.artworkPlaceholder]}>
-              <MaterialIcons name="music-note" size={80} color={COLORS.textMuted} />
+        {activeTab === 'artwork' ? (
+          <>
+            <View style={styles.artworkWrap}>
+              {currentTrack.thumbnailUrl ? (
+                <Image
+                  source={{ uri: currentTrack.thumbnailUrl }}
+                  style={styles.artwork}
+                  contentFit="cover"
+                />
+              ) : (
+                <View style={[styles.artwork, styles.artworkPlaceholder]}>
+                  <MaterialIcons name="music-note" size={80} color={COLORS.textMuted} />
+                </View>
+              )}
             </View>
-          )}
-        </View>
 
-        <View style={styles.badges}>
-          {srcInfo && (
-            <View style={[styles.badge, { backgroundColor: srcInfo.bg }]}>
-              <Text style={[styles.badgeText, { color: srcInfo.text }]}>{srcInfo.label}</Text>
+            <View style={styles.badges}>
+              {srcInfo && (
+                <View style={[styles.badge, { backgroundColor: srcInfo.bg }]}>
+                  <Text style={[styles.badgeText, { color: srcInfo.text }]}>{srcInfo.label}</Text>
+                </View>
+              )}
+              {typeInfo && (
+                <View style={[styles.badge, { backgroundColor: typeInfo.bg }]}>
+                  <Text style={[styles.badgeText, { color: typeInfo.text }]}>{typeInfo.label}</Text>
+                </View>
+              )}
             </View>
-          )}
-          {typeInfo && (
-            <View style={[styles.badge, { backgroundColor: typeInfo.bg }]}>
-              <Text style={[styles.badgeText, { color: typeInfo.text }]}>{typeInfo.label}</Text>
-            </View>
-          )}
-        </View>
 
-        <View style={styles.info}>
-          <Text style={styles.title} numberOfLines={2}>{currentTrack.title}</Text>
-          <Text style={styles.artist} numberOfLines={1}>{currentTrack.artist}</Text>
-        </View>
+            <View style={styles.info}>
+              <Text style={styles.title} numberOfLines={2}>{currentTrack.title}</Text>
+              <Text style={styles.artist} numberOfLines={1}>{currentTrack.artist}</Text>
+            </View>
+          </>
+        ) : (
+          <View style={styles.lyricsContainer}>
+            {lyricsLoading ? (
+              <View style={styles.lyricsCenter}>
+                <ActivityIndicator color={COLORS.accent} />
+                <Text style={styles.lyricsHint}>Ищем текст песни...</Text>
+              </View>
+            ) : !lyrics?.plainLyrics && !lyrics?.syncedLyrics ? (
+              <View style={styles.lyricsCenter}>
+                <MaterialIcons name="music-note" size={40} color={COLORS.textMuted} />
+                <Text style={styles.lyricsNotFound}>Текст не найден</Text>
+                <Text style={styles.lyricsHint}>Для этого трека текст в базе недоступен</Text>
+              </View>
+            ) : (
+              <ScrollView
+                ref={lyricsScrollRef}
+                style={styles.lyricsScroll}
+                contentContainerStyle={styles.lyricsScrollContent}
+                showsVerticalScrollIndicator={false}
+              >
+                <Text style={styles.lyricsMeta}>{currentTrack.artist} — {currentTrack.title}</Text>
+                {syncedLines ? (
+                  syncedLines.map((line, i) => (
+                    <Text
+                      key={i}
+                      style={[
+                        styles.lyricLine,
+                        i === activeLyricIndex && styles.lyricLineActive,
+                        !line.text && styles.lyricLineEmpty,
+                      ]}
+                    >
+                      {line.text || '·'}
+                    </Text>
+                  ))
+                ) : (
+                  lyricsText.map((line, i) => (
+                    <Text
+                      key={i}
+                      style={[styles.lyricLine, !line && styles.lyricLineEmpty]}
+                    >
+                      {line || '·'}
+                    </Text>
+                  ))
+                )}
+              </ScrollView>
+            )}
+          </View>
+        )}
 
         <View style={styles.seekSection}>
           <View
@@ -189,7 +328,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     width: '100%',
-    marginBottom: 32,
+    marginBottom: 24,
   },
   closeBtn: {
     width: 44,
@@ -197,12 +336,29 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  headerTitle: {
-    fontSize: 14,
+  tabs: {
+    flexDirection: 'row',
+    backgroundColor: COLORS.card,
+    borderRadius: 10,
+    padding: 3,
+    gap: 2,
+  },
+  tab: {
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  tabActive: {
+    backgroundColor: COLORS.bg,
+  },
+  tabText: {
+    fontSize: 13,
+    fontFamily: 'Inter_500Medium',
+    color: COLORS.textMuted,
+  },
+  tabTextActive: {
+    color: COLORS.text,
     fontFamily: 'Inter_600SemiBold',
-    color: COLORS.textSub,
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
   },
   artworkWrap: {
     shadowColor: '#000',
@@ -210,7 +366,7 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.4,
     shadowRadius: 20,
     elevation: 12,
-    marginBottom: 32,
+    marginBottom: 24,
   },
   artwork: {
     width: ARTWORK_SIZE,
@@ -241,9 +397,11 @@ const styles = StyleSheet.create({
   info: {
     alignItems: 'center',
     gap: 4,
-    marginBottom: 28,
+    marginBottom: 20,
     paddingHorizontal: 8,
     width: '100%',
+    flex: 1,
+    justifyContent: 'center',
   },
   title: {
     fontSize: 20,
@@ -258,9 +416,61 @@ const styles = StyleSheet.create({
     color: COLORS.textSub,
     textAlign: 'center',
   },
+  lyricsContainer: {
+    flex: 1,
+    width: '100%',
+    marginBottom: 4,
+  },
+  lyricsCenter: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  lyricsNotFound: {
+    fontSize: 17,
+    fontFamily: 'Inter_600SemiBold',
+    color: COLORS.textSub,
+  },
+  lyricsHint: {
+    fontSize: 13,
+    fontFamily: 'Inter_400Regular',
+    color: COLORS.textMuted,
+    textAlign: 'center',
+  },
+  lyricsScroll: {
+    flex: 1,
+  },
+  lyricsScrollContent: {
+    paddingBottom: 16,
+  },
+  lyricsMeta: {
+    fontSize: 12,
+    fontFamily: 'Inter_400Regular',
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  lyricLine: {
+    fontSize: 16,
+    fontFamily: 'Inter_400Regular',
+    color: COLORS.textSub,
+    textAlign: 'center',
+    lineHeight: 36,
+    paddingHorizontal: 4,
+  },
+  lyricLineActive: {
+    color: COLORS.text,
+    fontFamily: 'Inter_700Bold',
+    fontSize: 18,
+  },
+  lyricLineEmpty: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+  },
   seekSection: {
     width: '100%',
-    marginBottom: 32,
+    marginBottom: 24,
   },
   seekBarTrack: {
     height: 4,

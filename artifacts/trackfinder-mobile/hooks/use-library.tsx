@@ -5,6 +5,7 @@ import React, { createContext, useCallback, useContext, useEffect, useState } fr
 import { Platform } from 'react-native';
 
 import { getApiBase, getSessionId } from '@/hooks/use-session';
+import { getQuality, loadQuality } from '@/hooks/use-settings';
 
 const LIBRARY_KEY = 'trackfinder_library';
 
@@ -52,6 +53,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
 
   useEffect(() => {
+    loadQuality();
     AsyncStorage.getItem(LIBRARY_KEY).then((raw) => {
       if (raw) {
         try { setTracks(JSON.parse(raw)); } catch {}
@@ -88,10 +90,12 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       setDownloadProgress((p) => ({ ...p, [track.id]: 0 }));
 
       try {
-        const downloadUrl = `${getApiBase()}/tracks/${track.id}/download`;
+        const quality = getQuality();
+        const ext = quality === 'flac' ? 'flac' : 'mp3';
+        const downloadUrl = `${getApiBase()}/tracks/${track.id}/download?quality=${quality}`;
 
         const safe = track.title.replace(/[^a-z0-9_\-\s]/gi, '').replace(/\s+/g, '_');
-        const filename = `${safe}_${track.id.slice(-6)}.mp3`;
+        const filename = `${safe}_${track.id.slice(-6)}.${ext}`;
         const localUri = (FileSystem.documentDirectory ?? '') + filename;
 
         const downloadResumable = FileSystem.createDownloadResumable(

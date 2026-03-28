@@ -3,29 +3,32 @@ import { searchYouTube } from "../adapters/youtube.js";
 import { searchSoundCloud } from "../adapters/soundcloud.js";
 import { rank } from "../lib/ranker.js";
 import { getCached, setCached } from "../lib/cache.js";
-import { getStreamUrl, spawnAudioDownload } from "../lib/ytdlp.js";
+import { getStreamUrl, spawnAudioDownload, type AudioQuality } from "../lib/ytdlp.js";
+import { searchBandcamp } from "../adapters/bandcamp.js";
 import { SearchTracksBody } from "@workspace/api-zod";
 
 const router: IRouter = Router();
 
-const ALLOWED_HOSTS: Record<"yt" | "sc", string[]> = {
+const ALLOWED_HOSTS: Record<string, string[]> = {
   yt: ["www.youtube.com", "youtube.com", "m.youtube.com", "youtu.be"],
   sc: ["soundcloud.com", "www.soundcloud.com", "api.soundcloud.com", "api-v2.soundcloud.com"],
+  bc: ["bandcamp.com"],
 };
 
-function decodeTrackUrl(id: string): { source: "yt" | "sc"; url: string } | null {
-  let source: "yt" | "sc";
-  let encodedPart: string;
+function decodeTrackUrl(id: string): { source: string; url: string } | null {
+  const prefixes = ["yt_", "sc_", "bc_"];
+  let source: string | null = null;
+  let encodedPart: string | null = null;
 
-  if (id.startsWith("yt_")) {
-    source = "yt";
-    encodedPart = id.slice(3);
-  } else if (id.startsWith("sc_")) {
-    source = "sc";
-    encodedPart = id.slice(3);
-  } else {
-    return null;
+  for (const p of prefixes) {
+    if (id.startsWith(p)) {
+      source = p.slice(0, -1);
+      encodedPart = id.slice(p.length);
+      break;
+    }
   }
+
+  if (!source || !encodedPart) return null;
 
   let url: string;
   try {
@@ -37,12 +40,10 @@ function decodeTrackUrl(id: string): { source: "yt" | "sc"; url: string } | null
   try {
     const parsed = new URL(url);
     const hostname = parsed.hostname.toLowerCase();
-    if (!ALLOWED_HOSTS[source].includes(hostname)) {
-      return null;
-    }
-    if (parsed.protocol !== "https:") {
-      return null;
-    }
+    const allowed = ALLOWED_HOSTS[source] ?? [];
+    const isAllowed = allowed.some((h) => hostname === h || hostname.endsWith(`.${h}`));
+    if (!isAllowed) return null;
+    if (parsed.protocol !== "https:") return null;
   } catch {
     return null;
   }
@@ -70,14 +71,18 @@ router.post("/tracks/search", async (req, res) => {
     }
   }
 
-  const [ytResults, scResults] = await Promise.allSettled([
+  const perSource = Math.ceil(maxResults / 2);
+
+  const [ytResults, scResults, bcResults] = await Promise.allSettled([
     searchYouTube(query, maxResults),
     searchSoundCloud(query, maxResults),
+    searchBandcamp(query, perSource),
   ]);
 
   const allResults = [
     ...(ytResults.status === "fulfilled" ? ytResults.value : []),
     ...(scResults.status === "fulfilled" ? scResults.value : []),
+    ...(bcResults.status === "fulfilled" ? bcResults.value : []),
   ];
 
   if (ytResults.status === "rejected") {
@@ -85,6 +90,9 @@ router.post("/tracks/search", async (req, res) => {
   }
   if (scResults.status === "rejected") {
     req.log.warn({ err: scResults.reason }, "SoundCloud search failed");
+  }
+  if (bcResults.status === "rejected") {
+    req.log.warn({ err: bcResults.reason }, "Bandcamp search failed");
   }
 
   const referenceDuration =
@@ -127,14 +135,16 @@ router.post("/tracks/batch-search", async (req, res) => {
     if (cached) return { matches: cached as Record<string, unknown>[], cached: true };
 
     const query = `${artist} ${title}`.trim();
-    const [ytResults, scResults] = await Promise.allSettled([
+    const [ytResults, scResults, bcResults] = await Promise.allSettled([
       searchYouTube(query, 8),
       searchSoundCloud(query, 8),
+      searchBandcamp(query, 4),
     ]);
 
     const allResults = [
       ...(ytResults.status === "fulfilled" ? ytResults.value : []),
       ...(scResults.status === "fulfilled" ? scResults.value : []),
+      ...(bcResults.status === "fulfilled" ? bcResults.value : []),
     ];
 
     const referenceDuration =
@@ -227,12 +237,19 @@ router.get("/tracks/:id/download", async (req, res) => {
     return;
   }
 
+  const rawQuality = String(req.query["quality"] ?? "256");
+  const quality: AudioQuality = (["128", "192", "256", "320", "flac"] as const).includes(rawQuality as AudioQuality)
+    ? (rawQuality as AudioQuality)
+    : "256";
+  const ext = quality === "flac" ? "flac" : "mp3";
+  const mimeType = quality === "flac" ? "audio/flac" : "audio/mpeg";
+
   try {
-    const filename = `track_${id.slice(0, 16)}.mp3`;
-    res.setHeader("Content-Type", "audio/mpeg");
+    const filename = `track_${id.slice(0, 16)}.${ext}`;
+    res.setHeader("Content-Type", mimeType);
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
 
-    const proc = spawnAudioDownload(decoded.url);
+    const proc = spawnAudioDownload(decoded.url, quality);
     proc.stdout.pipe(res);
     proc.stderr.on("data", () => {});
 
@@ -256,6 +273,50 @@ router.get("/tracks/:id/download", async (req, res) => {
     if (!res.headersSent) {
       res.status(500).json({ error: "download_error", message: "Could not resolve download URL" });
     }
+  }
+});
+
+router.get("/tracks/lyrics", async (req, res) => {
+  const artist = String(req.query["artist"] ?? "").trim();
+  const title = String(req.query["title"] ?? "").trim();
+  const duration = Number(req.query["duration"] ?? 0);
+
+  if (!artist || !title) {
+    res.status(400).json({ error: "bad_request", message: "artist and title are required" });
+    return;
+  }
+
+  try {
+    const params = new URLSearchParams({ artist_name: artist, track_name: title });
+    if (duration > 0) params.set("duration", String(Math.round(duration)));
+
+    const response = await fetch(`https://lrclib.net/api/get?${params}`, {
+      headers: { "Lrclib-Client": "Apollo TrackFinder/1.0" },
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (response.status === 404) {
+      res.json({ plainLyrics: null, syncedLyrics: null });
+      return;
+    }
+
+    if (!response.ok) {
+      res.status(502).json({ error: "lyrics_unavailable", message: "Lyrics service error" });
+      return;
+    }
+
+    const data = await response.json() as {
+      plainLyrics?: string | null;
+      syncedLyrics?: string | null;
+    };
+
+    res.json({
+      plainLyrics: data.plainLyrics ?? null,
+      syncedLyrics: data.syncedLyrics ?? null,
+    });
+  } catch (err) {
+    req.log.warn({ err }, "Lyrics fetch failed");
+    res.json({ plainLyrics: null, syncedLyrics: null });
   }
 });
 
