@@ -20,6 +20,7 @@ export interface SavedTrack {
   fileSize?: number;
   source?: string;
   downloadQuality?: DownloadQuality;
+  importOrder?: number;
 }
 
 export interface BulkProgress {
@@ -34,7 +35,7 @@ interface LibraryState {
   isDownloading: Record<string, boolean>;
   downloadProgress: Record<string, number>;
   bulkProgress: BulkProgress;
-  saveToLibrary: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; source?: string }) => Promise<void>;
+  saveToLibrary: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; source?: string; importOrder?: number }) => Promise<void>;
   download: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }) => Promise<void>;
   bulkDownload: (tracks: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }[]) => Promise<{ failed: number }>;
   cancelBulkDownload: () => void;
@@ -75,7 +76,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const saveToLibrary = useCallback(
-    async (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; source?: string }) => {
+    async (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; source?: string; importOrder?: number }) => {
       setTracks((prev) => {
         if (prev.some((t) => t.id === track.id)) return prev;
         const entry: SavedTrack = {
@@ -87,6 +88,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
           localUri: '',
           savedAt: Date.now(),
           source: track.source,
+          importOrder: track.importOrder,
         };
         const updated = [entry, ...prev];
         AsyncStorage.setItem(LIBRARY_KEY, JSON.stringify(updated));
@@ -105,7 +107,13 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       try {
         const quality = getQuality();
         const ext = quality === 'flac' ? 'flac' : 'mp3';
-        const downloadUrl = `${getApiBase()}/tracks/${track.id}/download?quality=${quality}`;
+        const isDeezer = track.id.startsWith('dz_');
+        const params = new URLSearchParams({ quality });
+        if (isDeezer) {
+          params.set('artist', track.artist);
+          params.set('title', track.title);
+        }
+        const downloadUrl = `${getApiBase()}/tracks/${track.id}/download?${params}`;
 
         const safe = track.title.replace(/[^а-яёa-z0-9_\-\s]/gi, '').replace(/\s+/g, '_');
         const filename = `${safe || track.id.slice(-8)}_${track.id.slice(-6)}.${ext}`;

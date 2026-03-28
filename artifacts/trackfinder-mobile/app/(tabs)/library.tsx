@@ -55,9 +55,36 @@ export default function LibraryScreen() {
 
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [sortMode, setSortMode] = useState<'date_desc' | 'date_asc' | 'import_order'>('date_desc');
 
   const topPad = insets.top + (Platform.OS === 'web' ? 67 : 0);
   const bottomPad = TAB_BAR + (currentTrack ? PLAYER_HEIGHT : 0) + (Platform.OS === 'web' ? 34 : 0);
+
+  const sortedTracks = useMemo(() => {
+    const copy = [...tracks];
+    if (sortMode === 'date_asc') {
+      copy.sort((a, b) => a.savedAt - b.savedAt);
+    } else if (sortMode === 'import_order') {
+      copy.sort((a, b) => {
+        const ai = a.importOrder ?? Infinity;
+        const bi = b.importOrder ?? Infinity;
+        if (ai !== bi) return ai - bi;
+        return a.savedAt - b.savedAt;
+      });
+    }
+    return copy;
+  }, [tracks, sortMode]);
+
+  const cycleSortMode = useCallback(() => {
+    Haptics.selectionAsync();
+    setSortMode((prev) => {
+      if (prev === 'date_desc') return 'date_asc';
+      if (prev === 'date_asc') return 'import_order';
+      return 'date_desc';
+    });
+  }, []);
+
+  const sortLabel = sortMode === 'date_desc' ? 'Новые' : sortMode === 'date_asc' ? 'Старые' : 'Плейлист';
 
   const downloadedTracks = useMemo(() => tracks.filter((t) => !!t.localUri), [tracks]);
   const onlineTracks = useMemo(() => tracks.filter((t) => !t.localUri), [tracks]);
@@ -245,6 +272,10 @@ export default function LibraryScreen() {
             {tracks.length > 0 && (
               <View style={styles.statsRow}>
                 <Text style={styles.statChip}>{pluralTracks(tracks.length)}</Text>
+                <Pressable style={styles.sortBtn} onPress={cycleSortMode} hitSlop={6}>
+                  <MaterialIcons name="sort" size={12} color={COLORS.accent} />
+                  <Text style={styles.sortBtnText}>{sortLabel}</Text>
+                </Pressable>
                 {downloadedTracks.length > 0 && (
                   <Text style={styles.statChip}>
                     {downloadedTracks.length} скачано · {formatBytes(totalSize)}
@@ -303,7 +334,7 @@ export default function LibraryScreen() {
         </View>
       ) : (
         <FlatList
-          data={tracks}
+          data={sortedTracks}
           keyExtractor={keyExtractor}
           renderItem={renderItem}
           getItemLayout={getItemLayout}
@@ -413,6 +444,22 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 6,
     alignItems: 'center',
+  },
+  sortBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: COLORS.accentDim,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: COLORS.accent + '40',
+  },
+  sortBtnText: {
+    fontSize: 12,
+    fontFamily: 'Inter_600SemiBold',
+    color: COLORS.accent,
   },
   statChip: {
     fontSize: 12,

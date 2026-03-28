@@ -262,6 +262,33 @@ router.get("/tracks/:id/download", async (req, res) => {
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
 
     if (decoded.source === "dz") {
+      const dzArtist = String(req.query["artist"] ?? "").trim();
+      const dzTitle = String(req.query["title"] ?? "").trim();
+
+      if (dzArtist && dzTitle) {
+        try {
+          const ytResults = await searchYouTube(`${dzArtist} ${dzTitle}`, 3);
+          const ytTrack = ytResults.find((r) => r._sourceUrl) ?? ytResults[0];
+          if (ytTrack?._sourceUrl) {
+            req.log.info({ id, artist: dzArtist, title: dzTitle }, "Deezer→YouTube download fallback");
+            res.setHeader("Content-Type", mimeType);
+            const proc = spawnAudioDownload(ytTrack._sourceUrl, quality);
+            proc.stdout.pipe(res);
+            proc.stderr.on("data", () => {});
+            req.on("close", () => proc.kill("SIGKILL"));
+            proc.on("close", (code) => { if (code !== 0 && !res.writableEnded) res.destroy(); });
+            proc.on("error", (err) => {
+              req.log.error({ err }, "yt-dlp error during deezer fallback");
+              if (!res.headersSent) res.status(500).json({ error: "download_error" });
+              else res.destroy();
+            });
+            return;
+          }
+        } catch (e) {
+          req.log.warn({ e }, "Deezer→YouTube fallback failed, falling through to preview");
+        }
+      }
+
       res.setHeader("Content-Type", "audio/mpeg");
       const upstream = await fetch(decoded.url, { signal: AbortSignal.timeout(30000) });
       if (!upstream.ok) {

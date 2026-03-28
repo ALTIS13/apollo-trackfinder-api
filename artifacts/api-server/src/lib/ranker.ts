@@ -35,22 +35,49 @@ function jaccardSimilarity(a: string, b: string): number {
   const tokensB = new Set(tokenize(b));
   if (tokensA.size === 0 && tokensB.size === 0) return 1;
   if (tokensA.size === 0 || tokensB.size === 0) return 0;
-
   const intersection = [...tokensA].filter((t) => tokensB.has(t)).length;
   const union = new Set([...tokensA, ...tokensB]).size;
   return union === 0 ? 0 : intersection / union;
 }
 
 function containsQuery(text: string, query: string): boolean {
-  const n = normalize(text);
-  const q = normalize(query);
-  return n.includes(q);
+  return normalize(text).includes(normalize(query));
+}
+
+/**
+ * Strip platform-specific noise from titles so cross-platform comparisons work.
+ * e.g. "Song (Official Music Video)" → "Song"
+ */
+function stripMetadata(title: string): string {
+  return title
+    // Official video / audio / lyric video
+    .replace(/[\(\[]\s*(official\s*(music\s*)?video|official\s*(audio|mv|clip)|official|lyric\s*video|lyrics?\s*video|audio|music\s*video|mv|visualizer|animated\s*video|performance\s*video|hd|4k)\s*[\)\]]/gi, "")
+    // Remaster tags
+    .replace(/[\(\[]\s*(\d{4}\s*)?(re)?master(ed)?(\s*\d{4})?\s*[\)\]]/gi, "")
+    // Explicit / clean tags
+    .replace(/[\(\[]\s*(explicit|clean)\s*[\)\]]/gi, "")
+    // Normalize feat. / ft. / featuring → feat
+    .replace(/\bfeat(?:uring)?\b\.?|\bft\.\b/gi, "feat")
+    // Collapse whitespace
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function titleSimilarity(trackTitle: string, queryTitle: string): number {
-  const jaccard = jaccardSimilarity(trackTitle, queryTitle);
-  const exact = containsQuery(trackTitle, queryTitle) ? 0.2 : 0;
-  return Math.min(1, jaccard + exact);
+  const raw = jaccardSimilarity(trackTitle, queryTitle);
+  const stripped = jaccardSimilarity(stripMetadata(trackTitle), stripMetadata(queryTitle));
+  const containsBonus = containsQuery(stripMetadata(trackTitle), stripMetadata(queryTitle)) ? 0.15 : 0;
+  return Math.min(1, Math.max(raw, stripped) + containsBonus);
+}
+
+function artistSimilarity(trackArtist: string, queryArtist: string): number {
+  const raw = jaccardSimilarity(trackArtist, queryArtist);
+  // Bonus if one contains the other (e.g. "Artist feat. Someone" vs "Artist")
+  const containsBonus = (
+    containsQuery(trackArtist, queryArtist) ||
+    containsQuery(queryArtist, trackArtist)
+  ) ? 0.15 : 0;
+  return Math.min(1, raw + containsBonus);
 }
 
 function computeWithinTierScore<T extends RankableTrack>(
@@ -59,16 +86,14 @@ function computeWithinTierScore<T extends RankableTrack>(
   referenceDuration?: number,
 ): number {
   const trackFull = `${track.artist} ${track.title}`;
-  const expectedQuery = `${query.artist} ${query.title}`;
+  const expectedFull = `${query.artist} ${query.title}`;
 
-  const titleSim = titleSimilarity(track.title, query.title);
-  const fullSim = jaccardSimilarity(trackFull, expectedQuery);
-  const artistSim = jaccardSimilarity(track.artist, query.artist);
-  const artistContains = containsQuery(track.artist, query.artist) || containsQuery(query.artist, track.artist)
-    ? 0.15
-    : 0;
+  const tSim = titleSimilarity(track.title, query.title);
+  const aSim = artistSimilarity(track.artist, query.artist);
+  const fullSim = jaccardSimilarity(trackFull, expectedFull);
 
-  const nameSimilarity = Math.min(1, titleSim * 0.45 + fullSim * 0.25 + artistSim * 0.15 + artistContains);
+  // Combined name score: title matters most, then artist, then the full string
+  const nameSimilarity = Math.min(1, tSim * 0.50 + aSim * 0.25 + fullSim * 0.25);
 
   let durationScore = 0;
   if (referenceDuration && track.duration > 0) {
@@ -89,8 +114,7 @@ export function rank<T extends RankableTrack>(
   referenceDuration?: number,
 ): T[] {
   const scored = tracks.map((track) => {
-    const withinTierScore = computeWithinTierScore(track, query, referenceDuration);
-    const score = Math.round(withinTierScore * 100) / 100;
+    const score = Math.round(computeWithinTierScore(track, query, referenceDuration) * 100) / 100;
     return { ...track, score } as T;
   });
 
@@ -100,4 +124,11 @@ export function rank<T extends RankableTrack>(
     if (tierA !== tierB) return tierA - tierB;
     return (b.score ?? 0) - (a.score ?? 0);
   });
+}
+
+/** Produce a simplified query string that strips metadata noise before sending to search APIs */
+export function simplifyQuery(artist: string, title: string): string {
+  const a = stripMetadata(artist).replace(/\s*feat.*/i, "").trim();
+  const t = stripMetadata(title).replace(/\s*feat.*/i, "").trim();
+  return `${a} ${t}`.trim();
 }

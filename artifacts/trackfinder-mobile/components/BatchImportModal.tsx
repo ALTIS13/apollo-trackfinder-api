@@ -262,7 +262,7 @@ export function BatchImportModal({ visible, tracks, onClose }: Props) {
         continue;
       }
       try {
-        await saveToLibrary(best);
+        await saveToLibrary({ ...best, importOrder: item.index });
       } catch {
         errors++;
       }
