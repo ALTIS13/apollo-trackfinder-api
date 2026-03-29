@@ -1,5 +1,6 @@
 import { MaterialIcons } from '@/components/MaterialIcons';
 import { Image } from 'expo-image';
+import * as Haptics from 'expo-haptics';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -18,7 +19,7 @@ import { usePlayer } from '@/hooks/use-player';
 import { apiFetch } from '@/hooks/use-session';
 
 const { width: SCREEN_W } = Dimensions.get('window');
-const ARTWORK_SIZE = SCREEN_W - 80;
+const ARTWORK_SIZE = Math.min(SCREEN_W - 80, 280);
 
 function fmt(s: number): string {
   const m = Math.floor(s / 60);
@@ -54,18 +55,23 @@ export function FullPlayer() {
     position,
     duration,
     showFullPlayer,
+    shuffle,
+    repeat,
     pause,
     resume,
-    stop,
     seek,
+    playNext,
+    playPrev,
+    toggleShuffle,
+    cycleRepeat,
     closeFullPlayer,
   } = usePlayer();
 
   const seekBarRef = useRef<View>(null);
   const touchStartY = useRef(0);
+  const touchStartX = useRef(0);
   const lyricsScrollRef = useRef<ScrollView>(null);
 
-  const [activeTab, setActiveTab] = useState<'artwork' | 'lyrics'>('artwork');
   const [lyrics, setLyrics] = useState<LyricsData | null>(null);
   const [lyricsLoading, setLyricsLoading] = useState(false);
   const [lyricsTrackId, setLyricsTrackId] = useState<string | null>(null);
@@ -75,10 +81,7 @@ export function FullPlayer() {
     if (lyricsTrackId === track.id && lyrics !== null) return;
     setLyricsLoading(true);
     try {
-      const params = new URLSearchParams({
-        artist: track.artist,
-        title: track.title,
-      });
+      const params = new URLSearchParams({ artist: track.artist, title: track.title });
       if (track.duration) params.set('duration', String(Math.round(track.duration)));
       const data = await apiFetch<LyricsData>(`/tracks/lyrics?${params}`);
       setLyrics(data);
@@ -91,17 +94,16 @@ export function FullPlayer() {
   }, [lyricsTrackId, lyrics]);
 
   useEffect(() => {
-    if (activeTab === 'lyrics' && currentTrack) {
-      fetchLyrics(currentTrack);
-    }
-  }, [activeTab, currentTrack?.id]);
-
-  useEffect(() => {
     if (currentTrack?.id !== lyricsTrackId) {
       setLyrics(null);
       setLyricsTrackId(null);
     }
   }, [currentTrack?.id]);
+
+  // Auto-fetch lyrics when track changes
+  useEffect(() => {
+    if (currentTrack && showFullPlayer) fetchLyrics(currentTrack);
+  }, [currentTrack?.id, showFullPlayer]);
 
   const syncedLines = lyrics?.syncedLyrics ? parseSyncedLyrics(lyrics.syncedLyrics) : null;
   const activeLyricIndex = syncedLines
@@ -116,18 +118,34 @@ export function FullPlayer() {
 
   useEffect(() => {
     if (syncedLines && activeLyricIndex >= 0 && lyricsScrollRef.current) {
-      lyricsScrollRef.current.scrollTo({ y: activeLyricIndex * 36, animated: true });
+      lyricsScrollRef.current.scrollTo({ y: Math.max(0, activeLyricIndex * 36 - 72), animated: true });
     }
   }, [activeLyricIndex]);
 
   const handlePlayPause = async () => {
+    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (isPlaying) await pause();
     else await resume();
   };
 
-  const handleStop = async () => {
-    closeFullPlayer();
-    await stop();
+  const handleNext = async () => {
+    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    await playNext();
+  };
+
+  const handlePrev = async () => {
+    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    await playPrev();
+  };
+
+  const handleShuffle = () => {
+    Haptics.selectionAsync();
+    toggleShuffle();
+  };
+
+  const handleRepeat = () => {
+    Haptics.selectionAsync();
+    cycleRepeat();
   };
 
   const handleSeek = (e: any) => {
@@ -140,18 +158,19 @@ export function FullPlayer() {
 
   const progress = duration > 0 ? position / duration : 0;
 
-  const typeInfo = currentTrack?.type
-    ? TYPE_COLORS[currentTrack.type as keyof typeof TYPE_COLORS]
-    : null;
-  const srcInfo = currentTrack?.source
-    ? SOURCE_COLORS[currentTrack.source as keyof typeof SOURCE_COLORS]
-    : null;
+  const typeInfo = currentTrack?.type ? TYPE_COLORS[currentTrack.type as keyof typeof TYPE_COLORS] : null;
+  const srcInfo = currentTrack?.source ? SOURCE_COLORS[currentTrack.source as keyof typeof SOURCE_COLORS] : null;
+
+  const repeatIcon = repeat === 'one' ? 'repeat-one' : 'repeat';
+  const repeatActive = repeat !== 'none';
 
   if (!showFullPlayer || !currentTrack) return null;
 
-  const lyricsText = syncedLines
-    ? syncedLines.map((l) => l.text).filter(Boolean)
-    : (lyrics?.plainLyrics?.split('\n') ?? []);
+  const lyricsLines = syncedLines
+    ? syncedLines
+    : (lyrics?.plainLyrics?.split('\n').map((text) => ({ time: -1, text })) ?? []);
+
+  const hasLyrics = (syncedLines && syncedLines.length > 0) || !!lyrics?.plainLyrics;
 
   return (
     <Modal
@@ -161,155 +180,153 @@ export function FullPlayer() {
       onRequestClose={closeFullPlayer}
     >
       <View
-        style={[styles.root, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 24 }]}
-        onTouchStart={(e) => { touchStartY.current = e.nativeEvent.pageY; }}
+        style={[styles.root, { paddingTop: insets.top + 8 }]}
+        onTouchStart={(e) => {
+          touchStartY.current = e.nativeEvent.pageY;
+          touchStartX.current = e.nativeEvent.pageX;
+        }}
         onTouchEnd={(e) => {
-          const delta = e.nativeEvent.pageY - touchStartY.current;
-          if (delta > 80 && activeTab === 'artwork') closeFullPlayer();
+          const dy = e.nativeEvent.pageY - touchStartY.current;
+          const dx = Math.abs(e.nativeEvent.pageX - touchStartX.current);
+          // Swipe down (vertical > horizontal) to close
+          if (dy > 80 && dx < 60) closeFullPlayer();
         }}
       >
+        {/* Drag handle */}
         <View style={styles.handle} />
 
+        {/* Header */}
         <View style={styles.header}>
           <Pressable style={styles.closeBtn} onPress={closeFullPlayer} hitSlop={12}>
             <MaterialIcons name="keyboard-arrow-down" size={28} color={COLORS.textSub} />
           </Pressable>
-          <View style={styles.tabs}>
-            <Pressable
-              style={[styles.tab, activeTab === 'artwork' && styles.tabActive]}
-              onPress={() => setActiveTab('artwork')}
-            >
-              <Text style={[styles.tabText, activeTab === 'artwork' && styles.tabTextActive]}>Обложка</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.tab, activeTab === 'lyrics' && styles.tabActive]}
-              onPress={() => { setActiveTab('lyrics'); fetchLyrics(currentTrack); }}
-            >
-              <Text style={[styles.tabText, activeTab === 'lyrics' && styles.tabTextActive]}>Текст</Text>
-            </Pressable>
+          <View style={styles.badges}>
+            {srcInfo && (
+              <View style={[styles.badge, { backgroundColor: srcInfo.bg }]}>
+                <Text style={[styles.badgeText, { color: srcInfo.text }]}>{srcInfo.label}</Text>
+              </View>
+            )}
+            {typeInfo && (
+              <View style={[styles.badge, { backgroundColor: typeInfo.bg }]}>
+                <Text style={[styles.badgeText, { color: typeInfo.text }]}>{typeInfo.label}</Text>
+              </View>
+            )}
           </View>
           <View style={{ width: 44 }} />
         </View>
 
-        {activeTab === 'artwork' ? (
-          <>
-            <View style={styles.artworkWrap}>
-              {currentTrack.thumbnailUrl ? (
-                <Image
-                  source={{ uri: currentTrack.thumbnailUrl }}
-                  style={styles.artwork}
-                  contentFit="cover"
-                />
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 24 }]}
+          showsVerticalScrollIndicator={false}
+          bounces={false}
+        >
+          {/* Artwork */}
+          <View style={styles.artworkWrap}>
+            {currentTrack.thumbnailUrl ? (
+              <Image source={{ uri: currentTrack.thumbnailUrl }} style={styles.artwork} contentFit="cover" />
+            ) : (
+              <View style={[styles.artwork, styles.artworkPlaceholder]}>
+                <MaterialIcons name="music-note" size={64} color={COLORS.textMuted} />
+              </View>
+            )}
+          </View>
+
+          {/* Title & Artist */}
+          <View style={styles.info}>
+            <Text style={styles.title} numberOfLines={2}>{currentTrack.title}</Text>
+            <Text style={styles.artist} numberOfLines={1}>{currentTrack.artist}</Text>
+          </View>
+
+          {/* Seek bar */}
+          <View style={styles.seekSection}>
+            <View ref={seekBarRef} style={styles.seekBarTrack} onTouchEnd={handleSeek}>
+              <View style={[styles.seekBarFill, { width: `${progress * 100}%` }]} />
+              <View style={[styles.seekThumb, { left: `${progress * 100}%` }]} />
+            </View>
+            <View style={styles.times}>
+              <Text style={styles.timeText}>{fmt(position)}</Text>
+              <Text style={styles.timeText}>{fmt(duration)}</Text>
+            </View>
+          </View>
+
+          {/* Main controls: shuffle | prev | play/pause | next | repeat */}
+          <View style={styles.controls}>
+            <Pressable style={styles.sideBtn} onPress={handleShuffle} hitSlop={8}>
+              <MaterialIcons
+                name="shuffle"
+                size={22}
+                color={shuffle ? COLORS.accent : COLORS.textMuted}
+              />
+              {shuffle && <View style={styles.activeDot} />}
+            </Pressable>
+
+            <Pressable style={styles.skipBtn} onPress={handlePrev} hitSlop={8}>
+              <MaterialIcons name="skip-previous" size={34} color={COLORS.text} />
+            </Pressable>
+
+            <Pressable style={styles.playBtn} onPress={handlePlayPause}>
+              {isLoading ? (
+                <ActivityIndicator size="large" color={COLORS.bg} />
               ) : (
-                <View style={[styles.artwork, styles.artworkPlaceholder]}>
-                  <MaterialIcons name="music-note" size={80} color={COLORS.textMuted} />
-                </View>
+                <MaterialIcons name={isPlaying ? 'pause' : 'play-arrow'} size={42} color={COLORS.bg} />
               )}
+            </Pressable>
+
+            <Pressable style={styles.skipBtn} onPress={handleNext} hitSlop={8}>
+              <MaterialIcons name="skip-next" size={34} color={COLORS.text} />
+            </Pressable>
+
+            <Pressable style={styles.sideBtn} onPress={handleRepeat} hitSlop={8}>
+              <MaterialIcons
+                name={repeatIcon}
+                size={22}
+                color={repeatActive ? COLORS.accent : COLORS.textMuted}
+              />
+              {repeatActive && <View style={styles.activeDot} />}
+            </Pressable>
+          </View>
+
+          {/* Lyrics section */}
+          <View style={styles.lyricsSection}>
+            <View style={styles.lyricsDivider}>
+              <View style={styles.dividerLine} />
+              <Text style={styles.lyricsLabel}>Текст песни</Text>
+              <View style={styles.dividerLine} />
             </View>
 
-            <View style={styles.badges}>
-              {srcInfo && (
-                <View style={[styles.badge, { backgroundColor: srcInfo.bg }]}>
-                  <Text style={[styles.badgeText, { color: srcInfo.text }]}>{srcInfo.label}</Text>
-                </View>
-              )}
-              {typeInfo && (
-                <View style={[styles.badge, { backgroundColor: typeInfo.bg }]}>
-                  <Text style={[styles.badgeText, { color: typeInfo.text }]}>{typeInfo.label}</Text>
-                </View>
-              )}
-            </View>
-
-            <View style={styles.info}>
-              <Text style={styles.title} numberOfLines={2}>{currentTrack.title}</Text>
-              <Text style={styles.artist} numberOfLines={1}>{currentTrack.artist}</Text>
-            </View>
-          </>
-        ) : (
-          <View style={styles.lyricsContainer}>
             {lyricsLoading ? (
               <View style={styles.lyricsCenter}>
-                <ActivityIndicator color={COLORS.accent} />
-                <Text style={styles.lyricsHint}>Ищем текст песни...</Text>
+                <ActivityIndicator color={COLORS.accent} size="small" />
+                <Text style={styles.lyricsHint}>Ищем текст...</Text>
               </View>
-            ) : !lyrics?.plainLyrics && !lyrics?.syncedLyrics ? (
+            ) : !hasLyrics && lyrics !== null ? (
               <View style={styles.lyricsCenter}>
-                <MaterialIcons name="music-note" size={40} color={COLORS.textMuted} />
                 <Text style={styles.lyricsNotFound}>Текст не найден</Text>
-                <Text style={styles.lyricsHint}>Для этого трека текст в базе недоступен</Text>
               </View>
-            ) : (
+            ) : hasLyrics ? (
               <ScrollView
                 ref={lyricsScrollRef}
                 style={styles.lyricsScroll}
-                contentContainerStyle={styles.lyricsScrollContent}
+                nestedScrollEnabled
                 showsVerticalScrollIndicator={false}
               >
-                <Text style={styles.lyricsMeta}>{currentTrack.artist} — {currentTrack.title}</Text>
-                {syncedLines ? (
-                  syncedLines.map((line, i) => (
-                    <Text
-                      key={i}
-                      style={[
-                        styles.lyricLine,
-                        i === activeLyricIndex && styles.lyricLineActive,
-                        !line.text && styles.lyricLineEmpty,
-                      ]}
-                    >
-                      {line.text || '·'}
-                    </Text>
-                  ))
-                ) : (
-                  lyricsText.map((line, i) => (
-                    <Text
-                      key={i}
-                      style={[styles.lyricLine, !line && styles.lyricLineEmpty]}
-                    >
-                      {line || '·'}
-                    </Text>
-                  ))
-                )}
+                {lyricsLines.map((line, i) => (
+                  <Text
+                    key={i}
+                    style={[
+                      styles.lyricLine,
+                      syncedLines && i === activeLyricIndex && styles.lyricLineActive,
+                      !line.text && styles.lyricLineEmpty,
+                    ]}
+                  >
+                    {line.text || '·'}
+                  </Text>
+                ))}
               </ScrollView>
-            )}
+            ) : null}
           </View>
-        )}
-
-        <View style={styles.seekSection}>
-          <View
-            ref={seekBarRef}
-            style={styles.seekBarTrack}
-            onTouchEnd={handleSeek}
-          >
-            <View style={[styles.seekBarFill, { width: `${progress * 100}%` }]} />
-            <View style={[styles.seekThumb, { left: `${progress * 100}%` }]} />
-          </View>
-          <View style={styles.times}>
-            <Text style={styles.timeText}>{fmt(position)}</Text>
-            <Text style={styles.timeText}>{fmt(duration)}</Text>
-          </View>
-        </View>
-
-        <View style={styles.controls}>
-          <Pressable style={styles.controlBtn} onPress={handleStop}>
-            <MaterialIcons name="stop" size={28} color={COLORS.textSub} />
-          </Pressable>
-
-          <Pressable style={styles.playBtn} onPress={handlePlayPause}>
-            {isLoading ? (
-              <ActivityIndicator size="large" color={COLORS.bg} />
-            ) : (
-              <MaterialIcons
-                name={isPlaying ? 'pause' : 'play-arrow'}
-                size={40}
-                color={COLORS.bg}
-              />
-            )}
-          </Pressable>
-
-          <Pressable style={styles.controlBtn} onPress={closeFullPlayer}>
-            <MaterialIcons name="close" size={28} color={COLORS.textSub} />
-          </Pressable>
-        </View>
+        </ScrollView>
       </View>
     </Modal>
   );
@@ -319,22 +336,21 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: COLORS.bg,
-    alignItems: 'center',
-    paddingHorizontal: 24,
   },
   handle: {
     width: 40,
     height: 4,
     borderRadius: 2,
     backgroundColor: COLORS.border,
+    alignSelf: 'center',
     marginBottom: 8,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    width: '100%',
-    marginBottom: 24,
+    paddingHorizontal: 20,
+    marginBottom: 8,
   },
   closeBtn: {
     width: 44,
@@ -342,29 +358,28 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  tabs: {
+  badges: {
     flexDirection: 'row',
-    backgroundColor: COLORS.card,
-    borderRadius: 10,
-    padding: 3,
-    gap: 2,
+    gap: 6,
+    alignItems: 'center',
   },
-  tab: {
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    borderRadius: 8,
+  badge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 5,
   },
-  tabActive: {
-    backgroundColor: COLORS.bg,
-  },
-  tabText: {
-    fontSize: 13,
-    fontFamily: 'Inter_500Medium',
-    color: COLORS.textMuted,
-  },
-  tabTextActive: {
-    color: COLORS.text,
+  badgeText: {
+    fontSize: 10,
     fontFamily: 'Inter_600SemiBold',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  scroll: {
+    flex: 1,
+  },
+  scrollContent: {
+    alignItems: 'center',
+    paddingHorizontal: 24,
   },
   artworkWrap: {
     shadowColor: '#000',
@@ -372,7 +387,8 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.4,
     shadowRadius: 20,
     elevation: 12,
-    marginBottom: 24,
+    marginBottom: 20,
+    marginTop: 4,
   },
   artwork: {
     width: ARTWORK_SIZE,
@@ -384,30 +400,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  badges: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 12,
-  },
-  badge: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  badgeText: {
-    fontSize: 11,
-    fontFamily: 'Inter_600SemiBold',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
   info: {
     alignItems: 'center',
     gap: 4,
     marginBottom: 20,
-    paddingHorizontal: 8,
     width: '100%',
-    flex: 1,
-    justifyContent: 'center',
+    paddingHorizontal: 8,
   },
   title: {
     fontSize: 20,
@@ -422,61 +420,9 @@ const styles = StyleSheet.create({
     color: COLORS.textSub,
     textAlign: 'center',
   },
-  lyricsContainer: {
-    flex: 1,
-    width: '100%',
-    marginBottom: 4,
-  },
-  lyricsCenter: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
-  },
-  lyricsNotFound: {
-    fontSize: 17,
-    fontFamily: 'Inter_600SemiBold',
-    color: COLORS.textSub,
-  },
-  lyricsHint: {
-    fontSize: 13,
-    fontFamily: 'Inter_400Regular',
-    color: COLORS.textMuted,
-    textAlign: 'center',
-  },
-  lyricsScroll: {
-    flex: 1,
-  },
-  lyricsScrollContent: {
-    paddingBottom: 16,
-  },
-  lyricsMeta: {
-    fontSize: 12,
-    fontFamily: 'Inter_400Regular',
-    color: COLORS.textMuted,
-    textAlign: 'center',
-    marginBottom: 16,
-  },
-  lyricLine: {
-    fontSize: 16,
-    fontFamily: 'Inter_400Regular',
-    color: COLORS.textSub,
-    textAlign: 'center',
-    lineHeight: 36,
-    paddingHorizontal: 4,
-  },
-  lyricLineActive: {
-    color: COLORS.text,
-    fontFamily: 'Inter_700Bold',
-    fontSize: 18,
-  },
-  lyricLineEmpty: {
-    color: COLORS.textMuted,
-    fontSize: 13,
-  },
   seekSection: {
     width: '100%',
-    marginBottom: 24,
+    marginBottom: 20,
   },
   seekBarTrack: {
     height: 4,
@@ -511,21 +457,100 @@ const styles = StyleSheet.create({
   controls: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 32,
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingHorizontal: 4,
+    marginBottom: 28,
   },
-  controlBtn: {
+  sideBtn: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  activeDot: {
+    position: 'absolute',
+    bottom: 6,
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: COLORS.accent,
+  },
+  skipBtn: {
     width: 52,
     height: 52,
     alignItems: 'center',
     justifyContent: 'center',
   },
   playBtn: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+    width: 76,
+    height: 76,
+    borderRadius: 38,
     backgroundColor: COLORS.accent,
     alignItems: 'center',
     justifyContent: 'center',
+    shadowColor: COLORS.accent,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  lyricsSection: {
+    width: '100%',
+    minHeight: 120,
+  },
+  lyricsDivider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 16,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: COLORS.border,
+  },
+  lyricsLabel: {
+    fontSize: 11,
+    fontFamily: 'Inter_500Medium',
+    color: COLORS.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  lyricsCenter: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 20,
+    gap: 8,
+  },
+  lyricsNotFound: {
+    fontSize: 14,
+    fontFamily: 'Inter_400Regular',
+    color: COLORS.textMuted,
+  },
+  lyricsHint: {
+    fontSize: 13,
+    fontFamily: 'Inter_400Regular',
+    color: COLORS.textMuted,
+  },
+  lyricsScroll: {
+    maxHeight: 320,
+  },
+  lyricLine: {
+    fontSize: 15,
+    fontFamily: 'Inter_400Regular',
+    color: COLORS.textSub,
+    textAlign: 'center',
+    lineHeight: 36,
+    paddingHorizontal: 4,
+  },
+  lyricLineActive: {
+    color: COLORS.text,
+    fontFamily: 'Inter_700Bold',
+    fontSize: 17,
+  },
+  lyricLineEmpty: {
+    color: COLORS.textMuted,
+    fontSize: 12,
   },
 });

@@ -41,6 +41,7 @@ function getQualityLabel(downloadQuality?: string, source?: string): string | nu
 interface Props {
   track: SavedTrack;
   onSearchArtist?: (artist: string) => void;
+  onPlay?: (track: SavedTrack) => void;
   selectionMode?: boolean;
   isSelected?: boolean;
   onToggleSelect?: () => void;
@@ -50,6 +51,7 @@ interface Props {
 export const SavedTrackCard = React.memo(function SavedTrackCard({
   track,
   onSearchArtist,
+  onPlay,
   selectionMode = false,
   isSelected = false,
   onToggleSelect,
@@ -72,6 +74,10 @@ export const SavedTrackCard = React.memo(function SavedTrackCard({
       return;
     }
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (onPlay) {
+      onPlay(track);
+      return;
+    }
     const pt: PlayerTrack = {
       id: track.id,
       title: track.title,

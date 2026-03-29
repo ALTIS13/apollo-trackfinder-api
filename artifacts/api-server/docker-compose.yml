@@ -27,6 +27,7 @@ services:
       DATABASE_URL: postgres://apollo:apollo_secret@db:5432/apollo_trackfinder
       SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID}
       SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET}
+      SERVER_URL: ${SERVER_URL:-}
     depends_on:
       db:
         condition: service_healthy

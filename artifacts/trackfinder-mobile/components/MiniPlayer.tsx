@@ -9,7 +9,7 @@ import { COLORS } from '@/constants/colors';
 import { usePlayer } from '@/hooks/use-player';
 
 export function MiniPlayer() {
-  const { currentTrack, isPlaying, isLoading, position, duration, pause, resume, stop, openFullPlayer } =
+  const { currentTrack, isPlaying, isLoading, position, duration, pause, resume, stop, playNext, openFullPlayer } =
     usePlayer();
 
   if (!currentTrack) return null;
@@ -29,6 +29,12 @@ export function MiniPlayer() {
     e.stopPropagation?.();
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     await stop();
+  };
+
+  const handleNext = async (e: any) => {
+    e.stopPropagation?.();
+    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    await playNext();
   };
 
   const handleOpen = () => {
@@ -76,8 +82,12 @@ export function MiniPlayer() {
           )}
         </Pressable>
 
+        <Pressable style={styles.btn} onPress={handleNext}>
+          <MaterialIcons name="skip-next" size={24} color={COLORS.textSub} />
+        </Pressable>
+
         <Pressable style={styles.btn} onPress={handleStop}>
-          <MaterialIcons name="close" size={22} color={COLORS.textSub} />
+          <MaterialIcons name="close" size={22} color={COLORS.textMuted} />
         </Pressable>
       </Pressable>
     </Animated.View>

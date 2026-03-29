@@ -22,6 +22,8 @@ export interface PlayerTrack {
   type?: string;
 }
 
+export type RepeatMode = 'none' | 'one' | 'all';
+
 interface PlayerState {
   currentTrack: PlayerTrack | null;
   isPlaying: boolean;
@@ -29,16 +31,36 @@ interface PlayerState {
   position: number;
   duration: number;
   showFullPlayer: boolean;
+  queue: PlayerTrack[];
+  queueIndex: number;
+  shuffle: boolean;
+  repeat: RepeatMode;
   play: (track: PlayerTrack) => Promise<void>;
+  playQueue: (tracks: PlayerTrack[], startIndex?: number) => Promise<void>;
+  playNext: () => Promise<void>;
+  playPrev: () => Promise<void>;
   pause: () => Promise<void>;
   resume: () => Promise<void>;
   stop: () => Promise<void>;
   seek: (pos: number) => Promise<void>;
+  toggleShuffle: () => void;
+  cycleRepeat: () => void;
   openFullPlayer: () => void;
   closeFullPlayer: () => void;
 }
 
 const PlayerContext = createContext<PlayerState | null>(null);
+
+function buildUri(track: PlayerTrack): string {
+  const isDeezer = track.id.startsWith('dz_');
+  const params = new URLSearchParams();
+  if (isDeezer) {
+    params.set('artist', track.artist);
+    params.set('title', track.title);
+  }
+  const qs = params.toString() ? `?${params}` : '';
+  return `${getApiBase()}/tracks/${track.id}/audio-stream${qs}`;
+}
 
 export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [currentTrack, setCurrentTrack] = useState<PlayerTrack | null>(null);
@@ -47,8 +69,33 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
   const [showFullPlayer, setShowFullPlayer] = useState(false);
+
+  const [queue, setQueue] = useState<PlayerTrack[]>([]);
+  const [queueIndex, setQueueIndex] = useState(0);
+  const [shuffle, setShuffle] = useState(false);
+  const [repeat, setRepeat] = useState<RepeatMode>('none');
+
   const soundRef = useRef<Audio.Sound | null>(null);
   const reqIdRef = useRef(0);
+
+  // Refs for values needed inside status callbacks (avoids stale closures)
+  const queueRef = useRef<PlayerTrack[]>([]);
+  const queueIndexRef = useRef(0);
+  const shuffleRef = useRef(false);
+  const repeatRef = useRef<RepeatMode>('none');
+  const positionRef = useRef(0);
+
+  // Ref to break circular dep: _playTrackInner → status callback → advance → _playTrackInner
+  const playTrackInnerRef = useRef<(track: PlayerTrack, reqId: number) => Promise<void>>(
+    async () => {},
+  );
+
+  useEffect(() => { queueRef.current = queue; }, [queue]);
+  useEffect(() => { queueIndexRef.current = queueIndex; }, [queueIndex]);
+  useEffect(() => { shuffleRef.current = shuffle; }, [shuffle]);
+  useEffect(() => { repeatRef.current = repeat; }, [repeat]);
+  useEffect(() => { positionRef.current = position; }, [position]);
+
   const openFullPlayer = useCallback(() => setShowFullPlayer(true), []);
   const closeFullPlayer = useCallback(() => setShowFullPlayer(false), []);
 
@@ -63,21 +110,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const stop = useCallback(async () => {
-    reqIdRef.current += 1;
-    if (soundRef.current) {
-      await soundRef.current.unloadAsync().catch(() => {});
-      soundRef.current = null;
-    }
-    setIsPlaying(false);
-    setPosition(0);
-    setDuration(0);
-    setCurrentTrack(null);
-  }, []);
-
-  const play = useCallback(async (track: PlayerTrack) => {
-    const reqId = ++reqIdRef.current;
-
+  // Internal play implementation — stable via ref
+  const _playTrackInner = async (track: PlayerTrack, reqId: number) => {
     try {
       setIsLoading(true);
 
@@ -87,54 +121,62 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       }
       setIsPlaying(false);
       setPosition(0);
-      // Seed duration from track metadata immediately so UI isn't stuck at 0
       setDuration(track.duration > 0 ? track.duration : 0);
 
       if (reqId !== reqIdRef.current) return;
 
-      let uri: string;
-      // If a local file exists, make sure it's non-empty before using it.
-      // A 0-byte file (from a failed download) causes ExoPlayer to throw
-      // "None of the available extractors could read the stream".
       const localUriValid = track.localUri
         ? await FileSystem.getInfoAsync(track.localUri)
             .then((info) => info.exists && ((info as { size?: number }).size ?? 0) > 0)
             .catch(() => false)
         : false;
 
-      if (localUriValid) {
-        uri = track.localUri!;
-      } else {
-        // Use the server-side audio-stream proxy so the mobile never touches
-        // IP-bound YouTube HLS URLs directly.
-        const isDeezer = track.id.startsWith('dz_');
-        const params = new URLSearchParams();
-        if (isDeezer) {
-          params.set('artist', track.artist);
-          params.set('title', track.title);
-        }
-        const qs = params.toString() ? `?${params}` : '';
-        uri = `${getApiBase()}/tracks/${track.id}/audio-stream${qs}`;
-      }
+      const uri = localUriValid ? track.localUri! : buildUri(track);
 
       if (reqId !== reqIdRef.current) return;
 
       const { sound } = await Audio.Sound.createAsync(
         { uri },
-        { shouldPlay: true, progressUpdateIntervalMillis: 500 },
+        { shouldPlay: true, progressUpdateIntervalMillis: 250 },
         (status) => {
           if (reqId !== reqIdRef.current) return;
           if (!status.isLoaded) return;
           setIsPlaying(status.isPlaying);
           setPosition(status.positionMillis / 1000);
-          // Only override duration if expo-av reports a valid value;
-          // otherwise keep the track-metadata seed set above.
           if (status.durationMillis && status.durationMillis > 0) {
             setDuration(status.durationMillis / 1000);
           }
           if (status.didJustFinish) {
             setIsPlaying(false);
             setPosition(0);
+            // Auto-advance — all data from refs, no stale closures
+            const q = queueRef.current;
+            const idx = queueIndexRef.current;
+            const rep = repeatRef.current;
+            const shuf = shuffleRef.current;
+
+            if (rep === 'one') {
+              const newId = ++reqIdRef.current;
+              playTrackInnerRef.current(q[idx], newId);
+              return;
+            }
+
+            let nextIdx: number;
+            if (shuf && q.length > 1) {
+              do { nextIdx = Math.floor(Math.random() * q.length); } while (nextIdx === idx);
+            } else {
+              nextIdx = idx + 1;
+            }
+
+            if (nextIdx >= q.length) {
+              if (rep === 'all') nextIdx = 0;
+              else return; // end of queue, stop
+            }
+
+            queueIndexRef.current = nextIdx;
+            setQueueIndex(nextIdx);
+            const newId = ++reqIdRef.current;
+            playTrackInnerRef.current(q[nextIdx], newId);
           }
         },
       );
@@ -150,10 +192,84 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     } catch (e) {
       console.error('Player error:', e);
     } finally {
-      if (reqId === reqIdRef.current) {
-        setIsLoading(false);
-      }
+      if (reqId === reqIdRef.current) setIsLoading(false);
     }
+  };
+
+  // Keep ref up to date so status callbacks always call the latest version
+  playTrackInnerRef.current = _playTrackInner;
+
+  const stop = useCallback(async () => {
+    reqIdRef.current += 1;
+    if (soundRef.current) {
+      await soundRef.current.unloadAsync().catch(() => {});
+      soundRef.current = null;
+    }
+    setIsPlaying(false);
+    setPosition(0);
+    setDuration(0);
+    setCurrentTrack(null);
+    setQueue([]);
+    setQueueIndex(0);
+    queueRef.current = [];
+    queueIndexRef.current = 0;
+  }, []);
+
+  const play = useCallback(async (track: PlayerTrack) => {
+    const reqId = ++reqIdRef.current;
+    setQueue([track]);
+    setQueueIndex(0);
+    queueRef.current = [track];
+    queueIndexRef.current = 0;
+    await playTrackInnerRef.current(track, reqId);
+  }, []);
+
+  const playQueue = useCallback(async (tracks: PlayerTrack[], startIndex = 0) => {
+    if (tracks.length === 0) return;
+    const idx = Math.max(0, Math.min(startIndex, tracks.length - 1));
+    const reqId = ++reqIdRef.current;
+    setQueue(tracks);
+    setQueueIndex(idx);
+    queueRef.current = tracks;
+    queueIndexRef.current = idx;
+    await playTrackInnerRef.current(tracks[idx], reqId);
+  }, []);
+
+  const playNext = useCallback(async () => {
+    const q = queueRef.current;
+    const idx = queueIndexRef.current;
+    if (q.length === 0) return;
+
+    let nextIdx: number;
+    if (shuffleRef.current && q.length > 1) {
+      do { nextIdx = Math.floor(Math.random() * q.length); } while (nextIdx === idx);
+    } else {
+      nextIdx = (idx + 1) % q.length;
+    }
+
+    queueIndexRef.current = nextIdx;
+    setQueueIndex(nextIdx);
+    const reqId = ++reqIdRef.current;
+    await playTrackInnerRef.current(q[nextIdx], reqId);
+  }, []);
+
+  const playPrev = useCallback(async () => {
+    const q = queueRef.current;
+    const idx = queueIndexRef.current;
+    if (q.length === 0) return;
+
+    // Restart if >3s into track, else go to prev
+    if (positionRef.current > 3) {
+      await soundRef.current?.setPositionAsync(0).catch(() => {});
+      setPosition(0);
+      return;
+    }
+
+    const prevIdx = (idx - 1 + q.length) % q.length;
+    queueIndexRef.current = prevIdx;
+    setQueueIndex(prevIdx);
+    const reqId = ++reqIdRef.current;
+    await playTrackInnerRef.current(q[prevIdx], reqId);
   }, []);
 
   const pause = useCallback(async () => {
@@ -171,9 +287,31 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     setPosition(pos);
   }, []);
 
+  const toggleShuffle = useCallback(() => {
+    setShuffle((s) => {
+      shuffleRef.current = !s;
+      return !s;
+    });
+  }, []);
+
+  const cycleRepeat = useCallback(() => {
+    setRepeat((r) => {
+      const next: RepeatMode = r === 'none' ? 'all' : r === 'all' ? 'one' : 'none';
+      repeatRef.current = next;
+      return next;
+    });
+  }, []);
+
   return (
     <PlayerContext.Provider
-      value={{ currentTrack, isPlaying, isLoading, position, duration, showFullPlayer, play, pause, resume, stop, seek, openFullPlayer, closeFullPlayer }}
+      value={{
+        currentTrack, isPlaying, isLoading, position, duration, showFullPlayer,
+        queue, queueIndex, shuffle, repeat,
+        play, playQueue, playNext, playPrev,
+        pause, resume, stop, seek,
+        toggleShuffle, cycleRepeat,
+        openFullPlayer, closeFullPlayer,
+      }}
     >
       {children}
     </PlayerContext.Provider>

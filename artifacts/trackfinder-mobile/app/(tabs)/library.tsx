@@ -2,7 +2,7 @@ import { MaterialIcons } from '@/components/MaterialIcons';
 import { SavedTrackCard } from '@/components/SavedTrackCard';
 import { COLORS } from '@/constants/colors';
 import { SavedTrack, useLibrary } from '@/hooks/use-library';
-import { usePlayer } from '@/hooks/use-player';
+import { PlayerTrack, usePlayer } from '@/hooks/use-player';
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import React, { useCallback, useMemo, useState } from 'react';
@@ -15,6 +15,7 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -51,11 +52,12 @@ function pluralSelected(n: number): string {
 export default function LibraryScreen() {
   const insets = useSafeAreaInsets();
   const { tracks, bulkDownload, cancelBulkDownload, bulkProgress, bulkRemove, isDownloading } = useLibrary();
-  const { currentTrack } = usePlayer();
+  const { currentTrack, playQueue } = usePlayer();
 
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [sortMode, setSortMode] = useState<'date_desc' | 'date_asc' | 'import_order'>('date_desc');
+  const [searchQuery, setSearchQuery] = useState('');
 
   const topPad = insets.top + (Platform.OS === 'web' ? 67 : 0);
   const bottomPad = TAB_BAR + (currentTrack ? PLAYER_HEIGHT : 0) + (Platform.OS === 'web' ? 34 : 0);
@@ -74,6 +76,31 @@ export default function LibraryScreen() {
     }
     return copy;
   }, [tracks, sortMode]);
+
+  const filteredTracks = useMemo(() => {
+    if (!searchQuery.trim()) return sortedTracks;
+    const q = searchQuery.toLowerCase().trim();
+    return sortedTracks.filter(
+      (t) => t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q),
+    );
+  }, [sortedTracks, searchQuery]);
+
+  const handlePlay = useCallback(
+    async (track: SavedTrack) => {
+      const queueTracks: PlayerTrack[] = filteredTracks.map((t) => ({
+        id: t.id,
+        title: t.title,
+        artist: t.artist,
+        thumbnailUrl: t.thumbnailUrl,
+        duration: t.duration,
+        localUri: t.localUri || undefined,
+        source: t.source,
+      }));
+      const idx = filteredTracks.findIndex((t) => t.id === track.id);
+      await playQueue(queueTracks, idx >= 0 ? idx : 0);
+    },
+    [filteredTracks, playQueue],
+  );
 
   const cycleSortMode = useCallback(() => {
     Haptics.selectionAsync();
@@ -195,13 +222,14 @@ export default function LibraryScreen() {
       <SavedTrackCard
         track={item}
         onSearchArtist={handleSearchArtist}
+        onPlay={handlePlay}
         selectionMode={selectionMode}
         isSelected={selectedIds.has(item.id)}
         onToggleSelect={() => toggleSelect(item.id)}
         onEnterSelection={enterSelectionMode}
       />
     ),
-    [handleSearchArtist, selectionMode, selectedIds, toggleSelect, enterSelectionMode],
+    [handleSearchArtist, handlePlay, selectionMode, selectedIds, toggleSelect, enterSelectionMode],
   );
 
   const keyExtractor = useCallback((item: SavedTrack) => item.id, []);
@@ -294,6 +322,23 @@ export default function LibraryScreen() {
                 )}
               </View>
             )}
+            <View style={styles.searchRow}>
+              <MaterialIcons name="search" size={16} color={COLORS.textMuted} />
+              <TextInput
+                style={styles.searchInput}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                placeholder="Поиск по названию или исполнителю..."
+                placeholderTextColor={COLORS.textMuted}
+                returnKeyType="search"
+                clearButtonMode="while-editing"
+              />
+              {searchQuery.length > 0 && (
+                <Pressable onPress={() => setSearchQuery('')} hitSlop={8}>
+                  <MaterialIcons name="close" size={14} color={COLORS.textMuted} />
+                </Pressable>
+              )}
+            </View>
             <Text style={styles.hint}>
               Свайп влево — скачать / удалить · Удерживать — меню
             </Text>
@@ -332,9 +377,15 @@ export default function LibraryScreen() {
             Нажмите значок загрузки на любом треке или импортируйте треки из Spotify / Яндекс Музыки
           </Text>
         </View>
+      ) : filteredTracks.length === 0 ? (
+        <View style={styles.empty}>
+          <MaterialIcons name="search-off" size={48} color={COLORS.textMuted} />
+          <Text style={styles.emptyTitle}>Ничего не найдено</Text>
+          <Text style={styles.emptyText}>По запросу «{searchQuery}» треков нет</Text>
+        </View>
       ) : (
         <FlatList
-          data={sortedTracks}
+          data={filteredTracks}
           keyExtractor={keyExtractor}
           renderItem={renderItem}
           getItemLayout={getItemLayout}
@@ -486,6 +537,25 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: 'Inter_600SemiBold',
     color: COLORS.accent,
+  },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: COLORS.card,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    marginTop: 4,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 13,
+    fontFamily: 'Inter_400Regular',
+    color: COLORS.text,
+    padding: 0,
   },
   hint: {
     fontSize: 11,
