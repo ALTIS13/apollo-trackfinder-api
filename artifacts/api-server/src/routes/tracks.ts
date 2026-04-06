@@ -515,31 +515,24 @@ router.get("/tracks/recent", async (req, res) => {
   const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 50) : 10;
 
   try {
-    const rows = await db
-      .select({
-        trackId: playHistoryTable.trackId,
-        artist: playHistoryTable.artist,
-        title: playHistoryTable.title,
-        playedAt: playHistoryTable.playedAt,
-      })
-      .from(playHistoryTable)
-      .where(eq(playHistoryTable.sessionId, sessionId))
-      .orderBy(sql`${playHistoryTable.playedAt} desc`)
-      .limit(limit * 3);
+    const result = await db.execute(sql`
+      SELECT t.track_id, t.artist, t.title
+      FROM (
+        SELECT DISTINCT ON (track_id)
+          track_id, artist, title, played_at
+        FROM play_history
+        WHERE session_id = ${sessionId}
+        ORDER BY track_id, played_at DESC
+      ) t
+      ORDER BY t.played_at DESC
+      LIMIT ${limit}
+    `);
 
-    const seen = new Set<string>();
-    const deduped: { trackId: string; artist: string | null; title: string | null; playedAt: Date }[] = [];
-    for (const row of rows) {
-      if (!seen.has(row.trackId)) {
-        seen.add(row.trackId);
-        deduped.push(row);
-        if (deduped.length >= limit) break;
-      }
-    }
+    const resultRows = (result.rows ?? result) as { track_id: string; artist: string | null; title: string | null }[];
 
     res.json({
-      results: deduped.map((r) => ({
-        id: r.trackId,
+      results: resultRows.map((r) => ({
+        id: r.track_id,
         artist: r.artist ?? "",
         title: r.title ?? "",
         thumbnailUrl: null,

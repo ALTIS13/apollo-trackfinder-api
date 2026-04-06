@@ -266,7 +266,7 @@ export default function SearchScreen() {
   const topPad = insets.top + (Platform.OS === 'web' ? 67 : 0);
   const bottomPad = TAB_BAR + (currentTrack ? PLAYER_HEIGHT : 0) + (Platform.OS === 'web' ? 34 : 0);
 
-  const showDiscovery = !hasSearched && !isSearching;
+  const showDiscovery = !query.trim() && !hasSearched && !isSearching;
 
   const keyExtractor = useCallback((item: Track) => item.id, []);
 
@@ -277,12 +277,14 @@ export default function SearchScreen() {
     [handleFindVariants],
   );
 
-  const ListHeader = useCallback(() => {
+  const DiscoverySections = useCallback(() => {
     if (!showDiscovery) return null;
+    const hasRecent = recentLoading || recentTracks.length > 0;
+    const hasRecs = recsLoading || recommendations.length > 0;
+    if (!hasRecent && !hasRecs) return null;
     return (
-      <View>
-        {/* Recent section */}
-        {(recentLoading || recentTracks.length > 0) && (
+      <View style={{ paddingBottom: 4 }}>
+        {hasRecent && (
           <View style={sectionStyles.container}>
             <View style={sectionStyles.header}>
               <Text style={sectionStyles.title}>Недавно слушал</Text>
@@ -310,8 +312,7 @@ export default function SearchScreen() {
           </View>
         )}
 
-        {/* Recommendations section */}
-        {(recsLoading || recommendations.length > 0) && (
+        {hasRecs && (
           <View style={sectionStyles.container}>
             <View style={sectionStyles.header}>
               <Text style={sectionStyles.title}>Рекомендации</Text>
@@ -377,6 +378,8 @@ export default function SearchScreen() {
         </View>
         <Text style={styles.headerSub}>Найди все версии любого трека</Text>
       </View>
+
+      <DiscoverySections />
 
       <View style={styles.searchRow}>
         <View style={styles.searchInput}>
@@ -464,14 +467,13 @@ export default function SearchScreen() {
           data={hasSearched ? filtered : []}
           keyExtractor={keyExtractor}
           renderItem={renderItem}
-          ListHeaderComponent={ListHeader}
           contentContainerStyle={{ paddingTop: 8, paddingBottom: bottomPad }}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
           ListFooterComponent={ListFooter}
           removeClippedSubviews={Platform.OS !== 'web'}
           ListEmptyComponent={
-            !hasSearched ? (
+            !hasSearched && !showDiscovery ? (
               <View style={styles.heroWrapper}>
                 <View style={styles.hero}>
                   <MaterialIcons name="search" size={48} color={COLORS.textMuted} />
