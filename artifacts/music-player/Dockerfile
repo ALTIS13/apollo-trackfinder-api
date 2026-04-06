@@ -4,14 +4,7 @@ WORKDIR /app
 
 RUN npm install -g pnpm
 
-COPY pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json tsconfig.json ./
-
-COPY package.json /tmp/root-pkg.json
-RUN node -e " \
-  const pkg = require('/tmp/root-pkg.json'); \
-  delete pkg.dependencies; \
-  delete pkg.scripts; \
-  require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2));"
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json tsconfig.base.json tsconfig.json ./
 
 RUN node -e " \
   const fs = require('fs'); \
