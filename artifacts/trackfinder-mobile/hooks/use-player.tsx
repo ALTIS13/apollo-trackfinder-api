@@ -354,7 +354,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
       const local = currentTrackRef.current;
       if (local?.id !== track.id) {
-        // Different track → start playing the new one
+        // Different track → start playing the new one, then apply remote position/isPlaying
         const reqId = ++reqIdRef.current;
         const newTrack: PlayerTrack = {
           id: track.id,
@@ -368,7 +368,21 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         setQueueIndex(0);
         queueRef.current = [newTrack];
         queueIndexRef.current = 0;
-        playTrackInnerRef.current(newTrack, reqId);
+        const targetPosition = state.position;
+        const targetIsPlaying = state.isPlaying;
+        playTrackInnerRef.current(newTrack, reqId).then(() => {
+          if (reqId !== reqIdRef.current) return; // superseded
+          // Seek to the remote position if > 1s
+          if (targetPosition > 1) {
+            soundRef.current?.setPositionAsync(targetPosition * 1000).catch(() => {});
+            setPosition(targetPosition);
+          }
+          // If remote is paused, pause locally (playTrackInner always starts playing)
+          if (!targetIsPlaying) {
+            soundRef.current?.pauseAsync().catch(() => {});
+            setIsPlaying(false);
+          }
+        }).catch(() => {});
         return;
       }
 

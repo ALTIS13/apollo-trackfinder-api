@@ -216,9 +216,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           const local = currentTrackRef.current;
 
           if (local?.id !== msg.track.id) {
-            // Different (or no) track — load and start playing the remote track.
-            // Suppress outgoing sends for 10s to avoid echoing back intermediate states
-            // while the stream resolves and playback begins.
+            // Different (or no) track — load and start playing the remote track,
+            // then apply the remote position and paused state if needed.
+            // Suppress outgoing sends for 10s to avoid echoing back intermediate loading states.
             suppressSendUntilRef.current = Date.now() + 10_000;
 
             const validSources = ["youtube", "soundcloud"];
@@ -235,8 +235,22 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
               quality: [],
               score: 0,
             };
-            // Fire-and-forget: always use ref to get the latest playTrack (avoids stale closure)
-            playTrackRef.current(remoteTrack).catch(() => {});
+            const targetPosition = msg.position;
+            const targetIsPlaying = msg.isPlaying;
+            // Use ref to always call the latest playTrack (avoids stale closure)
+            playTrackRef.current(remoteTrack)
+              .then(() => {
+                // Seek to remote position if > 1s
+                if (targetPosition > 1 && audioRef.current) {
+                  audioRef.current.currentTime = targetPosition;
+                  setProgress(targetPosition);
+                }
+                // If remote is paused, pause locally (playTrack always starts playing)
+                if (!targetIsPlaying && audioRef.current) {
+                  audioRef.current.pause();
+                }
+              })
+              .catch(() => {});
             return;
           }
 
