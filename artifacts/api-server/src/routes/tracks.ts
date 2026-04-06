@@ -648,14 +648,17 @@ router.get("/tracks/suggest", async (req, res) => {
         const pattern = `search:*${q}*`;
         const found: string[] = [];
         let cursor = "0";
+        let scanIterations = 0;
+        const MAX_SCAN_ITERATIONS = 20; // cap scans at ~1000 keys max to avoid large-keyspace latency
         do {
           const [nextCursor, keys] = await redis.scan(cursor, "MATCH", pattern, "COUNT", 50);
           cursor = nextCursor;
+          scanIterations++;
           for (const key of keys) {
             if (found.length >= 5) break;
             found.push(key);
           }
-        } while (cursor !== "0" && found.length < 5);
+        } while (cursor !== "0" && found.length < 5 && scanIterations < MAX_SCAN_ITERATIONS);
 
         const suggestions = found.map((key: string) => {
           const cacheKey = key.replace(/^search:/, "");
@@ -811,8 +814,8 @@ router.post("/tracks/download/queue", async (req, res) => {
 /** List session's download jobs — used for client rehydration after app restart */
 router.get("/tracks/download/jobs", async (req, res) => {
   const sessionId = (req.headers["x-client-session"] as string | undefined) ?? String(req.query["sessionId"] ?? "");
-  if (!sessionId) {
-    res.json({ jobs: [] });
+  if (!sessionId.trim()) {
+    res.status(400).json({ error: "X-Client-Session header is required" });
     return;
   }
   const jobs = await listSessionDownloadJobs(sessionId);
@@ -822,6 +825,10 @@ router.get("/tracks/download/jobs", async (req, res) => {
 router.get("/tracks/download/status/:jobId", async (req, res) => {
   const { jobId } = req.params as { jobId: string };
   const sessionId = (req.headers["x-client-session"] as string | undefined) ?? String(req.query["sessionId"] ?? "");
+  if (!sessionId.trim()) {
+    res.status(400).json({ error: "X-Client-Session header is required" });
+    return;
+  }
   const status = await getDownloadJobStatus(jobId, sessionId);
   res.json(status);
 });
@@ -829,6 +836,10 @@ router.get("/tracks/download/status/:jobId", async (req, res) => {
 router.get("/tracks/download/file/:jobId", async (req, res) => {
   const { jobId } = req.params as { jobId: string };
   const sessionId = (req.headers["x-client-session"] as string | undefined) ?? String(req.query["sessionId"] ?? "");
+  if (!sessionId.trim()) {
+    res.status(400).json({ error: "X-Client-Session header is required" });
+    return;
+  }
   const filePath = await getDownloadFilePath(jobId, sessionId);
   if (!filePath) {
     res.status(404).json({ error: "File not ready or access denied" });
