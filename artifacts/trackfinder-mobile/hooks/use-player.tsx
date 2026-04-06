@@ -9,10 +9,10 @@ import React, {
   useState,
 } from 'react';
 
+import { showToast } from '@/components/Toast';
 import { getLibraryLocalUri } from '@/hooks/use-library';
 import { getApiBase, getSessionId } from '@/hooks/use-session';
 import { getOfflineMode } from '@/hooks/use-settings';
-import { Alert } from 'react-native';
 
 export interface PlayerTrack {
   id: string;
@@ -154,11 +154,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         : false;
 
       if (!localUriValid && getOfflineMode()) {
-        Alert.alert(
-          'Оффлайн режим',
-          `«${track.title}» не скачан. В оффлайн-режиме доступны только скачанные треки.`,
-          [{ text: 'OK' }],
-        );
+        showToast(`«${track.title}» не скачан — оффлайн-режим`);
+        setIsLoading(false);
         return;
       }
 

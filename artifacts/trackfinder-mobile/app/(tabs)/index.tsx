@@ -356,14 +356,8 @@ export default function SearchScreen() {
     );
   }, [canLoadMore, isLoadingMore]);
 
-  return (
-    <KeyboardAvoidingView
-      style={[styles.root, { backgroundColor: COLORS.bg }]}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={0}
-    >
-      <ServerSettings visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
-
+  const ListHeader = useCallback(() => (
+    <View>
       <View style={[styles.header, { paddingTop: topPad }]}>
         <View style={styles.headerRow}>
           <MaterialIcons name="music-note" size={22} color={COLORS.accent} />
@@ -443,7 +437,7 @@ export default function SearchScreen() {
       )}
 
       {error ? (
-        <View style={styles.centerMsg}>
+        <View style={styles.statusMsg}>
           <MaterialIcons name="error" size={32} color={COLORS.danger} />
           <Text style={styles.errorText}>{error}</Text>
           <Pressable style={styles.retryBtn} onPress={() => doSearch(undefined, undefined, PAGE_SIZE)}>
@@ -451,42 +445,51 @@ export default function SearchScreen() {
           </Pressable>
         </View>
       ) : isSearching ? (
-        <View style={styles.centerMsg}>
+        <View style={styles.statusMsg}>
           <ActivityIndicator size="large" color={COLORS.accent} />
           <Text style={styles.loadingText}>Ищем на YouTube + SoundCloud...</Text>
           <Text style={styles.loadingSubText}>Первый поиск может занять до 30 секунд</Text>
         </View>
       ) : hasSearched && filtered.length === 0 ? (
-        <View style={styles.centerMsg}>
+        <View style={styles.statusMsg}>
           <MaterialIcons name="inbox" size={40} color={COLORS.textMuted} />
           <Text style={styles.emptyTitle}>Ничего не найдено</Text>
           <Text style={styles.emptyText}>Попробуй другой запрос или фильтр</Text>
         </View>
-      ) : (
-        <FlatList
-          data={hasSearched ? filtered : []}
-          keyExtractor={keyExtractor}
-          renderItem={renderItem}
-          contentContainerStyle={{ paddingTop: 8, paddingBottom: bottomPad }}
-          showsVerticalScrollIndicator={false}
-          keyboardShouldPersistTaps="handled"
-          ListFooterComponent={ListFooter}
-          removeClippedSubviews={Platform.OS !== 'web'}
-          ListEmptyComponent={
-            !hasSearched && !showDiscovery ? (
-              <View style={styles.heroWrapper}>
-                <View style={styles.hero}>
-                  <MaterialIcons name="search" size={48} color={COLORS.textMuted} />
-                  <Text style={styles.heroTitle}>Найти трек</Text>
-                  <Text style={styles.heroText}>
-                    Введи исполнителя и название — найдём все версии: оригинал, ремиксы, живые выступления и каверы
-                  </Text>
-                </View>
-              </View>
-            ) : null
-          }
-        />
-      )}
+      ) : !hasSearched && !showDiscovery ? (
+        <View style={styles.heroWrapper}>
+          <View style={styles.hero}>
+            <MaterialIcons name="search" size={48} color={COLORS.textMuted} />
+            <Text style={styles.heroTitle}>Найти трек</Text>
+            <Text style={styles.heroText}>
+              Введи исполнителя и название — найдём все версии: оригинал, ремиксы, живые выступления и каверы
+            </Text>
+          </View>
+        </View>
+      ) : null}
+    </View>
+  ), [topPad, query, isSearching, hasSearched, error, results, filter, filtered, showDiscovery, recentLoading, recentTracks, recsLoading, recommendations]);
+
+  return (
+    <KeyboardAvoidingView
+      style={[styles.root, { backgroundColor: COLORS.bg }]}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={0}
+    >
+      <ServerSettings visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
+
+      <FlatList
+        data={hasSearched ? filtered : []}
+        keyExtractor={keyExtractor}
+        renderItem={renderItem}
+        ListHeaderComponent={ListHeader}
+        contentContainerStyle={{ paddingBottom: bottomPad }}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        ListFooterComponent={ListFooter}
+        removeClippedSubviews={Platform.OS !== 'web'}
+        stickyHeaderIndices={[]}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -611,11 +614,11 @@ const styles = StyleSheet.create({
     color: COLORS.accent,
     backgroundColor: COLORS.bg,
   },
-  centerMsg: {
-    flex: 1,
+  statusMsg: {
     alignItems: 'center',
     justifyContent: 'center',
     padding: 32,
+    paddingTop: 40,
     gap: 12,
   },
   loadingText: {

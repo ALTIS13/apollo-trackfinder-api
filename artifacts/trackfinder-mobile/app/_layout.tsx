@@ -16,6 +16,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { setBaseUrl } from '@workspace/api-client-react';
 
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { ToastProvider } from '@/components/Toast';
 import { LibraryProvider } from '@/hooks/use-library';
 import { PlayerProvider } from '@/hooks/use-player';
 import { initSession } from '@/hooks/use-session';
@@ -80,7 +81,9 @@ export default function RootLayout() {
             <KeyboardProvider>
               <PlayerProvider>
                 <LibraryProvider>
-                  <RootLayoutNav />
+                  <ToastProvider>
+                    <RootLayoutNav />
+                  </ToastProvider>
                 </LibraryProvider>
               </PlayerProvider>
             </KeyboardProvider>
