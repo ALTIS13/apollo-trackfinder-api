@@ -265,7 +265,19 @@ export async function getDownloadJobStatus(jobId: string, requesterSessionId: st
       const state = await job.getState();
       const progress = typeof job.progress === "number" ? job.progress : 0;
       const result = job.returnvalue as DownloadJobResult | null;
-      const position = state === "waiting" ? await downloadQueue!.getWaitingCount() : undefined;
+
+      // Compute job-specific position by scanning waiting list
+      let position: number | undefined;
+      if (state === "waiting") {
+        try {
+          const waiting = await downloadQueue!.getWaiting(0, 200);
+          const idx = waiting.findIndex((j) => j.id === jobId);
+          position = idx >= 0 ? idx + 1 : 1;
+        } catch {
+          position = 1;
+        }
+      }
+
       return {
         status: state === "active" ? "active" : state === "completed" ? "completed" : state === "failed" ? "failed" : "waiting",
         progress,
@@ -284,6 +296,7 @@ export async function getDownloadJobStatus(jobId: string, requesterSessionId: st
   if (job.data.sessionId && job.data.sessionId !== requesterSessionId) {
     return { status: "unknown", progress: 0 };
   }
+  // Specific position within waiting queue
   const queuePos = inMemoryQueue.findIndex((j) => j.id === jobId);
   return {
     status: job.status,
@@ -292,4 +305,51 @@ export async function getDownloadJobStatus(jobId: string, requesterSessionId: st
     fileSize: job.result?.fileSize,
     error: job.error,
   };
+}
+
+/** List all download jobs for a given session (for client rehydration after restart) */
+export async function listSessionDownloadJobs(sessionId: string): Promise<{ jobId: string; status: string; progress: number; position?: number; fileSize?: number }[]> {
+  const results: { jobId: string; status: string; progress: number; position?: number; fileSize?: number }[] = [];
+
+  if (redisAvailable && downloadQueue) {
+    try {
+      const [waiting, active, completed, failed] = await Promise.all([
+        downloadQueue.getWaiting(0, 200),
+        downloadQueue.getActive(),
+        downloadQueue.getCompleted(0, 50),
+        downloadQueue.getFailed(0, 50),
+      ]);
+      for (const [jobs, st] of [[waiting, "waiting"], [active, "active"], [completed, "completed"], [failed, "failed"]] as const) {
+        for (const j of jobs as import("bullmq").Job[]) {
+          if (j.data.sessionId !== sessionId) continue;
+          const result = j.returnvalue as DownloadJobResult | null;
+          const pos = st === "waiting" ? waiting.findIndex((wj) => wj.id === j.id) + 1 : undefined;
+          results.push({
+            jobId: j.id!,
+            status: st,
+            progress: typeof j.progress === "number" ? j.progress : 0,
+            position: pos || undefined,
+            fileSize: result?.fileSize,
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return results;
+  }
+
+  // In-memory fallback
+  for (const [jobId, job] of inMemoryJobs) {
+    if (job.data.sessionId !== sessionId) continue;
+    const queuePos = inMemoryQueue.findIndex((j) => j.id === jobId);
+    results.push({
+      jobId,
+      status: job.status,
+      progress: job.progress,
+      position: queuePos >= 0 ? queuePos + 1 : undefined,
+      fileSize: job.result?.fileSize,
+    });
+  }
+  return results;
 }

@@ -98,6 +98,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const recentlyPlayedRef = useRef<string[]>([]);
   const RECENT_HISTORY_SIZE = 10;
 
+  // Guard: prevent concurrent/duplicate recommendation fetches
+  const fetchingRecsRef = useRef(false);
+
   // Ref to break circular dep: _playTrackInner → status callback → advance → _playTrackInner
   const playTrackInnerRef = useRef<(track: PlayerTrack, reqId: number) => Promise<void>>(
     async () => {},
@@ -237,11 +240,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
               if (rep === 'all') {
                 nextIdx = 0;
               } else {
-                // End of queue — silently fetch recommendations and extend queue
+                // End of queue — fetch recommendations once (guarded against duplicate calls)
+                if (fetchingRecsRef.current) return;
+                fetchingRecsRef.current = true;
                 const sessionId = getSessionId();
                 fetch(`${getApiBase()}/tracks/recommendations?sessionId=${sessionId}&limit=10`)
                   .then((r) => r.json())
                   .then((data: { results?: PlayerTrack[] }) => {
+                    fetchingRecsRef.current = false;
                     const recs: PlayerTrack[] = (data.results ?? []).map((r) => ({
                       id: r.id,
                       title: r.title,
@@ -252,7 +258,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
                       type: (r as { type?: string }).type,
                     }));
                     if (recs.length === 0) return;
-                    const newQueue = [...queueRef.current, ...recs];
+                    // Dedupe: skip tracks already in queue
+                    const existingIds = new Set(queueRef.current.map((t) => t.id));
+                    const newRecs = recs.filter((r) => !existingIds.has(r.id));
+                    if (newRecs.length === 0) return;
+                    const newQueue = [...queueRef.current, ...newRecs];
                     queueRef.current = newQueue;
                     setQueue(newQueue);
                     const autoIdx = queueIndexRef.current + 1;
@@ -262,7 +272,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
                     playTrackInnerRef.current(newQueue[autoIdx], newId);
                   })
                   .catch(() => {
-                    // Silently fail — just stop playback
+                    fetchingRecsRef.current = false;
                   });
                 return;
               }

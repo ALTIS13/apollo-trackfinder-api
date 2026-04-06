@@ -8,6 +8,7 @@ import { getApiBase, getSessionId } from '@/hooks/use-session';
 import { getQuality, loadQuality, type DownloadQuality } from '@/hooks/use-settings';
 
 const LIBRARY_KEY = 'trackfinder_library';
+const SERVER_JOBS_KEY = 'trackfinder_server_jobs';
 
 export interface SavedTrack {
   id: string;
@@ -102,11 +103,52 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         } catch {}
       }
     });
+
+    // Restore persisted server jobs and rehydrate from server
+    AsyncStorage.getItem(SERVER_JOBS_KEY).then(async (raw) => {
+      if (!raw) return;
+      try {
+        const persisted = JSON.parse(raw) as ServerJob[];
+        if (!Array.isArray(persisted) || persisted.length === 0) return;
+        const sessionId = getSessionId();
+        // Ask server which of our jobs are still pending/completed
+        const resp = await fetch(`${getApiBase()}/tracks/download/jobs`, {
+          headers: { 'X-Client-Session': sessionId },
+        });
+        if (!resp.ok) return;
+        const data = await resp.json() as { jobs: { jobId: string; status: string; position?: number }[] };
+        const serverJobMap = new Map((data.jobs ?? []).map((j) => [j.jobId, j]));
+
+        // Only restore jobs the server still knows about and aren't done
+        const toResume = persisted.filter((j) => {
+          const serverJob = serverJobMap.get(j.jobId);
+          return serverJob && serverJob.status !== 'failed' && serverJob.status !== 'unknown';
+        }).map((j) => {
+          const serverJob = serverJobMap.get(j.jobId);
+          return { ...j, position: serverJob?.position ?? j.position };
+        });
+
+        if (toResume.length > 0) {
+          setServerJobs(toResume);
+        } else {
+          await AsyncStorage.removeItem(SERVER_JOBS_KEY).catch(() => {});
+        }
+      } catch {}
+    });
   }, []);
 
   useEffect(() => {
     _tracksRef = tracks;
   }, [tracks]);
+
+  // Persist serverJobs so polling can resume after app restart
+  useEffect(() => {
+    if (serverJobs.length > 0) {
+      AsyncStorage.setItem(SERVER_JOBS_KEY, JSON.stringify(serverJobs)).catch(() => {});
+    } else {
+      AsyncStorage.removeItem(SERVER_JOBS_KEY).catch(() => {});
+    }
+  }, [serverJobs]);
 
   /** Poll active server jobs every 3 seconds; fetch+save locally when completed */
   useEffect(() => {

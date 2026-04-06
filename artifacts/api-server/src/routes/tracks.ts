@@ -9,7 +9,7 @@ import { searchDeezer } from "../adapters/deezer.js";
 import { SearchTracksBody } from "@workspace/api-zod";
 import { getCachedStreamUrl, setCachedStreamUrl } from "../lib/stream-cache.js";
 import { isRedisAvailable, getRedis } from "../lib/redis.js";
-import { enqueueDownload, getDownloadJobStatus, getDownloadFilePath, DOWNLOAD_DIR, VALID_QUALITIES, type DownloadJobData } from "../lib/background-queue.js";
+import { enqueueDownload, getDownloadJobStatus, getDownloadFilePath, listSessionDownloadJobs, DOWNLOAD_DIR, VALID_QUALITIES, type DownloadJobData } from "../lib/background-queue.js";
 import { db } from "@workspace/db";
 import { playHistoryTable } from "@workspace/db/schema";
 import { eq, sql } from "drizzle-orm";
@@ -806,6 +806,17 @@ router.post("/tracks/download/queue", async (req, res) => {
   }
 
   res.json({ results });
+});
+
+/** List session's download jobs — used for client rehydration after app restart */
+router.get("/tracks/download/jobs", async (req, res) => {
+  const sessionId = (req.headers["x-client-session"] as string | undefined) ?? String(req.query["sessionId"] ?? "");
+  if (!sessionId) {
+    res.json({ jobs: [] });
+    return;
+  }
+  const jobs = await listSessionDownloadJobs(sessionId);
+  res.json({ jobs });
 });
 
 router.get("/tracks/download/status/:jobId", async (req, res) => {
