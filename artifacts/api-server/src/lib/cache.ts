@@ -1,14 +1,31 @@
 import { db } from "@workspace/db";
 import { trackSearchCacheTable } from "@workspace/db/schema";
 import { eq, lt } from "drizzle-orm";
+import { redisGet, redisSet, isRedisAvailable } from "./redis.js";
 
-const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const CACHE_TTL_MS = 60 * 60 * 1000;
+const CACHE_TTL_SECONDS = 60 * 60;
 
 function buildCacheKey(artist: string, title: string): string {
   return `${artist.toLowerCase().trim()}::${title.toLowerCase().trim()}`;
 }
 
+function buildRedisKey(artist: string, title: string): string {
+  return `search:${buildCacheKey(artist, title)}`;
+}
+
 export async function getCached<T>(artist: string, title: string): Promise<T[] | null> {
+  if (isRedisAvailable()) {
+    const raw = await redisGet(buildRedisKey(artist, title));
+    if (raw) {
+      try {
+        return JSON.parse(raw) as T[];
+      } catch {
+      }
+    }
+    return null;
+  }
+
   const key = buildCacheKey(artist, title);
   const now = new Date();
 
@@ -29,6 +46,11 @@ export async function getCached<T>(artist: string, title: string): Promise<T[] |
 }
 
 export async function setCached<T>(artist: string, title: string, results: T[]): Promise<void> {
+  if (isRedisAvailable()) {
+    await redisSet(buildRedisKey(artist, title), JSON.stringify(results), CACHE_TTL_SECONDS);
+    return;
+  }
+
   const key = buildCacheKey(artist, title);
   const expiresAt = new Date(Date.now() + CACHE_TTL_MS);
 

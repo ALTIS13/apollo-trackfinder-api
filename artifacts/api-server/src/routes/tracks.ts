@@ -7,6 +7,7 @@ import { getStreamUrl, spawnAudioDownload, type AudioQuality } from "../lib/ytdl
 import { searchBandcamp } from "../adapters/bandcamp.js";
 import { searchDeezer } from "../adapters/deezer.js";
 import { SearchTracksBody } from "@workspace/api-zod";
+import { getCachedStreamUrl, setCachedStreamUrl } from "../lib/stream-cache.js";
 
 const router: IRouter = Router();
 
@@ -224,6 +225,12 @@ router.get("/tracks/:id/stream", async (req, res) => {
   }
 
   try {
+    const cached = await getCachedStreamUrl(id);
+    if (cached) {
+      res.json({ id, streamUrl: cached.url, mimeType: cached.mimeType, cached: true });
+      return;
+    }
+
     if (decoded.source === "dz") {
       const dzArtist = String(req.query["artist"] ?? "").trim();
       const dzTitle = String(req.query["title"] ?? "").trim();
@@ -234,6 +241,7 @@ router.get("/tracks/:id/stream", async (req, res) => {
           const ytTrack = ytResults.find((r) => r._sourceUrl) ?? ytResults[0];
           if (ytTrack?._sourceUrl) {
             const { url, mimeType } = await getStreamUrl(ytTrack._sourceUrl);
+            await setCachedStreamUrl(id, url, mimeType ?? "audio/mpeg");
             res.json({ id, streamUrl: url, mimeType: mimeType ?? "audio/mpeg" });
             return;
           }
@@ -246,6 +254,7 @@ router.get("/tracks/:id/stream", async (req, res) => {
       return;
     }
     const { url, mimeType } = await getStreamUrl(decoded.url);
+    await setCachedStreamUrl(id, url, mimeType ?? "audio/mpeg");
     res.json({ id, streamUrl: url, mimeType: mimeType ?? null });
   } catch (err) {
     req.log.error({ err, id }, "Failed to get stream URL");
