@@ -77,6 +77,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  useEffect(() => {
+    if (!currentTrack) return;
+    fetch(`${import.meta.env.BASE_URL}api/tracks/play`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        trackId: currentTrack.id,
+        artist: currentTrack.artist,
+        title: currentTrack.title,
+        sessionId: getOrCreateWebSessionId(),
+      }),
+    }).catch(() => {});
+  }, [currentTrack?.id]);
+
   const playTrack = async (track: TrackResult) => {
     if (!audioRef.current) return;
 
@@ -84,17 +98,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       togglePlayPause();
       return;
     }
-
-    fetch(`${import.meta.env.BASE_URL}api/tracks/play`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        trackId: track.id,
-        artist: track.artist,
-        title: track.title,
-        sessionId: getOrCreateWebSessionId(),
-      }),
-    }).catch(() => {});
 
     try {
       setIsLoading(true);

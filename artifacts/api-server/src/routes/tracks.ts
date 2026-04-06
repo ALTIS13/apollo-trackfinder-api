@@ -547,7 +547,7 @@ router.get("/tracks/recommendations", async (req, res) => {
       .where(eq(playHistoryTable.sessionId, sessionId))
       .groupBy(playHistoryTable.artist)
       .orderBy(sql`count(*) desc`)
-      .limit(5);
+      .limit(10);
 
     const artists = topArtistsRows
       .map((r) => r.artist)

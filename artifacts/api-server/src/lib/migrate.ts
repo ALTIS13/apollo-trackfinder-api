@@ -75,13 +75,13 @@ export async function runMigrations(): Promise<void> {
 
     CREATE TABLE IF NOT EXISTS playlist_tracks (
       id            SERIAL PRIMARY KEY,
-      playlist_id   TEXT        NOT NULL,
+      playlist_id   INTEGER     NOT NULL,
       track_id      TEXT        NOT NULL,
       artist        TEXT,
       title         TEXT,
       thumbnail_url TEXT,
       duration      TEXT,
-      position      SERIAL,
+      position      INTEGER     NOT NULL DEFAULT 0,
       added_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
