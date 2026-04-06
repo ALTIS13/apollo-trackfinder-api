@@ -9,7 +9,7 @@ import React, {
   useState,
 } from 'react';
 
-import { getApiBase } from '@/hooks/use-session';
+import { getApiBase, getSessionId } from '@/hooks/use-session';
 
 export interface PlayerTrack {
   id: string;
@@ -95,6 +95,24 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { shuffleRef.current = shuffle; }, [shuffle]);
   useEffect(() => { repeatRef.current = repeat; }, [repeat]);
   useEffect(() => { positionRef.current = position; }, [position]);
+
+  useEffect(() => {
+    if (!currentTrack) return;
+    const sessionId = getSessionId();
+    fetch(`${getApiBase()}/tracks/play`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Client-Session': sessionId,
+      },
+      body: JSON.stringify({
+        trackId: currentTrack.id,
+        artist: currentTrack.artist,
+        title: currentTrack.title,
+        sessionId,
+      }),
+    }).catch(() => {});
+  }, [currentTrack?.id]);
 
   const openFullPlayer = useCallback(() => setShowFullPlayer(true), []);
   const closeFullPlayer = useCallback(() => setShowFullPlayer(false), []);

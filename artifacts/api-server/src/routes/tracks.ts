@@ -8,6 +8,9 @@ import { searchBandcamp } from "../adapters/bandcamp.js";
 import { searchDeezer } from "../adapters/deezer.js";
 import { SearchTracksBody } from "@workspace/api-zod";
 import { getCachedStreamUrl, setCachedStreamUrl } from "../lib/stream-cache.js";
+import { db } from "@workspace/db";
+import { playHistoryTable } from "@workspace/db/schema";
+import { eq, sql } from "drizzle-orm";
 
 const router: IRouter = Router();
 
@@ -498,6 +501,91 @@ async function fetchLyricsOvh(artist: string, title: string): Promise<{ plainLyr
     return null;
   }
 }
+
+router.post("/tracks/play", async (req, res) => {
+  const { trackId, artist, title, sessionId } = req.body as Record<string, unknown>;
+
+  if (!trackId || typeof trackId !== "string") {
+    res.status(400).json({ error: "bad_request", message: "trackId is required" });
+    return;
+  }
+
+  const effectiveSession = (sessionId && typeof sessionId === "string" && sessionId.trim())
+    ? sessionId.trim()
+    : (req.headers["x-client-session"] as string | undefined) ?? "anonymous";
+
+  try {
+    await db.insert(playHistoryTable).values({
+      sessionId: effectiveSession,
+      trackId: String(trackId),
+      artist: typeof artist === "string" ? artist : null,
+      title: typeof title === "string" ? title : null,
+    });
+    res.status(201).json({ ok: true });
+  } catch (err) {
+    req.log.warn({ err }, "Failed to record play history");
+    res.status(500).json({ error: "db_error", message: "Could not record play" });
+  }
+});
+
+router.get("/tracks/recommendations", async (req, res) => {
+  const sessionId = (req.headers["x-client-session"] as string | undefined) ??
+    String(req.query["sessionId"] ?? "");
+
+  if (!sessionId) {
+    res.json({ results: [] });
+    return;
+  }
+
+  try {
+    const topArtistsRows = await db
+      .select({
+        artist: playHistoryTable.artist,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(playHistoryTable)
+      .where(eq(playHistoryTable.sessionId, sessionId))
+      .groupBy(playHistoryTable.artist)
+      .orderBy(sql`count(*) desc`)
+      .limit(5);
+
+    const artists = topArtistsRows
+      .map((r) => r.artist)
+      .filter((a): a is string => !!a);
+
+    if (artists.length === 0) {
+      res.json({ results: [] });
+      return;
+    }
+
+    const searchPromises = artists.map((artist) =>
+      Promise.allSettled([
+        searchYouTube(artist, 6),
+        searchSoundCloud(artist, 6),
+      ]).then(([yt, sc]) => [
+        ...(yt.status === "fulfilled" ? yt.value : []),
+        ...(sc.status === "fulfilled" ? sc.value : []),
+      ]),
+    );
+
+    const nested = await Promise.all(searchPromises);
+    const allResults = nested.flat();
+
+    const seen = new Set<string>();
+    const deduped = allResults.filter((r) => {
+      if (seen.has(r.id)) return false;
+      seen.add(r.id);
+      return true;
+    });
+
+    const limited = deduped.slice(0, 20).map(({ _sourceUrl: _, ...r }) => r);
+
+    res.json({ results: limited });
+  } catch (err) {
+    req.log.warn({ err }, "Failed to generate recommendations");
+    res.json({ results: [] });
+  }
+});
 
 router.get("/tracks/lyrics", async (req, res) => {
   const artist = String(req.query["artist"] ?? "").trim();

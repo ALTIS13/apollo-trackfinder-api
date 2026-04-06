@@ -4,6 +4,16 @@ import { getGetTrackStreamQueryOptions } from "@workspace/api-client-react";
 import type { TrackResult } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
 
+function getOrCreateWebSessionId(): string {
+  const key = "apollo_web_session_id";
+  let id = localStorage.getItem(key);
+  if (!id) {
+    id = Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
+    localStorage.setItem(key, id);
+  }
+  return id;
+}
+
 interface PlayerContextType {
   currentTrack: TrackResult | null;
   isPlaying: boolean;
@@ -75,6 +85,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    fetch(`${import.meta.env.BASE_URL}api/tracks/play`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        trackId: track.id,
+        artist: track.artist,
+        title: track.title,
+        sessionId: getOrCreateWebSessionId(),
+      }),
+    }).catch(() => {});
+
     try {
       setIsLoading(true);
       setCurrentTrack(track);
@@ -82,12 +103,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setProgress(0);
       setDuration(track.duration || 0);
 
-      // Reset audio element
       audioRef.current.pause();
       audioRef.current.src = "";
 
       const res = await queryClient.fetchQuery(getGetTrackStreamQueryOptions(track.id));
-      
+
       if (!res.streamUrl) {
         throw new Error("Stream URL not provided by server");
       }
@@ -111,11 +131,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const togglePlayPause = () => {
     if (!audioRef.current || !currentTrack) return;
-    
+
     if (isPlaying) {
       audioRef.current.pause();
     } else {
-      // If we pause and resume, it might fail if the URL expired, but let's assume it's fine for short pauses
       audioRef.current.play().catch(err => {
         console.error("Resume failed:", err);
         toast({

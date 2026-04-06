@@ -35,6 +35,57 @@ export async function runMigrations(): Promise<void> {
       created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS play_history (
+      id          SERIAL PRIMARY KEY,
+      session_id  TEXT        NOT NULL,
+      track_id    TEXT        NOT NULL,
+      artist      TEXT,
+      title       TEXT,
+      played_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS play_history_session_idx ON play_history (session_id);
+    CREATE INDEX IF NOT EXISTS play_history_played_at_idx ON play_history (played_at);
+
+    CREATE TABLE IF NOT EXISTS liked_tracks (
+      id            SERIAL PRIMARY KEY,
+      session_id    TEXT        NOT NULL,
+      track_id      TEXT        NOT NULL,
+      artist        TEXT,
+      title         TEXT,
+      thumbnail_url TEXT,
+      duration      TEXT,
+      liked_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (session_id, track_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS liked_tracks_session_idx ON liked_tracks (session_id);
+
+    CREATE TABLE IF NOT EXISTS playlists (
+      id          SERIAL PRIMARY KEY,
+      session_id  TEXT        NOT NULL,
+      name        TEXT        NOT NULL,
+      description TEXT,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS playlists_session_idx ON playlists (session_id);
+
+    CREATE TABLE IF NOT EXISTS playlist_tracks (
+      id            SERIAL PRIMARY KEY,
+      playlist_id   TEXT        NOT NULL,
+      track_id      TEXT        NOT NULL,
+      artist        TEXT,
+      title         TEXT,
+      thumbnail_url TEXT,
+      duration      TEXT,
+      position      SERIAL,
+      added_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS playlist_tracks_playlist_idx ON playlist_tracks (playlist_id);
   `);
 
   logger.info("Migrations complete");
