@@ -40,6 +40,7 @@ services:
       SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID}
       SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET}
       SERVER_URL: ${SERVER_URL:-}
+      WEB_URL: ${WEB_URL:-}
     depends_on:
       db:
         condition: service_healthy

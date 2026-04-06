@@ -1,7 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getClientSessionId } from "@/lib/client-session";
-
-const API_BASE = `${import.meta.env.BASE_URL}api`.replace(/\/+/g, "/").replace(":/", "://");
+import { API_BASE } from "@/lib/api-config";
 
 export interface SpotifyTrack {
   id: string;
@@ -33,7 +32,9 @@ function sessionHeaders(): Record<string, string> {
 }
 
 async function apiFetch<T>(path: string, params?: Record<string, string>): Promise<T> {
-  const url = new URL(path, window.location.origin);
+  const isAbsolute = path.startsWith("http://") || path.startsWith("https://");
+  const fullPath = isAbsolute ? path : `${window.location.origin}${path}`;
+  const url = new URL(fullPath);
   if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
   const resp = await fetch(url.toString(), {
     credentials: "include",

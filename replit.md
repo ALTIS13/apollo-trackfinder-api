@@ -132,6 +132,29 @@ Expo React Native app targeting Android + web (Windows PWA). Uses the same backe
 - `hooks/use-session.ts` — session ID + apiFetch helper
 - `constants/colors.ts` — dark theme + type/source color maps
 
+## Self-Hosted Deployment
+
+### Environment Variables
+- **API Server**:
+  - `SERVER_URL` — full URL of the API server (e.g., `https://api.apollot.ru`). Used to construct Spotify OAuth redirect URI.
+  - `WEB_URL` — full URL of the web player (e.g., `https://web.apollot.ru`). Used for Spotify OAuth callback redirect back to web player.
+  - `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` — Spotify OAuth credentials
+  - `DATABASE_URL` — PostgreSQL connection string
+- **Web Player** (build-time):
+  - `VITE_API_URL` — full API base URL (e.g., `https://api.apollot.ru/api`). When set, all API calls use this instead of relative paths.
+
+### Docker
+- `docker-compose.yml` — full stack (db + api + web)
+- `artifacts/api-server/Dockerfile` — API server image (Node.js + yt-dlp + ffmpeg)
+- `artifacts/music-player/Dockerfile` — Web player image (Vite build → nginx)
+- Build: `VITE_API_URL=https://api.apollot.ru/api docker compose build`
+- Run: `docker compose up -d`
+
+### Spotify OAuth Setup
+1. Set `SERVER_URL=https://api.apollot.ru` on the API server
+2. Register `https://api.apollot.ru/api/spotify/callback` in Spotify Developer Dashboard
+3. Set `WEB_URL=https://web.apollot.ru` so callback redirects go to the web player (not the API domain)
+
 ## Structure
 
 ```text

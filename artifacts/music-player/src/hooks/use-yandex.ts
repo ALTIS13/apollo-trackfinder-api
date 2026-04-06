@@ -1,7 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getClientSessionId } from "@/lib/client-session";
-
-const API_BASE = `${import.meta.env.BASE_URL}api`.replace(/\/+/g, "/").replace(":/", "://");
+import { API_BASE } from "@/lib/api-config";
 
 export interface YandexTrack {
   id: string;

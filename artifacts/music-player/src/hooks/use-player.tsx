@@ -4,6 +4,7 @@ import { getGetTrackStreamQueryOptions } from "@workspace/api-client-react";
 import type { TrackResult, TrackSource, TrackType } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
 import { getClientSessionId } from "@/lib/client-session";
+import { API_BASE as apiBase } from "@/lib/api-config";
 
 interface PlayerContextType {
   currentTrack: TrackResult | null;
@@ -48,8 +49,13 @@ const MAX_RECONNECT_DELAY_MS = 30000;
 
 function getWsUrl(): string {
   const sessionId = encodeURIComponent(getClientSessionId());
+  if (apiBase.startsWith("http")) {
+    const url = new URL(apiBase);
+    const protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${url.host}${url.pathname.replace(/\/$/, "")}/ws?sessionId=${sessionId}`;
+  }
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/api/ws?sessionId=${sessionId}`;
+  return `${protocol}//${window.location.host}${apiBase}/ws?sessionId=${sessionId}`;
 }
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
@@ -120,7 +126,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!currentTrack) return;
-    fetch(`${import.meta.env.BASE_URL}api/tracks/play`, {
+    fetch(`${apiBase}/tracks/play`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

@@ -4,6 +4,7 @@ import { Sparkles, Music2, Loader2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import type { TrackResult } from "@workspace/api-client-react";
 import { getClientSessionId } from "@/lib/client-session";
+import { API_BASE } from "@/lib/api-config";
 
 export default function Discover() {
   const [recommendations, setRecommendations] = useState<TrackResult[]>([]);
@@ -12,7 +13,7 @@ export default function Discover() {
 
   useEffect(() => {
     const sessionId = getClientSessionId();
-    const url = `${import.meta.env.BASE_URL}api/tracks/recommendations?sessionId=${encodeURIComponent(sessionId)}&limit=20`;
+    const url = `${API_BASE}/tracks/recommendations?sessionId=${encodeURIComponent(sessionId)}&limit=20`;
     setIsLoading(true);
     fetch(url)
       .then((r) => {

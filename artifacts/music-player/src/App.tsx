@@ -12,6 +12,12 @@ import Favorites from "@/pages/Favorites";
 import Discover from "@/pages/Discover";
 import Queue from "@/pages/Queue";
 import NotFound from "@/pages/not-found";
+import { setBaseUrl } from "@workspace/api-client-react";
+import { API_BASE } from "@/lib/api-config";
+
+if (import.meta.env.VITE_API_URL) {
+  setBaseUrl(import.meta.env.VITE_API_URL as string);
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {

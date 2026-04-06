@@ -112,7 +112,8 @@ router.get("/spotify/callback", async (req, res) => {
     if (isMobile) {
       res.redirect(`trackfinder://${path}?${qs}`);
     } else {
-      res.redirect(`/${path}?${qs}`);
+      const webBase = process.env["WEB_URL"]?.replace(/\/$/, "") ?? "";
+      res.redirect(`${webBase}/${path}?${qs}`);
     }
   }
 
