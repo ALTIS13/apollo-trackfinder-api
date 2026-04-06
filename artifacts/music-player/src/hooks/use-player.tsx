@@ -11,9 +11,20 @@ interface PlayerContextType {
   isLoading: boolean;
   progress: number;
   duration: number;
+  volume: number;
+  queue: TrackResult[];
+  queueIndex: number;
   playTrack: (track: TrackResult) => Promise<void>;
+  playFromQueue: (index: number) => Promise<void>;
+  addToQueue: (track: TrackResult) => void;
+  removeFromQueue: (index: number) => void;
+  clearQueue: () => void;
+  playNext: () => Promise<void>;
+  playPrev: () => Promise<void>;
   togglePlayPause: () => void;
   seekTo: (percentage: number) => void;
+  seekBy: (seconds: number) => void;
+  setVolume: (v: number) => void;
 }
 
 interface PlayerSyncState {
@@ -47,6 +58,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [volume, setVolumeState] = useState(0.8);
+
+  const [queue, setQueue] = useState<TrackResult[]>([]);
+  const [queueIndex, setQueueIndex] = useState(0);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const queryClient = useQueryClient();
@@ -56,12 +71,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const isPlayingRef = useRef(false);
   const progressRef = useRef(0);
   const applyingRemoteRef = useRef(false);
-  // Stable ref for playTrack — always points to the latest version (avoids stale closure in WS handler)
+  const queueRef = useRef<TrackResult[]>([]);
+  const queueIndexRef = useRef(0);
+
   const playTrackRef = useRef<(track: TrackResult) => Promise<void>>(async () => {});
+  const playNextRef = useRef<() => Promise<void>>(async () => {});
 
   useEffect(() => { currentTrackRef.current = currentTrack; }, [currentTrack]);
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
   useEffect(() => { progressRef.current = progress; }, [progress]);
+  useEffect(() => { queueRef.current = queue; }, [queue]);
+  useEffect(() => { queueIndexRef.current = queueIndex; }, [queueIndex]);
+
+  // ── Audio element setup ───────────────────────────────────────────────────
 
   useEffect(() => {
     audioRef.current = new Audio();
@@ -69,19 +91,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     const audio = audioRef.current;
 
-    const handleTimeUpdate = () => {
-      setProgress(audio.currentTime);
-    };
-
-    const handleDurationChange = () => {
-      setDuration(audio.duration);
-    };
-
+    const handleTimeUpdate = () => setProgress(audio.currentTime);
+    const handleDurationChange = () => setDuration(audio.duration);
     const handleEnded = () => {
       setIsPlaying(false);
       setProgress(0);
+      playNextRef.current();
     };
-
     const handlePlay = () => setIsPlaying(true);
     const handlePause = () => setIsPlaying(false);
 
@@ -116,30 +132,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }).catch(() => {});
   }, [currentTrack?.id]);
 
-  const playTrack = useCallback(async (track: TrackResult) => {
+  // ── Internal load helper (no toggle check, no queue reset) ────────────────
+
+  const _loadTrack = useCallback(async (track: TrackResult) => {
     if (!audioRef.current) return;
-
-    if (currentTrack?.id === track.id) {
-      togglePlayPause();
-      return;
-    }
-
     try {
       setIsLoading(true);
       setCurrentTrack(track);
       setIsPlaying(false);
       setProgress(0);
       setDuration(track.duration || 0);
-
       audioRef.current.pause();
       audioRef.current.src = "";
-
       const res = await queryClient.fetchQuery(getGetTrackStreamQueryOptions(track.id));
-
-      if (!res.streamUrl) {
-        throw new Error("Stream URL not provided by server");
-      }
-
+      if (!res.streamUrl) throw new Error("No stream URL");
       audioRef.current.src = res.streamUrl;
       await audioRef.current.play();
       setIsPlaying(true);
@@ -147,33 +153,108 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       console.error("Failed to play track:", err);
       setCurrentTrack(null);
       setIsPlaying(false);
-      toast({
-        title: "Playback Error",
-        description: "Could not load the audio stream for this track.",
-        variant: "destructive",
-      });
+      toast({ title: "Ошибка воспроизведения", description: "Не удалось загрузить трек.", variant: "destructive" });
     } finally {
       setIsLoading(false);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTrack?.id, queryClient, toast]);
+  }, [queryClient, toast]);
 
-  // Keep stable ref for use in WS handler (avoids stale closures)
+  const _loadTrackRef = useRef(_loadTrack);
+  _loadTrackRef.current = _loadTrack;
+
+  // ── Public API ────────────────────────────────────────────────────────────
+
+  const playTrack = useCallback(async (track: TrackResult) => {
+    if (!audioRef.current) return;
+    if (currentTrack?.id === track.id) {
+      togglePlayPause();
+      return;
+    }
+    // Replace queue with this track
+    setQueue([track]);
+    setQueueIndex(0);
+    queueRef.current = [track];
+    queueIndexRef.current = 0;
+    await _loadTrackRef.current(track);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTrack?.id]);
+
   playTrackRef.current = playTrack;
+
+  const playFromQueue = useCallback(async (index: number) => {
+    const q = queueRef.current;
+    if (index < 0 || index >= q.length) return;
+    queueIndexRef.current = index;
+    setQueueIndex(index);
+    await _loadTrackRef.current(q[index]);
+  }, []);
+
+  const playNext = useCallback(async () => {
+    const q = queueRef.current;
+    const nextIdx = queueIndexRef.current + 1;
+    if (nextIdx >= q.length) return;
+    queueIndexRef.current = nextIdx;
+    setQueueIndex(nextIdx);
+    await _loadTrackRef.current(q[nextIdx]);
+  }, []);
+
+  playNextRef.current = playNext;
+
+  const playPrev = useCallback(async () => {
+    const q = queueRef.current;
+    const idx = queueIndexRef.current;
+    // Restart if >3s into track
+    if (progressRef.current > 3 && audioRef.current) {
+      audioRef.current.currentTime = 0;
+      setProgress(0);
+      return;
+    }
+    const prevIdx = idx - 1;
+    if (prevIdx < 0) return;
+    queueIndexRef.current = prevIdx;
+    setQueueIndex(prevIdx);
+    await _loadTrackRef.current(q[prevIdx]);
+  }, []);
+
+  const addToQueue = useCallback((track: TrackResult) => {
+    setQueue((prev) => {
+      const updated = [...prev, track];
+      queueRef.current = updated;
+      return updated;
+    });
+  }, []);
+
+  const removeFromQueue = useCallback((index: number) => {
+    setQueue((prev) => {
+      const updated = prev.filter((_, i) => i !== index);
+      queueRef.current = updated;
+      // Adjust queueIndex if needed
+      if (index < queueIndexRef.current) {
+        const newIdx = Math.max(0, queueIndexRef.current - 1);
+        queueIndexRef.current = newIdx;
+        setQueueIndex(newIdx);
+      } else if (index === queueIndexRef.current && updated.length === 0) {
+        queueIndexRef.current = 0;
+        setQueueIndex(0);
+      }
+      return updated;
+    });
+  }, []);
+
+  const clearQueue = useCallback(() => {
+    setQueue([]);
+    queueRef.current = [];
+    queueIndexRef.current = 0;
+    setQueueIndex(0);
+  }, []);
 
   const togglePlayPause = useCallback(() => {
     if (!audioRef.current || !currentTrackRef.current) return;
-
     if (isPlayingRef.current) {
       audioRef.current.pause();
     } else {
-      audioRef.current.play().catch(err => {
-        console.error("Resume failed:", err);
-        toast({
-          title: "Playback Error",
-          description: "Stream might have expired. Try playing from the list again.",
-          variant: "destructive",
-        });
+      audioRef.current.play().catch(() => {
+        toast({ title: "Ошибка", description: "Стрим истёк. Запустите трек снова.", variant: "destructive" });
         setIsPlaying(false);
       });
     }
@@ -186,13 +267,25 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setProgress(time);
   }, [duration]);
 
-  // ── WebSocket sync ───────────────────────────────────────────────────────────
+  const seekBy = useCallback((seconds: number) => {
+    if (!audioRef.current) return;
+    const newTime = Math.max(0, Math.min(audioRef.current.currentTime + seconds, audioRef.current.duration || 0));
+    audioRef.current.currentTime = newTime;
+    setProgress(newTime);
+  }, []);
+
+  const setVolume = useCallback((v: number) => {
+    const clamped = Math.max(0, Math.min(1, v));
+    setVolumeState(clamped);
+    if (audioRef.current) audioRef.current.volume = clamped;
+  }, []);
+
+  // ── WebSocket sync ────────────────────────────────────────────────────────
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectDelayRef = useRef(RECONNECT_DELAY_MS);
   const mountedRef = useRef(true);
-  // Suppress outgoing WS messages while applying a remote track (time-based guard for async ops)
   const suppressSendUntilRef = useRef<number>(0);
 
   const connectWs = useCallback(() => {
@@ -203,9 +296,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       const ws = new WebSocket(getWsUrl());
       wsRef.current = ws;
 
-      ws.onopen = () => {
-        reconnectDelayRef.current = RECONNECT_DELAY_MS;
-      };
+      ws.onopen = () => { reconnectDelayRef.current = RECONNECT_DELAY_MS; };
 
       ws.onmessage = (event) => {
         try {
@@ -216,11 +307,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           const local = currentTrackRef.current;
 
           if (local?.id !== msg.track.id) {
-            // Different (or no) track — load and start playing the remote track,
-            // then apply the remote position and paused state if needed.
-            // Suppress outgoing sends for 10s to avoid echoing back intermediate loading states.
             suppressSendUntilRef.current = Date.now() + 10_000;
-
             const validSources = ["youtube", "soundcloud"];
             const remoteTrack: TrackResult = {
               id: msg.track.id,
@@ -228,33 +315,25 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
               artist: msg.track.artist,
               thumbnailUrl: msg.track.thumbnailUrl ?? null,
               duration: msg.track.duration,
-              source: (validSources.includes(msg.track.source ?? "")
-                ? msg.track.source
-                : "youtube") as TrackSource,
+              source: (validSources.includes(msg.track.source ?? "") ? msg.track.source : "youtube") as TrackSource,
               type: "original" as TrackType,
               quality: [],
               score: 0,
             };
             const targetPosition = msg.position;
             const targetIsPlaying = msg.isPlaying;
-            // Use ref to always call the latest playTrack (avoids stale closure)
             playTrackRef.current(remoteTrack)
               .then(() => {
-                // Seek to remote position if > 1s
                 if (targetPosition > 1 && audioRef.current) {
                   audioRef.current.currentTime = targetPosition;
                   setProgress(targetPosition);
                 }
-                // If remote is paused, pause locally (playTrack always starts playing)
-                if (!targetIsPlaying && audioRef.current) {
-                  audioRef.current.pause();
-                }
+                if (!targetIsPlaying && audioRef.current) audioRef.current.pause();
               })
               .catch(() => {});
             return;
           }
 
-          // Same track — sync play/pause and position
           applyingRemoteRef.current = true;
           try {
             if (msg.isPlaying && !isPlayingRef.current) {
@@ -262,8 +341,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             } else if (!msg.isPlaying && isPlayingRef.current) {
               audioRef.current?.pause();
             }
-
-            // Sync position if drift > 5s
             const drift = Math.abs(progressRef.current - msg.position);
             if (drift > 5 && audioRef.current) {
               audioRef.current.currentTime = msg.position;
@@ -298,16 +375,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     return () => {
       mountedRef.current = false;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      if (wsRef.current) {
-        wsRef.current.onclose = null;
-        wsRef.current.close();
-        wsRef.current = null;
-      }
+      if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); wsRef.current = null; }
     };
   }, [connectWs]);
 
-  // Send state when track or play/pause changes
-  const sendWsState = useCallback((overrides?: Partial<PlayerSyncState>) => {
+  const sendWsState = useCallback(() => {
     if (applyingRemoteRef.current) return;
     if (Date.now() < suppressSendUntilRef.current) return;
     const ws = wsRef.current;
@@ -315,50 +387,30 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const track = currentTrackRef.current;
     const msg: PlayerSyncState = {
       type: "player_state",
-      track: track
-        ? {
-            id: track.id,
-            title: track.title,
-            artist: track.artist,
-            thumbnailUrl: track.thumbnailUrl ?? null,
-            duration: track.duration ?? 0,
-            source: track.source,
-          }
-        : null,
+      track: track ? { id: track.id, title: track.title, artist: track.artist, thumbnailUrl: track.thumbnailUrl ?? null, duration: track.duration ?? 0, source: track.source } : null,
       position: progressRef.current,
       isPlaying: isPlayingRef.current,
-      ...overrides,
     };
     try { ws.send(JSON.stringify(msg)); } catch {}
   }, []);
 
-  useEffect(() => {
-    sendWsState();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTrack?.id, isPlaying]);
+  useEffect(() => { sendWsState(); }, [currentTrack?.id, isPlaying]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Debounced position sends (1s) so seeks sync bidirectionally even when paused
   const positionSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!currentTrack) return;
     if (positionSendTimerRef.current) clearTimeout(positionSendTimerRef.current);
-    positionSendTimerRef.current = setTimeout(() => {
-      sendWsState();
-    }, 1000);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [progress]);
+    positionSendTimerRef.current = setTimeout(sendWsState, 1000);
+  }, [progress]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <PlayerContext.Provider
       value={{
-        currentTrack,
-        isPlaying,
-        isLoading,
-        progress,
-        duration,
-        playTrack,
-        togglePlayPause,
-        seekTo,
+        currentTrack, isPlaying, isLoading, progress, duration, volume,
+        queue, queueIndex,
+        playTrack, playFromQueue, addToQueue, removeFromQueue, clearQueue,
+        playNext, playPrev,
+        togglePlayPause, seekTo, seekBy, setVolume,
       }}
     >
       {children}
@@ -368,8 +420,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
 export function usePlayer() {
   const context = useContext(PlayerContext);
-  if (context === undefined) {
-    throw new Error("usePlayer must be used within a PlayerProvider");
-  }
+  if (context === undefined) throw new Error("usePlayer must be used within a PlayerProvider");
   return context;
 }
