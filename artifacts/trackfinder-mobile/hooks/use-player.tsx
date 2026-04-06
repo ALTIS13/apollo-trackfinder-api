@@ -427,10 +427,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     });
   }, [currentTrack?.id, isPlaying, sendState]);
 
-  // Send position updates debounced (1s)
+  // Send position updates debounced (1s) — fires even when paused so seeks sync correctly
   useEffect(() => {
     if (applyingRemoteRef.current) return;
-    if (!currentTrack || !isPlaying) return;
+    if (!currentTrack) return;
     if (positionSendTimerRef.current) clearTimeout(positionSendTimerRef.current);
     positionSendTimerRef.current = setTimeout(() => {
       sendState({

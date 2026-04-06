@@ -337,6 +337,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTrack?.id, isPlaying]);
 
+  // Debounced position sends (1s) so seeks sync bidirectionally even when paused
+  const positionSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!currentTrack) return;
+    if (positionSendTimerRef.current) clearTimeout(positionSendTimerRef.current);
+    positionSendTimerRef.current = setTimeout(() => {
+      sendWsState();
+    }, 1000);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [progress]);
+
   return (
     <PlayerContext.Provider
       value={{
