@@ -33,7 +33,8 @@ export function useSpotifyStatus() {
   return useQuery({
     queryKey: ['spotify', 'status'],
     queryFn: () => apiFetch<SpotifyStatus>('/spotify/status'),
-    refetchInterval: 3000,
+    staleTime: 30000,
+    refetchOnWindowFocus: true,
   });
 }
 

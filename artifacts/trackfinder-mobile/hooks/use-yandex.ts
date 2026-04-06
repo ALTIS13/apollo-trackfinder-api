@@ -28,7 +28,8 @@ export function useYandexStatus() {
   return useQuery({
     queryKey: ['yandex', 'status'],
     queryFn: () => apiFetch<YandexStatus>('/yandex/status'),
-    refetchInterval: 3000,
+    staleTime: 30000,
+    refetchOnWindowFocus: true,
   });
 }
 

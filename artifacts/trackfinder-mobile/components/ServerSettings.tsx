@@ -190,6 +190,7 @@ export function ServerSettings({ visible, onClose }: Props) {
   const [saving, setSaving] = useState(false);
   const [activeNode, setActiveNode] = useState<NodeMode>('fallback');
   const [showFallbackBadge, setShowFallbackBadge] = useState(false);
+  const [selfHostOpen, setSelfHostOpen] = useState(false);
 
   useEffect(() => {
     if (visible) {
@@ -384,37 +385,53 @@ export function ServerSettings({ visible, onClose }: Props) {
 
                 <View style={styles.divider} />
 
-                <Text style={styles.sectionTitle}>Self-host the backend</Text>
-                <Text style={styles.sectionDesc}>
-                  Run the backend on your own server with Docker — no Replit required:
-                </Text>
+                <Pressable
+                  style={styles.collapseHeader}
+                  onPress={() => setSelfHostOpen((v) => !v)}
+                  hitSlop={6}
+                >
+                  <Text style={styles.sectionTitle}>Self-host the backend</Text>
+                  <MaterialIcons
+                    name={selfHostOpen ? 'expand-less' : 'expand-more'}
+                    size={20}
+                    color={COLORS.textSub}
+                  />
+                </Pressable>
 
-                <View style={styles.codeBlock}>
-                  <Text style={styles.code}>
-                    {'# 1. Clone & start\ngit clone <your-repo>\ncd <repo-dir>\n\ndocker-compose up -d\n\n# 2. The API is now at\nhttp://localhost:8080/api'}
-                  </Text>
-                </View>
+                {selfHostOpen && (
+                  <>
+                    <Text style={styles.sectionDesc}>
+                      Run the backend on your own server with Docker — no Replit required:
+                    </Text>
 
-                <Text style={styles.sectionDesc}>
-                  Free cloud options: Railway, Render, Fly.io — each takes ~2 minutes to deploy. The backend needs one environment variable: DATABASE_URL (PostgreSQL).
-                </Text>
+                    <View style={styles.codeBlock}>
+                      <Text style={styles.code}>
+                        {'# 1. Clone & start\ngit clone <your-repo>\ncd <repo-dir>\n\ndocker-compose up -d\n\n# 2. The API is now at\nhttp://localhost:8080/api'}
+                      </Text>
+                    </View>
 
-                <View style={styles.cloudLinks}>
-                  {[
-                    { label: 'Railway', url: 'https://railway.app', icon: 'arrow-upward' as const },
-                    { label: 'Render', url: 'https://render.com', icon: 'arrow-upward' as const },
-                    { label: 'Fly.io', url: 'https://fly.io', icon: 'arrow-upward' as const },
-                  ].map((item) => (
-                    <Pressable
-                      key={item.label}
-                      style={styles.cloudLink}
-                      onPress={() => Linking.openURL(item.url)}
-                    >
-                      <MaterialIcons name={item.icon} size={13} color={COLORS.accent} />
-                      <Text style={styles.cloudLinkText}>{item.label}</Text>
-                    </Pressable>
-                  ))}
-                </View>
+                    <Text style={styles.sectionDesc}>
+                      Free cloud options: Railway, Render, Fly.io — each takes ~2 minutes to deploy. The backend needs one environment variable: DATABASE_URL (PostgreSQL).
+                    </Text>
+
+                    <View style={styles.cloudLinks}>
+                      {[
+                        { label: 'Railway', url: 'https://railway.app', icon: 'arrow-upward' as const },
+                        { label: 'Render', url: 'https://render.com', icon: 'arrow-upward' as const },
+                        { label: 'Fly.io', url: 'https://fly.io', icon: 'arrow-upward' as const },
+                      ].map((item) => (
+                        <Pressable
+                          key={item.label}
+                          style={styles.cloudLink}
+                          onPress={() => Linking.openURL(item.url)}
+                        >
+                          <MaterialIcons name={item.icon} size={13} color={COLORS.accent} />
+                          <Text style={styles.cloudLinkText}>{item.label}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </>
+                )}
               </ScrollView>
             </View>
           </KeyboardAvoidingView>
@@ -576,6 +593,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: 'Inter_400Regular',
     color: COLORS.textMuted,
+  },
+  collapseHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   divider: {
     height: 1,

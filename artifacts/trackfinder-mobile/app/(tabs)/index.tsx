@@ -486,15 +486,11 @@ export default function SearchScreen() {
         </View>
       )}
 
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={styles.sourceFiltersScroll}
-        contentContainerStyle={styles.filtersContent}
-      >
+      <View style={styles.sourceChipsRow}>
         <Pressable
           style={[styles.sourceChip, isAllEnabled && styles.sourceChipAuto]}
           onPress={() => { setAuto(); Haptics.selectionAsync(); }}
+          hitSlop={4}
         >
           <Text style={[styles.sourceChipText, isAllEnabled && styles.sourceChipTextAuto]}>Авто</Text>
         </Pressable>
@@ -507,13 +503,14 @@ export default function SearchScreen() {
               key={key}
               style={[styles.sourceChip, active && { borderColor: clr.text + '60', backgroundColor: clr.bg }]}
               onPress={() => { toggleSource(key); Haptics.selectionAsync(); }}
+              hitSlop={4}
             >
               <View style={[styles.sourceChipDot, { backgroundColor: active ? clr.text : COLORS.textMuted }]} />
               <Text style={[styles.sourceChipText, active && { color: clr.text }]}>{SOURCE_LABELS[key]}</Text>
             </Pressable>
           );
         })}
-      </ScrollView>
+      </View>
 
       {hasSearched && results.length > 0 && (
         <ScrollView
@@ -675,9 +672,12 @@ const styles = StyleSheet.create({
   searchBtnDisabled: {
     opacity: 0.5,
   },
-  sourceFiltersScroll: {
-    flexShrink: 0,
-    marginBottom: 2,
+  sourceChipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    paddingHorizontal: 16,
+    marginBottom: 4,
   },
   sourceChip: {
     flexDirection: 'row',
