@@ -38,6 +38,8 @@ interface LibraryState {
   saveToLibrary: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; source?: string; importOrder?: number }) => Promise<void>;
   download: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }) => Promise<void>;
   bulkDownload: (tracks: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }[]) => Promise<{ failed: number }>;
+  /** Queue server-side async downloads (via BullMQ). Returns job IDs for polling. */
+  queueServerDownloads: (tracks: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; sourceUrl: string }[]) => Promise<{ jobId: string; position: number; trackId: string }[]>;
   cancelBulkDownload: () => void;
   remove: (id: string) => Promise<void>;
   bulkRemove: (ids: string[]) => Promise<void>;
@@ -237,6 +239,40 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     setBulkProgress((p) => ({ ...p, active: false }));
   }, []);
 
+  /**
+   * Queue server-side async downloads via BullMQ download endpoint.
+   * Returns an array of { jobId, position, trackId } entries that callers
+   * can poll via GET /tracks/download/status/:jobId.
+   */
+  const queueServerDownloads = useCallback(
+    async (
+      tracksInput: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; sourceUrl: string }[],
+    ): Promise<{ jobId: string; position: number; trackId: string }[]> => {
+      const quality = getQuality();
+      const payload = tracksInput.map((t) => ({
+        trackId: t.id,
+        artist: t.artist,
+        title: t.title,
+        quality,
+        sourceUrl: t.sourceUrl,
+      }));
+      const resp = await fetch(`${getApiBase()}/tracks/download/queue`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Client-Session': getSessionId(),
+        },
+        body: JSON.stringify({ tracks: payload }),
+      });
+      if (!resp.ok) throw new Error(`Queue request failed: HTTP ${resp.status}`);
+      const data = await resp.json() as { results: Array<{ trackId: string; jobId?: string; position?: number; error?: string }> };
+      return (data.results ?? [])
+        .filter((r): r is { trackId: string; jobId: string; position: number } => !!r.jobId)
+        .map((r) => ({ jobId: r.jobId, position: r.position, trackId: r.trackId }));
+    },
+    [],
+  );
+
   const remove = useCallback(
     async (id: string) => {
       const track = tracks.find((t) => t.id === id);
@@ -280,6 +316,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       saveToLibrary,
       download: downloadSingle,
       bulkDownload,
+      queueServerDownloads,
       cancelBulkDownload,
       remove,
       bulkRemove,

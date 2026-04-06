@@ -94,10 +94,40 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   // Guard flag: true while applying a remote WS state (prevents send loop)
   const applyingRemoteRef = useRef(false);
 
+  // Smart shuffle: recently played IDs (last N) for exclusion when shuffling
+  const recentlyPlayedRef = useRef<string[]>([]);
+  const RECENT_HISTORY_SIZE = 10;
+
   // Ref to break circular dep: _playTrackInner → status callback → advance → _playTrackInner
   const playTrackInnerRef = useRef<(track: PlayerTrack, reqId: number) => Promise<void>>(
     async () => {},
   );
+
+  /** Pick a shuffle index that avoids recently played tracks (smart shuffle). */
+  function smartShuffleNext(q: PlayerTrack[], currentIdx: number): number {
+    if (q.length <= 1) return 0;
+    const recent = recentlyPlayedRef.current;
+    // Prefer tracks not in recently played and not current
+    const candidates = q
+      .map((t, i) => i)
+      .filter((i) => i !== currentIdx && !recent.includes(q[i].id));
+    if (candidates.length > 0) {
+      return candidates[Math.floor(Math.random() * candidates.length)];
+    }
+    // All played — reset history (except current) and pick any other
+    recentlyPlayedRef.current = [];
+    let nextIdx: number;
+    do { nextIdx = Math.floor(Math.random() * q.length); } while (nextIdx === currentIdx);
+    return nextIdx;
+  }
+
+  /** Record a track as recently played (capped at RECENT_HISTORY_SIZE). */
+  function recordRecentlyPlayed(trackId: string) {
+    const list = recentlyPlayedRef.current;
+    if (list[list.length - 1] === trackId) return;
+    list.push(trackId);
+    if (list.length > RECENT_HISTORY_SIZE) list.shift();
+  }
 
   useEffect(() => { queueRef.current = queue; }, [queue]);
   useEffect(() => { queueIndexRef.current = queueIndex; }, [queueIndex]);
@@ -198,14 +228,44 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
             let nextIdx: number;
             if (shuf && q.length > 1) {
-              do { nextIdx = Math.floor(Math.random() * q.length); } while (nextIdx === idx);
+              nextIdx = smartShuffleNext(q, idx);
             } else {
               nextIdx = idx + 1;
             }
 
             if (nextIdx >= q.length) {
-              if (rep === 'all') nextIdx = 0;
-              else return; // end of queue, stop
+              if (rep === 'all') {
+                nextIdx = 0;
+              } else {
+                // End of queue — silently fetch recommendations and extend queue
+                const sessionId = getSessionId();
+                fetch(`${getApiBase()}/tracks/recommendations?sessionId=${sessionId}&limit=10`)
+                  .then((r) => r.json())
+                  .then((data: { recommendations?: PlayerTrack[] }) => {
+                    const recs: PlayerTrack[] = (data.recommendations ?? []).map((r) => ({
+                      id: r.id,
+                      title: r.title,
+                      artist: r.artist,
+                      thumbnailUrl: r.thumbnailUrl ?? null,
+                      duration: r.duration ?? 0,
+                      source: (r as { source?: string }).source,
+                      type: (r as { type?: string }).type,
+                    }));
+                    if (recs.length === 0) return;
+                    const newQueue = [...queueRef.current, ...recs];
+                    queueRef.current = newQueue;
+                    setQueue(newQueue);
+                    const autoIdx = queueIndexRef.current + 1;
+                    queueIndexRef.current = autoIdx;
+                    setQueueIndex(autoIdx);
+                    const newId = ++reqIdRef.current;
+                    playTrackInnerRef.current(newQueue[autoIdx], newId);
+                  })
+                  .catch(() => {
+                    // Silently fail — just stop playback
+                  });
+                return;
+              }
             }
 
             queueIndexRef.current = nextIdx;
@@ -222,6 +282,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       }
 
       soundRef.current = sound;
+      recordRecentlyPlayed(track.id);
       setCurrentTrack(track);
       setIsPlaying(true);
     } catch (e) {
@@ -252,6 +313,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   const play = useCallback(async (track: PlayerTrack) => {
     const reqId = ++reqIdRef.current;
+    // Reset recently played on fresh queue start
+    recentlyPlayedRef.current = [];
     setQueue([track]);
     setQueueIndex(0);
     queueRef.current = [track];
@@ -263,6 +326,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     if (tracks.length === 0) return;
     const idx = Math.max(0, Math.min(startIndex, tracks.length - 1));
     const reqId = ++reqIdRef.current;
+    // Reset recently played on new queue
+    recentlyPlayedRef.current = [];
     setQueue(tracks);
     setQueueIndex(idx);
     queueRef.current = tracks;
@@ -277,7 +342,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     let nextIdx: number;
     if (shuffleRef.current && q.length > 1) {
-      do { nextIdx = Math.floor(Math.random() * q.length); } while (nextIdx === idx);
+      nextIdx = smartShuffleNext(q, idx);
     } else {
       nextIdx = (idx + 1) % q.length;
     }

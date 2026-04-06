@@ -533,6 +533,7 @@ export default function SearchScreen() {
         data={showDiscovery ? [] : (hasSearched ? filtered : [])}
         keyExtractor={keyExtractor}
         renderItem={renderItem}
+        estimatedItemSize={90}
         ListHeaderComponent={ListHeader}
         contentContainerStyle={{ paddingBottom: bottomPad }}
         showsVerticalScrollIndicator={false}
