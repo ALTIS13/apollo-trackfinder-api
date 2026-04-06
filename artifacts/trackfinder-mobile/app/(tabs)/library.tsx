@@ -427,7 +427,6 @@ export default function LibraryScreen() {
           data={filteredTracks}
           keyExtractor={keyExtractor}
           renderItem={renderItem}
-          estimatedItemSize={ROW_HEIGHT}
           contentContainerStyle={{ paddingBottom: bottomPad }}
           showsVerticalScrollIndicator={false}
           extraData={selectionMode ? `${selectionMode}-${[...selectedIds].join(',')}` : `${selectionMode}-${bulkActive}`}
