@@ -228,15 +228,29 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setQueue((prev) => {
       const updated = prev.filter((_, i) => i !== index);
       queueRef.current = updated;
-      // Adjust queueIndex if needed
-      if (index < queueIndexRef.current) {
-        const newIdx = Math.max(0, queueIndexRef.current - 1);
-        queueIndexRef.current = newIdx;
-        setQueueIndex(newIdx);
-      } else if (index === queueIndexRef.current && updated.length === 0) {
+      const curIdx = queueIndexRef.current;
+
+      if (updated.length === 0) {
+        // Queue fully emptied — stop playback
         queueIndexRef.current = 0;
         setQueueIndex(0);
+        if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
+        setCurrentTrack(null);
+        setIsPlaying(false);
+        setProgress(0);
+      } else if (index === curIdx) {
+        // Removed the currently playing track — start playing the next one (or prev if at end)
+        const nextIdx = Math.min(curIdx, updated.length - 1);
+        queueIndexRef.current = nextIdx;
+        setQueueIndex(nextIdx);
+        _loadTrackRef.current(updated[nextIdx]);
+      } else if (index < curIdx) {
+        // Removed a track before the current one — shift index down
+        const newIdx = curIdx - 1;
+        queueIndexRef.current = newIdx;
+        setQueueIndex(newIdx);
       }
+      // index > curIdx: no adjustment needed
       return updated;
     });
   }, []);

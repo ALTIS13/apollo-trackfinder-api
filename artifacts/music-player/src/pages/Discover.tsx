@@ -3,6 +3,7 @@ import { TrackCard } from "@/components/TrackCard";
 import { Sparkles, Music2, Loader2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import type { TrackResult } from "@workspace/api-client-react";
+import { getClientSessionId } from "@/lib/client-session";
 
 export default function Discover() {
   const [recommendations, setRecommendations] = useState<TrackResult[]>([]);
@@ -10,7 +11,7 @@ export default function Discover() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const sessionId = localStorage.getItem("apollo_session_id") ?? "";
+    const sessionId = getClientSessionId();
     const url = `${import.meta.env.BASE_URL}api/tracks/recommendations?sessionId=${encodeURIComponent(sessionId)}&limit=20`;
     setIsLoading(true);
     fetch(url)
