@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useRef, useEffect, ReactNode } from "react";
+import { createContext, useContext, useState, useRef, useEffect, useCallback, ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getGetTrackStreamQueryOptions } from "@workspace/api-client-react";
 import type { TrackResult } from "@workspace/api-client-react";
@@ -16,7 +16,30 @@ interface PlayerContextType {
   seekTo: (percentage: number) => void;
 }
 
+interface PlayerSyncState {
+  type: "player_state";
+  track: {
+    id: string;
+    title: string;
+    artist: string;
+    thumbnailUrl: string | null;
+    duration: number;
+    source?: string;
+  } | null;
+  position: number;
+  isPlaying: boolean;
+}
+
 const PlayerContext = createContext<PlayerContextType | undefined>(undefined);
+
+const RECONNECT_DELAY_MS = 3000;
+const MAX_RECONNECT_DELAY_MS = 30000;
+
+function getWsUrl(): string {
+  const sessionId = encodeURIComponent(getClientSessionId());
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/api/ws?sessionId=${sessionId}`;
+}
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const [currentTrack, setCurrentTrack] = useState<TrackResult | null>(null);
@@ -28,6 +51,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const queryClient = useQueryClient();
   const { toast } = useToast();
+
+  const currentTrackRef = useRef<TrackResult | null>(null);
+  const isPlayingRef = useRef(false);
+  const progressRef = useRef(0);
+  const applyingRemoteRef = useRef(false);
+
+  useEffect(() => { currentTrackRef.current = currentTrack; }, [currentTrack]);
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+  useEffect(() => { progressRef.current = progress; }, [progress]);
 
   useEffect(() => {
     audioRef.current = new Audio();
@@ -82,7 +114,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }).catch(() => {});
   }, [currentTrack?.id]);
 
-  const playTrack = async (track: TrackResult) => {
+  const playTrack = useCallback(async (track: TrackResult) => {
     if (!audioRef.current) return;
 
     if (currentTrack?.id === track.id) {
@@ -121,12 +153,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTrack?.id, queryClient, toast]);
 
-  const togglePlayPause = () => {
-    if (!audioRef.current || !currentTrack) return;
+  const togglePlayPause = useCallback(() => {
+    if (!audioRef.current || !currentTrackRef.current) return;
 
-    if (isPlaying) {
+    if (isPlayingRef.current) {
       audioRef.current.pause();
     } else {
       audioRef.current.play().catch(err => {
@@ -139,14 +172,124 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         setIsPlaying(false);
       });
     }
-  };
+  }, [toast]);
 
-  const seekTo = (percentage: number) => {
+  const seekTo = useCallback((percentage: number) => {
     if (!audioRef.current || !duration) return;
     const time = (percentage / 100) * duration;
     audioRef.current.currentTime = time;
     setProgress(time);
-  };
+  }, [duration]);
+
+  // ── WebSocket sync ───────────────────────────────────────────────────────────
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectDelayRef = useRef(RECONNECT_DELAY_MS);
+  const mountedRef = useRef(true);
+
+  const connectWs = useCallback(() => {
+    if (!mountedRef.current) return;
+    if (wsRef.current?.readyState === WebSocket.CONNECTING || wsRef.current?.readyState === WebSocket.OPEN) return;
+
+    try {
+      const ws = new WebSocket(getWsUrl());
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        reconnectDelayRef.current = RECONNECT_DELAY_MS;
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data) as PlayerSyncState;
+          if (msg.type !== "player_state") return;
+          if (!msg.track) return;
+
+          const local = currentTrackRef.current;
+          // Only sync play/pause and position for the same track
+          if (local?.id !== msg.track.id) return;
+
+          applyingRemoteRef.current = true;
+          try {
+            if (msg.isPlaying && !isPlayingRef.current) {
+              audioRef.current?.play().catch(() => {});
+            } else if (!msg.isPlaying && isPlayingRef.current) {
+              audioRef.current?.pause();
+            }
+
+            // Sync position if drift > 5s
+            const drift = Math.abs(progressRef.current - msg.position);
+            if (drift > 5 && audioRef.current) {
+              audioRef.current.currentTime = msg.position;
+              setProgress(msg.position);
+            }
+          } finally {
+            applyingRemoteRef.current = false;
+          }
+        } catch {}
+      };
+
+      ws.onclose = () => {
+        wsRef.current = null;
+        if (!mountedRef.current) return;
+        const delay = Math.min(reconnectDelayRef.current, MAX_RECONNECT_DELAY_MS);
+        reconnectDelayRef.current = Math.min(delay * 2, MAX_RECONNECT_DELAY_MS);
+        reconnectTimerRef.current = setTimeout(connectWs, delay);
+      };
+
+      ws.onerror = () => { ws.close(); };
+    } catch {
+      const delay = Math.min(reconnectDelayRef.current, MAX_RECONNECT_DELAY_MS);
+      reconnectDelayRef.current = Math.min(delay * 2, MAX_RECONNECT_DELAY_MS);
+      reconnectTimerRef.current = setTimeout(connectWs, delay);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    connectWs();
+    return () => {
+      mountedRef.current = false;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, [connectWs]);
+
+  // Send state when track or play/pause changes
+  const sendWsState = useCallback((overrides?: Partial<PlayerSyncState>) => {
+    if (applyingRemoteRef.current) return;
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const track = currentTrackRef.current;
+    const msg: PlayerSyncState = {
+      type: "player_state",
+      track: track
+        ? {
+            id: track.id,
+            title: track.title,
+            artist: track.artist,
+            thumbnailUrl: track.thumbnailUrl ?? null,
+            duration: track.duration ?? 0,
+            source: track.source,
+          }
+        : null,
+      position: progressRef.current,
+      isPlaying: isPlayingRef.current,
+      ...overrides,
+    };
+    try { ws.send(JSON.stringify(msg)); } catch {}
+  }, []);
+
+  useEffect(() => {
+    sendWsState();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTrack?.id, isPlaying]);
 
   return (
     <PlayerContext.Provider

@@ -13,6 +13,7 @@ import { showToast } from '@/components/Toast';
 import { getLibraryLocalUri } from '@/hooks/use-library';
 import { getApiBase, getSessionId } from '@/hooks/use-session';
 import { getOfflineMode } from '@/hooks/use-settings';
+import { usePlayerSync, type PlayerSyncState } from '@/hooks/use-sync';
 
 export interface PlayerTrack {
   id: string;
@@ -87,6 +88,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const shuffleRef = useRef(false);
   const repeatRef = useRef<RepeatMode>('none');
   const positionRef = useRef(0);
+  const currentTrackRef = useRef<PlayerTrack | null>(null);
+  const isPlayingRef = useRef(false);
+
+  // Guard flag: true while applying a remote WS state (prevents send loop)
+  const applyingRemoteRef = useRef(false);
 
   // Ref to break circular dep: _playTrackInner → status callback → advance → _playTrackInner
   const playTrackInnerRef = useRef<(track: PlayerTrack, reqId: number) => Promise<void>>(
@@ -98,6 +104,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { shuffleRef.current = shuffle; }, [shuffle]);
   useEffect(() => { repeatRef.current = repeat; }, [repeat]);
   useEffect(() => { positionRef.current = position; }, [position]);
+  useEffect(() => { currentTrackRef.current = currentTrack; }, [currentTrack]);
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
   useEffect(() => {
     if (!currentTrack) return;
@@ -328,6 +336,105 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       return next;
     });
   }, []);
+
+  // ── WS sync ─────────────────────────────────────────────────────────────────
+
+  // Debounce position updates: send at most once per second
+  const positionSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleRemoteState = useCallback((state: PlayerSyncState) => {
+    if (applyingRemoteRef.current) return;
+    applyingRemoteRef.current = true;
+    try {
+      const track = state.track;
+      if (!track) {
+        // Remote stopped — do nothing (don't auto-stop local playback)
+        return;
+      }
+
+      const local = currentTrackRef.current;
+      if (local?.id !== track.id) {
+        // Different track → start playing the new one
+        const reqId = ++reqIdRef.current;
+        const newTrack: PlayerTrack = {
+          id: track.id,
+          title: track.title,
+          artist: track.artist,
+          thumbnailUrl: track.thumbnailUrl,
+          duration: track.duration,
+          source: track.source,
+        };
+        setQueue([newTrack]);
+        setQueueIndex(0);
+        queueRef.current = [newTrack];
+        queueIndexRef.current = 0;
+        playTrackInnerRef.current(newTrack, reqId);
+        return;
+      }
+
+      // Same track — sync play/pause
+      if (state.isPlaying && !isPlayingRef.current) {
+        soundRef.current?.playAsync().catch(() => {});
+        setIsPlaying(true);
+      } else if (!state.isPlaying && isPlayingRef.current) {
+        soundRef.current?.pauseAsync().catch(() => {});
+        setIsPlaying(false);
+      }
+
+      // Sync position if drift > 5s
+      const drift = Math.abs(positionRef.current - state.position);
+      if (drift > 5) {
+        soundRef.current?.setPositionAsync(state.position * 1000).catch(() => {});
+        setPosition(state.position);
+      }
+    } finally {
+      applyingRemoteRef.current = false;
+    }
+  }, []);
+
+  const { sendState } = usePlayerSync({ onRemoteState: handleRemoteState });
+
+  // Send state when track or play/pause changes
+  useEffect(() => {
+    if (applyingRemoteRef.current) return;
+    sendState({
+      track: currentTrack
+        ? {
+            id: currentTrack.id,
+            title: currentTrack.title,
+            artist: currentTrack.artist,
+            thumbnailUrl: currentTrack.thumbnailUrl,
+            duration: currentTrack.duration,
+            source: currentTrack.source,
+          }
+        : null,
+      position: positionRef.current,
+      isPlaying,
+    });
+  }, [currentTrack?.id, isPlaying, sendState]);
+
+  // Send position updates debounced (1s)
+  useEffect(() => {
+    if (applyingRemoteRef.current) return;
+    if (!currentTrack || !isPlaying) return;
+    if (positionSendTimerRef.current) clearTimeout(positionSendTimerRef.current);
+    positionSendTimerRef.current = setTimeout(() => {
+      sendState({
+        track: currentTrackRef.current
+          ? {
+              id: currentTrackRef.current.id,
+              title: currentTrackRef.current.title,
+              artist: currentTrackRef.current.artist,
+              thumbnailUrl: currentTrackRef.current.thumbnailUrl,
+              duration: currentTrackRef.current.duration,
+              source: currentTrackRef.current.source,
+            }
+          : null,
+        position: positionRef.current,
+        isPlaying: isPlayingRef.current,
+      });
+    }, 1000);
+  }, [position, currentTrack?.id, isPlaying, sendState]);
 
   return (
     <PlayerContext.Provider

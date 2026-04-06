@@ -2,6 +2,7 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { runMigrations } from "./lib/migrate";
 import { getRedis } from "./lib/redis";
+import { attachWebSocketServer } from "./ws";
 
 const rawPort = process.env["PORT"];
 
@@ -21,13 +22,14 @@ getRedis();
 
 runMigrations()
   .then(() => {
-    app.listen(port, (err) => {
+    const server = app.listen(port, (err: unknown) => {
       if (err) {
         logger.error({ err }, "Error listening on port");
         process.exit(1);
       }
       logger.info({ port }, "Server listening");
     });
+    attachWebSocketServer(server);
   })
   .catch((err) => {
     logger.error({ err }, "Migration failed — server will not start");
