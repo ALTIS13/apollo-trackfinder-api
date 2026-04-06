@@ -43,7 +43,7 @@ services:
     ports:
       - "3000:80"
     environment:
-      VITE_API_URL: "${VITE_API_URL:-https://api.apollot.ru/api}"
+      VITE_API_URL: "${VITE_API_URL:-https://api.apollot.ru}"
 
 volumes:
   pgdata:

@@ -26,7 +26,7 @@ RUN pnpm --filter @workspace/music-player run build
 
 FROM nginx:alpine AS runner
 
-COPY --from=builder /app/artifacts/music-player/dist /usr/share/nginx/html
+COPY --from=builder /app/artifacts/music-player/dist/public /usr/share/nginx/html
 
 RUN printf 'server {\n\
     listen 80;\n\

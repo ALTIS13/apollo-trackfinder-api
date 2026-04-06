@@ -141,13 +141,13 @@ Expo React Native app targeting Android + web (Windows PWA). Uses the same backe
   - `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` — Spotify OAuth credentials
   - `DATABASE_URL` — PostgreSQL connection string
 - **Web Player** (build-time):
-  - `VITE_API_URL` — full API base URL (e.g., `https://api.apollot.ru/api`). When set, all API calls use this instead of relative paths.
+  - `VITE_API_URL` — API server origin (e.g., `https://api.apollot.ru`). When set, all API calls use this origin instead of relative paths. Do NOT include `/api` — it's appended automatically.
 
 ### Docker
 - `docker-compose.yml` — full stack (db + api + web)
 - `artifacts/api-server/Dockerfile` — API server image (Node.js + yt-dlp + ffmpeg)
 - `artifacts/music-player/Dockerfile` — Web player image (Vite build → nginx)
-- Build: `VITE_API_URL=https://api.apollot.ru/api docker compose build`
+- Build: `VITE_API_URL=https://api.apollot.ru docker compose build`
 - Run: `docker compose up -d`
 
 ### Spotify OAuth Setup
