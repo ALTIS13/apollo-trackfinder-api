@@ -502,6 +502,54 @@ async function fetchLyricsOvh(artist: string, title: string): Promise<{ plainLyr
   }
 }
 
+router.get("/tracks/recent", async (req, res) => {
+  const sessionId = (req.headers["x-client-session"] as string | undefined) ??
+    String(req.query["sessionId"] ?? "");
+
+  if (!sessionId) {
+    res.json({ results: [] });
+    return;
+  }
+
+  const limit = Math.min(Number(req.query["limit"] ?? 10), 50);
+
+  try {
+    const rows = await db
+      .select({
+        trackId: playHistoryTable.trackId,
+        artist: playHistoryTable.artist,
+        title: playHistoryTable.title,
+        playedAt: playHistoryTable.playedAt,
+      })
+      .from(playHistoryTable)
+      .where(eq(playHistoryTable.sessionId, sessionId))
+      .orderBy(sql`${playHistoryTable.playedAt} desc`)
+      .limit(limit * 3);
+
+    const seen = new Set<string>();
+    const deduped: { trackId: string; artist: string | null; title: string | null; playedAt: Date }[] = [];
+    for (const row of rows) {
+      if (!seen.has(row.trackId)) {
+        seen.add(row.trackId);
+        deduped.push(row);
+        if (deduped.length >= limit) break;
+      }
+    }
+
+    res.json({
+      results: deduped.map((r) => ({
+        id: r.trackId,
+        artist: r.artist ?? "",
+        title: r.title ?? "",
+        thumbnailUrl: null,
+      })),
+    });
+  } catch (err) {
+    req.log.warn({ err }, "Failed to fetch recent tracks");
+    res.json({ results: [] });
+  }
+});
+
 router.post("/tracks/play", async (req, res) => {
   const { trackId, artist, title, sessionId } = req.body as Record<string, unknown>;
 

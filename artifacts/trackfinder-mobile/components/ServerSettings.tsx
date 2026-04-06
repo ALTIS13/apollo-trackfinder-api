@@ -11,6 +11,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   TouchableWithoutFeedback,
@@ -25,7 +26,7 @@ import {
   setApiUrl,
   testServerConnection,
 } from '@/hooks/use-session';
-import { type DownloadQuality, useDownloadQuality } from '@/hooks/use-settings';
+import { type DownloadQuality, useDownloadQuality, useOfflineMode } from '@/hooks/use-settings';
 
 const QUALITY_OPTIONS: { value: DownloadQuality; label: string; desc: string }[] = [
   { value: '128', label: '128 kbps', desc: 'Эконом' },
@@ -34,6 +35,54 @@ const QUALITY_OPTIONS: { value: DownloadQuality; label: string; desc: string }[]
   { value: '320', label: '320 kbps', desc: 'Максимум' },
   { value: 'flac', label: 'FLAC', desc: 'Без потерь' },
 ];
+
+function OfflineModeToggle() {
+  const { offline, toggle } = useOfflineMode();
+
+  return (
+    <View style={offlineStyles.row}>
+      <View style={offlineStyles.info}>
+        <Text style={offlineStyles.title}>Оффлайн режим</Text>
+        <Text style={offlineStyles.desc}>
+          Только скачанные треки. Треки без локального файла не воспроизводятся.
+        </Text>
+      </View>
+      <Switch
+        value={offline}
+        onValueChange={() => {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          toggle();
+        }}
+        trackColor={{ false: COLORS.border, true: COLORS.accentDim }}
+        thumbColor={offline ? COLORS.accent : COLORS.textSub}
+        ios_backgroundColor={COLORS.border}
+      />
+    </View>
+  );
+}
+
+const offlineStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  info: {
+    flex: 1,
+  },
+  title: {
+    fontSize: 14,
+    fontFamily: 'Inter_600SemiBold',
+    color: COLORS.text,
+    marginBottom: 2,
+  },
+  desc: {
+    fontSize: 12,
+    fontFamily: 'Inter_400Regular',
+    color: COLORS.textMuted,
+    lineHeight: 17,
+  },
+});
 
 function QualitySelector() {
   const { quality, changeQuality } = useDownloadQuality();
@@ -268,6 +317,10 @@ export function ServerSettings({ visible, onClose }: Props) {
                   <MaterialIcons name="refresh" size={13} color={COLORS.textMuted} />
                   <Text style={styles.resetText}>Reset to Replit default</Text>
                 </Pressable>
+
+                <View style={styles.divider} />
+
+                <OfflineModeToggle />
 
                 <View style={styles.divider} />
 

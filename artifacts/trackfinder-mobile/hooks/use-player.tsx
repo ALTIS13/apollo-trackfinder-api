@@ -10,6 +10,8 @@ import React, {
 } from 'react';
 
 import { getApiBase, getSessionId } from '@/hooks/use-session';
+import { getOfflineMode } from '@/hooks/use-settings';
+import { Alert } from 'react-native';
 
 export interface PlayerTrack {
   id: string;
@@ -148,6 +150,15 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             .then((info) => info.exists && ((info as { size?: number }).size ?? 0) > 0)
             .catch(() => false)
         : false;
+
+      if (!localUriValid && getOfflineMode()) {
+        Alert.alert(
+          'Оффлайн режим',
+          `«${track.title}» не скачан. В оффлайн-режиме доступны только скачанные треки.`,
+          [{ text: 'OK' }],
+        );
+        return;
+      }
 
       const uri = localUriValid ? track.localUri! : buildUri(track);
 
