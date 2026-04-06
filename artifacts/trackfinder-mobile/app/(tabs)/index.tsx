@@ -266,7 +266,7 @@ export default function SearchScreen() {
   const topPad = insets.top + (Platform.OS === 'web' ? 67 : 0);
   const bottomPad = TAB_BAR + (currentTrack ? PLAYER_HEIGHT : 0) + (Platform.OS === 'web' ? 34 : 0);
 
-  const showDiscovery = !query.trim() && !hasSearched && !isSearching;
+  const showDiscovery = !query.trim() && !isSearching;
 
   const keyExtractor = useCallback((item: Track) => item.id, []);
 
@@ -456,16 +456,6 @@ export default function SearchScreen() {
           <Text style={styles.emptyTitle}>Ничего не найдено</Text>
           <Text style={styles.emptyText}>Попробуй другой запрос или фильтр</Text>
         </View>
-      ) : !hasSearched && !showDiscovery ? (
-        <View style={styles.heroWrapper}>
-          <View style={styles.hero}>
-            <MaterialIcons name="search" size={48} color={COLORS.textMuted} />
-            <Text style={styles.heroTitle}>Найти трек</Text>
-            <Text style={styles.heroText}>
-              Введи исполнителя и название — найдём все версии: оригинал, ремиксы, живые выступления и каверы
-            </Text>
-          </View>
-        </View>
       ) : null}
     </View>
   ), [topPad, query, isSearching, hasSearched, error, results, filter, filtered, showDiscovery, recentLoading, recentTracks, recsLoading, recommendations]);
@@ -479,7 +469,7 @@ export default function SearchScreen() {
       <ServerSettings visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
       <FlatList
-        data={hasSearched ? filtered : []}
+        data={showDiscovery ? [] : (hasSearched ? filtered : [])}
         keyExtractor={keyExtractor}
         renderItem={renderItem}
         ListHeaderComponent={ListHeader}
