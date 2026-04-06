@@ -134,6 +134,18 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   // Internal play implementation — stable via ref
   const _playTrackInner = async (track: PlayerTrack, reqId: number) => {
     try {
+      const resolvedLocalUri = track.localUri || getLibraryLocalUri(track.id);
+      const localUriValid = resolvedLocalUri
+        ? await FileSystem.getInfoAsync(resolvedLocalUri)
+            .then((info) => info.exists && ((info as { size?: number }).size ?? 0) > 0)
+            .catch(() => false)
+        : false;
+
+      if (!localUriValid && getOfflineMode()) {
+        showToast(`«${track.title}» не скачан — оффлайн-режим`);
+        return;
+      }
+
       setIsLoading(true);
 
       if (soundRef.current) {
@@ -145,19 +157,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       setDuration(track.duration > 0 ? track.duration : 0);
 
       if (reqId !== reqIdRef.current) return;
-
-      const resolvedLocalUri = track.localUri || getLibraryLocalUri(track.id);
-      const localUriValid = resolvedLocalUri
-        ? await FileSystem.getInfoAsync(resolvedLocalUri)
-            .then((info) => info.exists && ((info as { size?: number }).size ?? 0) > 0)
-            .catch(() => false)
-        : false;
-
-      if (!localUriValid && getOfflineMode()) {
-        showToast(`«${track.title}» не скачан — оффлайн-режим`);
-        setIsLoading(false);
-        return;
-      }
 
       const uri = localUriValid ? resolvedLocalUri! : buildUri(track);
 
