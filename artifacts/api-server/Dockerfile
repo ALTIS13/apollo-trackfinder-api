@@ -1,4 +1,4 @@
-FROM node:20-alpine AS builder
+FROM node:20-slim AS builder
 
 WORKDIR /app
 
@@ -25,10 +25,12 @@ COPY artifacts/api-server ./artifacts/api-server
 
 RUN pnpm --filter @workspace/api-server run build
 
-FROM node:20-alpine AS runner
+FROM node:20-slim AS runner
 
-RUN apk add --no-cache python3 py3-pip ffmpeg \
-  && pip3 install --no-cache-dir --break-system-packages yt-dlp
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip ffmpeg \
+  && pip3 install --no-cache-dir --break-system-packages yt-dlp \
+  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
