@@ -50,12 +50,8 @@ function pluralSelected(n: number): string {
 
 export default function LibraryScreen() {
   const insets = useSafeAreaInsets();
-  const { tracks, bulkDownload, cancelBulkDownload, bulkProgress, bulkRemove, isDownloading, queueServerDownloads } = useLibrary();
+  const { tracks, bulkDownload, cancelBulkDownload, bulkProgress, bulkRemove, isDownloading, queueServerDownloads, serverJobs } = useLibrary();
   const { currentTrack, playQueue } = usePlayer();
-
-  // Server-side BullMQ queue jobs (for tracks queued server-side)
-  const [serverQueueJobs, setServerQueueJobs] = useState<{ jobId: string; position: number; trackId: string }[]>([]);
-  const [serverQueueActive, setServerQueueActive] = useState(false);
 
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -170,18 +166,14 @@ export default function LibraryScreen() {
 
     if (serverTracks.length > 0) {
       try {
-        setServerQueueActive(true);
         const jobs = await queueServerDownloads(serverTracks);
-        setServerQueueJobs(jobs);
-        // Show user how many queued and their positions
         const positions = jobs.map((j) => j.position).filter(Boolean);
         const minPos = positions.length > 0 ? Math.min(...positions) : 1;
         Alert.alert(
           'Поставлено в очередь',
-          `${jobs.length} ${jobs.length === 1 ? 'трек' : 'трека'} поставлено на загрузку (позиция в очереди: ${minPos}). Загрузка идёт на сервере.`,
+          `${jobs.length} ${jobs.length === 1 ? 'трек' : 'трека'} поставлено на загрузку (позиция: ${minPos}). Файлы будут сохранены автоматически.`,
         );
       } catch {
-        setServerQueueActive(false);
         // Fall back to local download
         await bulkDownload(serverTracks).catch(() => {});
       }
@@ -233,12 +225,9 @@ export default function LibraryScreen() {
 
             if (serverTracks.length > 0) {
               try {
-                setServerQueueActive(true);
                 const jobs = await queueServerDownloads(serverTracks);
-                setServerQueueJobs(jobs);
-                Alert.alert('Поставлено в очередь', `${jobs.length} ${jobs.length === 1 ? 'трек' : 'трека'} поставлено на загрузку на сервере.`);
+                Alert.alert('Поставлено в очередь', `${jobs.length} ${jobs.length === 1 ? 'трек' : 'трека'} поставлено на загрузку. Файлы сохранятся автоматически.`);
               } catch {
-                setServerQueueActive(false);
                 await bulkDownload(serverTracks).catch(() => {});
               }
             }
@@ -407,25 +396,15 @@ export default function LibraryScreen() {
         </View>
       )}
 
-      {serverQueueActive && serverQueueJobs.length > 0 && (
+      {serverJobs.length > 0 && (
         <View style={styles.bulkProgressBar}>
           <View style={styles.bulkProgressLeft}>
             <ActivityIndicator size="small" color={COLORS.accent} />
             <Text style={styles.bulkProgressText}>
-              Очередь сервера: {serverQueueJobs.length} {serverQueueJobs.length === 1 ? 'трек' : 'трека'}
-              {serverQueueJobs[0]?.position ? ` · поз. ${serverQueueJobs[0].position}` : ''}
+              Очередь сервера: {serverJobs.length} {serverJobs.length === 1 ? 'трек' : 'трека'}
+              {serverJobs[0]?.position ? ` · поз. ${serverJobs[0].position}` : ''}
             </Text>
           </View>
-          <Pressable
-            style={styles.bulkCancelBtn}
-            onPress={() => {
-              setServerQueueActive(false);
-              setServerQueueJobs([]);
-            }}
-            hitSlop={8}
-          >
-            <MaterialIcons name="close" size={16} color={COLORS.textMuted} />
-          </Pressable>
         </View>
       )}
 

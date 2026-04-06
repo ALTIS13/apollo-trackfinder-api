@@ -7,12 +7,15 @@ import { spawnAudioDownload, type AudioQuality } from "./ytdlp.js";
 
 export const DOWNLOAD_DIR = process.env["DOWNLOAD_DIR"] ?? "/tmp/tf-downloads";
 
+export const VALID_QUALITIES: AudioQuality[] = ["128", "192", "256", "320", "flac"];
+
 export interface DownloadJobData {
   trackId: string;
   artist: string;
   title: string;
   quality: AudioQuality;
   sourceUrl: string;
+  sessionId: string;
 }
 
 export interface DownloadJobResult {
@@ -197,9 +200,9 @@ export interface EnqueueResult {
 
 export async function enqueueDownload(data: DownloadJobData): Promise<EnqueueResult> {
   if (redisAvailable && downloadQueue) {
-    const job = await downloadQueue.add("download", data);
     const waiting = await downloadQueue.getWaitingCount();
-    return { jobId: job.id!, position: waiting };
+    const job = await downloadQueue.add("download", data);
+    return { jobId: job.id!, position: waiting + 1 };
   }
 
   // In-memory fallback
@@ -222,16 +225,43 @@ export interface JobStatus {
   status: "waiting" | "active" | "completed" | "failed" | "unknown";
   progress: number;
   position?: number;
-  filePath?: string;
   fileSize?: number;
   error?: string;
+  sessionId?: string;
 }
 
-export async function getDownloadJobStatus(jobId: string): Promise<JobStatus> {
+/** Internal method for file serving — returns filePath only for same session */
+export async function getDownloadFilePath(jobId: string, requesterSessionId: string): Promise<string | null> {
+  if (redisAvailable && downloadQueue) {
+    try {
+      const job = await downloadQueue.getJob(jobId);
+      if (!job) return null;
+      if (job.data.sessionId && job.data.sessionId !== requesterSessionId) return null;
+      const state = await job.getState();
+      if (state !== "completed") return null;
+      const result = job.returnvalue as DownloadJobResult | null;
+      return result?.filePath ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  const job = inMemoryJobs.get(jobId);
+  if (!job) return null;
+  if (job.data.sessionId && job.data.sessionId !== requesterSessionId) return null;
+  if (job.status !== "completed") return null;
+  return job.result?.filePath ?? null;
+}
+
+export async function getDownloadJobStatus(jobId: string, requesterSessionId: string): Promise<JobStatus> {
   if (redisAvailable && downloadQueue) {
     try {
       const job = await downloadQueue.getJob(jobId);
       if (!job) return { status: "unknown", progress: 0 };
+      // Ownership check
+      if (job.data.sessionId && job.data.sessionId !== requesterSessionId) {
+        return { status: "unknown", progress: 0 };
+      }
       const state = await job.getState();
       const progress = typeof job.progress === "number" ? job.progress : 0;
       const result = job.returnvalue as DownloadJobResult | null;
@@ -240,7 +270,6 @@ export async function getDownloadJobStatus(jobId: string): Promise<JobStatus> {
         status: state === "active" ? "active" : state === "completed" ? "completed" : state === "failed" ? "failed" : "waiting",
         progress,
         position,
-        filePath: result?.filePath,
         fileSize: result?.fileSize,
         error: job.failedReason,
       };
@@ -251,12 +280,15 @@ export async function getDownloadJobStatus(jobId: string): Promise<JobStatus> {
 
   const job = inMemoryJobs.get(jobId);
   if (!job) return { status: "unknown", progress: 0 };
+  // Ownership check
+  if (job.data.sessionId && job.data.sessionId !== requesterSessionId) {
+    return { status: "unknown", progress: 0 };
+  }
   const queuePos = inMemoryQueue.findIndex((j) => j.id === jobId);
   return {
     status: job.status,
     progress: job.progress,
     position: queuePos >= 0 ? queuePos + 1 : undefined,
-    filePath: job.result?.filePath,
     fileSize: job.result?.fileSize,
     error: job.error,
   };

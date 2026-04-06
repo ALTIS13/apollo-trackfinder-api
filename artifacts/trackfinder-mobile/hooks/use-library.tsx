@@ -35,10 +35,12 @@ interface LibraryState {
   isDownloading: Record<string, boolean>;
   downloadProgress: Record<string, number>;
   bulkProgress: BulkProgress;
+  /** Server-side BullMQ jobs currently polling (queue position & status visible) */
+  serverJobs: ServerJob[];
   saveToLibrary: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; source?: string; importOrder?: number }) => Promise<void>;
   download: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }) => Promise<void>;
   bulkDownload: (tracks: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }[]) => Promise<{ failed: number }>;
-  /** Queue server-side async downloads (via BullMQ). Returns job IDs for polling. */
+  /** Queue server-side async downloads (via BullMQ). Automatically polls and saves locally when done. */
   queueServerDownloads: (tracks: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; sourceUrl?: string }[]) => Promise<{ jobId: string; position: number; trackId: string }[]>;
   cancelBulkDownload: () => void;
   remove: (id: string) => Promise<void>;
@@ -68,12 +70,26 @@ async function tryGrantMediaPermission(): Promise<boolean> {
   }
 }
 
+/** A pending server-side BullMQ download job being tracked. */
+export interface ServerJob {
+  jobId: string;
+  trackId: string;
+  title: string;
+  artist: string;
+  thumbnailUrl: string | null;
+  duration: number;
+  position: number;
+}
+
 export function LibraryProvider({ children }: { children: React.ReactNode }) {
   const [tracks, setTracks] = useState<SavedTrack[]>([]);
   const [isDownloading, setIsDownloading] = useState<Record<string, boolean>>({});
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
   const [bulkProgress, setBulkProgress] = useState<BulkProgress>({ total: 0, done: 0, failed: 0, active: false });
   const bulkCancelRef = useRef(false);
+
+  // Active server-queue jobs (BullMQ) being polled
+  const [serverJobs, setServerJobs] = useState<ServerJob[]>([]);
 
   useEffect(() => {
     loadQuality();
@@ -91,6 +107,94 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     _tracksRef = tracks;
   }, [tracks]);
+
+  /** Poll active server jobs every 3 seconds; fetch+save locally when completed */
+  useEffect(() => {
+    if (serverJobs.length === 0) return;
+
+    const poll = async () => {
+      const sessionId = getSessionId();
+      const stillPending: ServerJob[] = [];
+
+      for (const job of serverJobs) {
+        try {
+          const resp = await fetch(`${getApiBase()}/tracks/download/status/${job.jobId}`, {
+            headers: { 'X-Client-Session': sessionId },
+          });
+          if (!resp.ok) {
+            stillPending.push(job);
+            continue;
+          }
+          const statusData = await resp.json() as { status: string; progress: number; position?: number; fileSize?: number };
+
+          if (statusData.status === 'completed') {
+            // Download file from server to local storage
+            const quality = getQuality();
+            const ext = quality === 'flac' ? 'flac' : 'mp3';
+            const safe = job.title.replace(/[^а-яёa-z0-9_\-\s]/gi, '').replace(/\s+/g, '_');
+            const filename = `${safe.slice(0, 24) || job.trackId.slice(-8)}_${job.trackId.slice(-6)}.${ext}`;
+            const localUri = (FileSystem.documentDirectory ?? '') + filename;
+
+            const fileUrl = `${getApiBase()}/tracks/download/file/${job.jobId}`;
+            const downloadResumable = FileSystem.createDownloadResumable(
+              fileUrl,
+              localUri,
+              { headers: { 'X-Client-Session': sessionId } },
+              (progress) => {
+                const pct = progress.totalBytesExpectedToWrite > 0
+                  ? progress.totalBytesWritten / progress.totalBytesExpectedToWrite
+                  : 0;
+                setDownloadProgress((p) => ({ ...p, [job.trackId]: pct }));
+              },
+            );
+
+            try {
+              const result = await downloadResumable.downloadAsync();
+              if (result && result.status < 400) {
+                const info = await FileSystem.getInfoAsync(result.uri);
+                const fileSize = info.exists ? (info as { size?: number }).size : undefined;
+                if (fileSize && fileSize >= 1024) {
+                  setTracks((prev) => {
+                    const existing = prev.find((t) => t.id === job.trackId);
+                    const updated: SavedTrack = {
+                      id: job.trackId,
+                      title: job.title,
+                      artist: job.artist,
+                      thumbnailUrl: job.thumbnailUrl,
+                      duration: job.duration,
+                      localUri: result.uri,
+                      savedAt: existing?.savedAt ?? Date.now(),
+                      fileSize,
+                      downloadQuality: quality,
+                    };
+                    const filtered = prev.filter((t) => t.id !== job.trackId);
+                    const next = [updated, ...filtered];
+                    AsyncStorage.setItem(LIBRARY_KEY, JSON.stringify(next));
+                    return next;
+                  });
+                }
+              }
+            } finally {
+              setDownloadProgress((p) => { const n = { ...p }; delete n[job.trackId]; return n; });
+            }
+            // Job done — don't add to stillPending
+          } else if (statusData.status === 'failed' || statusData.status === 'unknown') {
+            // Drop failed jobs silently
+          } else {
+            // Still waiting/active — update position and keep polling
+            stillPending.push({ ...job, position: statusData.position ?? job.position });
+          }
+        } catch {
+          stillPending.push(job);
+        }
+      }
+
+      setServerJobs(stillPending);
+    };
+
+    const timer = setInterval(poll, 3000);
+    return () => clearInterval(timer);
+  }, [serverJobs]);
 
   const saveToLibrary = useCallback(
     async (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; source?: string; importOrder?: number }) => {
@@ -249,6 +353,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       tracksInput: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; sourceUrl?: string }[],
     ): Promise<{ jobId: string; position: number; trackId: string }[]> => {
       const quality = getQuality();
+      const sessionId = getSessionId();
       const payload = tracksInput.map((t) => ({
         trackId: t.id,
         artist: t.artist,
@@ -260,15 +365,36 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Client-Session': getSessionId(),
+          'X-Client-Session': sessionId,
         },
         body: JSON.stringify({ tracks: payload }),
       });
       if (!resp.ok) throw new Error(`Queue request failed: HTTP ${resp.status}`);
       const data = await resp.json() as { results: Array<{ trackId: string; jobId?: string; position?: number; error?: string }> };
-      return (data.results ?? [])
+      const queued = (data.results ?? [])
         .filter((r): r is { trackId: string; jobId: string; position: number } => !!r.jobId)
         .map((r) => ({ jobId: r.jobId, position: r.position, trackId: r.trackId }));
+
+      // Store as ServerJob for automatic polling + local save
+      const byId = new Map(tracksInput.map((t) => [t.id, t]));
+      const jobs: ServerJob[] = queued.map((q) => {
+        const src = byId.get(q.trackId);
+        return {
+          jobId: q.jobId,
+          trackId: q.trackId,
+          title: src?.title ?? q.trackId,
+          artist: src?.artist ?? '',
+          thumbnailUrl: src?.thumbnailUrl ?? null,
+          duration: src?.duration ?? 0,
+          position: q.position,
+        };
+      });
+      setServerJobs((prev) => {
+        const existing = new Set(prev.map((j) => j.jobId));
+        return [...prev, ...jobs.filter((j) => !existing.has(j.jobId))];
+      });
+
+      return queued;
     },
     [],
   );
@@ -313,6 +439,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       isDownloading,
       downloadProgress,
       bulkProgress,
+      serverJobs,
       saveToLibrary,
       download: downloadSingle,
       bulkDownload,

@@ -9,7 +9,7 @@ import { searchDeezer } from "../adapters/deezer.js";
 import { SearchTracksBody } from "@workspace/api-zod";
 import { getCachedStreamUrl, setCachedStreamUrl } from "../lib/stream-cache.js";
 import { isRedisAvailable, getRedis } from "../lib/redis.js";
-import { enqueueDownload, getDownloadJobStatus, DOWNLOAD_DIR, type DownloadJobData } from "../lib/background-queue.js";
+import { enqueueDownload, getDownloadJobStatus, getDownloadFilePath, DOWNLOAD_DIR, VALID_QUALITIES, type DownloadJobData } from "../lib/background-queue.js";
 import { db } from "@workspace/db";
 import { playHistoryTable } from "@workspace/db/schema";
 import { eq, sql } from "drizzle-orm";
@@ -753,6 +753,7 @@ function validateDownloadSourceUrl(trackId: string, rawSourceUrl?: string): stri
 }
 
 router.post("/tracks/download/queue", async (req, res) => {
+  const sessionId = (req.headers["x-client-session"] as string | undefined) ?? "";
   const body = req.body as { tracks?: unknown[] };
   if (!Array.isArray(body.tracks) || body.tracks.length === 0) {
     res.status(400).json({ error: "tracks array is required" });
@@ -769,13 +770,18 @@ router.post("/tracks/download/queue", async (req, res) => {
     const trackId = String(t["trackId"] ?? t["id"] ?? "").trim();
     const artist = String(t["artist"] ?? "").trim();
     const title = String(t["title"] ?? "").trim();
-    const quality = (t["quality"] as string) ?? "128k";
+    const rawQuality = String(t["quality"] ?? "128").trim();
     const rawSourceUrl = t["sourceUrl"] ? String(t["sourceUrl"]) : undefined;
 
     if (!trackId) {
       results.push({ trackId, error: "trackId is required" });
       continue;
     }
+
+    // Strict quality allowlist — normalize with fallback to 128 kbps
+    const quality: import("../lib/ytdlp.js").AudioQuality = VALID_QUALITIES.includes(rawQuality as import("../lib/ytdlp.js").AudioQuality)
+      ? (rawQuality as import("../lib/ytdlp.js").AudioQuality)
+      : "128";
 
     // Derive source URL server-side from trusted track ID (with allowlist fallback)
     const sourceUrl = validateDownloadSourceUrl(trackId, rawSourceUrl);
@@ -789,8 +795,9 @@ router.post("/tracks/download/queue", async (req, res) => {
         trackId,
         artist,
         title,
-        quality: quality as import("../lib/ytdlp.js").AudioQuality,
+        quality,
         sourceUrl,
+        sessionId,
       });
       results.push({ trackId, jobId, position });
     } catch (err) {
@@ -803,28 +810,31 @@ router.post("/tracks/download/queue", async (req, res) => {
 
 router.get("/tracks/download/status/:jobId", async (req, res) => {
   const { jobId } = req.params as { jobId: string };
-  const status = await getDownloadJobStatus(jobId);
+  const sessionId = (req.headers["x-client-session"] as string | undefined) ?? String(req.query["sessionId"] ?? "");
+  const status = await getDownloadJobStatus(jobId, sessionId);
   res.json(status);
 });
 
 router.get("/tracks/download/file/:jobId", async (req, res) => {
   const { jobId } = req.params as { jobId: string };
-  const status = await getDownloadJobStatus(jobId);
-  if (status.status !== "completed" || !status.filePath) {
-    res.status(404).json({ error: "File not ready", status: status.status });
+  const sessionId = (req.headers["x-client-session"] as string | undefined) ?? String(req.query["sessionId"] ?? "");
+  const filePath = await getDownloadFilePath(jobId, sessionId);
+  if (!filePath) {
+    res.status(404).json({ error: "File not ready or access denied" });
     return;
   }
-  if (!fsSync.existsSync(status.filePath)) {
+  if (!fsSync.existsSync(filePath)) {
     res.status(404).json({ error: "File not found on disk" });
     return;
   }
-  const ext = path.extname(status.filePath).slice(1) || "mp3";
+  const ext = path.extname(filePath).slice(1) || "mp3";
   const mime = ext === "flac" ? "audio/flac" : "audio/mpeg";
-  const filename = path.basename(status.filePath);
+  const filename = path.basename(filePath);
+  const stats = fsSync.statSync(filePath);
   res.setHeader("Content-Type", mime);
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-  if (status.fileSize) res.setHeader("Content-Length", status.fileSize);
-  fsSync.createReadStream(status.filePath).pipe(res);
+  res.setHeader("Content-Length", stats.size);
+  fsSync.createReadStream(filePath).pipe(res);
 });
 
 export default router;
