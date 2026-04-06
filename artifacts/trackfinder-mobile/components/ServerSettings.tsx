@@ -139,19 +139,18 @@ const qualStyles = StyleSheet.create({
   },
   chips: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
+    gap: 6,
     marginBottom: 4,
   },
   chip: {
-    paddingHorizontal: 12,
+    flex: 1,
+    paddingHorizontal: 6,
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: COLORS.border,
     backgroundColor: COLORS.card,
     alignItems: 'center',
-    minWidth: 70,
   },
   chipActive: {
     borderColor: COLORS.accent,
@@ -440,7 +439,7 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 20,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
-    maxHeight: '90%',
+    maxHeight: '95%',
   },
   handle: {
     width: 36,
@@ -479,8 +478,10 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.card,
   },
   body: {
-    padding: 20,
-    gap: 12,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 20,
+    gap: 10,
   },
   sectionTitle: {
     fontSize: 14,
@@ -579,7 +580,7 @@ const styles = StyleSheet.create({
   divider: {
     height: 1,
     backgroundColor: COLORS.border,
-    marginVertical: 6,
+    marginVertical: 4,
   },
   codeBlock: {
     backgroundColor: COLORS.bg,
