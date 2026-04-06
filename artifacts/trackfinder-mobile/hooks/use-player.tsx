@@ -241,8 +241,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
                 const sessionId = getSessionId();
                 fetch(`${getApiBase()}/tracks/recommendations?sessionId=${sessionId}&limit=10`)
                   .then((r) => r.json())
-                  .then((data: { recommendations?: PlayerTrack[] }) => {
-                    const recs: PlayerTrack[] = (data.recommendations ?? []).map((r) => ({
+                  .then((data: { results?: PlayerTrack[] }) => {
+                    const recs: PlayerTrack[] = (data.results ?? []).map((r) => ({
                       id: r.id,
                       title: r.title,
                       artist: r.artist,

@@ -50,8 +50,12 @@ function pluralSelected(n: number): string {
 
 export default function LibraryScreen() {
   const insets = useSafeAreaInsets();
-  const { tracks, bulkDownload, cancelBulkDownload, bulkProgress, bulkRemove, isDownloading } = useLibrary();
+  const { tracks, bulkDownload, cancelBulkDownload, bulkProgress, bulkRemove, isDownloading, queueServerDownloads } = useLibrary();
   const { currentTrack, playQueue } = usePlayer();
+
+  // Server-side BullMQ queue jobs (for tracks queued server-side)
+  const [serverQueueJobs, setServerQueueJobs] = useState<{ jobId: string; position: number; trackId: string }[]>([]);
+  const [serverQueueActive, setServerQueueActive] = useState(false);
 
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -159,11 +163,37 @@ export default function LibraryScreen() {
     if (toDownload.length === 0) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     exitSelectionMode();
-    const { failed } = await bulkDownload(toDownload);
-    if (failed > 0) {
-      Alert.alert('Ошибка', `Не удалось скачать ${failed} ${failed === 1 ? 'трек' : 'трека'}. Проверьте соединение.`);
+
+    // Use server-queue (BullMQ) for tracks whose ID encodes a trusted source URL
+    const serverTracks = toDownload.filter((t) => t.id.startsWith('yt_') || t.id.startsWith('sc_') || t.id.startsWith('bc_'));
+    const localTracks = toDownload.filter((t) => !serverTracks.includes(t));
+
+    if (serverTracks.length > 0) {
+      try {
+        setServerQueueActive(true);
+        const jobs = await queueServerDownloads(serverTracks);
+        setServerQueueJobs(jobs);
+        // Show user how many queued and their positions
+        const positions = jobs.map((j) => j.position).filter(Boolean);
+        const minPos = positions.length > 0 ? Math.min(...positions) : 1;
+        Alert.alert(
+          'Поставлено в очередь',
+          `${jobs.length} ${jobs.length === 1 ? 'трек' : 'трека'} поставлено на загрузку (позиция в очереди: ${minPos}). Загрузка идёт на сервере.`,
+        );
+      } catch {
+        setServerQueueActive(false);
+        // Fall back to local download
+        await bulkDownload(serverTracks).catch(() => {});
+      }
     }
-  }, [tracks, selectedIds, isDownloading, bulkDownload, exitSelectionMode]);
+
+    if (localTracks.length > 0) {
+      const { failed } = await bulkDownload(localTracks);
+      if (failed > 0) {
+        Alert.alert('Ошибка', `Не удалось скачать ${failed} ${failed === 1 ? 'трек' : 'трека'}. Проверьте соединение.`);
+      }
+    }
+  }, [tracks, selectedIds, isDownloading, bulkDownload, queueServerDownloads, exitSelectionMode]);
 
   const handleBulkDelete = useCallback(() => {
     const count = selectedIds.size;
@@ -197,15 +227,33 @@ export default function LibraryScreen() {
         {
           text: 'Скачать',
           onPress: async () => {
-            const { failed } = await bulkDownload(toDownload);
-            if (failed > 0) {
-              Alert.alert('Ошибка', `Не удалось скачать ${failed} трека.`);
+            // Route yt/sc/bc tracks through server BullMQ queue; dz via direct stream
+            const serverTracks = toDownload.filter((t) => t.id.startsWith('yt_') || t.id.startsWith('sc_') || t.id.startsWith('bc_'));
+            const localTracks = toDownload.filter((t) => !serverTracks.includes(t));
+
+            if (serverTracks.length > 0) {
+              try {
+                setServerQueueActive(true);
+                const jobs = await queueServerDownloads(serverTracks);
+                setServerQueueJobs(jobs);
+                Alert.alert('Поставлено в очередь', `${jobs.length} ${jobs.length === 1 ? 'трек' : 'трека'} поставлено на загрузку на сервере.`);
+              } catch {
+                setServerQueueActive(false);
+                await bulkDownload(serverTracks).catch(() => {});
+              }
+            }
+
+            if (localTracks.length > 0) {
+              const { failed } = await bulkDownload(localTracks);
+              if (failed > 0) {
+                Alert.alert('Ошибка', `Не удалось скачать ${failed} трека.`);
+              }
             }
           },
         },
       ],
     );
-  }, [onlineTracks, isDownloading, bulkDownload]);
+  }, [onlineTracks, isDownloading, bulkDownload, queueServerDownloads]);
 
   const renderItem = useCallback(
     ({ item }: ListRenderItemInfo<SavedTrack>) => (
@@ -355,6 +403,28 @@ export default function LibraryScreen() {
           >
             <MaterialIcons name="close" size={16} color={COLORS.danger} />
             <Text style={styles.bulkCancelText}>Стоп</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {serverQueueActive && serverQueueJobs.length > 0 && (
+        <View style={styles.bulkProgressBar}>
+          <View style={styles.bulkProgressLeft}>
+            <ActivityIndicator size="small" color={COLORS.accent} />
+            <Text style={styles.bulkProgressText}>
+              Очередь сервера: {serverQueueJobs.length} {serverQueueJobs.length === 1 ? 'трек' : 'трека'}
+              {serverQueueJobs[0]?.position ? ` · поз. ${serverQueueJobs[0].position}` : ''}
+            </Text>
+          </View>
+          <Pressable
+            style={styles.bulkCancelBtn}
+            onPress={() => {
+              setServerQueueActive(false);
+              setServerQueueJobs([]);
+            }}
+            hitSlop={8}
+          >
+            <MaterialIcons name="close" size={16} color={COLORS.textMuted} />
           </Pressable>
         </View>
       )}

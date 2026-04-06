@@ -724,6 +724,34 @@ router.get("/tracks/lyrics", async (req, res) => {
 
 // --- Download Queue endpoints ---
 
+/**
+ * Validate and allowlist a source URL for download queue jobs.
+ * Accepts either a trusted track ID (decoded server-side via decodeTrackUrl)
+ * or an explicit sourceUrl that must match HTTPS + allowed host allowlist.
+ */
+function validateDownloadSourceUrl(trackId: string, rawSourceUrl?: string): string | null {
+  // Primary: derive from trusted track ID
+  const decoded = decodeTrackUrl(trackId);
+  if (decoded) return decoded.url;
+
+  // Fallback: if caller provided a raw URL, apply allowlist
+  if (rawSourceUrl) {
+    try {
+      const parsed = new URL(rawSourceUrl);
+      if (parsed.protocol !== "https:") return null;
+      const host = parsed.hostname.toLowerCase();
+      const allAllowed = Object.values(ALLOWED_HOSTS).flat();
+      const ok = allAllowed.some((h) => host === h || host.endsWith(`.${h}`));
+      if (!ok) return null;
+      return rawSourceUrl;
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
 router.post("/tracks/download/queue", async (req, res) => {
   const body = req.body as { tracks?: unknown[] };
   if (!Array.isArray(body.tracks) || body.tracks.length === 0) {
@@ -738,14 +766,21 @@ router.post("/tracks/download/queue", async (req, res) => {
   const results: Array<{ trackId: string; jobId: string; position: number } | { trackId: string; error: string }> = [];
 
   for (const t of body.tracks as Record<string, unknown>[]) {
-    const trackId = String(t["trackId"] ?? t["id"] ?? "");
+    const trackId = String(t["trackId"] ?? t["id"] ?? "").trim();
     const artist = String(t["artist"] ?? "").trim();
     const title = String(t["title"] ?? "").trim();
     const quality = (t["quality"] as string) ?? "128k";
-    const sourceUrl = String(t["sourceUrl"] ?? "").trim();
+    const rawSourceUrl = t["sourceUrl"] ? String(t["sourceUrl"]) : undefined;
 
-    if (!trackId || !sourceUrl) {
-      results.push({ trackId, error: "trackId and sourceUrl are required" });
+    if (!trackId) {
+      results.push({ trackId, error: "trackId is required" });
+      continue;
+    }
+
+    // Derive source URL server-side from trusted track ID (with allowlist fallback)
+    const sourceUrl = validateDownloadSourceUrl(trackId, rawSourceUrl);
+    if (!sourceUrl) {
+      results.push({ trackId, error: "Could not resolve a trusted source URL for this track" });
       continue;
     }
 

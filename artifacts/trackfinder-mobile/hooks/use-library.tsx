@@ -39,7 +39,7 @@ interface LibraryState {
   download: (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }) => Promise<void>;
   bulkDownload: (tracks: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number }[]) => Promise<{ failed: number }>;
   /** Queue server-side async downloads (via BullMQ). Returns job IDs for polling. */
-  queueServerDownloads: (tracks: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; sourceUrl: string }[]) => Promise<{ jobId: string; position: number; trackId: string }[]>;
+  queueServerDownloads: (tracks: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; sourceUrl?: string }[]) => Promise<{ jobId: string; position: number; trackId: string }[]>;
   cancelBulkDownload: () => void;
   remove: (id: string) => Promise<void>;
   bulkRemove: (ids: string[]) => Promise<void>;
@@ -246,7 +246,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
    */
   const queueServerDownloads = useCallback(
     async (
-      tracksInput: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; sourceUrl: string }[],
+      tracksInput: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; sourceUrl?: string }[],
     ): Promise<{ jobId: string; position: number; trackId: string }[]> => {
       const quality = getQuality();
       const payload = tracksInput.map((t) => ({
