@@ -4,7 +4,7 @@ WORKDIR /app
 
 RUN npm install -g pnpm
 
-COPY pnpm-lock.yaml tsconfig.base.json tsconfig.json ./
+COPY pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json tsconfig.json ./
 
 COPY package.json /tmp/root-pkg.json
 RUN node -e " \
@@ -13,7 +13,12 @@ RUN node -e " \
   delete pkg.scripts; \
   require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2));"
 
-RUN printf 'packages:\n  - artifacts/api-server\n  - lib/db\n  - lib/api-zod\n' > pnpm-workspace.yaml
+RUN node -e " \
+  const fs = require('fs'); \
+  const y = fs.readFileSync('pnpm-workspace.yaml', 'utf8'); \
+  const replaced = y.replace(/^packages:[\s\S]*?(?=\n[a-zA-Z])/m, \
+    'packages:\n  - artifacts/api-server\n  - lib/db\n  - lib/api-zod\n\n'); \
+  fs.writeFileSync('pnpm-workspace.yaml', replaced);"
 
 COPY lib/db/package.json ./lib/db/
 COPY lib/api-zod/package.json ./lib/api-zod/
