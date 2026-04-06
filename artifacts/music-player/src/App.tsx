@@ -82,7 +82,7 @@ function AppLayout() {
 
       <div className="flex flex-1 overflow-hidden">
         {/* Desktop sidebar */}
-        <aside className="hidden md:flex flex-col w-[220px] flex-shrink-0 border-r border-white/5 bg-black/30 overflow-y-auto">
+        <aside className="hidden md:flex flex-col w-[240px] flex-shrink-0 border-r border-white/5 bg-black/30 overflow-y-auto">
           <Sidebar />
         </aside>
 

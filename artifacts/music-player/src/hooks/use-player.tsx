@@ -87,7 +87,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     audioRef.current = new Audio();
-    audioRef.current.volume = 0.8;
+    audioRef.current.volume = 0.8; // matches initial volume state
 
     const audio = audioRef.current;
 
@@ -260,6 +260,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     queueRef.current = [];
     queueIndexRef.current = 0;
     setQueueIndex(0);
+    // Stop playback and reset player state (consistent with remove-last-item behavior)
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ""; }
+    setCurrentTrack(null);
+    setIsPlaying(false);
+    setProgress(0);
+    setDuration(0);
   }, []);
 
   const togglePlayPause = useCallback(() => {
