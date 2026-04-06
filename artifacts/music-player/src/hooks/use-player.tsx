@@ -3,16 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { getGetTrackStreamQueryOptions } from "@workspace/api-client-react";
 import type { TrackResult } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
-
-function getOrCreateWebSessionId(): string {
-  const key = "apollo_web_session_id";
-  let id = localStorage.getItem(key);
-  if (!id) {
-    id = Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
-    localStorage.setItem(key, id);
-  }
-  return id;
-}
+import { getClientSessionId } from "@/lib/client-session";
 
 interface PlayerContextType {
   currentTrack: TrackResult | null;
@@ -86,7 +77,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         trackId: currentTrack.id,
         artist: currentTrack.artist,
         title: currentTrack.title,
-        sessionId: getOrCreateWebSessionId(),
+        sessionId: getClientSessionId(),
       }),
     }).catch(() => {});
   }, [currentTrack?.id]);
