@@ -1,0 +1,307 @@
+🧠 FULL IMPLEMENTATION PLAN (BACKEND + MOBILE + WEB)
+
+Доработать проект Apollo TrackFinder до уровня Spotify-like приложения с оффлайном, рекомендациями, кэшированием и синхронизацией.
+
+1. INFRA + BACKEND CORE
+
+Добавить Redis в docker-compose.yml:
+
+redis:
+  image: redis:7-alpine
+  ports:
+    - "6379:6379"
+
+Создать клиент Redis:
+
+src/lib/redis.ts
+
+import Redis from "ioredis";
+
+export const redis = new Redis(process.env.REDIS_URL || "redis://redis:6379", {
+  maxRetriesPerRequest: null,
+});
+2. SEARCH CACHE (замена PostgreSQL)
+
+В tracks.ts заменить кэш:
+
+const cacheKey = `search:${artist}:${title}`;
+
+const cached = await redis.get(cacheKey);
+if (cached) {
+  return res.json(JSON.parse(cached));
+}
+
+const results = await searchAllSources();
+
+await redis.set(cacheKey, JSON.stringify(results), "EX", 3600);
+
+res.json(results);
+
+Удалить использование track_search_cache или оставить как fallback.
+
+3. STREAM CACHE (ускорение yt-dlp)
+
+Создать:
+
+src/lib/stream-cache.ts
+
+import { redis } from "./redis";
+
+export async function getCachedStreamUrl(id: string) {
+  return await redis.get(`stream:${id}`);
+}
+
+export async function setCachedStreamUrl(id: string, url: string) {
+  await redis.set(`stream:${id}`, url, "EX", 300);
+}
+
+Обновить /tracks/:id/audio-stream:
+
+let streamUrl = await getCachedStreamUrl(track.id);
+
+if (!streamUrl) {
+  streamUrl = await getStreamUrl(originalUrl);
+  await setCachedStreamUrl(track.id, streamUrl);
+}
+
+res.redirect(streamUrl);
+4. PLAY HISTORY + RECOMMENDATIONS
+
+Добавить таблицу:
+
+play_history (
+  id SERIAL PRIMARY KEY,
+  session_id TEXT,
+  track_id TEXT,
+  played_at TIMESTAMP DEFAULT NOW()
+)
+
+Добавить endpoint:
+
+POST /tracks/play
+
+await db.insert(playHistory).values({
+  session_id: req.headers["x-client-session"],
+  track_id: req.body.trackId,
+});
+
+Добавить endpoint рекомендаций:
+
+GET /tracks/recommendations
+
+const history = await db.execute(`
+  SELECT track_id, COUNT(*) as score
+  FROM play_history
+  WHERE session_id = $1
+  GROUP BY track_id
+  ORDER BY score DESC
+  LIMIT 10
+`, [session_id]);
+
+// дальше дергаем search по артистам этих треков
+5. WEBSOCKET (SYNC ПЛЕЕРА)
+
+Установить:
+
+pnpm add ws
+
+Создать:
+
+src/ws.ts
+
+import { WebSocketServer } from "ws";
+
+export const wss = new WebSocketServer({ port: 8081 });
+
+wss.on("connection", (ws) => {
+  ws.on("message", (msg) => {
+    const data = JSON.parse(msg.toString());
+
+    wss.clients.forEach(client => {
+      if (client !== ws && client.readyState === 1) {
+        client.send(JSON.stringify(data));
+      }
+    });
+  });
+});
+
+Подключить в index.ts:
+
+import "./ws";
+6. QUEUE (BullMQ для загрузок)
+pnpm add bullmq
+
+Создать:
+
+src/lib/queue.ts
+
+import { Queue } from "bullmq";
+import { redis } from "./redis";
+
+export const downloadQueue = new Queue("downloads", {
+  connection: redis,
+});
+
+Worker:
+
+import { Worker } from "bullmq";
+
+new Worker("downloads", async job => {
+  const { url } = job.data;
+  // yt-dlp download
+});
+
+Использование:
+
+await downloadQueue.add("download", { url });
+7. MOBILE — КРИТИЧЕСКИЕ ДОРАБОТКИ
+7.1 История прослушивания
+
+В use-player.tsx:
+
+useEffect(() => {
+  if (currentTrack) {
+    apiFetch("/tracks/play", {
+      method: "POST",
+      body: JSON.stringify({ trackId: currentTrack.id }),
+    });
+  }
+}, [currentTrack]);
+7.2 WebSocket sync
+
+Создать:
+
+hooks/use-sync.ts
+
+const ws = new WebSocket("ws://YOUR_SERVER:8081");
+
+export function sendPlayerState(state) {
+  ws.send(JSON.stringify(state));
+}
+
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  // обновить плеер
+};
+
+В use-player.tsx:
+
+useEffect(() => {
+  sendPlayerState({
+    track: currentTrack,
+    position,
+    isPlaying,
+  });
+}, [currentTrack, position, isPlaying]);
+7.3 Новый Home экран
+
+Создать блоки:
+
+Recently Played
+Recommendations
+Library shortcuts
+
+API:
+
+const recs = await apiFetch("/tracks/recommendations");
+7.4 Offline режим
+
+Добавить в use-settings.ts:
+
+offlineMode: boolean
+
+В use-player.tsx:
+
+if (offlineMode && !track.localUri) {
+  return; // не играть
+}
+7.5 Оптимизация списков
+
+Заменить FlatList:
+
+pnpm add @shopify/flash-list
+import { FlashList } from "@shopify/flash-list";
+8. WEB PLAYER (СЕРЬЁЗНЫЙ АПГРЕЙД)
+8.1 Player Context
+
+Создать:
+
+const audio = new Audio();
+
+export function play(track) {
+  audio.src = `/tracks/${track.id}/audio-stream`;
+  audio.play();
+}
+8.2 Layout (Spotify-style)
+
+Структура:
+
+Sidebar
+Main content
+Bottom player
+8.3 Queue
+const [queue, setQueue] = useState([]);
+8.4 Hotkeys
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space") {
+    audio.paused ? audio.play() : audio.pause();
+  }
+});
+9. DATABASE EXTENSIONS
+
+Добавить таблицы:
+
+users
+------
+id SERIAL
+session_id TEXT
+
+liked_tracks
+------
+id SERIAL
+session_id TEXT
+track_id TEXT
+
+playlists
+------
+id SERIAL
+name TEXT
+session_id TEXT
+
+playlist_tracks
+------
+playlist_id INT
+track_id TEXT
+10. УЛУЧШЕНИЕ UX (КРИТИЧНО)
+
+Добавить:
+
+autoplay next похожих треков
+long press → preview
+swipe → add to queue
+smart shuffle
+11. SMART FEATURES
+Автодобавление похожих треков
+if (queue закончилась) {
+  const recs = await fetch("/tracks/recommendations");
+  setQueue(recs);
+}
+Поиск с автокомплитом
+
+Добавить endpoint:
+
+GET /tracks/suggest?q=
+🧾 ИТОГ
+
+После реализации:
+
+❌ Сейчас: агрегатор + плеер
+✅ Станет: полноценный Spotify-like сервис
+🚨 ПРИОРИТЕТ (делай в таком порядке)
+Redis + stream cache
+Play history
+Recommendations
+Новый Home экран
+WebSocket sync
+Web player upgrade
+Offline mode
