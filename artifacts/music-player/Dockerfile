@@ -4,17 +4,22 @@ WORKDIR /app
 
 RUN npm install -g pnpm
 
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json tsconfig.json ./
+COPY pnpm-lock.yaml tsconfig.base.json tsconfig.json ./
 
-COPY lib/api-spec/package.json ./lib/api-spec/
-COPY lib/api-zod/package.json ./lib/api-zod/
+COPY package.json /tmp/root-pkg.json
+RUN node -e " \
+  const pkg = require('/tmp/root-pkg.json'); \
+  delete pkg.dependencies; \
+  delete pkg.scripts; \
+  require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2));"
+
+RUN printf 'packages:\n  - artifacts/music-player\n  - lib/api-client-react\n' > pnpm-workspace.yaml
+
 COPY lib/api-client-react/package.json ./lib/api-client-react/
 COPY artifacts/music-player/package.json ./artifacts/music-player/
 
 RUN pnpm install --frozen-lockfile
 
-COPY lib/api-spec ./lib/api-spec
-COPY lib/api-zod ./lib/api-zod
 COPY lib/api-client-react ./lib/api-client-react
 COPY artifacts/music-player ./artifacts/music-player
 COPY attached_assets ./attached_assets

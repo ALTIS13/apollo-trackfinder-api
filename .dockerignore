@@ -1,0 +1,13 @@
+node_modules
+.git
+.local
+.cache
+.replit
+replit.nix
+.config
+*.log
+
+artifacts/trackfinder-mobile
+artifacts/mockup-sandbox
+
+scripts

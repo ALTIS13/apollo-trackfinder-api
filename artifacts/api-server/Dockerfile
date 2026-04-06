@@ -4,17 +4,24 @@ WORKDIR /app
 
 RUN npm install -g pnpm
 
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json tsconfig.json ./
+COPY pnpm-lock.yaml tsconfig.base.json tsconfig.json ./
+
+COPY package.json /tmp/root-pkg.json
+RUN node -e " \
+  const pkg = require('/tmp/root-pkg.json'); \
+  delete pkg.dependencies; \
+  delete pkg.scripts; \
+  require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2));"
+
+RUN printf 'packages:\n  - artifacts/api-server\n  - lib/db\n  - lib/api-zod\n' > pnpm-workspace.yaml
 
 COPY lib/db/package.json ./lib/db/
-COPY lib/api-spec/package.json ./lib/api-spec/
 COPY lib/api-zod/package.json ./lib/api-zod/
 COPY artifacts/api-server/package.json ./artifacts/api-server/
 
 RUN pnpm install --frozen-lockfile
 
 COPY lib/db ./lib/db
-COPY lib/api-spec ./lib/api-spec
 COPY lib/api-zod ./lib/api-zod
 COPY artifacts/api-server ./artifacts/api-server
 
