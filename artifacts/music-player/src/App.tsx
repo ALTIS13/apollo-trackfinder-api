@@ -9,6 +9,8 @@ import { useState, useEffect } from "react";
 import { Menu } from "lucide-react";
 import Home from "@/pages/Home";
 import Favorites from "@/pages/Favorites";
+import Discover from "@/pages/Discover";
+import Queue from "@/pages/Queue";
 import NotFound from "@/pages/not-found";
 
 const queryClient = new QueryClient({
@@ -21,6 +23,8 @@ function Router() {
   return (
     <Switch>
       <Route path="/" component={Home} />
+      <Route path="/discover" component={Discover} />
+      <Route path="/queue" component={Queue} />
       <Route path="/favorites" component={Favorites} />
       <Route component={NotFound} />
     </Switch>

@@ -61,14 +61,20 @@ export function TrackCard({ track, index }: TrackCardProps) {
     }
   };
 
-  const getVariant = (type: string) => {
-    switch (type) {
-      case "original": return "original";
-      case "remix": return "remix";
-      case "live": return "live";
-      case "cover": return "cover";
-      default: return "outline";
-    }
+  type TypeVariant = "original" | "remix" | "live" | "cover" | "outline";
+  type SourceVariant = "youtube" | "soundcloud" | "default";
+
+  const getVariant = (type: string): TypeVariant => {
+    const map: Record<string, TypeVariant> = {
+      original: "original", remix: "remix", live: "live", cover: "cover",
+    };
+    return map[type] ?? "outline";
+  };
+
+  const getSourceVariant = (source: string): SourceVariant => {
+    if (source === "youtube") return "youtube";
+    if (source === "soundcloud") return "soundcloud";
+    return "default";
   };
 
   return (
@@ -129,10 +135,10 @@ export function TrackCard({ track, index }: TrackCardProps) {
             </p>
           </div>
           <div className="flex flex-col items-end gap-2 flex-shrink-0">
-            <Badge variant={getVariant(track.type) as any} className="capitalize px-3 py-1">
+            <Badge variant={getVariant(track.type)} className="capitalize px-3 py-1">
               {track.type}
             </Badge>
-            <Badge variant={track.source === "youtube" ? "youtube" : "soundcloud"} className="uppercase text-[10px] tracking-wider px-2">
+            <Badge variant={getSourceVariant(track.source)} className="uppercase text-[10px] tracking-wider px-2">
               {track.source}
             </Badge>
           </div>

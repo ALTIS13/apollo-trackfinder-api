@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { Music2, Search, Heart, ListMusic, X, GripVertical } from "lucide-react";
+import { Music2, Search, Heart, ListMusic, X, Sparkles } from "lucide-react";
 import { usePlayer } from "@/hooks/use-player";
 import { formatDuration } from "@/lib/utils";
 
@@ -12,8 +12,10 @@ export function Sidebar({ onClose }: SidebarProps) {
   const { queue, queueIndex, currentTrack, playFromQueue, removeFromQueue } = usePlayer();
 
   const navItems = [
-    { to: "/", label: "Поиск", icon: <Search className="w-4 h-4" /> },
-    { to: "/favorites", label: "Избранное", icon: <Heart className="w-4 h-4" /> },
+    { to: "/", label: "Поиск", icon: <Search className="w-4 h-4" />, exact: true },
+    { to: "/discover", label: "Рекомендации", icon: <Sparkles className="w-4 h-4" />, exact: false },
+    { to: "/queue", label: "Очередь", icon: <ListMusic className="w-4 h-4" />, exact: false },
+    { to: "/favorites", label: "Избранное", icon: <Heart className="w-4 h-4" />, exact: false },
   ];
 
   return (
@@ -36,7 +38,7 @@ export function Sidebar({ onClose }: SidebarProps) {
       {/* Nav */}
       <nav className="px-2 space-y-0.5">
         {navItems.map((item) => {
-          const isActive = item.to === "/" ? location === "/" : location.startsWith(item.to);
+          const isActive = item.exact ? location === "/" : location.startsWith(item.to);
           return (
             <Link
               key={item.to}
