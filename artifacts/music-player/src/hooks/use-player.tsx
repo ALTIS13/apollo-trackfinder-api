@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useRef, useEffect, useCallback, ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getGetTrackStreamQueryOptions } from "@workspace/api-client-react";
-import type { TrackResult } from "@workspace/api-client-react";
+import type { TrackResult, TrackSource, TrackType } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
 import { getClientSessionId } from "@/lib/client-session";
 
@@ -56,6 +56,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const isPlayingRef = useRef(false);
   const progressRef = useRef(0);
   const applyingRemoteRef = useRef(false);
+  // Stable ref for playTrack — always points to the latest version (avoids stale closure in WS handler)
+  const playTrackRef = useRef<(track: TrackResult) => Promise<void>>(async () => {});
 
   useEffect(() => { currentTrackRef.current = currentTrack; }, [currentTrack]);
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
@@ -156,6 +158,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTrack?.id, queryClient, toast]);
 
+  // Keep stable ref for use in WS handler (avoids stale closures)
+  playTrackRef.current = playTrack;
+
   const togglePlayPause = useCallback(() => {
     if (!audioRef.current || !currentTrackRef.current) return;
 
@@ -187,6 +192,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectDelayRef = useRef(RECONNECT_DELAY_MS);
   const mountedRef = useRef(true);
+  // Suppress outgoing WS messages while applying a remote track (time-based guard for async ops)
+  const suppressSendUntilRef = useRef<number>(0);
 
   const connectWs = useCallback(() => {
     if (!mountedRef.current) return;
@@ -207,9 +214,33 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           if (!msg.track) return;
 
           const local = currentTrackRef.current;
-          // Only sync play/pause and position for the same track
-          if (local?.id !== msg.track.id) return;
 
+          if (local?.id !== msg.track.id) {
+            // Different (or no) track — load and start playing the remote track.
+            // Suppress outgoing sends for 10s to avoid echoing back intermediate states
+            // while the stream resolves and playback begins.
+            suppressSendUntilRef.current = Date.now() + 10_000;
+
+            const validSources = ["youtube", "soundcloud"];
+            const remoteTrack: TrackResult = {
+              id: msg.track.id,
+              title: msg.track.title,
+              artist: msg.track.artist,
+              thumbnailUrl: msg.track.thumbnailUrl ?? null,
+              duration: msg.track.duration,
+              source: (validSources.includes(msg.track.source ?? "")
+                ? msg.track.source
+                : "youtube") as TrackSource,
+              type: "original" as TrackType,
+              quality: [],
+              score: 0,
+            };
+            // Fire-and-forget: always use ref to get the latest playTrack (avoids stale closure)
+            playTrackRef.current(remoteTrack).catch(() => {});
+            return;
+          }
+
+          // Same track — sync play/pause and position
           applyingRemoteRef.current = true;
           try {
             if (msg.isPlaying && !isPlayingRef.current) {
@@ -264,6 +295,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // Send state when track or play/pause changes
   const sendWsState = useCallback((overrides?: Partial<PlayerSyncState>) => {
     if (applyingRemoteRef.current) return;
+    if (Date.now() < suppressSendUntilRef.current) return;
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const track = currentTrackRef.current;
