@@ -27,9 +27,20 @@ app.use(
   }),
 );
 
+const PRODUCTION_ORIGINS = [
+  "https://web.apollot.ru",
+  "https://api.apollot.ru",
+  "https://apollot.ru",
+];
+
 app.use(
   cors({
-    origin: true,
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (PRODUCTION_ORIGINS.includes(origin)) return callback(null, true);
+      if (origin.includes("localhost") || origin.includes("replit") || origin.includes("127.0.0.1")) return callback(null, true);
+      return callback(null, false);
+    },
     credentials: true,
     allowedHeaders: ["Content-Type", "Authorization", "X-Client-Session"],
   }),

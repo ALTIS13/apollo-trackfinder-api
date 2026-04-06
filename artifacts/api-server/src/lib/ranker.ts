@@ -108,13 +108,44 @@ function computeWithinTierScore<T extends RankableTrack>(
   return nameSimilarity * 70 + durationScore * 20 + popularityScore * 10;
 }
 
+const SOURCE_WEIGHT: Record<string, number> = {
+  youtube: 1.0,
+  soundcloud: 1.1,
+  bandcamp: 1.2,
+  deezer: 1.3,
+};
+
+export interface SmartBoosts {
+  mode?: "auto" | "manual";
+  queryText?: string;
+}
+
+function computeSmartBoosts(queryText: string): Record<string, number> {
+  const q = queryText.toLowerCase();
+  const boosts: Record<string, number> = {};
+  if (q.includes("remix") || q.includes("ремикс")) boosts["soundcloud"] = 1.2;
+  if (q.includes("live") || q.includes("живое") || q.includes("концерт")) boosts["youtube"] = 1.1;
+  if (q.includes("album") || q.includes("альбом")) boosts["deezer"] = 1.3;
+  if (q.includes("indie") || q.includes("инди")) boosts["bandcamp"] = 1.2;
+  return boosts;
+}
+
 export function rank<T extends RankableTrack>(
   tracks: T[],
   query: { artist: string; title: string },
   referenceDuration?: number,
+  smart?: SmartBoosts,
 ): T[] {
+  const smartBoosts = smart?.mode === "auto" && smart.queryText
+    ? computeSmartBoosts(smart.queryText)
+    : {};
+
   const scored = tracks.map((track) => {
-    const score = Math.round(computeWithinTierScore(track, query, referenceDuration) * 100) / 100;
+    let score = Math.round(computeWithinTierScore(track, query, referenceDuration) * 100) / 100;
+    const src = (track as unknown as { source?: string }).source ?? "";
+    score *= SOURCE_WEIGHT[src] ?? 1.0;
+    if (smartBoosts[src]) score *= smartBoosts[src];
+    score = Math.round(score * 100) / 100;
     return { ...track, score } as T;
   });
 

@@ -22,6 +22,8 @@ export const HealthCheckResponse = zod.object({
 export const SearchTracksBody = zod.object({
   artist: zod.string(),
   title: zod.string(),
+  mode: zod.enum(["auto", "manual"]).optional(),
+  sources: zod.array(zod.enum(["yt", "sc", "bc", "dz"])).optional(),
 });
 
 export const SearchTracksResponse = zod.object({

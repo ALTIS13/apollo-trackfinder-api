@@ -1,9 +1,10 @@
 import { MaterialIcons } from '@/components/MaterialIcons';
 import { TrackCard, Track } from '@/components/TrackCard';
 import { ServerSettings } from '@/components/ServerSettings';
-import { COLORS, TrackType } from '@/constants/colors';
+import { COLORS, TrackType, SOURCE_COLORS } from '@/constants/colors';
 import { usePlayer, PlayerTrack } from '@/hooks/use-player';
 import { apiFetch, getApiBase, getSessionId } from '@/hooks/use-session';
+import { useSourceFilter, SOURCE_LABELS, type SourceKey } from '@/hooks/use-source-filter';
 import { FlashList, type ListRenderItemInfo } from '@shopify/flash-list';
 import * as Haptics from 'expo-haptics';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
@@ -161,6 +162,9 @@ export default function SearchScreen() {
   const [suggestions, setSuggestions] = useState<{ artist: string; title: string }[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const suggestTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [fallbackAvailable, setFallbackAvailable] = useState(false);
+
+  const { mode: sourceMode, sources, enabledSources, isAllEnabled, toggleSource, setAuto } = useSourceFilter();
 
   const loadRecentAndRecs = useCallback(async () => {
     const sessionId = getSessionId();
@@ -248,14 +252,22 @@ export default function SearchScreen() {
     setCanLoadMore(false);
 
     try {
-      const data = await apiFetch<{ results: Track[] }>('/tracks/search', {
+      const searchBody: Record<string, unknown> = { artist: a, title: t, maxResults };
+      if (sourceMode === 'manual' && enabledSources.length > 0 && enabledSources.length < 4) {
+        searchBody.mode = 'manual';
+        searchBody.sources = enabledSources;
+      } else {
+        searchBody.mode = 'auto';
+      }
+      const data = await apiFetch<{ results: Track[]; fallbackAvailable?: boolean }>('/tracks/search', {
         method: 'POST',
-        body: JSON.stringify({ artist: a, title: t, maxResults }),
+        body: JSON.stringify(searchBody),
       });
       const fetched = data.results ?? [];
       setResults(fetched);
       setFilter('all');
       setCanLoadMore(fetched.length >= maxResults);
+      setFallbackAvailable(!!data.fallbackAvailable);
     } catch (e: any) {
       setError(e.message ?? 'Ошибка поиска');
     } finally {
@@ -270,9 +282,14 @@ export default function SearchScreen() {
     setCanLoadMore(false);
     const { artist, title } = lastSearchRef.current;
     try {
+      const searchBody: Record<string, unknown> = { artist, title, maxResults: LOAD_MORE_SIZE };
+      if (sourceMode === 'manual' && enabledSources.length > 0 && enabledSources.length < 4) {
+        searchBody.mode = 'manual';
+        searchBody.sources = enabledSources;
+      }
       const data = await apiFetch<{ results: Track[] }>('/tracks/search', {
         method: 'POST',
-        body: JSON.stringify({ artist, title, maxResults: LOAD_MORE_SIZE }),
+        body: JSON.stringify(searchBody),
       });
       const fetched = data.results ?? [];
       setResults(fetched);
@@ -469,6 +486,35 @@ export default function SearchScreen() {
         </View>
       )}
 
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.sourceFiltersScroll}
+        contentContainerStyle={styles.filtersContent}
+      >
+        <Pressable
+          style={[styles.sourceChip, isAllEnabled && styles.sourceChipAuto]}
+          onPress={() => { setAuto(); Haptics.selectionAsync(); }}
+        >
+          <Text style={[styles.sourceChipText, isAllEnabled && styles.sourceChipTextAuto]}>Авто</Text>
+        </Pressable>
+        {(['yt', 'sc', 'bc', 'dz'] as SourceKey[]).map((key) => {
+          const active = sources[key];
+          const fullName = key === 'yt' ? 'youtube' : key === 'sc' ? 'soundcloud' : key === 'bc' ? 'bandcamp' : 'deezer';
+          const clr = SOURCE_COLORS[fullName];
+          return (
+            <Pressable
+              key={key}
+              style={[styles.sourceChip, active && { borderColor: clr.text + '60', backgroundColor: clr.bg }]}
+              onPress={() => { toggleSource(key); Haptics.selectionAsync(); }}
+            >
+              <View style={[styles.sourceChipDot, { backgroundColor: active ? clr.text : COLORS.textMuted }]} />
+              <Text style={[styles.sourceChipText, active && { color: clr.text }]}>{SOURCE_LABELS[key]}</Text>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+
       {hasSearched && results.length > 0 && (
         <ScrollView
           horizontal
@@ -508,7 +554,9 @@ export default function SearchScreen() {
       ) : isSearching ? (
         <View style={styles.statusMsg}>
           <ActivityIndicator size="large" color={COLORS.accent} />
-          <Text style={styles.loadingText}>Ищем на YouTube + SoundCloud...</Text>
+          <Text style={styles.loadingText}>
+            {sourceMode === 'manual' ? `Ищем в ${enabledSources.map((s) => SOURCE_LABELS[s]).join(' + ')}...` : 'Ищем по всем источникам...'}
+          </Text>
           <Text style={styles.loadingSubText}>Первый поиск может занять до 30 секунд</Text>
         </View>
       ) : hasSearched && filtered.length === 0 ? (
@@ -516,10 +564,19 @@ export default function SearchScreen() {
           <MaterialIcons name="inbox" size={40} color={COLORS.textMuted} />
           <Text style={styles.emptyTitle}>Ничего не найдено</Text>
           <Text style={styles.emptyText}>Попробуй другой запрос или фильтр</Text>
+          {fallbackAvailable && (
+            <Pressable
+              style={styles.fallbackBtn}
+              onPress={() => { setAuto(); doSearch(undefined, undefined, PAGE_SIZE); }}
+            >
+              <MaterialIcons name="search" size={16} color={COLORS.white} />
+              <Text style={styles.fallbackBtnText}>Искать во всех источниках</Text>
+            </Pressable>
+          )}
         </View>
       ) : null}
     </View>
-  ), [topPad, query, isSearching, hasSearched, error, results, filter, filtered, showDiscovery, recentLoading, recentTracks, recsLoading, recommendations, suggestions, showSuggestions, handleQueryChange, applySuggestion]);
+  ), [topPad, query, isSearching, hasSearched, error, results, filter, filtered, showDiscovery, recentLoading, recentTracks, recsLoading, recommendations, suggestions, showSuggestions, handleQueryChange, applySuggestion, sourceMode, sources, enabledSources, isAllEnabled, fallbackAvailable]);
 
   return (
     <KeyboardAvoidingView
@@ -618,6 +675,53 @@ const styles = StyleSheet.create({
   },
   searchBtnDisabled: {
     opacity: 0.5,
+  },
+  sourceFiltersScroll: {
+    flexShrink: 0,
+    marginBottom: 2,
+  },
+  sourceChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  sourceChipAuto: {
+    borderColor: COLORS.accent + '60',
+    backgroundColor: COLORS.accentDim,
+  },
+  sourceChipText: {
+    fontSize: 12,
+    fontFamily: 'Inter_600SemiBold',
+    color: COLORS.textSub,
+  },
+  sourceChipTextAuto: {
+    color: COLORS.accent,
+  },
+  sourceChipDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  fallbackBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: COLORS.accent,
+    marginTop: 12,
+  },
+  fallbackBtnText: {
+    fontSize: 14,
+    fontFamily: 'Inter_700Bold',
+    color: COLORS.white,
   },
   filtersScroll: {
     flexShrink: 0,

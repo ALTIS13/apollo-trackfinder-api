@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { searchYouTube } from "../adapters/youtube.js";
 import { searchSoundCloud } from "../adapters/soundcloud.js";
-import { rank } from "../lib/ranker.js";
+import { rank, type SmartBoosts } from "../lib/ranker.js";
 import { getCached, setCached } from "../lib/cache.js";
 import { getStreamUrl, spawnAudioDownload, type AudioQuality } from "../lib/ytdlp.js";
 import { searchBandcamp } from "../adapters/bandcamp.js";
@@ -68,12 +68,19 @@ router.post("/tracks/search", async (req, res) => {
     return;
   }
 
-  const { artist, title } = parseResult.data;
+  const { artist, title, mode, sources } = parseResult.data;
   const query = `${artist} ${title}`.trim();
   const maxResults = Math.min(Math.max(Number((req.body as Record<string, unknown>).maxResults ?? 20), 5), 40);
   const isExtendedSearch = maxResults > 20;
 
-  if (!isExtendedSearch) {
+  const ALL_SOURCES = ["yt", "sc", "bc", "dz"] as const;
+  type SourceKey = typeof ALL_SOURCES[number];
+  const enabledSources: SourceKey[] =
+    mode === "manual" && sources && sources.length > 0
+      ? sources
+      : [...ALL_SOURCES];
+
+  if (!isExtendedSearch && enabledSources.length === ALL_SOURCES.length) {
     const cached = await getCached<Record<string, unknown>>(artist, title);
     if (cached) {
       res.json({ query, results: cached, cached: true });
@@ -83,51 +90,50 @@ router.post("/tracks/search", async (req, res) => {
 
   const perSource = Math.ceil(maxResults / 2);
 
-  const [ytResults, scResults, bcResults, dzResults] = await Promise.allSettled([
-    searchYouTube(query, maxResults),
-    searchSoundCloud(query, maxResults),
-    searchBandcamp(query, perSource),
-    searchDeezer(query, perSource),
-  ]);
+  const searchPromises: Promise<unknown>[] = [];
+  const searchLabels: string[] = [];
 
-  const allResults = [
-    ...(ytResults.status === "fulfilled" ? ytResults.value : []),
-    ...(scResults.status === "fulfilled" ? scResults.value : []),
-    ...(bcResults.status === "fulfilled" ? bcResults.value : []),
-    ...(dzResults.status === "fulfilled" ? dzResults.value : []),
-  ];
+  if (enabledSources.includes("yt")) { searchPromises.push(searchYouTube(query, maxResults)); searchLabels.push("YouTube"); }
+  if (enabledSources.includes("sc")) { searchPromises.push(searchSoundCloud(query, maxResults)); searchLabels.push("SoundCloud"); }
+  if (enabledSources.includes("bc")) { searchPromises.push(searchBandcamp(query, perSource)); searchLabels.push("Bandcamp"); }
+  if (enabledSources.includes("dz")) { searchPromises.push(searchDeezer(query, perSource)); searchLabels.push("Deezer"); }
 
-  if (ytResults.status === "rejected") {
-    req.log.warn({ err: ytResults.reason }, "YouTube search failed");
-  }
-  if (scResults.status === "rejected") {
-    req.log.warn({ err: scResults.reason }, "SoundCloud search failed");
-  }
-  if (bcResults.status === "rejected") {
-    req.log.warn({ err: bcResults.reason }, "Bandcamp search failed");
-  }
-  if (dzResults.status === "rejected") {
-    req.log.warn({ err: dzResults.reason }, "Deezer search failed");
+  const settled = await Promise.allSettled(searchPromises);
+
+  const allResults: any[] = [];
+
+  for (let i = 0; i < settled.length; i++) {
+    const result = settled[i];
+    if (result.status === "fulfilled") {
+      allResults.push(...(result.value as any[]));
+    } else {
+      req.log.warn({ err: result.reason }, `${searchLabels[i]} search failed`);
+    }
   }
 
-  const referenceDuration =
-    allResults
-      .filter((r) => r.type === "original" && r.duration > 0)
-      .map((r) => r.duration)
-      .sort((a, b) => a - b)
-      .at(Math.floor(allResults.filter((r) => r.type === "original").length / 2)) ?? undefined;
+  const smart: SmartBoosts = { mode: mode ?? "auto", queryText: query };
 
-  const ranked = rank(allResults, { artist, title }, referenceDuration);
+  const origDurations = allResults
+    .filter((r: any) => r.type === "original" && r.duration > 0)
+    .map((r: any) => r.duration as number)
+    .sort((a: number, b: number) => a - b);
+  const referenceDuration = origDurations.length > 0
+    ? origDurations[Math.floor(origDurations.length / 2)]
+    : undefined;
 
-  const apiResults = ranked.map(({ _sourceUrl: _, ...r }) => r);
+  const ranked = rank(allResults, { artist, title }, referenceDuration, smart);
 
-  if (!isExtendedSearch) {
-    await setCached(artist, title, apiResults).catch((err) => {
+  const apiResults = ranked.map(({ _sourceUrl: _, ...r }: any) => r);
+
+  if (!isExtendedSearch && enabledSources.length === ALL_SOURCES.length) {
+    await setCached(artist, title, apiResults).catch((err: unknown) => {
       req.log.warn({ err }, "Failed to save to cache");
     });
   }
 
-  res.json({ query, results: apiResults, cached: false });
+  const fallbackAvailable = mode === "manual" && apiResults.length === 0 && enabledSources.length < ALL_SOURCES.length;
+
+  res.json({ query, results: apiResults, cached: false, sources: enabledSources, fallbackAvailable });
 });
 
 router.post("/tracks/batch-search", async (req, res) => {
@@ -164,12 +170,13 @@ router.post("/tracks/batch-search", async (req, res) => {
       ...(dzResults.status === "fulfilled" ? dzResults.value : []),
     ];
 
-    const referenceDuration =
-      allResults
-        .filter((r) => r.type === "original" && r.duration > 0)
-        .map((r) => r.duration)
-        .sort((a, b) => a - b)
-        .at(Math.floor(allResults.filter((r) => r.type === "original").length / 2)) ?? undefined;
+    const origDurations = allResults
+      .filter((r) => r.type === "original" && r.duration > 0)
+      .map((r) => r.duration)
+      .sort((a, b) => a - b);
+    const referenceDuration = origDurations.length > 0
+      ? origDurations[Math.floor(origDurations.length / 2)]
+      : undefined;
 
     const ranked = rank(allResults, { artist, title }, referenceDuration);
     const apiResults = ranked.map(({ _sourceUrl: _, ...r }) => r) as Record<string, unknown>[];

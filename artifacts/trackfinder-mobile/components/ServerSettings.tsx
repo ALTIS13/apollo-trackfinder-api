@@ -22,9 +22,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from '@/constants/colors';
 import {
   getConfiguredApiUrl,
+  getNodeMode,
+  getNodes,
+  isUsingFallback,
+  setNodeMode,
   resetApiUrl,
   setApiUrl,
   testServerConnection,
+  type NodeMode,
 } from '@/hooks/use-session';
 import { type DownloadQuality, useDownloadQuality, useOfflineMode } from '@/hooks/use-settings';
 
@@ -184,10 +189,15 @@ export function ServerSettings({ visible, onClose }: Props) {
   const [testState, setTestState] = useState<TestState>('idle');
   const [testMsg, setTestMsg] = useState('');
   const [saving, setSaving] = useState(false);
+  const [activeNode, setActiveNode] = useState<NodeMode>('fallback');
+  const [showFallbackBadge, setShowFallbackBadge] = useState(false);
 
   useEffect(() => {
     if (visible) {
-      setUrl(getConfiguredApiUrl().replace(/\/api$/, ''));
+      setActiveNode(getNodeMode());
+      setShowFallbackBadge(isUsingFallback());
+      const currentUrl = getConfiguredApiUrl().replace(/\/api$/, '');
+      setUrl(currentUrl);
       setTestState('idle');
       setTestMsg('');
     }
@@ -207,7 +217,9 @@ export function ServerSettings({ visible, onClose }: Props) {
     if (!url.trim()) return;
     setSaving(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    await setApiUrl(url);
+    if (activeNode === 'custom') {
+      await setNodeMode('custom', url);
+    }
     setSaving(false);
     onClose();
   };
@@ -215,9 +227,24 @@ export function ServerSettings({ visible, onClose }: Props) {
   const handleReset = async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     await resetApiUrl();
-    setUrl(getConfiguredApiUrl().replace(/\/api$/, ''));
+    setActiveNode('fallback');
+    setUrl(getNodes().fallback.replace(/\/api$/, ''));
     setTestState('idle');
     setTestMsg('');
+  };
+
+  const handleNodeSelect = async (mode: NodeMode) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setActiveNode(mode);
+    setTestState('idle');
+    setTestMsg('');
+    if (mode === 'primary') {
+      await setNodeMode('primary');
+      setUrl(getNodes().primary.replace(/\/api$/, ''));
+    } else if (mode === 'fallback') {
+      await setNodeMode('fallback');
+      setUrl(getNodes().fallback.replace(/\/api$/, ''));
+    }
   };
 
   return (
@@ -251,25 +278,53 @@ export function ServerSettings({ visible, onClose }: Props) {
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={styles.body}
               >
-                <Text style={styles.sectionTitle}>Server URL</Text>
+                <Text style={styles.sectionTitle}>API Node</Text>
                 <Text style={styles.sectionDesc}>
-                  Enter the URL of your Apollo TrackFinder API server. This lets you run the backend on your own machine or cloud, completely independent of Replit.
+                  Выберите сервер для подключения. Primary — production, Fallback — dev-среда.
                 </Text>
 
-                <View style={styles.inputRow}>
-                  <TextInput
-                    style={[styles.input, testState === 'ok' && styles.inputOk, testState === 'fail' && styles.inputFail]}
-                    value={url}
-                    onChangeText={(v) => { setUrl(v); setTestState('idle'); }}
-                    placeholder="http://your-server.com"
-                    placeholderTextColor={COLORS.textMuted}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    keyboardType="url"
-                    selectionColor={COLORS.accent}
-                    returnKeyType="done"
-                  />
+                {showFallbackBadge && (
+                  <View style={[styles.testResult, styles.testFail]}>
+                    <MaterialIcons name="error" size={14} color={COLORS.danger} />
+                    <Text style={[styles.testMsg, { color: COLORS.danger }]}>
+                      Primary недоступен — используется fallback
+                    </Text>
+                  </View>
+                )}
+
+                <View style={styles.nodeRow}>
+                  {([
+                    { mode: 'primary' as NodeMode, label: 'Primary', desc: 'api.apollot.ru' },
+                    { mode: 'fallback' as NodeMode, label: 'Fallback', desc: 'Dev server' },
+                    { mode: 'custom' as NodeMode, label: 'Custom', desc: 'Свой URL' },
+                  ]).map((n) => (
+                    <Pressable
+                      key={n.mode}
+                      style={[styles.nodeChip, activeNode === n.mode && styles.nodeChipActive]}
+                      onPress={() => handleNodeSelect(n.mode)}
+                    >
+                      <Text style={[styles.nodeLabel, activeNode === n.mode && styles.nodeLabelActive]}>{n.label}</Text>
+                      <Text style={[styles.nodeDesc, activeNode === n.mode && styles.nodeDescActive]}>{n.desc}</Text>
+                    </Pressable>
+                  ))}
                 </View>
+
+                {activeNode === 'custom' && (
+                  <View style={styles.inputRow}>
+                    <TextInput
+                      style={[styles.input, testState === 'ok' && styles.inputOk, testState === 'fail' && styles.inputFail]}
+                      value={url}
+                      onChangeText={(v) => { setUrl(v); setTestState('idle'); }}
+                      placeholder="http://your-server.com"
+                      placeholderTextColor={COLORS.textMuted}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      keyboardType="url"
+                      selectionColor={COLORS.accent}
+                      returnKeyType="done"
+                    />
+                  </View>
+                )}
 
                 {testMsg !== '' && (
                   <View style={[styles.testResult, testState === 'ok' ? styles.testOk : styles.testFail]}>
@@ -295,27 +350,29 @@ export function ServerSettings({ visible, onClose }: Props) {
                     ) : (
                       <>
                         <MaterialIcons name="wifi" size={15} color={COLORS.text} />
-                        <Text style={styles.btnOutlineText}>Test connection</Text>
+                        <Text style={styles.btnOutlineText}>Проверить</Text>
                       </>
                     )}
                   </Pressable>
 
-                  <Pressable
-                    style={[styles.btn, styles.btnPrimary, !url.trim() && styles.btnDisabled]}
-                    onPress={handleSave}
-                    disabled={!url.trim() || saving}
-                  >
-                    {saving ? (
-                      <ActivityIndicator size="small" color={COLORS.white} />
-                    ) : (
-                      <Text style={styles.btnPrimaryText}>Save & use</Text>
-                    )}
-                  </Pressable>
+                  {activeNode === 'custom' && (
+                    <Pressable
+                      style={[styles.btn, styles.btnPrimary, !url.trim() && styles.btnDisabled]}
+                      onPress={handleSave}
+                      disabled={!url.trim() || saving}
+                    >
+                      {saving ? (
+                        <ActivityIndicator size="small" color={COLORS.white} />
+                      ) : (
+                        <Text style={styles.btnPrimaryText}>Сохранить</Text>
+                      )}
+                    </Pressable>
+                  )}
                 </View>
 
                 <Pressable style={styles.resetRow} onPress={handleReset}>
                   <MaterialIcons name="refresh" size={13} color={COLORS.textMuted} />
-                  <Text style={styles.resetText}>Reset to Replit default</Text>
+                  <Text style={styles.resetText}>Сбросить к dev-серверу</Text>
                 </Pressable>
 
                 <View style={styles.divider} />
@@ -557,5 +614,41 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: 'Inter_600SemiBold',
     color: COLORS.text,
+  },
+  nodeRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 4,
+  },
+  nodeChip: {
+    flex: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.card,
+    alignItems: 'center',
+    gap: 2,
+  },
+  nodeChipActive: {
+    borderColor: COLORS.accent,
+    backgroundColor: COLORS.accentDim ?? COLORS.card,
+  },
+  nodeLabel: {
+    fontSize: 13,
+    fontFamily: 'Inter_700Bold',
+    color: COLORS.textSub,
+  },
+  nodeLabelActive: {
+    color: COLORS.accent,
+  },
+  nodeDesc: {
+    fontSize: 10,
+    fontFamily: 'Inter_400Regular',
+    color: COLORS.textMuted,
+  },
+  nodeDescActive: {
+    color: COLORS.accent,
   },
 });

@@ -21,7 +21,7 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 ## Music Player API
 
 ### Endpoints
-- `POST /api/tracks/search` — search YouTube + SoundCloud for track variants, returns classified & ranked list with `score` (0-100)
+- `POST /api/tracks/search` — search YouTube + SoundCloud + Bandcamp + Deezer for track variants, returns classified & ranked list with `score` (0-100). Supports `mode` (auto/manual) and `sources` (yt/sc/bc/dz array) params for source filtering. Source weights: yt:1.0, sc:1.1, bc:1.2, dz:1.3. Smart Auto Mode: query-aware boosting (remix→sc, live→yt, album→dz, indie→bc). Returns `fallbackAvailable` when manual mode yields no results.
 - `POST /api/tracks/batch-search` — bulk search up to 100 tracks; returns best match + similarity score per track; auto-selection at ≥80%
 - `GET /api/tracks/:id/stream` — get stream URL (HLS or direct audio) for a track
 - `GET /api/tracks/:id/download` — get download URL for a track
@@ -48,6 +48,7 @@ React + Vite SPA with dark professional design.
 
 ### Key behaviors
 - Search calls `useSearchTracks` mutation; results are ordered originals-first by the API
+- Source filter chips (Авто/YouTube/SoundCloud/Bandcamp/Deezer) below search form with localStorage persistence (`tf_source_prefs`)
 - Filter buttons (All/Original/Remix/Live/Cover) filter the already-sorted results client-side
 - Play click → fetches `/api/tracks/:id/stream` → sets `audio.src` → plays via HTML5 Audio
 - Download click → fetches `/api/tracks/:id/download` → triggers `<a download>` programmatic click
@@ -114,10 +115,13 @@ Expo React Native app targeting Android + web (Windows PWA). Uses the same backe
 - **Favorites tab**: Spotify OAuth + Yandex Music token connect, catalog browse, "Find Variants" → Search tab
 - **Mini player**: Persistent bottom bar with progress, play/pause, stop (expo-av)
 
-### Session
+### Session & API Nodes
 - Session ID stored in `AsyncStorage` (no cookies needed)
 - All API calls include `X-Client-Session` header
 - Spotify OAuth encodes session ID in `state` parameter
+- API Node system: primary (api.apollot.ru) / fallback (Replit dev domain) / custom node with auto-failover (60s primary retry)
+- Node selector in Settings screen (Primary / Fallback / Custom)
+- Source filter hook (`use-source-filter.tsx`) with AsyncStorage persistence (`trackfinder_source_prefs`)
 
 ### Key files
 - `app/(tabs)/index.tsx` — Search screen

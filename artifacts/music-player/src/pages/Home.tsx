@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useSearchTracks } from "@workspace/api-client-react";
 import type { TrackType, TrackResult } from "@workspace/api-client-react";
 import { TrackCard } from "@/components/TrackCard";
@@ -6,6 +6,27 @@ import { Search, Music2, Loader2, Sparkles } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 type FilterType = TrackType | "all";
+type SourceKey = "yt" | "sc" | "bc" | "dz";
+type SourceMode = "auto" | "manual";
+
+const SOURCE_INFO: { key: SourceKey; label: string; color: string; dot: string }[] = [
+  { key: "yt", label: "YouTube", color: "text-red-400 bg-red-400/10 border-red-400/30", dot: "bg-red-400" },
+  { key: "sc", label: "SoundCloud", color: "text-orange-400 bg-orange-400/10 border-orange-400/30", dot: "bg-orange-400" },
+  { key: "bc", label: "Bandcamp", color: "text-cyan-400 bg-cyan-400/10 border-cyan-400/30", dot: "bg-cyan-400" },
+  { key: "dz", label: "Deezer", color: "text-purple-400 bg-purple-400/10 border-purple-400/30", dot: "bg-purple-400" },
+];
+
+function loadSourcePrefs(): { mode: SourceMode; sources: Record<SourceKey, boolean> } {
+  try {
+    const raw = localStorage.getItem("tf_source_prefs");
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return { mode: "auto", sources: { yt: true, sc: true, bc: true, dz: true } };
+}
+
+function saveSourcePrefs(mode: SourceMode, sources: Record<SourceKey, boolean>) {
+  localStorage.setItem("tf_source_prefs", JSON.stringify({ mode, sources }));
+}
 
 export default function Home() {
   const params = new URLSearchParams(window.location.search);
@@ -14,7 +35,41 @@ export default function Home() {
   const [activeFilter, setActiveFilter] = useState<FilterType>("all");
   const [hasSearched, setHasSearched] = useState(false);
 
+  const [sourceMode, setSourceMode] = useState<SourceMode>(() => loadSourcePrefs().mode);
+  const [sourcesState, setSourcesState] = useState<Record<SourceKey, boolean>>(() => loadSourcePrefs().sources);
+
+  const enabledSources = (Object.keys(sourcesState) as SourceKey[]).filter((k) => sourcesState[k]);
+  const isAllEnabled = enabledSources.length === 4;
+
+  const toggleSource = useCallback((key: SourceKey) => {
+    setSourcesState((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      if (Object.values(next).filter(Boolean).length === 0) return prev;
+      setSourceMode("manual");
+      saveSourcePrefs("manual", next);
+      return next;
+    });
+  }, []);
+
+  const setAutoMode = useCallback(() => {
+    const next = { yt: true, sc: true, bc: true, dz: true } as Record<SourceKey, boolean>;
+    setSourceMode("auto");
+    setSourcesState(next);
+    saveSourcePrefs("auto", next);
+  }, []);
+
   const searchMutation = useSearchTracks();
+
+  function buildSearchData(a: string, t: string) {
+    const data: Record<string, unknown> = { artist: a, title: t };
+    if (sourceMode === "manual" && enabledSources.length > 0 && enabledSources.length < 4) {
+      data.mode = "manual";
+      data.sources = enabledSources;
+    } else {
+      data.mode = "auto";
+    }
+    return data;
+  }
 
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
@@ -22,7 +77,7 @@ export default function Home() {
     const t = p.get("title");
     if (a && t) {
       setHasSearched(true);
-      searchMutation.mutate({ data: { artist: a, title: t } });
+      searchMutation.mutate({ data: buildSearchData(a, t) as any });
       window.history.replaceState({}, "", window.location.pathname);
     }
   }, []);
@@ -32,7 +87,7 @@ export default function Home() {
     if (!artist.trim() || !title.trim()) return;
     
     setHasSearched(true);
-    searchMutation.mutate({ data: { artist, title } });
+    searchMutation.mutate({ data: buildSearchData(artist, title) as any });
   };
 
   const results = searchMutation.data?.results || [];
@@ -141,6 +196,39 @@ export default function Home() {
               )}
             </button>
           </motion.form>
+
+          {/* Source Filter Chips */}
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.4 }}
+            className="flex flex-wrap items-center justify-center gap-2 mt-6"
+          >
+            <button
+              onClick={setAutoMode}
+              className={`px-4 py-2 rounded-full text-sm font-semibold border transition-all duration-200 ${
+                isAllEnabled
+                  ? "bg-primary/15 border-primary/40 text-primary"
+                  : "bg-white/5 border-white/10 text-muted-foreground hover:bg-white/10"
+              }`}
+            >
+              Авто
+            </button>
+            {SOURCE_INFO.map((s) => (
+              <button
+                key={s.key}
+                onClick={() => toggleSource(s.key)}
+                className={`px-4 py-2 rounded-full text-sm font-semibold border transition-all duration-200 flex items-center gap-2 ${
+                  sourcesState[s.key]
+                    ? s.color + " border"
+                    : "bg-white/5 border-white/10 text-muted-foreground hover:bg-white/10"
+                }`}
+              >
+                <span className={`w-2 h-2 rounded-full ${sourcesState[s.key] ? s.dot : "bg-white/30"}`} />
+                {s.label}
+              </button>
+            ))}
+          </motion.div>
         </div>
       </div>
 
