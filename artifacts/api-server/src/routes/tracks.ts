@@ -8,6 +8,7 @@ import { searchBandcamp } from "../adapters/bandcamp.js";
 import { searchDeezer } from "../adapters/deezer.js";
 import { SearchTracksBody } from "@workspace/api-zod";
 import { getCachedStreamUrl, setCachedStreamUrl } from "../lib/stream-cache.js";
+import { isRedisAvailable, getRedis } from "../lib/redis.js";
 import { db } from "@workspace/db";
 import { playHistoryTable } from "@workspace/db/schema";
 import { eq, sql } from "drizzle-orm";
@@ -626,6 +627,52 @@ router.get("/tracks/recommendations", async (req, res) => {
   } catch (err) {
     req.log.warn({ err }, "Failed to generate recommendations");
     res.json({ results: [] });
+  }
+});
+
+router.get("/tracks/suggest", async (req, res) => {
+  const q = String(req.query["q"] ?? "").trim().toLowerCase();
+  if (!q || q.length < 2) {
+    res.json({ suggestions: [] });
+    return;
+  }
+
+  try {
+    // Try Redis scan first (fast path)
+    if (isRedisAvailable()) {
+      const redis = getRedis();
+      if (redis) {
+        const pattern = `search:*${q}*`;
+        const keys = await redis.keys(pattern);
+        const suggestions = keys.slice(0, 5).map((key: string) => {
+          const cacheKey = key.replace(/^search:/, "");
+          const sep = cacheKey.indexOf("::");
+          if (sep === -1) return null;
+          return {
+            artist: cacheKey.slice(0, sep),
+            title: cacheKey.slice(sep + 2),
+          };
+        }).filter(Boolean);
+        res.json({ suggestions });
+        return;
+      }
+    }
+
+    // PostgreSQL fallback
+    const rows = await db.execute(
+      sql`SELECT cache_key FROM track_search_cache WHERE cache_key LIKE ${"%" + q + "%"} AND expires_at > NOW() ORDER BY id DESC LIMIT 5`,
+    );
+    const resultRows = (rows.rows ?? rows) as { cache_key: string }[];
+    const suggestions = resultRows.map((r) => {
+      const sep = r.cache_key.indexOf("::");
+      if (sep === -1) return null;
+      return { artist: r.cache_key.slice(0, sep), title: r.cache_key.slice(sep + 2) };
+    }).filter(Boolean);
+
+    res.json({ suggestions });
+  } catch (err) {
+    req.log.warn({ err }, "Suggest query failed");
+    res.json({ suggestions: [] });
   }
 });
 

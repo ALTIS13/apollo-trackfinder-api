@@ -3,16 +3,15 @@ import { TrackCard, Track } from '@/components/TrackCard';
 import { ServerSettings } from '@/components/ServerSettings';
 import { COLORS, TrackType } from '@/constants/colors';
 import { usePlayer, PlayerTrack } from '@/hooks/use-player';
-import { apiFetch, getSessionId } from '@/hooks/use-session';
+import { apiFetch, getApiBase, getSessionId } from '@/hooks/use-session';
+import { FlashList, type ListRenderItemInfo } from '@shopify/flash-list';
 import * as Haptics from 'expo-haptics';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  FlatList,
   Image,
   KeyboardAvoidingView,
-  ListRenderItemInfo,
   Platform,
   Pressable,
   ScrollView,
@@ -159,6 +158,10 @@ export default function SearchScreen() {
   const [recommendations, setRecommendations] = useState<MiniTrack[]>([]);
   const [recsLoading, setRecsLoading] = useState(false);
 
+  const [suggestions, setSuggestions] = useState<{ artist: string; title: string }[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const suggestTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const loadRecentAndRecs = useCallback(async () => {
     const sessionId = getSessionId();
 
@@ -175,6 +178,44 @@ export default function SearchScreen() {
       .then((data) => setRecommendations(data.results ?? []))
       .catch(() => {})
       .finally(() => setRecsLoading(false));
+  }, []);
+
+  const fetchSuggestions = useCallback((text: string) => {
+    if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current);
+    const trimmed = text.trim();
+    if (trimmed.length < 2) {
+      setSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
+    suggestTimerRef.current = setTimeout(async () => {
+      try {
+        const url = `${getApiBase()}/tracks/suggest?q=${encodeURIComponent(trimmed.toLowerCase())}`;
+        const resp = await fetch(url);
+        if (!resp.ok) return;
+        const data = await resp.json() as { suggestions?: { artist: string; title: string }[] };
+        const list = data.suggestions ?? [];
+        setSuggestions(list);
+        setShowSuggestions(list.length > 0);
+      } catch {
+        setSuggestions([]);
+        setShowSuggestions(false);
+      }
+    }, 300);
+  }, []);
+
+  const handleQueryChange = useCallback((text: string) => {
+    setQuery(text);
+    fetchSuggestions(text);
+  }, [fetchSuggestions]);
+
+  const applySuggestion = useCallback((s: { artist: string; title: string }) => {
+    Haptics.selectionAsync();
+    setShowSuggestions(false);
+    setSuggestions([]);
+    const q = s.title ? `${s.artist} — ${s.title}` : s.artist;
+    setQuery(q);
+    doSearch(s.artist, s.title, PAGE_SIZE);
   }, []);
 
   useFocusEffect(
@@ -384,15 +425,16 @@ export default function SearchScreen() {
             ref={inputRef}
             style={styles.input}
             value={query}
-            onChangeText={setQuery}
+            onChangeText={handleQueryChange}
             placeholder="Артист — Название трека"
             placeholderTextColor={COLORS.textMuted}
             returnKeyType="search"
-            onSubmitEditing={() => doSearch(undefined, undefined, PAGE_SIZE)}
+            onFocus={() => { if (suggestions.length > 0) setShowSuggestions(true); }}
+            onSubmitEditing={() => { setShowSuggestions(false); doSearch(undefined, undefined, PAGE_SIZE); }}
             selectionColor={COLORS.accent}
           />
           {query.length > 0 && (
-            <Pressable onPress={() => { setQuery(''); setResults([]); setHasSearched(false); setCanLoadMore(false); }}>
+            <Pressable onPress={() => { setQuery(''); setResults([]); setHasSearched(false); setCanLoadMore(false); setSuggestions([]); setShowSuggestions(false); }}>
               <MaterialIcons name="close" size={16} color={COLORS.textMuted} />
             </Pressable>
           )}
@@ -409,6 +451,23 @@ export default function SearchScreen() {
           )}
         </Pressable>
       </View>
+
+      {showSuggestions && suggestions.length > 0 && (
+        <View style={styles.suggestBox}>
+          {suggestions.map((s, i) => (
+            <Pressable
+              key={i}
+              style={[styles.suggestRow, i < suggestions.length - 1 && styles.suggestRowBorder]}
+              onPress={() => applySuggestion(s)}
+            >
+              <MaterialIcons name="search" size={14} color={COLORS.textMuted} />
+              <Text style={styles.suggestText} numberOfLines={1}>
+                {s.artist}{s.title ? ` — ${s.title}` : ''}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
 
       {hasSearched && results.length > 0 && (
         <ScrollView
@@ -460,7 +519,7 @@ export default function SearchScreen() {
         </View>
       ) : null}
     </View>
-  ), [topPad, query, isSearching, hasSearched, error, results, filter, filtered, showDiscovery, recentLoading, recentTracks, recsLoading, recommendations]);
+  ), [topPad, query, isSearching, hasSearched, error, results, filter, filtered, showDiscovery, recentLoading, recentTracks, recsLoading, recommendations, suggestions, showSuggestions, handleQueryChange, applySuggestion]);
 
   return (
     <KeyboardAvoidingView
@@ -470,7 +529,7 @@ export default function SearchScreen() {
     >
       <ServerSettings visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
-      <FlatList
+      <FlashList
         data={showDiscovery ? [] : (hasSearched ? filtered : [])}
         keyExtractor={keyExtractor}
         renderItem={renderItem}
@@ -479,8 +538,6 @@ export default function SearchScreen() {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
         ListFooterComponent={ListFooter}
-        removeClippedSubviews={Platform.OS !== 'web'}
-        stickyHeaderIndices={[]}
       />
     </KeyboardAvoidingView>
   );
@@ -696,6 +753,32 @@ const styles = StyleSheet.create({
   loadMoreText: {
     fontSize: 14,
     fontFamily: 'Inter_600SemiBold',
+    color: COLORS.text,
+  },
+  suggestBox: {
+    marginHorizontal: 16,
+    marginTop: 2,
+    backgroundColor: COLORS.card,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    overflow: 'hidden',
+  },
+  suggestRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  suggestRowBorder: {
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  suggestText: {
+    flex: 1,
+    fontSize: 13,
+    fontFamily: 'Inter_400Regular',
     color: COLORS.text,
   },
 });

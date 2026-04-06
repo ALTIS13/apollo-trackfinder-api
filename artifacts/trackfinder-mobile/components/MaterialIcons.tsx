@@ -26,8 +26,15 @@ export type MaterialIconName =
   | 'person'
   | 'play-arrow'
   | 'refresh'
+  | 'repeat'
+  | 'repeat-one'
   | 'search'
+  | 'search-off'
   | 'settings'
+  | 'shuffle'
+  | 'skip-next'
+  | 'skip-previous'
+  | 'sort'
   | 'stop'
   | 'wifi';
 
@@ -88,6 +95,20 @@ const PATHS: Record<MaterialIconName, string> = {
     'M6 6h12v12H6z',
   'wifi':
     'M1 9l2 2c4.97-4.97 13.03-4.97 18 0l2-2C16.93 2.93 7.08 2.93 1 9zm8 8l3 3 3-3c-1.65-1.66-4.34-1.66-6 0zm-4-4l2 2c2.76-2.76 7.24-2.76 10 0l2-2C15.14 9.14 8.87 9.14 5 13z',
+  'repeat':
+    'M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z',
+  'repeat-one':
+    'M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z',
+  'shuffle':
+    'M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z',
+  'skip-next':
+    'M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z',
+  'skip-previous':
+    'M6 6h2v12H6zm3.5 6l8.5 6V6z',
+  'sort':
+    'M3 18h6v-2H3v2zM3 6v2h18V6H3zm0 7h12v-2H3v2z',
+  'search-off':
+    'M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 0 0 9.5 3C6.08 3 3.28 5.64 3.05 9h2.02C5.3 6.75 7.18 5 9.5 5 11.99 5 14 7.01 14 9.5S11.99 14 9.5 14c-.17 0-.33-.03-.5-.05v2.02c.17.02.33.03.5.03 1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-7.5.5A4.5 4.5 0 0 1 5 10.5v-1H3.5v1A6 6 0 0 0 8 16h1v-1.5H8v-.5z M6.47 6.47L5.06 5.06 3 7.12V5H1.5v4.5H6V8H3.62l2.85-2.85 1.29 1.28 1.41-1.41z',
 };
 
 interface MaterialIconsProps {

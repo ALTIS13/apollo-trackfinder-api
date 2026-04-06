@@ -3,6 +3,7 @@ import { logger } from "./lib/logger";
 import { runMigrations } from "./lib/migrate";
 import { getRedis } from "./lib/redis";
 import { attachWebSocketServer } from "./ws";
+import { initBackgroundQueues, shutdownBackgroundQueues } from "./lib/background-queue";
 
 const rawPort = process.env["PORT"];
 
@@ -21,7 +22,7 @@ if (Number.isNaN(port) || port <= 0) {
 getRedis();
 
 runMigrations()
-  .then(() => {
+  .then(async () => {
     const server = app.listen(port, (err: unknown) => {
       if (err) {
         logger.error({ err }, "Error listening on port");
@@ -30,6 +31,16 @@ runMigrations()
       logger.info({ port }, "Server listening");
     });
     attachWebSocketServer(server);
+
+    await initBackgroundQueues();
+
+    const shutdown = async () => {
+      logger.info("Shutting down background queues...");
+      await shutdownBackgroundQueues();
+      process.exit(0);
+    };
+    process.once("SIGTERM", shutdown);
+    process.once("SIGINT", shutdown);
   })
   .catch((err) => {
     logger.error({ err }, "Migration failed — server will not start");

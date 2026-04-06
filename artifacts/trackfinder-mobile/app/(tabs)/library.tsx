@@ -3,14 +3,13 @@ import { SavedTrackCard } from '@/components/SavedTrackCard';
 import { COLORS } from '@/constants/colors';
 import { SavedTrack, useLibrary } from '@/hooks/use-library';
 import { PlayerTrack, usePlayer } from '@/hooks/use-player';
+import { FlashList, type ListRenderItemInfo } from '@shopify/flash-list';
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import React, { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  FlatList,
-  ListRenderItemInfo,
   Platform,
   Pressable,
   StyleSheet,
@@ -208,15 +207,6 @@ export default function LibraryScreen() {
     );
   }, [onlineTracks, isDownloading, bulkDownload]);
 
-  const getItemLayout = useCallback(
-    (_: unknown, index: number) => ({
-      length: ROW_HEIGHT,
-      offset: ROW_HEIGHT * index,
-      index,
-    }),
-    [],
-  );
-
   const renderItem = useCallback(
     ({ item }: ListRenderItemInfo<SavedTrack>) => (
       <SavedTrackCard
@@ -384,16 +374,12 @@ export default function LibraryScreen() {
           <Text style={styles.emptyText}>По запросу «{searchQuery}» треков нет</Text>
         </View>
       ) : (
-        <FlatList
+        <FlashList
           data={filteredTracks}
           keyExtractor={keyExtractor}
           renderItem={renderItem}
-          getItemLayout={getItemLayout}
           contentContainerStyle={{ paddingBottom: bottomPad }}
           showsVerticalScrollIndicator={false}
-          windowSize={7}
-          maxToRenderPerBatch={20}
-          removeClippedSubviews={Platform.OS !== 'web'}
           extraData={selectionMode ? `${selectionMode}-${[...selectedIds].join(',')}` : `${selectionMode}-${bulkActive}`}
         />
       )}
