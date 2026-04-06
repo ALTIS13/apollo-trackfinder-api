@@ -162,14 +162,16 @@ export default function SearchScreen() {
   const loadRecentAndRecs = useCallback(async () => {
     const sessionId = getSessionId();
 
+    const encodedSession = encodeURIComponent(sessionId);
+
     setRecentLoading(true);
-    apiFetch<{ results: MiniTrack[] }>(`/tracks/recent?sessionId=${sessionId}`)
+    apiFetch<{ results: MiniTrack[] }>(`/tracks/recent?sessionId=${encodedSession}`)
       .then((data) => setRecentTracks(data.results ?? []))
       .catch(() => {})
       .finally(() => setRecentLoading(false));
 
     setRecsLoading(true);
-    apiFetch<{ results: MiniTrack[] }>(`/tracks/recommendations?sessionId=${sessionId}`)
+    apiFetch<{ results: MiniTrack[] }>(`/tracks/recommendations?sessionId=${encodedSession}`)
       .then((data) => setRecommendations(data.results ?? []))
       .catch(() => {})
       .finally(() => setRecsLoading(false));
