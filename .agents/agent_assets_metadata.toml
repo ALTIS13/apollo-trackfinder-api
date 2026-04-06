@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "1fOR-3A0pdi0E7Int9KdC"
+uri = "file://MODULES.md"
+type = "text"
+title = "Apollo TrackFinder — Документация по модулям"
