@@ -9,6 +9,7 @@ import React, {
   useState,
 } from 'react';
 
+import { getLibraryLocalUri } from '@/hooks/use-library';
 import { getApiBase, getSessionId } from '@/hooks/use-session';
 import { getOfflineMode } from '@/hooks/use-settings';
 import { Alert } from 'react-native';
@@ -145,8 +146,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
       if (reqId !== reqIdRef.current) return;
 
-      const localUriValid = track.localUri
-        ? await FileSystem.getInfoAsync(track.localUri)
+      const resolvedLocalUri = track.localUri || getLibraryLocalUri(track.id);
+      const localUriValid = resolvedLocalUri
+        ? await FileSystem.getInfoAsync(resolvedLocalUri)
             .then((info) => info.exists && ((info as { size?: number }).size ?? 0) > 0)
             .catch(() => false)
         : false;
@@ -160,7 +162,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      const uri = localUriValid ? track.localUri! : buildUri(track);
+      const uri = localUriValid ? resolvedLocalUri! : buildUri(track);
 
       if (reqId !== reqIdRef.current) return;
 

@@ -19,6 +19,7 @@ import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { LibraryProvider } from '@/hooks/use-library';
 import { PlayerProvider } from '@/hooks/use-player';
 import { initSession } from '@/hooks/use-session';
+import { loadSettings } from '@/hooks/use-settings';
 
 if (process.env.EXPO_PUBLIC_DOMAIN) {
   setBaseUrl(`https://${process.env.EXPO_PUBLIC_DOMAIN}`);
@@ -43,6 +44,7 @@ export default function RootLayout() {
 
   useEffect(() => {
     initSession();
+    loadSettings();
   }, []);
 
   useEffect(() => {

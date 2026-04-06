@@ -511,7 +511,8 @@ router.get("/tracks/recent", async (req, res) => {
     return;
   }
 
-  const limit = Math.min(Number(req.query["limit"] ?? 10), 50);
+  const rawLimit = Number(req.query["limit"] ?? 10);
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 50) : 10;
 
   try {
     const rows = await db

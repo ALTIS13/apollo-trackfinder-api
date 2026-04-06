@@ -47,6 +47,13 @@ interface LibraryState {
 
 const LibraryContext = createContext<LibraryState | null>(null);
 
+let _tracksRef: SavedTrack[] = [];
+
+export function getLibraryLocalUri(trackId: string): string | undefined {
+  const t = _tracksRef.find((s) => s.id === trackId);
+  return t?.localUri || undefined;
+}
+
 async function tryGrantMediaPermission(): Promise<boolean> {
   if (Platform.OS !== 'android' && Platform.OS !== 'ios') return false;
   try {
@@ -70,10 +77,18 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     loadQuality();
     AsyncStorage.getItem(LIBRARY_KEY).then((raw) => {
       if (raw) {
-        try { setTracks(JSON.parse(raw)); } catch {}
+        try {
+          const parsed = JSON.parse(raw) as SavedTrack[];
+          setTracks(parsed);
+          _tracksRef = parsed;
+        } catch {}
       }
     });
   }, []);
+
+  useEffect(() => {
+    _tracksRef = tracks;
+  }, [tracks]);
 
   const saveToLibrary = useCallback(
     async (track: { id: string; title: string; artist: string; thumbnailUrl: string | null; duration: number; source?: string; importOrder?: number }) => {

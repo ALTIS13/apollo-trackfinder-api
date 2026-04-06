@@ -5,7 +5,7 @@ import { COLORS, TrackType } from '@/constants/colors';
 import { usePlayer, PlayerTrack } from '@/hooks/use-player';
 import { apiFetch, getSessionId } from '@/hooks/use-session';
 import * as Haptics from 'expo-haptics';
-import { useLocalSearchParams } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -175,9 +175,11 @@ export default function SearchScreen() {
       .finally(() => setRecsLoading(false));
   }, []);
 
-  useEffect(() => {
-    loadRecentAndRecs();
-  }, [loadRecentAndRecs]);
+  useFocusEffect(
+    useCallback(() => {
+      loadRecentAndRecs();
+    }, [loadRecentAndRecs]),
+  );
 
   useEffect(() => {
     if (params.artist && params.title) {
@@ -284,11 +286,9 @@ export default function SearchScreen() {
           <View style={sectionStyles.container}>
             <View style={sectionStyles.header}>
               <Text style={sectionStyles.title}>Недавно слушал</Text>
-              {recentTracks.length > 0 && (
-                <Pressable onPress={loadRecentAndRecs} hitSlop={8}>
-                  <MaterialIcons name="refresh" size={16} color={COLORS.textMuted} />
-                </Pressable>
-              )}
+              <Pressable onPress={loadRecentAndRecs} hitSlop={8}>
+                <MaterialIcons name="refresh" size={16} color={COLORS.textMuted} />
+              </Pressable>
             </View>
             {recentLoading ? (
               <SectionSkeleton />
