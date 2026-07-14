@@ -1,11 +1,22 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { formatTrafficLabel } from "./components/TopologyPanel";
 import { demoSnapshot } from "./data/demo-snapshot";
-import type { DashboardSnapshot, DashboardSnapshotAdapter } from "./types/dashboard";
+import type {
+  DashboardSnapshot,
+  DashboardSnapshotAdapter,
+} from "./types/dashboard";
 
 beforeAll(() => {
   vi.stubGlobal(
@@ -112,7 +123,9 @@ describe("Apollo TF admin dashboard", () => {
   it("labels the default adapter as demo context", () => {
     render(<App />);
 
-    expect(screen.getByTestId("dashboard-environment")).toHaveTextContent("Демо");
+    expect(screen.getByTestId("dashboard-environment")).toHaveTextContent(
+      "Демо",
+    );
     expect(screen.queryByText("Продакшн")).not.toBeInTheDocument();
   });
 
@@ -132,7 +145,9 @@ describe("Apollo TF admin dashboard", () => {
   it("renders the operational shell landmarks and real section navigation", () => {
     render(<App />);
 
-    expect(screen.getByRole("navigation", { name: "Разделы панели" })).toBeVisible();
+    expect(
+      screen.getByRole("navigation", { name: "Разделы панели" }),
+    ).toBeVisible();
     expect(screen.getByRole("banner")).toBeVisible();
     expect(screen.getByRole("main")).toBeVisible();
 
@@ -151,19 +166,55 @@ describe("Apollo TF admin dashboard", () => {
   it("keeps deployment and provider operating data visible as semantic tables", () => {
     render(<App />);
 
-    const deployments = screen.getByRole("table", { name: "Деплойменты сервисов" });
+    const deployments = screen.getByRole("table", {
+      name: "Деплойменты сервисов",
+    });
     expect(deployments).toHaveTextContent("Core API");
     expect(deployments).toHaveTextContent("2.14.0");
     expect(deployments).toHaveTextContent("2.14.1");
     expect(deployments).toHaveTextContent("Доступно обновление");
     expect(deployments).toHaveTextContent("Последний деплой");
 
-    const providers = screen.getByRole("table", { name: "Состояние провайдеров" });
+    const providers = screen.getByRole("table", {
+      name: "Состояние провайдеров",
+    });
     expect(providers).toHaveTextContent("SoundCloud");
     expect(providers).toHaveTextContent("812 мс");
     expect(providers).toHaveTextContent("Предупреждение");
     expect(providers).toHaveTextContent("Проверено");
     expect(providers).toHaveTextContent("Тренд");
+  });
+
+  it("labels missing deployment and provider observation times without inventing dates", () => {
+    const modules = demoSnapshot.modules.map((module) => {
+      if (module.id !== "public-web") return module;
+      const { lastDeploymentAt: _lastDeploymentAt, ...withoutTimestamp } =
+        module;
+      return withoutTimestamp;
+    });
+    const providers = demoSnapshot.providers.map((provider) => {
+      if (provider.id !== "spotify") return provider;
+      const { lastCheckedAt: _lastCheckedAt, ...withoutTimestamp } = provider;
+      return withoutTimestamp;
+    });
+    const snapshot: DashboardSnapshot = {
+      ...demoSnapshot,
+      modules,
+      providers,
+    };
+
+    render(<App adapter={createAdapter(async () => snapshot, snapshot)} />);
+
+    expect(
+      within(screen.getByRole("row", { name: /Public Web/ })).getByText(
+        "Нет данных",
+      ),
+    ).toBeVisible();
+    expect(
+      within(screen.getByRole("row", { name: /Spotify/ })).getByText(
+        "Не проверялся",
+      ),
+    ).toBeVisible();
   });
 
   it("renders the four scan-first metrics before the topology", () => {
@@ -220,7 +271,9 @@ describe("Apollo TF admin dashboard", () => {
       name: "Журнал инцидента Ошибки download-worker",
     });
     expect(within(journal).getByText("DLW-E502")).toBeVisible();
-    expect(within(journal).getByText(/upstream connection reset/)).toBeVisible();
+    expect(
+      within(journal).getByText(/upstream connection reset/),
+    ).toBeVisible();
   });
 
   it.each([
@@ -272,7 +325,8 @@ describe("Apollo TF admin dashboard", () => {
     const noCodeSnapshot: DashboardSnapshot = {
       ...demoSnapshot,
       incidents: demoSnapshot.incidents.map((incident) =>
-        incident.id === "incident-download-errors" && incident.diagnostic !== undefined
+        incident.id === "incident-download-errors" &&
+        incident.diagnostic !== undefined
           ? {
               ...incident,
               diagnostic: {
@@ -300,7 +354,9 @@ describe("Apollo TF admin dashboard", () => {
     });
     expect(within(journal).queryByText("Код ошибки")).not.toBeInTheDocument();
     expect(
-      within(journal).getByText("Соединение Download Worker с Media Storage прервано"),
+      within(journal).getByText(
+        "Соединение Download Worker с Media Storage прервано",
+      ),
     ).toBeVisible();
   });
 
@@ -308,7 +364,9 @@ describe("Apollo TF admin dashboard", () => {
     render(<App />);
 
     await userEvent.click(screen.getByRole("button", { name: "Открытые" }));
-    expect(screen.queryByText("Задержка интеграций аккаунта")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Задержка интеграций аккаунта"),
+    ).not.toBeInTheDocument();
     expect(screen.getByText("Ошибки download-worker")).toBeVisible();
 
     await userEvent.click(screen.getByRole("button", { name: "Все" }));
@@ -318,14 +376,17 @@ describe("Apollo TF admin dashboard", () => {
   it("resets service selection and restores all incidents", async () => {
     render(<App />);
 
-    await userEvent.click(screen.getByRole("button", { name: "Download Worker" }));
-    await userEvent.click(screen.getByRole("button", { name: "Сбросить выбор" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Download Worker" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Сбросить выбор" }),
+    );
 
     expect(screen.getByText("Деградация SoundCloud")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Download Worker" })).toHaveAttribute(
-      "aria-pressed",
-      "false",
-    );
+    expect(
+      screen.getByRole("button", { name: "Download Worker" }),
+    ).toHaveAttribute("aria-pressed", "false");
   });
 
   it("acknowledges an incident", async () => {
@@ -347,10 +408,14 @@ describe("Apollo TF admin dashboard", () => {
     action.focus();
     await userEvent.click(action);
 
-    expect(screen.getByRole("button", { name: "Инцидент Ошибки download-worker подтвержден" })).toHaveFocus();
-    expect(screen.getByRole("status", { name: "Состояние инцидентов" })).toHaveTextContent(
-      "Инцидент «Ошибки download-worker» подтвержден",
-    );
+    expect(
+      screen.getByRole("button", {
+        name: "Инцидент Ошибки download-worker подтвержден",
+      }),
+    ).toHaveFocus();
+    expect(
+      screen.getByRole("status", { name: "Состояние инцидентов" }),
+    ).toHaveTextContent("Инцидент «Ошибки download-worker» подтвержден");
   });
 
   it("moves focus to stable feedback when acknowledgement removes an open row", async () => {
@@ -370,7 +435,9 @@ describe("Apollo TF admin dashboard", () => {
     expect(feedback).toHaveTextContent(
       "Инцидент «Ошибки download-worker» подтвержден",
     );
-    expect(screen.queryByText("Ошибки download-worker")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Ошибки download-worker"),
+    ).not.toBeInTheDocument();
   });
 
   it("gives every open incident a unique acknowledge action", () => {
@@ -403,14 +470,21 @@ describe("Apollo TF admin dashboard", () => {
     render(<App adapter={createAdapter(loadSnapshot)} />);
 
     await userEvent.click(screen.getByRole("button", { name: "Обновить" }));
-    expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent("Обновление");
+    expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent(
+      "Обновление",
+    );
     expect(screen.getByRole("button", { name: "Обновление" })).toBeDisabled();
 
     resolveRefresh(snapshotAt("2026-07-14T09:45:00.000Z"));
     await waitFor(() =>
-      expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent("Актуально"),
+      expect(
+        screen.getByTestId("dashboard-connection-status"),
+      ).toHaveTextContent("Актуально"),
     );
-    expect(screen.getByText("12:45")).toHaveAttribute("datetime", "2026-07-14T09:45:00.000Z");
+    expect(screen.getByText("12:45")).toHaveAttribute(
+      "datetime",
+      "2026-07-14T09:45:00.000Z",
+    );
     expect(loadSnapshot).toHaveBeenCalledTimes(1);
   });
 
@@ -428,9 +502,9 @@ describe("Apollo TF admin dashboard", () => {
     await userEvent.click(screen.getByRole("button", { name: "Обновить" }));
 
     await waitFor(() =>
-      expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent(
-        "Актуально",
-      ),
+      expect(
+        screen.getByTestId("dashboard-connection-status"),
+      ).toHaveTextContent("Актуально"),
     );
     expect(
       screen.getByRole("button", {
@@ -464,9 +538,9 @@ describe("Apollo TF admin dashboard", () => {
     render(<App adapter={createAdapter(loadSnapshot, demoSnapshot, "http")} />);
 
     await waitFor(() =>
-      expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent(
-        "Нет связи",
-      ),
+      expect(
+        screen.getByTestId("dashboard-connection-status"),
+      ).toHaveTextContent("Нет связи"),
     );
     expect(loadSnapshot).toHaveBeenCalledTimes(1);
     expect(screen.getByText("Активные модули")).toBeVisible();
@@ -481,15 +555,15 @@ describe("Apollo TF admin dashboard", () => {
     render(<App adapter={createAdapter(loadSnapshot, demoSnapshot, "http")} />);
 
     await waitFor(() =>
-      expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent(
-        "Актуально",
-      ),
+      expect(
+        screen.getByTestId("dashboard-connection-status"),
+      ).toHaveTextContent("Актуально"),
     );
     await userEvent.click(screen.getByRole("button", { name: "Обновить" }));
     await waitFor(() =>
-      expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent(
-        "Данные устарели",
-      ),
+      expect(
+        screen.getByTestId("dashboard-connection-status"),
+      ).toHaveTextContent("Данные устарели"),
     );
   });
 
@@ -515,7 +589,9 @@ describe("Apollo TF admin dashboard", () => {
 
   it("refreshes through the adapter every 15 seconds when enabled", async () => {
     vi.useFakeTimers();
-    const loadSnapshot = vi.fn().mockResolvedValue(snapshotAt("2026-07-14T09:45:00.000Z"));
+    const loadSnapshot = vi
+      .fn()
+      .mockResolvedValue(snapshotAt("2026-07-14T09:45:00.000Z"));
     render(<App adapter={createAdapter(loadSnapshot)} />);
 
     fireEvent.click(screen.getByRole("checkbox", { name: "Автообновление" }));
@@ -525,16 +601,22 @@ describe("Apollo TF admin dashboard", () => {
   });
 
   it("keeps the last snapshot visible when refresh fails", async () => {
-    const loadSnapshot = vi.fn().mockRejectedValue(new Error("network unavailable"));
+    const loadSnapshot = vi
+      .fn()
+      .mockRejectedValue(new Error("network unavailable"));
     render(<App adapter={createAdapter(loadSnapshot)} />);
 
     await userEvent.click(screen.getByRole("button", { name: "Обновить" }));
 
     await waitFor(() =>
-      expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent("Данные устарели"),
+      expect(
+        screen.getByTestId("dashboard-connection-status"),
+      ).toHaveTextContent("Данные устарели"),
     );
     expect(screen.getByText("Активные модули")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Download Worker" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Download Worker" }),
+    ).toBeVisible();
   });
 
   it("shows offline state when the adapter has no last known snapshot", async () => {
@@ -542,7 +624,9 @@ describe("Apollo TF admin dashboard", () => {
     render(<App adapter={createAdapter(loadSnapshot, null)} />);
 
     await waitFor(() =>
-      expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent("Нет связи"),
+      expect(
+        screen.getByTestId("dashboard-connection-status"),
+      ).toHaveTextContent("Нет связи"),
     );
     expect(screen.getByText("Нет сохраненного снимка")).toBeVisible();
   });

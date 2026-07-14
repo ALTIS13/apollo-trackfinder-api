@@ -4,7 +4,9 @@ RUN corepack enable
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json tsconfig.json ./
+COPY lib/admin-dashboard-contract/package.json ./lib/admin-dashboard-contract/
 COPY artifacts/admin-dashboard ./artifacts/admin-dashboard
+COPY lib/admin-dashboard-contract ./lib/admin-dashboard-contract
 
 RUN pnpm install --frozen-lockfile --filter @workspace/admin-dashboard...
 

@@ -29,6 +29,9 @@ services:
       SPOTIFY_CLIENT_SECRET: "${SPOTIFY_CLIENT_SECRET}"
       SERVER_URL: "${SERVER_URL:-https://api.apollot.ru}"
       WEB_URL: "${WEB_URL:-https://web.apollot.ru}"
+      ADMIN_DASHBOARD_TOKEN: "${ADMIN_DASHBOARD_TOKEN:-}"
+      APOLLO_API_VERSION: "${APOLLO_API_VERSION:-unknown}"
+      APOLLO_DEPLOYED_AT: "${APOLLO_DEPLOYED_AT:-}"
     depends_on:
       db:
         condition: service_healthy
@@ -49,10 +52,12 @@ services:
       dockerfile: artifacts/admin-dashboard/Dockerfile
     restart: unless-stopped
     ports:
-      - "3001:80"
+      - "127.0.0.1:3001:80"
     environment:
       APOLLO_API_UPSTREAM: "http://api:8080"
       ADMIN_DASHBOARD_TOKEN: "${ADMIN_DASHBOARD_TOKEN:-}"
+      ADMIN_ACCESS_USER: "${ADMIN_ACCESS_USER:-}"
+      ADMIN_ACCESS_PASSWORD: "${ADMIN_ACCESS_PASSWORD:-}"
 
 volumes:
   pgdata:

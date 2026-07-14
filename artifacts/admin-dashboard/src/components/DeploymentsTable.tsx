@@ -21,9 +21,15 @@ interface DeploymentsTableProps {
 
 export function DeploymentsTable({ modules }: DeploymentsTableProps) {
   return (
-    <section className="data-panel deployments-panel" id="deployments" aria-labelledby="deployments-title">
+    <section
+      className="data-panel deployments-panel"
+      id="deployments"
+      aria-labelledby="deployments-title"
+    >
       <div className="data-panel-header">
-        <span className="panel-title-icon" aria-hidden="true"><PackageOpen /></span>
+        <span className="panel-title-icon" aria-hidden="true">
+          <PackageOpen />
+        </span>
         <div>
           <h2 id="deployments-title">Деплойменты</h2>
           <p>Текущие и доступные версии</p>
@@ -50,24 +56,42 @@ export function DeploymentsTable({ modules }: DeploymentsTableProps) {
                   <th scope="row">
                     <span className="table-service">
                       <PackageCheck aria-hidden="true" />
-                      <span><strong>{module.name}</strong><small>{module.id}</small></span>
+                      <span>
+                        <strong>{module.name}</strong>
+                        <small>{module.id}</small>
+                      </span>
                     </span>
                   </th>
-                  <td><code>{module.version}</code></td>
                   <td>
-                    <code className={hasUpdate ? "available-version" : undefined}>
+                    <code>{module.version}</code>
+                  </td>
+                  <td>
+                    <code
+                      className={hasUpdate ? "available-version" : undefined}
+                    >
                       {module.availableVersion ?? module.version}
                     </code>
                   </td>
                   <td>
-                    <span className="status-cell" data-status={hasUpdate ? "warning" : module.status}>
-                      {hasUpdate ? "Доступно обновление" : healthLabels[module.status]}
+                    <span
+                      className="status-cell"
+                      data-status={hasUpdate ? "warning" : module.status}
+                    >
+                      {hasUpdate
+                        ? "Доступно обновление"
+                        : healthLabels[module.status]}
                     </span>
                   </td>
                   <td>
-                    <time dateTime={module.lastDeploymentAt}>
-                      {deploymentFormatter.format(new Date(module.lastDeploymentAt))}
-                    </time>
+                    {module.lastDeploymentAt === undefined ? (
+                      <span className="table-empty-value">Нет данных</span>
+                    ) : (
+                      <time dateTime={module.lastDeploymentAt}>
+                        {deploymentFormatter.format(
+                          new Date(module.lastDeploymentAt),
+                        )}
+                      </time>
+                    )}
                   </td>
                 </tr>
               );

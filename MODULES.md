@@ -355,9 +355,10 @@ Action Sheet с опциями: воспроизвести, скачать, уд
 - Визуальная основа -- вариант 2: центральная topology-схема с устойчивым left-to-right layout. Из варианта 1 добавлены четыре метрики; incident rail поддерживает фильтрацию и service focus. Локальный acknowledgement доступен только в demo mode, remote mode явно read-only.
 - `DashboardSnapshotAdapter` объявляет mode/capabilities; CommandBar показывает `Демо` для demo adapter и `Продакшн` для HTTP adapter. Demo mode стартует live из `demoSnapshot`. Production HTTP mode сразу загружает same-origin `/api/admin/dashboard`, удерживает визуальный fallback в непроверенном refreshing/offline состоянии, становится live только после валидного remote snapshot и stale только после последующего отказа.
 - Каждый HTTP 200 JSON проходит Zod validation до state mutation: поля/enums/timestamps, ровно четыре metrics, bounded collections, unique IDs для metrics/modules/edges/incidents/providers и edge/incident service references. HTTP adapter имеет 10-second abort timeout и single-flight refresh.
-- Production browser не получает API base или token. nginx проксирует и добавляет `X-Admin-Dashboard-Token` только для exact `GET /api/admin/dashboard`; non-GET exact path возвращает `405`, остальные `/api/*` -- `404` без proxy/token. Docker resolver откладывает upstream DNS lookup до API-запроса, сохраняющего URI/query; `/healthz` и SPA fallback стартуют даже с unresolvable upstream hostname. Root Compose задаёт runtime upstream/token для `admin` service и не содержит obsolete top-level `version`.
+- Production browser не получает API base или service token. nginx требует operator Basic Auth для UI и admin proxy, rate-limits dashboard probes, затем добавляет `X-Admin-Dashboard-Token` только для exact `GET /api/admin/dashboard`; non-GET exact path возвращает `405`, остальные `/api/*` -- `404` без proxy/token. `/healthz` остаётся доступен без operator credentials. При пустых `ADMIN_ACCESS_USER`/`ADMIN_ACCESS_PASSWORD` UI закрыт по умолчанию.
 - `pnpm` override фиксирует `lodash@4.18.1` для `dagre`/`graphlib`; parsed production audit содержит 0 admin paths. Final re-review verification включает 8 files / 62 tests, dashboard/workspace typecheck, production build, Docker `/healthz` с unresolvable upstream, warning-free Compose config и scoped audit evidence.
-- Backend telemetry endpoint и проверка forwarded token ещё не реализованы; deployment в Coolify/HomeNode не выполнялся. Owner approval остаётся обязательным перед merge в `main`.
+- Backend реализует `GET /api/admin/dashboard`: пустой `ADMIN_DASHBOARD_TOKEN` безопасно отключает route с `503`, неверный `X-Admin-Dashboard-Token` получает `401`, а успешный ответ проходит общий `@workspace/admin-dashboard-contract` и отправляется с `Cache-Control: no-store`. Токены сравниваются по SHA-256 digest через `timingSafeEqual` и редактируются из request logs.
+- Текущая telemetry boundary ограничена процессом API: bounded 60-second HTTP counters, 5xx rate, download queue, coalesced PostgreSQL probe с connection/query/statement timeout и раздельные состояния cache Redis/Queue Redis. BullMQ workers, producers и короткий telemetry probe используют отдельные Redis connections: telemetry timeout не останавливает workers и не переключает enqueue routing на in-memory backend. Сбой queue probe даёт partial snapshot с `Нет данных`, а не общий `503`. Непроверенные внешние контейнеры и providers честно получают `unknown`; пользовательские Spotify/Yandex credentials не используются как global health probe. Deployment в Coolify/HomeNode не выполнялся.
 
 ---
 
@@ -446,7 +447,7 @@ const parseResult = SearchTracksBody.safeParse(req.body);
 
 ### `artifacts/admin-dashboard/Dockerfile`
 
-Собирает standalone admin dashboard с pinned `pnpm@10.33.2`, затем nginx отдаёт production bundle. nginx template читает runtime `APOLLO_API_UPSTREAM` и `ADMIN_DASHBOARD_TOKEN`, проксирует только exact `GET /api/admin/dashboard`, добавляет token только к этому запросу и сохраняет независимый `GET /healthz`. Runtime resolver откладывает upstream DNS lookup до API-запроса и сохраняет URI/query. Token не компилируется в browser bundle. Локальная проверка image/health/Compose не является deployment в Coolify/HomeNode.
+Собирает standalone admin dashboard с pinned `pnpm@10.33.2`, затем nginx отдаёт production bundle. При старте `ADMIN_ACCESS_USER`/`ADMIN_ACCESS_PASSWORD` преобразуются в закрытый `.htpasswd`; без обеих переменных UI остаётся deny-by-default. nginx защищает UI через Basic Auth, rate-limits admin probes, проксирует только exact `GET /api/admin/dashboard` и добавляет server token только к этому запросу. Независимый `GET /healthz` не требует operator auth. Локальная проверка image/health/Compose не является deployment в Coolify/HomeNode.
 
 ### Корневой `docker-compose.yml`
 
@@ -458,7 +459,7 @@ services:
   admin:  # Admin dashboard на порту 3001
 ```
 
-Root stack содержит PostgreSQL, API, web и admin services. Для admin Compose передаёт `APOLLO_API_UPSTREAM=http://api:8080` и server-side `ADMIN_DASHBOARD_TOKEN`; будущий backend endpoint обязан проверять forwarded `X-Admin-Dashboard-Token`. Endpoint/deployment пока не реализован.
+Root stack содержит PostgreSQL, API, web и admin services. Compose передаёт одинаковый server-side `ADMIN_DASHBOARD_TOKEN` API и admin nginx; браузер его не получает. Admin port привязан к `127.0.0.1`, а UI дополнительно требует `ADMIN_ACCESS_USER`/`ADMIN_ACCESS_PASSWORD`. Пустой service token отключает backend endpoint; пустые operator credentials закрывают UI. Deployment в Coolify/HomeNode пока не выполнялся.
 
 ### `artifacts/api-server/docker-compose.yml`
 
@@ -468,7 +469,7 @@ services:
   api:    # API-сервер на порту 8080
 ```
 
-Этот вложенный compose относится только к API и PostgreSQL; admin service входит в корневой `docker-compose.yml`.
+Этот вложенный compose относится к API, PostgreSQL и Redis; admin service входит в корневой `docker-compose.yml`. `ADMIN_DASHBOARD_TOKEN` передаётся только API service.
 
 **Переменные окружения:**
 
@@ -481,6 +482,10 @@ services:
 | `PORT` | Авто | 8080 |
 | `APOLLO_API_UPSTREAM` | Для admin runtime | nginx upstream origin только для exact same-origin `GET /api/admin/dashboard` proxy |
 | `ADMIN_DASHBOARD_TOKEN` | До production deployment | Server-side token, который nginx пересылает как `X-Admin-Dashboard-Token`; не попадает в browser bundle |
+| `ADMIN_ACCESS_USER` | Для доступа к admin UI | Operator username для nginx Basic Auth; допустимы буквы, цифры и `_.@-` |
+| `ADMIN_ACCESS_PASSWORD` | Для доступа к admin UI | Operator password; хэшируется при старте контейнера и удаляется из окружения nginx process |
+| `APOLLO_API_VERSION` | Нет | Версия in-process API-модулей в admin snapshot; default `unknown` |
+| `APOLLO_DEPLOYED_AT` | Нет | ISO timestamp фактического deployment; при отсутствии UI показывает `Нет данных` |
 
 ### Запуск на своём сервере
 

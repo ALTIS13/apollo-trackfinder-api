@@ -24,6 +24,7 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
+    "@workspace/admin-dashboard-contract": "workspace:*",
     "@fontsource-variable/outfit": "^5.2.8",
     "@fontsource-variable/plus-jakarta-sans": "^5.2.8",
     "@xyflow/react": "^12.11.2",

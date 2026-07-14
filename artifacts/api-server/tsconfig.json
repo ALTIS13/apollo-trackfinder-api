@@ -8,6 +8,9 @@
   "include": ["src"],
   "references": [
     {
+      "path": "../../lib/admin-dashboard-contract"
+    },
+    {
       "path": "../../lib/db"
     },
     {

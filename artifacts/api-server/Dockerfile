@@ -10,18 +10,20 @@ RUN node -e " \
   const fs = require('fs'); \
   const y = fs.readFileSync('pnpm-workspace.yaml', 'utf8'); \
   const replaced = y.replace(/^packages:[\s\S]*?(?=\n[a-zA-Z])/m, \
-    'packages:\n  - artifacts/api-server\n  - lib/db\n  - lib/api-zod\n\n'); \
+    'packages:\n  - artifacts/api-server\n  - lib/admin-dashboard-contract\n  - lib/db\n  - lib/api-zod\n\n'); \
   fs.writeFileSync('pnpm-workspace.yaml', replaced);"
 
 COPY lib/db/package.json ./lib/db/
 COPY lib/api-zod/package.json ./lib/api-zod/
+COPY lib/admin-dashboard-contract/package.json ./lib/admin-dashboard-contract/
 COPY artifacts/api-server/package.json ./artifacts/api-server/
-
-RUN pnpm install --frozen-lockfile
 
 COPY lib/db ./lib/db
 COPY lib/api-zod ./lib/api-zod
+COPY lib/admin-dashboard-contract ./lib/admin-dashboard-contract
 COPY artifacts/api-server ./artifacts/api-server
+
+RUN pnpm install --frozen-lockfile --filter @workspace/api-server...
 
 RUN pnpm --filter @workspace/api-server run build
 

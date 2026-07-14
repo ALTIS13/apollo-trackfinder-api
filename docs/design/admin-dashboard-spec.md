@@ -78,7 +78,7 @@
 - The dashboard is a standalone Vite artifact served by nginx.
 - Coolify builds it from the monorepo root with `artifacts/admin-dashboard/Dockerfile`.
 - The production browser always requests same-origin `/api/admin/dashboard`; no API base, cross-origin credentials, or admin token is compiled into the bundle.
-- nginx proxies only exact `GET /api/admin/dashboard` to runtime `APOLLO_API_UPSTREAM` and forwards server-side `ADMIN_DASHBOARD_TOKEN` as `X-Admin-Dashboard-Token` only on that request. Non-GET requests on the exact path return `405`; every other `/api/*` path returns `404` without proxying or token injection.
+- nginx requires operator Basic Auth for the UI and exact admin proxy, rate-limits dashboard probes, and forwards server-side `ADMIN_DASHBOARD_TOKEN` as `X-Admin-Dashboard-Token` only on exact `GET /api/admin/dashboard`. Missing operator credentials deny access by default; `/healthz` remains unauthenticated. Non-GET requests on the exact path return `405`; every other `/api/*` path returns `404` without proxying or token injection.
 - The nginx Docker resolver and variable-form upstream defer DNS resolution until an API request while preserving the original request URI and query. The standalone image must start and answer `/healthz` when the configured upstream hostname is unresolvable.
 - Root Compose omits the obsolete top-level `version` key so configuration validation is warning-free.
 - The future backend endpoint must validate the forwarded token. This specification does not claim that the endpoint, auth validation, Coolify deployment, or HomeNode deployment exists.

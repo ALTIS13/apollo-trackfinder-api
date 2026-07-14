@@ -19,7 +19,8 @@ interface ProviderTableProps {
 }
 
 function getTrendLabel(values: number[]): string {
-  if (values.length < 2 || values.every((value) => value === 0)) return "нет данных";
+  if (values.length < 2 || values.every((value) => value === 0))
+    return "нет данных";
   const difference = values.at(-1)! - values[0];
   if (Math.abs(difference) < 20) return "стабильно";
   return difference > 0 ? "растет" : "снижается";
@@ -34,7 +35,10 @@ function ProviderTrend({ provider }: { provider: ProviderHealth }) {
       <span className="provider-trend-label">Тренд: {trendLabel}</span>
       <span className="provider-trend-bars" aria-hidden="true">
         {provider.latencyTrendMs.map((value, index) => (
-          <span key={index} style={{ height: `${Math.max((value / maximum) * 100, 8)}%` }} />
+          <span
+            key={index}
+            style={{ height: `${Math.max((value / maximum) * 100, 8)}%` }}
+          />
         ))}
       </span>
     </span>
@@ -43,9 +47,15 @@ function ProviderTrend({ provider }: { provider: ProviderHealth }) {
 
 export function ProviderTable({ providers }: ProviderTableProps) {
   return (
-    <section className="data-panel providers-panel" id="providers" aria-labelledby="providers-title">
+    <section
+      className="data-panel providers-panel"
+      id="providers"
+      aria-labelledby="providers-title"
+    >
       <div className="data-panel-header">
-        <span className="panel-title-icon info" aria-hidden="true"><RadioTower /></span>
+        <span className="panel-title-icon info" aria-hidden="true">
+          <RadioTower />
+        </span>
         <div>
           <h2 id="providers-title">Провайдеры</h2>
           <p>Здоровье внешних источников</p>
@@ -65,21 +75,35 @@ export function ProviderTable({ providers }: ProviderTableProps) {
           <tbody>
             {providers.map((provider) => (
               <tr key={provider.id}>
-                <th scope="row"><strong>{provider.name}</strong></th>
+                <th scope="row">
+                  <strong>{provider.name}</strong>
+                </th>
                 <td>
                   <span className="status-cell" data-status={provider.status}>
                     {healthLabels[provider.status]}
                   </span>
                 </td>
-                <td>{provider.latencyMs > 0 ? `${provider.latencyMs} мс` : "Нет данных"}</td>
-                <td><ProviderTrend provider={provider} /></td>
                 <td>
-                  <span className="checked-at">
-                    Проверено
-                    <time dateTime={provider.lastCheckedAt}>
-                      {checkedAtFormatter.format(new Date(provider.lastCheckedAt))}
-                    </time>
-                  </span>
+                  {provider.latencyMs > 0
+                    ? `${provider.latencyMs} мс`
+                    : "Нет данных"}
+                </td>
+                <td>
+                  <ProviderTrend provider={provider} />
+                </td>
+                <td>
+                  {provider.lastCheckedAt === undefined ? (
+                    <span className="table-empty-value">Не проверялся</span>
+                  ) : (
+                    <span className="checked-at">
+                      Проверено
+                      <time dateTime={provider.lastCheckedAt}>
+                        {checkedAtFormatter.format(
+                          new Date(provider.lastCheckedAt),
+                        )}
+                      </time>
+                    </span>
+                  )}
                 </td>
               </tr>
             ))}

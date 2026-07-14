@@ -1,3 +1,23 @@
 #!/bin/sh
 
 export ADMIN_DASHBOARD_TOKEN="${ADMIN_DASHBOARD_TOKEN:-}"
+
+umask 077
+case "${ADMIN_ACCESS_USER:-}" in
+  ""|*[!a-zA-Z0-9_.@-]*)
+    printf 'disabled:!\n' > /etc/nginx/.htpasswd
+    ;;
+  *)
+    if [ -z "${ADMIN_ACCESS_PASSWORD:-}" ]; then
+      printf 'disabled:!\n' > /etc/nginx/.htpasswd
+    else
+      admin_password_hash="$(printf '%s\n' "$ADMIN_ACCESS_PASSWORD" | mkpasswd -P 0 -m sha512)"
+      printf '%s:%s\n' "$ADMIN_ACCESS_USER" "$admin_password_hash" > /etc/nginx/.htpasswd
+      unset admin_password_hash
+    fi
+    ;;
+esac
+
+chown root:nginx /etc/nginx/.htpasswd
+chmod 640 /etc/nginx/.htpasswd
+unset ADMIN_ACCESS_PASSWORD

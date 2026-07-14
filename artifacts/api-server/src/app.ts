@@ -4,6 +4,7 @@ import pinoHttp from "pino-http";
 import session from "express-session";
 import router from "./routes";
 import { logger } from "./lib/logger";
+import { adminRequestTelemetry } from "./lib/admin-telemetry";
 
 const app: Express = express();
 
@@ -27,6 +28,17 @@ app.use(
   }),
 );
 
+app.use((req, res, next) => {
+  res.once("finish", () => {
+    adminRequestTelemetry.record({
+      method: req.method,
+      path: req.originalUrl,
+      statusCode: res.statusCode,
+    });
+  });
+  next();
+});
+
 const PRODUCTION_ORIGINS = [
   "https://web.apollot.ru",
   "https://api.apollot.ru",
@@ -38,7 +50,8 @@ app.use(
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
       if (PRODUCTION_ORIGINS.includes(origin)) return callback(null, true);
-      if (origin.includes("localhost") || origin.includes("127.0.0.1")) return callback(null, true);
+      if (origin.includes("localhost") || origin.includes("127.0.0.1"))
+        return callback(null, true);
       return callback(null, false);
     },
     credentials: true,
@@ -49,7 +62,8 @@ app.use(
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const sessionSecret = process.env["SESSION_SECRET"] ?? "dev-secret-change-in-production";
+const sessionSecret =
+  process.env["SESSION_SECRET"] ?? "dev-secret-change-in-production";
 app.use(
   session({
     secret: sessionSecret,
