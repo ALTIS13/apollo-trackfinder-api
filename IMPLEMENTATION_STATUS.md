@@ -48,7 +48,7 @@ Last updated: 2026-07-14.
 - Smart Git HTTPS завершался `Recv failure: Connection was reset`, поэтому commit опубликован через GitHub Git Database API после проверки parent и полного tree SHA.
 - Локальные `main` и `origin/main` выровнены на `7a1b262ff19a5ba6867ccdff70b30466dfe77811`; admin dashboard в `main` не merged.
 - Финальное whole-branch review для admin dashboard завершилось `Final Review: Approved` без открытых branch findings.
-- Feature branch `codex/feat/admin-topology-dashboard` опубликована в `origin` на commit `8001817d557e8cb87ae243c6b3721e9c6b50d255` и оставлена отдельной до визуального подтверждения владельца.
+- Feature branch `codex/feat/admin-topology-dashboard` опубликована и отслеживает `origin`; reviewed implementation checkpoint -- `8001817d557e8cb87ae243c6b3721e9c6b50d255`, после него добавлена только статусная документация. Ветка оставлена отдельной до визуального подтверждения владельца.
 
 ## Следующий логичный этап реализации
 
