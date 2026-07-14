@@ -107,8 +107,8 @@ describe("FlowingEdge", () => {
     const contact = container.querySelector(".topology-edge-contact");
     const maskGap = container.querySelector("mask[id^='edge-contact-gap-'] rect:last-child");
 
-    expect(contact).toHaveAttribute("transform", "translate(104 80)");
-    expect(maskGap).toHaveAttribute("x", "88");
+    expect(contact).toHaveAttribute("transform", "translate(92 80)");
+    expect(maskGap).toHaveAttribute("x", "76");
     expect(maskGap).toHaveAttribute("width", "32");
   });
 

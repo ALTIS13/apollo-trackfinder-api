@@ -36,6 +36,7 @@ const contactOffsets: Record<HealthStatus, number> = {
 };
 
 const CONTACT_HALF_LENGTH = 16;
+const TARGET_LINE_STUB = 12;
 const EDGE_BEND_RADIUS = 7.5;
 const MAX_VISIBLE_STATUS_CODE_LENGTH = 12;
 
@@ -123,7 +124,7 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
   });
   const color = edgeColors[status];
   const labelText = getLabelText(props.label);
-  const contactX = targetX - CONTACT_HALF_LENGTH;
+  const contactX = targetX - CONTACT_HALF_LENGTH - TARGET_LINE_STUB;
   const contactY = targetY;
   const contactOffset = contactOffsets[status];
   const sourceFaceX = -contactOffset;

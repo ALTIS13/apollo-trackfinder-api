@@ -1,6 +1,5 @@
 import {
   Background,
-  MarkerType,
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
@@ -211,7 +210,6 @@ function TopologyCanvas({
                   },
                 },
           label: formatTrafficLabel(edge.requestsPerMinute),
-          markerEnd: { type: MarkerType.ArrowClosed, color: "currentColor" },
           data: {
             status: edge.status,
             diagnostic:

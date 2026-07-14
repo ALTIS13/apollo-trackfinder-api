@@ -17,6 +17,10 @@ const nginxRuntimeDefaults = readFileSync(
   "utf8",
 );
 const mainEntry = readFileSync(resolve(dashboardRoot, "src/main.tsx"), "utf8");
+const topologyPanel = readFileSync(
+  resolve(dashboardRoot, "src/components/TopologyPanel.tsx"),
+  "utf8",
+);
 const workspaceConfig = readFileSync(
   resolve(dashboardRoot, "../../pnpm-workspace.yaml"),
   "utf8",
@@ -202,5 +206,9 @@ describe("admin dashboard delivery contracts", () => {
 
   it("pins the package manager used by the production image", () => {
     expect(rootPackage.packageManager).toBe("pnpm@10.33.2");
+  });
+
+  it("renders connector edges without a closed arrow marker", () => {
+    expect(topologyPanel).not.toContain("MarkerType.ArrowClosed");
   });
 });
