@@ -211,4 +211,11 @@ describe("admin dashboard delivery contracts", () => {
   it("renders connector edges without a closed arrow marker", () => {
     expect(topologyPanel).not.toContain("MarkerType.ArrowClosed");
   });
+
+  it("hides routing handles behind fixed module-status terminals", () => {
+    expect(dashboardCss).toMatch(/\.react-flow__handle\s*{[^}]*opacity:\s*0/s);
+    expect(dashboardCss).toMatch(
+      /\.service-node-terminal\s*{[^}]*width:\s*6px;[^}]*height:\s*16px/s,
+    );
+  });
 });

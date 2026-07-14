@@ -51,6 +51,11 @@ function ServiceNodeComponent({ data, selected }: NodeProps<ServiceFlowNode>) {
         isConnectable={false}
         aria-hidden="true"
       />
+      <span
+        className="service-node-terminal service-node-terminal--target"
+        data-status={module.status}
+        aria-hidden="true"
+      />
       <button
         type="button"
         className="service-node nodrag nopan"
@@ -90,6 +95,11 @@ function ServiceNodeComponent({ data, selected }: NodeProps<ServiceFlowNode>) {
         type="source"
         position={Position.Right}
         isConnectable={false}
+        aria-hidden="true"
+      />
+      <span
+        className="service-node-terminal service-node-terminal--source"
+        data-status={module.status}
         aria-hidden="true"
       />
     </div>

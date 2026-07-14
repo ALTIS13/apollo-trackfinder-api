@@ -766,6 +766,10 @@ svg {
   height: 100%;
 }
 
+.service-node-root {
+  position: relative;
+}
+
 .service-node {
   display: grid;
   grid-template-columns: 30px minmax(0, 1fr);
@@ -857,7 +861,27 @@ svg {
   width: 5px;
   height: 5px;
   border: 0;
-  background: var(--color-border-strong);
+  opacity: 0;
+}
+
+.service-node-terminal {
+  position: absolute;
+  top: 50%;
+  width: 6px;
+  height: 16px;
+  transform: translateY(-50%);
+  border: 1px solid var(--color-surface);
+  background: currentColor;
+  box-shadow: 0 0 0 1px var(--color-border-strong);
+  pointer-events: none;
+}
+
+.service-node-terminal--target {
+  left: -3px;
+}
+
+.service-node-terminal--source {
+  right: -3px;
 }
 
 .incident-rail {
