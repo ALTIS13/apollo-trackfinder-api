@@ -69,7 +69,7 @@ Last updated: 2026-07-15.
 - Feature commit `2481f57b674be15e48140e818653a104e9dff3b0` опубликован в `origin/codex/feat/admin-topology-dashboard`, fast-forward merged в `main` и опубликован в `origin/main` после повторной validation на merged result.
 - Финальное whole-branch review для admin dashboard завершилось `Final Review: Approved` без открытых branch findings.
 - Feature branch UI сохранена в origin как проверяемая история серьёзного этапа. Backend telemetry/API implementation commit `a5a1b52177f746fc6693b4c1356c83f405bbeeb1` и validation status commit `1f169e57f78ea9c8713ab04a11133e06d56d83d3` опубликованы в `origin/codex/feat/admin-telemetry-api`, затем fast-forward merged и опубликованы в `origin/main`; HomeNode/Coolify не изменялись.
-- Status terminal connector work опубликован в `origin/codex/fix/admin-connector-ports`; implementation commits `ed28e9c` и `6e4278b` прошли TDD, полный admin regression, два task review и whole-branch review `APPROVED` без findings. Fast-forward в `main` выполняется после повторной validation merged result.
+- Status terminal connector work опубликован в `origin/codex/fix/admin-connector-ports`; implementation commits `ed28e9c` и `6e4278b` прошли TDD, полный admin regression, два task review и whole-branch review `APPROVED` без findings. Проверенный feature tip `362d8f637760fc76d9a143e0d3adae67ba98a594` fast-forward merged и опубликован в `origin/main`; merged result повторно прошёл `86/86`, typecheck и production build.
 
 ## Следующий логичный этап реализации
 
