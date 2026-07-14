@@ -18,13 +18,24 @@ export interface TopologyLayout {
   height: number;
 }
 
+function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 export function layoutTopology(modules: ServiceModule[], edges: ServiceEdge[]): TopologyLayout {
   const graph = new dagre.graphlib.Graph();
+  const canonicalModules = [...modules].sort((left, right) => compareStrings(left.id, right.id));
+  const canonicalEdges = [...edges].sort(
+    (left, right) =>
+      compareStrings(left.source, right.source) ||
+      compareStrings(left.target, right.target) ||
+      compareStrings(left.id, right.id),
+  );
 
   graph.setGraph({ rankdir: "LR", ranksep: 72, nodesep: 34, marginx: 24, marginy: 24 });
   graph.setDefaultEdgeLabel(() => ({}));
-  modules.forEach((module) => graph.setNode(module.id, { width: NODE_WIDTH, height: NODE_HEIGHT }));
-  edges.forEach((edge) => graph.setEdge(edge.source, edge.target));
+  canonicalModules.forEach((module) => graph.setNode(module.id, { width: NODE_WIDTH, height: NODE_HEIGHT }));
+  canonicalEdges.forEach((edge) => graph.setEdge(edge.source, edge.target));
   dagre.layout(graph);
 
   const nodes = modules.map((module) => {
