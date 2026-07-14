@@ -142,6 +142,6 @@ Expected: all tests, typecheck, build and diff check pass.
 
 Use the current Codex in-app browser tab. Reload after the change and verify page identity, nonblank DOM, no framework overlay, no console warnings/errors, status terminals on both module sides, no arrow markers or round handles, a visible target stub, and incident edge activation. Repeat at the current desktop viewport and `390 x 844`.
 
-- [ ] **Step 3: Record status and publish**
+- [x] **Step 3: Record status and publish**
 
 Update `IMPLEMENTATION_STATUS.md` with exact validation counts and rendered QA evidence, commit implementation and status separately, push `codex/fix/admin-connector-ports`, fast-forward `main` only after review, and push `main`.
