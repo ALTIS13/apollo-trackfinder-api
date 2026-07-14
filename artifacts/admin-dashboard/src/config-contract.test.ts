@@ -6,10 +6,14 @@ const dashboardRoot = process.cwd();
 const dashboardCss = readFileSync(resolve(dashboardRoot, "src/index.css"), "utf8");
 const dockerfile = readFileSync(resolve(dashboardRoot, "Dockerfile"), "utf8");
 const nginxConfig = readFileSync(resolve(dashboardRoot, "nginx.conf"), "utf8");
+const mainEntry = readFileSync(resolve(dashboardRoot, "src/main.tsx"), "utf8");
 const composeConfig = readFileSync(
   resolve(dashboardRoot, "../../docker-compose.yml"),
   "utf8",
 );
+const rootPackage = JSON.parse(
+  readFileSync(resolve(dashboardRoot, "../../package.json"), "utf8"),
+) as { packageManager?: string };
 
 describe("admin dashboard delivery contracts", () => {
   it("defines the approved visual tokens and portrait topology overflow", () => {
@@ -49,5 +53,15 @@ describe("admin dashboard delivery contracts", () => {
     expect(composeConfig).toContain("dockerfile: artifacts/admin-dashboard/Dockerfile");
     expect(composeConfig).toContain("VITE_ADMIN_API_URL:");
     expect(composeConfig).toContain('"3001:80"');
+  });
+
+  it("wires the build-time API URL through the dashboard adapter selector", () => {
+    expect(mainEntry).toContain(
+      "createDashboardAdapterForEnvironment(import.meta.env.VITE_ADMIN_API_URL)",
+    );
+  });
+
+  it("pins the package manager used by the production image", () => {
+    expect(rootPackage.packageManager).toBe("pnpm@10.33.2");
   });
 });
