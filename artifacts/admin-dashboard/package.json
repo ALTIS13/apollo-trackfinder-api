@@ -1,0 +1,16 @@
+{
+  "name": "@workspace/admin-dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "vite": "catalog:",
+    "vitest": "^4.0.18"
+  }
+}
