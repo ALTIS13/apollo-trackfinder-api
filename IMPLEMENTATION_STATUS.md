@@ -31,7 +31,7 @@ Last updated: 2026-07-14.
 - `gh auth status`: authenticated as `ALTIS13`; GitHub connector вызван успешно.
 - SSH connection test: passed; только read-only команды, изменений инфраструктуры не было.
 - Credential-bearing Git remote заменён на credential-free HTTPS URL.
-- Повторный `git fetch` через GitHub завершился сетевой ошибкой `Recv failure: Connection was reset`; auth при этом подтверждён через `gh` и GitHub connector.
+- Исторически один `git fetch` завершался `Recv failure: Connection was reset`; финальные `git fetch origin --prune` и feature-branch push 2026-07-14 прошли по credential-free HTTPS.
 - `adb devices -l`: подключены два физических устройства в состоянии `device`.
 - Fresh `pnpm run typecheck`: passed.
 - Fresh filtered build для API, web player и mockup sandbox: passed.
@@ -46,7 +46,9 @@ Last updated: 2026-07-14.
 
 - Cleanup и операционная документация опубликованы в `main` commit `9a7d770fc053fcc64daeb337749920ce85f46506`.
 - Smart Git HTTPS завершался `Recv failure: Connection was reset`, поэтому commit опубликован через GitHub Git Database API после проверки parent и полного tree SHA.
-- Локальные `main`, `origin/main` и GitHub `main` выровнены на один commit.
+- Локальные `main` и `origin/main` выровнены на `7a1b262ff19a5ba6867ccdff70b30466dfe77811`; admin dashboard в `main` не merged.
+- Финальное whole-branch review для admin dashboard завершилось `Final Review: Approved` без открытых branch findings.
+- Feature branch `codex/feat/admin-topology-dashboard` опубликована в `origin` на commit `8001817d557e8cb87ae243c6b3721e9c6b50d255` и оставлена отдельной до визуального подтверждения владельца.
 
 ## Следующий логичный этап реализации
 
