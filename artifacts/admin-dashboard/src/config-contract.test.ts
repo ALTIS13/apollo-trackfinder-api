@@ -42,7 +42,7 @@ describe("admin dashboard delivery contracts", () => {
     expect(dashboardCss).toMatch(/\.topology-canvas\s*{[^}]*min-width:\s*760px/s);
   });
 
-  it("keeps small text contrast at or above WCAG AA", () => {
+  it("keeps base, hover, and subtle small text contrast at or above WCAG AA", () => {
     const token = (name: string) => {
       const value = dashboardCss.match(new RegExp(`--${name}:\\s*(#[0-9a-f]{6})`, "i"))?.[1];
       expect(value, `missing --${name}`).toBeDefined();
@@ -61,7 +61,11 @@ describe("admin dashboard delivery contracts", () => {
     };
 
     expect(contrast("#ffffff", token("color-accent"))).toBeGreaterThanOrEqual(4.5);
+    expect(contrast("#ffffff", token("color-accent-hover"))).toBeGreaterThanOrEqual(4.5);
     expect(contrast(token("color-subtle"), token("color-surface"))).toBeGreaterThanOrEqual(4.5);
+    expect(dashboardCss).toMatch(
+      /\.refresh-button:hover:not\(:disabled\)\s*{[^}]*background:\s*var\(--color-accent-hover\)/s,
+    );
   });
 
   it("builds Vite without browser API credentials before producing the nginx image", () => {
@@ -82,14 +86,48 @@ describe("admin dashboard delivery contracts", () => {
     expect(dockerfile).toContain("HEALTHCHECK CMD wget -qO- http://127.0.0.1/healthz || exit 1");
   });
 
-  it("serves the SPA and health endpoint while proxying API requests with a server token", () => {
+  it("limits the tokenized proxy to exact GET dashboard requests with deferred DNS", () => {
+    const dashboardLocationStart = nginxConfig.indexOf(
+      "location = /api/admin/dashboard",
+    );
+    const fallbackApiLocationStart = nginxConfig.indexOf(
+      "location ^~ /api/",
+      dashboardLocationStart,
+    );
+    const dashboardLocation = nginxConfig.slice(
+      dashboardLocationStart,
+      fallbackApiLocationStart,
+    );
+    const fallbackApiLocation = nginxConfig.slice(
+      fallbackApiLocationStart,
+      nginxConfig.indexOf("location /", fallbackApiLocationStart),
+    );
+
     expect(nginxConfig).toMatch(/location\s*=\s*\/healthz\s*{[^}]*return\s+200/s);
-    expect(nginxConfig).toMatch(/location\s+\/api\/\s*{[\s\S]*?proxy_pass\s+\$\{APOLLO_API_UPSTREAM\}/);
-    expect(nginxConfig).toContain('proxy_set_header X-Admin-Dashboard-Token "${ADMIN_DASHBOARD_TOKEN}"');
+    expect(dashboardLocationStart).toBeGreaterThan(-1);
+    expect(fallbackApiLocationStart).toBeGreaterThan(dashboardLocationStart);
+    expect(dashboardLocation).toContain("if ($request_method != GET)");
+    expect(dashboardLocation).toContain("return 405");
+    expect(dashboardLocation).toContain("resolver 127.0.0.11");
+    expect(dashboardLocation).toContain(
+      'set $apollo_api_upstream "${APOLLO_API_UPSTREAM}"',
+    );
+    expect(dashboardLocation).toContain(
+      'proxy_set_header X-Admin-Dashboard-Token "${ADMIN_DASHBOARD_TOKEN}"',
+    );
+    expect(dashboardLocation).toContain(
+      "proxy_pass $apollo_api_upstream$request_uri",
+    );
+    expect(fallbackApiLocation).toContain("return 404");
+    expect(fallbackApiLocation).not.toContain("proxy_pass");
+    expect(fallbackApiLocation).not.toContain("X-Admin-Dashboard-Token");
+    expect(nginxConfig.match(/proxy_pass/g)).toHaveLength(1);
+    expect(nginxConfig.match(/X-Admin-Dashboard-Token/g)).toHaveLength(1);
     expect(nginxConfig).toMatch(/location\s+\/\s*{[^}]*try_files\s+\$uri\s+\$uri\/\s+\/index\.html/s);
   });
 
   it("configures the admin service with runtime same-origin upstream and token values", () => {
+    expect(composeConfig).not.toMatch(/^version:/m);
     expect(composeConfig).toMatch(/\n\s{2}admin:\s*\n/);
     expect(composeConfig).toContain("dockerfile: artifacts/admin-dashboard/Dockerfile");
     expect(composeConfig).not.toContain("VITE_ADMIN_API_URL");

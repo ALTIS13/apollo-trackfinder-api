@@ -92,3 +92,21 @@ DONE_WITH_CONCERNS
 ### Verification
 
 `git diff --check -- IMPLEMENTATION_STATUS.md MODULES.md docs/superpowers/plans/2026-07-14-admin-topology-dashboard.md .superpowers/sdd/task-5-report.md` -- passed with exit code `0` and no whitespace errors.
+
+## Final Re-review Follow-up
+
+### Status
+
+DONE_WITH_CONCERNS
+
+### Findings addressed
+
+1. Restricted nginx proxy and token authority to exact `GET /api/admin/dashboard`; the exact path rejects other methods with `405`, and every other `/api/*` route returns `404` without proxying or token injection.
+2. Tightened runtime validation to exactly four metrics and unique IDs across metrics, modules, edges, incidents, and providers while retaining collection bounds and edge/incident references.
+3. Deferred upstream DNS resolution with the nginx Docker resolver and variable-form proxy target while preserving request URI/query, so an unresolvable upstream hostname cannot prevent `/healthz` startup.
+4. Added a WCAG-AA refresh hover token and deterministic checks for white text on base/hover accents plus subtle text on the dashboard surface.
+5. Surfaced active adapter context in CommandBar as `Демо` or `Продакшн`, and removed the obsolete root Compose `version` key.
+
+### Verification and remaining work
+
+The complete RED/GREEN and final command evidence is appended to `.superpowers/sdd/final-review-fix-report.md`. Backend telemetry plus validation of the forwarded token are still required, and owner approval remains required before merge. No Coolify/HomeNode deployment occurred.

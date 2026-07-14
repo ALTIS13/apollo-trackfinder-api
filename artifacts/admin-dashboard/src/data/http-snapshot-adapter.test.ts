@@ -46,7 +46,46 @@ describe("HTTP dashboard snapshot adapter", () => {
     ["an invalid timestamp", { ...demoSnapshot, generatedAt: "today" }],
     [
       "duplicate service IDs",
-      { ...demoSnapshot, modules: [demoSnapshot.modules[0], demoSnapshot.modules[0]] },
+      { ...demoSnapshot, modules: [...demoSnapshot.modules, demoSnapshot.modules[0]] },
+    ],
+    [
+      "duplicate metric IDs",
+      {
+        ...demoSnapshot,
+        metrics: demoSnapshot.metrics.map((metric, index) =>
+          index === 1 ? { ...metric, id: demoSnapshot.metrics[0].id } : metric,
+        ),
+      },
+    ],
+    [
+      "duplicate edge IDs",
+      {
+        ...demoSnapshot,
+        edges: demoSnapshot.edges.map((edge, index) =>
+          index === 1 ? { ...edge, id: demoSnapshot.edges[0].id } : edge,
+        ),
+      },
+    ],
+    [
+      "duplicate incident IDs",
+      { ...demoSnapshot, incidents: [...demoSnapshot.incidents, demoSnapshot.incidents[0]] },
+    ],
+    [
+      "duplicate provider IDs",
+      {
+        ...demoSnapshot,
+        providers: demoSnapshot.providers.map((provider, index) =>
+          index === 1 ? { ...provider, id: demoSnapshot.providers[0].id } : provider,
+        ),
+      },
+    ],
+    [
+      "three metrics",
+      { ...demoSnapshot, metrics: demoSnapshot.metrics.slice(0, 3) },
+    ],
+    [
+      "five metrics",
+      { ...demoSnapshot, metrics: [...demoSnapshot.metrics, { ...demoSnapshot.metrics[0], id: "extra-metric" }] },
     ],
     [
       "an unknown edge service reference",
@@ -64,7 +103,13 @@ describe("HTTP dashboard snapshot adapter", () => {
     ],
     [
       "an oversized collection",
-      { ...demoSnapshot, metrics: Array.from({ length: 33 }, (_, index) => ({ ...demoSnapshot.metrics[0], id: `metric-${index}` })) },
+      {
+        ...demoSnapshot,
+        providers: Array.from({ length: 129 }, (_, index) => ({
+          ...demoSnapshot.providers[0],
+          id: `provider-${index}`,
+        })),
+      },
     ],
   ])("rejects HTTP 200 JSON containing %s", async (_label, body) => {
     const adapter = createHttpDashboardSnapshotAdapter({

@@ -28,10 +28,11 @@
 ## Dashboard update model
 
 - The typed adapter exposes `demo`/`http` mode and acknowledgement capability.
+- The command bar exposes the active adapter context as `Демо` for the demo adapter and `Продакшн` for the HTTP adapter.
 - Demo mode starts live from the deterministic snapshot and may acknowledge incidents locally.
 - Configured production HTTP mode renders the demo snapshot only as an unverified visual fallback, starts an initial GET on mount, becomes live only after validated remote data, reports offline until the first success, and reports stale only when a later request fails.
 - Target production cadence is a 15-second snapshot refresh. Requests use a deterministic 10-second abort timeout and single-flight behavior so manual and interval refreshes cannot overlap.
-- Every HTTP 200 JSON response is validated before state mutation. The schema covers all fields, enums and timestamps, bounds every collection, requires unique service/incident IDs, and verifies edge/incident service references.
+- Every HTTP 200 JSON response is validated before state mutation. The schema covers all fields, enums and timestamps, requires exactly four metrics, bounds every collection, requires unique IDs across metrics/modules/edges/incidents/providers, and verifies edge/incident service references.
 - The last known good validated remote snapshot remains visible during reconnects.
 - Provider latency, module versions, incident state, and deployment availability are represented in the snapshot contract.
 
@@ -40,7 +41,7 @@
 - Background: near-black neutral, not blue-tinted.
 - Surfaces: charcoal panels with subtle transparency and 1px neutral borders.
 - Primary accent: violet for selection and commands.
-- Small-text tokens meet WCAG AA: white on refresh accent and subtle text on the dashboard surface are both at least 4.5:1.
+- Small-text tokens meet WCAG AA: white on the refresh base and hover accents, plus subtle text on the dashboard surface, are each at least 4.5:1.
 - Semantic colors: green healthy, amber warning, red degraded, blue informational, gray unknown.
 - Radius: 6px panels and controls; 8px only for major repeated metric modules.
 - Typography: Plus Jakarta Sans for UI, Outfit for major metric values and headings.
@@ -72,6 +73,8 @@
 - The dashboard is a standalone Vite artifact served by nginx.
 - Coolify builds it from the monorepo root with `artifacts/admin-dashboard/Dockerfile`.
 - The production browser always requests same-origin `/api/admin/dashboard`; no API base, cross-origin credentials, or admin token is compiled into the bundle.
-- nginx proxies `/api/` to runtime `APOLLO_API_UPSTREAM` and forwards server-side `ADMIN_DASHBOARD_TOKEN` as `X-Admin-Dashboard-Token`. The standalone image must start and answer `/healthz` even when upstream is unavailable.
+- nginx proxies only exact `GET /api/admin/dashboard` to runtime `APOLLO_API_UPSTREAM` and forwards server-side `ADMIN_DASHBOARD_TOKEN` as `X-Admin-Dashboard-Token` only on that request. Non-GET requests on the exact path return `405`; every other `/api/*` path returns `404` without proxying or token injection.
+- The nginx Docker resolver and variable-form upstream defer DNS resolution until an API request while preserving the original request URI and query. The standalone image must start and answer `/healthz` when the configured upstream hostname is unresolvable.
+- Root Compose omits the obsolete top-level `version` key so configuration validation is warning-free.
 - The future backend endpoint must validate the forwarded token. This specification does not claim that the endpoint, auth validation, Coolify deployment, or HomeNode deployment exists.
 - The workspace override pins patched `lodash@4.18.1` for the admin `dagre`/`graphlib` production paths.

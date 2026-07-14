@@ -89,6 +89,26 @@ function createAdapter(
 }
 
 describe("Apollo TF admin dashboard", () => {
+  it("labels the default adapter as demo context", () => {
+    render(<App />);
+
+    expect(screen.getByTestId("dashboard-environment")).toHaveTextContent("Демо");
+    expect(screen.queryByText("Продакшн")).not.toBeInTheDocument();
+  });
+
+  it("labels the HTTP adapter as production context", () => {
+    const loadSnapshot = vi.fn(
+      () => new Promise<DashboardSnapshot>(() => undefined),
+    );
+
+    render(<App adapter={createAdapter(loadSnapshot, demoSnapshot, "http")} />);
+
+    expect(screen.getByTestId("dashboard-environment")).toHaveTextContent(
+      "Продакшн",
+    );
+    expect(screen.queryByText("Демо")).not.toBeInTheDocument();
+  });
+
   it("renders the operational shell landmarks and real section navigation", () => {
     render(<App />);
 

@@ -13,6 +13,7 @@
   --color-muted: #9ca4b5;
   --color-subtle: #7f889b;
   --color-accent: #6f5ee8;
+  --color-accent-hover: #6252d6;
   --color-accent-soft: #272345;
   --color-healthy: #4dcc70;
   --color-warning: #f0b429;
@@ -374,8 +375,8 @@ svg {
 }
 
 .refresh-button:hover:not(:disabled) {
-  border-color: #9186ff;
-  background: #8678ff;
+  border-color: var(--color-accent-hover);
+  background: var(--color-accent-hover);
 }
 
 .refresh-button:disabled {

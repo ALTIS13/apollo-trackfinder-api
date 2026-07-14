@@ -1,11 +1,18 @@
 import { CircleDot, RefreshCw } from "lucide-react";
-import type { DashboardConnectionState } from "../types/dashboard";
+import type {
+  DashboardAdapterMode,
+  DashboardConnectionState,
+} from "../types/dashboard";
 
 const connectionLabels: Record<DashboardConnectionState, string> = {
   live: "Актуально",
   stale: "Данные устарели",
   offline: "Нет связи",
   refreshing: "Обновление",
+};
+const environmentLabels: Record<DashboardAdapterMode, string> = {
+  demo: "Демо",
+  http: "Продакшн",
 };
 const updatedAtFormatter = new Intl.DateTimeFormat("ru-RU", {
   hour: "2-digit",
@@ -14,6 +21,7 @@ const updatedAtFormatter = new Intl.DateTimeFormat("ru-RU", {
 });
 
 interface CommandBarProps {
+  adapterMode: DashboardAdapterMode;
   connectionState: DashboardConnectionState;
   lastUpdatedAt?: string;
   isAutoRefreshEnabled: boolean;
@@ -22,6 +30,7 @@ interface CommandBarProps {
 }
 
 export function CommandBar({
+  adapterMode,
   connectionState,
   lastUpdatedAt,
   isAutoRefreshEnabled,
@@ -33,9 +42,12 @@ export function CommandBar({
   return (
     <header className="command-bar">
       <div className="command-context">
-        <span className="environment-label">
+        <span
+          className="environment-label"
+          data-testid="dashboard-environment"
+        >
           <CircleDot aria-hidden="true" />
-          Продакшн
+          {environmentLabels[adapterMode]}
         </span>
         <span className="command-title">Операционный контур</span>
       </div>

@@ -24,6 +24,7 @@ export default function App({ adapter = demoDashboardAdapter }: AppProps) {
       <AdminSidebar openIncidentCount={openIncidentCount} />
       <div className="dashboard-frame">
         <CommandBar
+          adapterMode={adapter.mode}
           connectionState={dashboard.connectionState}
           lastUpdatedAt={dashboard.lastUpdatedAt}
           isAutoRefreshEnabled={dashboard.isAutoRefreshEnabled}

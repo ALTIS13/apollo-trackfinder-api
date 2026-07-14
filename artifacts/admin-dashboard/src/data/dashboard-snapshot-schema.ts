@@ -55,34 +55,37 @@ const providerSchema = z.object({
 
 const dashboardSnapshotSchema = z.object({
   generatedAt: timestampSchema,
-  metrics: z.array(metricSchema).max(32),
+  metrics: z.array(metricSchema).length(4),
   modules: z.array(moduleSchema).max(128),
   edges: z.array(edgeSchema).max(512),
   incidents: z.array(incidentSchema).max(512),
   providers: z.array(providerSchema).max(128),
 }).strict().superRefine((snapshot, context) => {
-  const moduleIds = new Set<string>();
-  snapshot.modules.forEach((module, index) => {
-    if (moduleIds.has(module.id)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Duplicate service ID: ${module.id}`,
-        path: ["modules", index, "id"],
-      });
-    }
-    moduleIds.add(module.id);
-  });
+  const uniqueIds = (
+    items: ReadonlyArray<{ id: string }>,
+    collection: "metrics" | "modules" | "edges" | "incidents" | "providers",
+  ) => {
+    const ids = new Set<string>();
+    items.forEach((item, index) => {
+      if (ids.has(item.id)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate ${collection} ID: ${item.id}`,
+          path: [collection, index, "id"],
+        });
+      }
+      ids.add(item.id);
+    });
+    return ids;
+  };
 
-  const incidentIds = new Set<string>();
+  uniqueIds(snapshot.metrics, "metrics");
+  const moduleIds = uniqueIds(snapshot.modules, "modules");
+  uniqueIds(snapshot.edges, "edges");
+  uniqueIds(snapshot.incidents, "incidents");
+  uniqueIds(snapshot.providers, "providers");
+
   snapshot.incidents.forEach((incident, index) => {
-    if (incidentIds.has(incident.id)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Duplicate incident ID: ${incident.id}`,
-        path: ["incidents", index, "id"],
-      });
-    }
-    incidentIds.add(incident.id);
     if (!moduleIds.has(incident.serviceId)) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
