@@ -65,7 +65,7 @@ Last updated: 2026-07-15.
 - Smart Git HTTPS завершался `Recv failure: Connection was reset`, поэтому commit опубликован через GitHub Git Database API после проверки parent и полного tree SHA.
 - Feature commit `2481f57b674be15e48140e818653a104e9dff3b0` опубликован в `origin/codex/feat/admin-topology-dashboard`, fast-forward merged в `main` и опубликован в `origin/main` после повторной validation на merged result.
 - Финальное whole-branch review для admin dashboard завершилось `Final Review: Approved` без открытых branch findings.
-- Feature branch UI сохранена в origin как проверяемая история серьёзного этапа. Backend telemetry/API implementation commit `a5a1b52177f746fc6693b4c1356c83f405bbeeb1` опубликован в `origin/codex/feat/admin-telemetry-api` после полной validation и independent review; HomeNode/Coolify не изменялись.
+- Feature branch UI сохранена в origin как проверяемая история серьёзного этапа. Backend telemetry/API implementation commit `a5a1b52177f746fc6693b4c1356c83f405bbeeb1` и validation status commit `1f169e57f78ea9c8713ab04a11133e06d56d83d3` опубликованы в `origin/codex/feat/admin-telemetry-api`, затем fast-forward merged и опубликованы в `origin/main`; HomeNode/Coolify не изменялись.
 
 ## Следующий логичный этап реализации
 
