@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Incident, IncidentFilter } from "../types/dashboard";
 
 const severityLabels = {
@@ -28,6 +28,14 @@ export function IncidentRail({
   onFocusService,
 }: IncidentRailProps) {
   const [announcement, setAnnouncement] = useState("");
+  const feedbackRef = useRef<HTMLParagraphElement>(null);
+  const shouldFocusFeedbackRef = useRef(false);
+
+  useEffect(() => {
+    if (!shouldFocusFeedbackRef.current) return;
+    shouldFocusFeedbackRef.current = false;
+    feedbackRef.current?.focus();
+  }, [announcement]);
 
   return (
     <aside className="incident-rail" aria-label="Инциденты">
@@ -50,7 +58,13 @@ export function IncidentRail({
           </button>
         </div>
       </header>
-      <p role="status" aria-label="Состояние инцидентов" aria-live="polite">
+      <p
+        ref={feedbackRef}
+        role="status"
+        aria-label="Состояние инцидентов"
+        aria-live="polite"
+        tabIndex={-1}
+      >
         {announcement}
       </p>
       {incidents.length === 0 ? <p>Инцидентов нет</p> : null}
@@ -77,6 +91,7 @@ export function IncidentRail({
               type="button"
               disabled={incident.status !== "open"}
               onClick={() => {
+                shouldFocusFeedbackRef.current = filter === "open";
                 onAcknowledge(incident.id);
                 setAnnouncement(`Инцидент «${incident.title}» подтвержден`);
               }}

@@ -11,6 +11,11 @@ input {
   font: inherit;
 }
 
+.dashboard-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+}
+
 .topology-panel {
   min-width: 0;
 }
@@ -35,4 +40,10 @@ input {
 .service-node {
   width: 100%;
   height: 100%;
+}
+
+@media (max-width: 800px) {
+  .dashboard-content {
+    grid-template-columns: 1fr;
+  }
 }

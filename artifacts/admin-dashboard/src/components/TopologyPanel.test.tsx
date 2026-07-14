@@ -67,6 +67,55 @@ describe("TopologyPanel", () => {
     );
   });
 
+  it.each([
+    { reduced: true, behavior: "auto" as const },
+    { reduced: false, behavior: "smooth" as const },
+  ])(
+    "scrolls a 335px outer viewport to the selected node with $behavior behavior",
+    async ({ reduced, behavior }) => {
+      motionPreference.reduced = reduced;
+      flowApi.getNode.mockReturnValue({
+        position: { x: 520, y: 200 },
+        width: 190,
+        height: 76,
+      });
+      const { container, rerender } = render(
+        <TopologyPanel
+          snapshot={demoSnapshot}
+          onSelectService={vi.fn()}
+        />,
+      );
+      const scroller = container.querySelector<HTMLElement>(".topology-scroll");
+      if (scroller === null) throw new Error("Не найден скроллер топологии");
+      const scrollTo = vi.fn();
+      Object.defineProperties(scroller, {
+        clientWidth: { configurable: true, value: 335 },
+        scrollWidth: { configurable: true, value: 760 },
+        scrollTo: { configurable: true, value: scrollTo },
+      });
+
+      rerender(
+        <TopologyPanel
+          snapshot={demoSnapshot}
+          selectedServiceId="download-worker"
+          onSelectService={vi.fn()}
+        />,
+      );
+
+      await waitFor(() =>
+        expect(scrollTo).toHaveBeenCalledWith({
+          behavior,
+          left: 212.5,
+          top: 0,
+        }),
+      );
+      expect(flowApi.setCenter).toHaveBeenCalledWith(615, 238, {
+        duration: reduced ? 0 : 240,
+        zoom: 0.8,
+      });
+    },
+  );
+
   it("keeps React Flow nodes keyboard focusable and synchronizes keyboard selection", async () => {
     const onSelectService = vi.fn();
     render(<TopologyPanel snapshot={demoSnapshot} onSelectService={onSelectService} />);

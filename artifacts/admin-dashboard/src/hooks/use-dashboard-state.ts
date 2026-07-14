@@ -12,6 +12,20 @@ import type {
 
 const REFRESH_INTERVAL_MS = 15_000;
 
+function applyLocalAcknowledgements(
+  snapshot: DashboardSnapshot,
+  acknowledgedIncidentIds: ReadonlySet<string>,
+): DashboardSnapshot {
+  return {
+    ...snapshot,
+    incidents: snapshot.incidents.map((incident) =>
+      acknowledgedIncidentIds.has(incident.id) && incident.status === "open"
+        ? { ...incident, status: "acknowledged" }
+        : incident,
+    ),
+  };
+}
+
 export function useDashboardState(
   adapter: DashboardSnapshotAdapter,
 ) {
@@ -27,13 +41,18 @@ export function useDashboardState(
   const [isAutoRefreshEnabled, setAutoRefreshEnabled] = useState(false);
   const snapshotRef = useRef(snapshot);
   const requestIdRef = useRef(0);
+  const acknowledgedIncidentIdsRef = useRef(new Set<string>());
 
   const refresh = useCallback(async () => {
     const requestId = ++requestIdRef.current;
     setConnectionState("refreshing");
     try {
-      const nextSnapshot = await adapter.loadSnapshot();
+      const adapterSnapshot = await adapter.loadSnapshot();
       if (requestId !== requestIdRef.current) return;
+      const nextSnapshot = applyLocalAcknowledgements(
+        adapterSnapshot,
+        acknowledgedIncidentIdsRef.current,
+      );
       snapshotRef.current = nextSnapshot;
       setSnapshot(nextSnapshot);
       setConnectionState("live");
@@ -56,6 +75,7 @@ export function useDashboardState(
   }, [isAutoRefreshEnabled, refresh]);
 
   const acknowledgeIncident = useCallback((incidentId: string) => {
+    acknowledgedIncidentIdsRef.current.add(incidentId);
     setSnapshot((current) => {
       if (current === undefined) return current;
       const nextSnapshot: DashboardSnapshot = {

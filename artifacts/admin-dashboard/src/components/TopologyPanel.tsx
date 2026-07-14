@@ -10,7 +10,14 @@ import {
 } from "@xyflow/react";
 import { Maximize2, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
 import { useReducedMotion } from "framer-motion";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import { getServiceNeighborhood } from "../lib/dashboard-model";
 import { layoutTopology } from "../lib/topology-layout";
 import type { DashboardSnapshot, HealthStatus } from "../types/dashboard";
@@ -42,6 +49,10 @@ interface TopologyPanelProps {
   selectedServiceId?: string;
   neighborhood?: Set<string>;
   onSelectService: (serviceId?: string) => void;
+}
+
+interface TopologyCanvasProps extends TopologyPanelProps {
+  scrollContainerRef: RefObject<HTMLDivElement | null>;
 }
 
 function useDocumentVisible() {
@@ -96,7 +107,8 @@ function TopologyCanvas({
   selectedServiceId,
   neighborhood,
   onSelectService,
-}: TopologyPanelProps) {
+  scrollContainerRef,
+}: TopologyCanvasProps) {
   const reducedMotion = useReducedMotion() ?? false;
   const documentVisible = useDocumentVisible();
   const { getNode, getZoom, setCenter } = useReactFlow();
@@ -195,7 +207,28 @@ function TopologyCanvas({
       duration: reducedMotion ? 0 : 240,
       zoom: getZoom(),
     });
-  }, [getNode, getZoom, reducedMotion, selectedServiceId, setCenter]);
+
+    const scrollContainer = scrollContainerRef.current;
+    if (
+      scrollContainer !== null &&
+      scrollContainer.scrollWidth > scrollContainer.clientWidth
+    ) {
+      // setCenter places the node at the canvas midpoint; reveal that midpoint externally.
+      scrollContainer.scrollTo?.({
+        behavior: reducedMotion ? "auto" : "smooth",
+        left:
+          (scrollContainer.scrollWidth - scrollContainer.clientWidth) / 2,
+        top: 0,
+      });
+    }
+  }, [
+    getNode,
+    getZoom,
+    reducedMotion,
+    scrollContainerRef,
+    selectedServiceId,
+    setCenter,
+  ]);
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<ServiceFlowNode>[]) => {
@@ -247,6 +280,8 @@ function TopologyCanvas({
 }
 
 export function TopologyPanel(props: TopologyPanelProps) {
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
   return (
     <section className="topology-panel" aria-label="Топология сервисов">
       <header className="topology-panel-header">
@@ -267,9 +302,12 @@ export function TopologyPanel(props: TopologyPanelProps) {
           Сбросить выбор
         </button>
       </header>
-      <div className="topology-scroll">
+      <div className="topology-scroll" ref={scrollContainerRef}>
         <ReactFlowProvider initialWidth={760} initialHeight={560} fitView>
-          <TopologyCanvas {...props} />
+          <TopologyCanvas
+            {...props}
+            scrollContainerRef={scrollContainerRef}
+          />
         </ReactFlowProvider>
       </div>
     </section>

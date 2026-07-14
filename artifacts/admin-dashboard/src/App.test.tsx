@@ -172,6 +172,26 @@ describe("Apollo TF admin dashboard", () => {
     );
   });
 
+  it("moves focus to stable feedback when acknowledgement removes an open row", async () => {
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Открытые" }));
+
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Подтвердить инцидент Ошибки download-worker",
+      }),
+    );
+
+    const feedback = screen.getByRole("status", {
+      name: "Состояние инцидентов",
+    });
+    await waitFor(() => expect(feedback).toHaveFocus());
+    expect(feedback).toHaveTextContent(
+      "Инцидент «Ошибки download-worker» подтвержден",
+    );
+    expect(screen.queryByText("Ошибки download-worker")).not.toBeInTheDocument();
+  });
+
   it("gives every open incident a unique acknowledge action", () => {
     render(<App />);
 
@@ -211,6 +231,36 @@ describe("Apollo TF admin dashboard", () => {
     );
     expect(screen.getByText("12:45")).toHaveAttribute("datetime", "2026-07-14T09:45:00.000Z");
     expect(loadSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a local acknowledgement after a successful refresh", async () => {
+    const loadSnapshot = vi
+      .fn()
+      .mockResolvedValue(snapshotAt("2026-07-14T09:45:00.000Z"));
+    render(<App adapter={createAdapter(loadSnapshot)} />);
+
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Подтвердить инцидент Ошибки download-worker",
+      }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Обновить" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent(
+        "Актуально",
+      ),
+    );
+    expect(
+      screen.getByRole("button", {
+        name: "Инцидент Ошибки download-worker подтвержден",
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByRole("button", {
+        name: "Подтвердить инцидент Ошибки download-worker",
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("refreshes through the adapter every 15 seconds when enabled", async () => {
