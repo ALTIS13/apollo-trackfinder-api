@@ -45,5 +45,15 @@ services:
     environment:
       VITE_API_URL: "${VITE_API_URL:-https://api.apollot.ru}"
 
+  admin:
+    build:
+      context: .
+      dockerfile: artifacts/admin-dashboard/Dockerfile
+      args:
+        VITE_ADMIN_API_URL: "${VITE_ADMIN_API_URL:-https://api.apollot.ru}"
+    restart: unless-stopped
+    ports:
+      - "3001:80"
+
 volumes:
   pgdata:

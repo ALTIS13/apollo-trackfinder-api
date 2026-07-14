@@ -41,6 +41,7 @@ export const demoSnapshot: DashboardSnapshot = {
       name: "Public Web",
       status: "healthy",
       version: "2.14.0",
+      lastDeploymentAt: "2026-07-14T08:58:00.000Z",
       requestsPerMinute: 1284,
     },
     {
@@ -48,6 +49,8 @@ export const demoSnapshot: DashboardSnapshot = {
       name: "Core API",
       status: "warning",
       version: "2.14.0",
+      availableVersion: "2.14.1",
+      lastDeploymentAt: "2026-07-14T09:21:00.000Z",
       requestsPerMinute: 1284,
     },
     {
@@ -55,6 +58,7 @@ export const demoSnapshot: DashboardSnapshot = {
       name: "Account Integrations",
       status: "healthy",
       version: "2.13.4",
+      lastDeploymentAt: "2026-07-14T08:45:00.000Z",
       requestsPerMinute: 244,
     },
     {
@@ -62,6 +66,8 @@ export const demoSnapshot: DashboardSnapshot = {
       name: "Search Media",
       status: "healthy",
       version: "2.14.0",
+      availableVersion: "2.14.1",
+      lastDeploymentAt: "2026-07-14T09:07:00.000Z",
       requestsPerMinute: 894,
     },
     {
@@ -69,6 +75,8 @@ export const demoSnapshot: DashboardSnapshot = {
       name: "Download Worker",
       status: "degraded",
       version: "2.13.9",
+      availableVersion: "2.14.0",
+      lastDeploymentAt: "2026-07-14T08:33:00.000Z",
       requestsPerMinute: 146,
     },
     {
@@ -76,6 +84,7 @@ export const demoSnapshot: DashboardSnapshot = {
       name: "PostgreSQL",
       status: "healthy",
       version: "16.4",
+      lastDeploymentAt: "2026-07-13T21:10:00.000Z",
       requestsPerMinute: 244,
     },
     {
@@ -83,6 +92,7 @@ export const demoSnapshot: DashboardSnapshot = {
       name: "Redis",
       status: "healthy",
       version: "7.4.1",
+      lastDeploymentAt: "2026-07-13T21:12:00.000Z",
       requestsPerMinute: 894,
     },
     {
@@ -90,6 +100,7 @@ export const demoSnapshot: DashboardSnapshot = {
       name: "Media Storage",
       status: "warning",
       version: "1.8.2",
+      lastDeploymentAt: "2026-07-13T19:42:00.000Z",
       requestsPerMinute: 146,
     },
   ],
@@ -171,17 +182,54 @@ export const demoSnapshot: DashboardSnapshot = {
     },
   ],
   providers: [
-    { id: "spotify", name: "Spotify", status: "healthy", latencyMs: 142 },
+    {
+      id: "spotify",
+      name: "Spotify",
+      status: "healthy",
+      latencyMs: 142,
+      latencyTrendMs: [151, 146, 149, 143, 145, 142],
+      lastCheckedAt: "2026-07-14T09:29:42.000Z",
+    },
     {
       id: "yandex-music",
       name: "Yandex Music",
       status: "healthy",
       latencyMs: 168,
+      latencyTrendMs: [174, 169, 171, 166, 170, 168],
+      lastCheckedAt: "2026-07-14T09:29:38.000Z",
     },
-    { id: "youtube", name: "YouTube", status: "healthy", latencyMs: 183 },
-    { id: "soundcloud", name: "SoundCloud", status: "warning", latencyMs: 812 },
-    { id: "bandcamp", name: "Bandcamp", status: "healthy", latencyMs: 276 },
-    { id: "deezer", name: "Deezer", status: "unknown", latencyMs: 0 },
+    {
+      id: "youtube",
+      name: "YouTube",
+      status: "healthy",
+      latencyMs: 183,
+      latencyTrendMs: [192, 188, 184, 186, 181, 183],
+      lastCheckedAt: "2026-07-14T09:29:36.000Z",
+    },
+    {
+      id: "soundcloud",
+      name: "SoundCloud",
+      status: "warning",
+      latencyMs: 812,
+      latencyTrendMs: [392, 448, 510, 620, 744, 812],
+      lastCheckedAt: "2026-07-14T09:29:30.000Z",
+    },
+    {
+      id: "bandcamp",
+      name: "Bandcamp",
+      status: "healthy",
+      latencyMs: 276,
+      latencyTrendMs: [291, 286, 280, 283, 274, 276],
+      lastCheckedAt: "2026-07-14T09:29:25.000Z",
+    },
+    {
+      id: "deezer",
+      name: "Deezer",
+      status: "unknown",
+      latencyMs: 0,
+      latencyTrendMs: [0, 0, 0, 0, 0, 0],
+      lastCheckedAt: "2026-07-14T09:27:10.000Z",
+    },
   ],
 };
 

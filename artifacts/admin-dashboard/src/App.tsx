@@ -1,25 +1,14 @@
-import { RefreshCw } from "lucide-react";
+import { AdminSidebar } from "./components/AdminSidebar";
+import { CommandBar } from "./components/CommandBar";
+import { DeploymentsTable } from "./components/DeploymentsTable";
 import { IncidentRail } from "./components/IncidentRail";
+import { ProviderTable } from "./components/ProviderTable";
 import { SummaryStrip } from "./components/SummaryStrip";
 import { TopologyPanel } from "./components/TopologyPanel";
 import { demoDashboardAdapter } from "./data/demo-snapshot";
 import { useDashboardState } from "./hooks/use-dashboard-state";
-import type {
-  DashboardConnectionState,
-  DashboardSnapshotAdapter,
-} from "./types/dashboard";
-
-const connectionLabels: Record<DashboardConnectionState, string> = {
-  live: "Актуально",
-  stale: "Данные устарели",
-  offline: "Нет связи",
-  refreshing: "Обновление",
-};
-const updatedAtFormatter = new Intl.DateTimeFormat("ru-RU", {
-  hour: "2-digit",
-  minute: "2-digit",
-  timeZone: "Europe/Moscow",
-});
+import { getOpenIncidentCount } from "./lib/dashboard-model";
+import type { DashboardSnapshotAdapter } from "./types/dashboard";
 
 interface AppProps {
   adapter?: DashboardSnapshotAdapter;
@@ -27,56 +16,27 @@ interface AppProps {
 
 export default function App({ adapter = demoDashboardAdapter }: AppProps) {
   const dashboard = useDashboardState(adapter);
-  const isRefreshing = dashboard.connectionState === "refreshing";
+  const openIncidentCount =
+    dashboard.snapshot === undefined ? 0 : getOpenIncidentCount(dashboard.snapshot);
 
   return (
-    <div className="dashboard-shell">
-      <header className="dashboard-header">
-        <h1>Apollo TF</h1>
-        <span
-          role="status"
-          aria-live="polite"
-          data-testid="dashboard-connection-status"
-        >
-          {connectionLabels[dashboard.connectionState]}
-        </span>
-        <span>
-          Обновлено:{" "}
-          {dashboard.lastUpdatedAt === undefined ? (
-            "нет данных"
+    <div className="admin-shell">
+      <AdminSidebar openIncidentCount={openIncidentCount} />
+      <div className="dashboard-frame">
+        <CommandBar
+          connectionState={dashboard.connectionState}
+          lastUpdatedAt={dashboard.lastUpdatedAt}
+          isAutoRefreshEnabled={dashboard.isAutoRefreshEnabled}
+          onAutoRefreshChange={dashboard.setAutoRefreshEnabled}
+          onRefresh={dashboard.refresh}
+        />
+        <main className="dashboard-main">
+          {dashboard.snapshot === undefined ? (
+            <section className="empty-state" aria-live="polite">Нет сохраненного снимка</section>
           ) : (
-            <time dateTime={dashboard.lastUpdatedAt}>
-              {updatedAtFormatter.format(new Date(dashboard.lastUpdatedAt))}
-            </time>
-          )}
-        </span>
-        <label>
-          <input
-            type="checkbox"
-            checked={dashboard.isAutoRefreshEnabled}
-            onChange={(event) =>
-              dashboard.setAutoRefreshEnabled(event.currentTarget.checked)
-            }
-          />
-          Автообновление
-        </label>
-        <button
-          type="button"
-          aria-label={isRefreshing ? "Обновление" : "Обновить"}
-          disabled={isRefreshing}
-          onClick={() => void dashboard.refresh()}
-        >
-          <RefreshCw aria-hidden="true" />
-          {isRefreshing ? "Обновление" : "Обновить"}
-        </button>
-      </header>
-      <main>
-        {dashboard.snapshot === undefined ? (
-          <p>Нет сохраненного снимка</p>
-        ) : (
-          <>
-            <SummaryStrip metrics={dashboard.snapshot.metrics} />
-            <div className="dashboard-content">
+            <>
+              <SummaryStrip metrics={dashboard.snapshot.metrics} />
+              <div className="operational-layout">
               <TopologyPanel
                 snapshot={dashboard.snapshot}
                 selectedServiceId={dashboard.selectedServiceId}
@@ -90,10 +50,15 @@ export default function App({ adapter = demoDashboardAdapter }: AppProps) {
                 onAcknowledge={dashboard.acknowledgeIncident}
                 onFocusService={dashboard.selectService}
               />
-            </div>
-          </>
-        )}
-      </main>
+                <div className="detail-tables">
+                  <DeploymentsTable modules={dashboard.snapshot.modules} />
+                  <ProviderTable providers={dashboard.snapshot.providers} />
+                </div>
+              </div>
+            </>
+          )}
+        </main>
+      </div>
     </div>
   );
 }

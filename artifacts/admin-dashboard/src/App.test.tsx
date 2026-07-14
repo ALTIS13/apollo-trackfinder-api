@@ -84,6 +84,43 @@ function createAdapter(
 }
 
 describe("Apollo TF admin dashboard", () => {
+  it("renders the operational shell landmarks and real section navigation", () => {
+    render(<App />);
+
+    expect(screen.getByRole("navigation", { name: "Разделы панели" })).toBeVisible();
+    expect(screen.getByRole("banner")).toBeVisible();
+    expect(screen.getByRole("main")).toBeVisible();
+
+    const expectedAnchors = [
+      ["Сводка", "#summary"],
+      ["Топология", "#topology"],
+      ["Инциденты", "#incidents"],
+      ["Деплойменты", "#deployments"],
+      ["Провайдеры", "#providers"],
+    ];
+    for (const [name, href] of expectedAnchors) {
+      expect(screen.getByRole("link", { name })).toHaveAttribute("href", href);
+    }
+  });
+
+  it("keeps deployment and provider operating data visible as semantic tables", () => {
+    render(<App />);
+
+    const deployments = screen.getByRole("table", { name: "Деплойменты сервисов" });
+    expect(deployments).toHaveTextContent("Core API");
+    expect(deployments).toHaveTextContent("2.14.0");
+    expect(deployments).toHaveTextContent("2.14.1");
+    expect(deployments).toHaveTextContent("Доступно обновление");
+    expect(deployments).toHaveTextContent("Последний деплой");
+
+    const providers = screen.getByRole("table", { name: "Состояние провайдеров" });
+    expect(providers).toHaveTextContent("SoundCloud");
+    expect(providers).toHaveTextContent("812 мс");
+    expect(providers).toHaveTextContent("Предупреждение");
+    expect(providers).toHaveTextContent("Проверено");
+    expect(providers).toHaveTextContent("Тренд");
+  });
+
   it("renders the four scan-first metrics before the topology", () => {
     render(<App />);
 

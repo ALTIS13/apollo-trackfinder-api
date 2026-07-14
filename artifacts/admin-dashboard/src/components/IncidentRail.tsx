@@ -1,3 +1,4 @@
+import { CircleAlert, CircleCheck, Info, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { Incident, IncidentFilter } from "../types/dashboard";
 
@@ -11,6 +12,11 @@ const incidentTimeFormatter = new Intl.DateTimeFormat("ru-RU", {
   minute: "2-digit",
   timeZone: "Europe/Moscow",
 });
+const severityIcons = {
+  critical: CircleAlert,
+  warning: TriangleAlert,
+  info: Info,
+} as const;
 
 interface IncidentRailProps {
   incidents: Incident[];
@@ -38,8 +44,8 @@ export function IncidentRail({
   }, [announcement]);
 
   return (
-    <aside className="incident-rail" aria-label="Инциденты">
-      <header>
+    <aside className="incident-rail" id="incidents" aria-label="Инциденты">
+      <div className="incident-rail-header">
         <h2>Инциденты</h2>
         <div className="incident-filters" aria-label="Фильтр инцидентов">
           <button
@@ -57,7 +63,7 @@ export function IncidentRail({
             Открытые
           </button>
         </div>
-      </header>
+      </div>
       <p
         ref={feedbackRef}
         role="status"
@@ -69,13 +75,18 @@ export function IncidentRail({
       </p>
       {incidents.length === 0 ? <p>Инцидентов нет</p> : null}
       <div className="incident-list">
-        {incidents.map((incident) => (
-          <article
-            className="incident-row"
-            data-severity={incident.severity}
-            key={incident.id}
-          >
-            <span>{severityLabels[incident.severity]}</span>
+        {incidents.map((incident) => {
+          const SeverityIcon = severityIcons[incident.severity];
+          return (
+            <article
+              className="incident-row"
+              data-severity={incident.severity}
+              key={incident.id}
+            >
+            <span className="incident-severity">
+              <SeverityIcon aria-hidden="true" />
+              {severityLabels[incident.severity]}
+            </span>
             <button
               type="button"
               className="incident-title"
@@ -103,6 +114,7 @@ export function IncidentRail({
                     : `Инцидент ${incident.title} закрыт`
               }
             >
+              {incident.status !== "open" ? <CircleCheck aria-hidden="true" /> : null}
               {incident.status === "open"
                 ? "Подтвердить"
                 : incident.status === "acknowledged"
@@ -110,7 +122,8 @@ export function IncidentRail({
                   : "Закрыто"}
             </button>
           </article>
-        ))}
+          );
+        })}
       </div>
     </aside>
   );

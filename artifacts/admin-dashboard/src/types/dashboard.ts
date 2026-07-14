@@ -21,6 +21,8 @@ export interface ServiceModule {
   name: string;
   status: HealthStatus;
   version: string;
+  availableVersion?: string;
+  lastDeploymentAt: string;
   requestsPerMinute: number;
 }
 
@@ -46,6 +48,8 @@ export interface ProviderHealth {
   name: string;
   status: HealthStatus;
   latencyMs: number;
+  latencyTrendMs: number[];
+  lastCheckedAt: string;
 }
 
 export interface DashboardSnapshot {

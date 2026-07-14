@@ -283,8 +283,8 @@ export function TopologyPanel(props: TopologyPanelProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   return (
-    <section className="topology-panel" aria-label="Топология сервисов">
-      <header className="topology-panel-header">
+    <section className="topology-panel" id="topology" aria-label="Топология сервисов">
+      <div className="topology-panel-header">
         <h2>Топология сервисов</h2>
         <div className="status-legend" aria-label="Статусы">
           {(Object.keys(statusLabels) as HealthStatus[]).map((status) => (
@@ -301,7 +301,7 @@ export function TopologyPanel(props: TopologyPanelProps) {
           <RotateCcw aria-hidden="true" />
           Сбросить выбор
         </button>
-      </header>
+      </div>
       <div className="topology-scroll" ref={scrollContainerRef}>
         <ReactFlowProvider initialWidth={760} initialHeight={560} fitView>
           <TopologyCanvas

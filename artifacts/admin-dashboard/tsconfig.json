@@ -6,6 +6,6 @@
     "noEmit": true,
     "jsx": "react-jsx",
     "lib": ["es2022", "dom", "dom.iterable"],
-    "types": ["vite/client"]
+    "types": ["vite/client", "node"]
   }
 }
