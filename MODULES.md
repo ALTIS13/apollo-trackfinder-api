@@ -356,7 +356,7 @@ Action Sheet с опциями: воспроизвести, скачать, уд
 - Типизированный `DashboardSnapshot` описывает метрики, сервисы, связи, инциденты, deployments и provider health. `VITE_ADMIN_API_URL` включает HTTP-адаптер для `GET /api/admin/dashboard`; при пустой переменной используется demo snapshot, а ошибка обновления сохраняет last-known-good состояние как stale.
 - `Dockerfile` собирает Vite bundle и отдаёт его через nginx. `nginx.conf` объявляет `/healthz` и SPA fallback; корневой `docker-compose.yml` содержит сервис `admin`, пригодный для Docker/Coolify.
 - Проверено в отчётах checkpoint: 41 dashboard test, dashboard typecheck/build, workspace typecheck и локальный Docker `/healthz` (`200`, `ok`).
-- Следующий этап: production backend telemetry/API для `/api/admin/dashboard`, затем финальное визуальное подтверждение desktop/mobile, focus, incidents, refresh и reduced motion перед merge в `main`.
+- Следующий этап: production backend telemetry/API для `/api/admin/dashboard`, затем визуальное подтверждение владельца перед merge в `main`; технический desktop/mobile QA focus, incidents, refresh и reduced motion уже пройден.
 
 ---
 

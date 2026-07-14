@@ -38,6 +38,7 @@ Last updated: 2026-07-14.
 - Admin dashboard: `pnpm --filter @workspace/admin-dashboard test` -- passed, 8 files / 41 tests; dashboard typecheck и production build -- passed.
 - Workspace `pnpm run typecheck` -- passed после устранения конфликтующих React type definitions в lockfile/catalog.
 - Local Docker validation admin image -- passed: image built with pinned pnpm 10.33.2, disposable container returned `200` and `ok` from `/healthz`, then was removed.
+- Codex in-app browser QA -- passed at `1536x1090` and `390x844`: no page-level horizontal overflow, topology uses an internal portrait scroller, node/incident focus works, acknowledgement survives dashboard refresh, open/all filters work, and reduced-motion removes animated traffic packets while preserving status dots and labels.
 
 ## Commit/push
 
@@ -48,7 +49,7 @@ Last updated: 2026-07-14.
 ## Следующий логичный этап реализации
 
 - Реализовать backend telemetry/API, который будет поставлять production snapshot по `/api/admin/dashboard`; до этого frontend использует типизированный HTTP-контракт с demo fallback.
-- Перед merge feature branch `codex/feat/admin-topology-dashboard` в `main` повторно визуально подтвердить dashboard в desktop и mobile portrait, включая topology focus, инциденты, refresh и reduced-motion.
+- Получить визуальное подтверждение владельца в открытой Codex in-app browser вкладке; техническая desktop/mobile проверка topology focus, incidents, refresh и reduced-motion уже пройдена.
 - Уточнить границу отказа от Expo: сохранить Expo-модули через native prebuild/Gradle либо выполнить отдельную миграцию на bare React Native.
 
 ## Notes
