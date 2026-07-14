@@ -19,7 +19,7 @@ apollo-trackfinder/
 │   ├── api-spec/            # OpenAPI-спецификация
 │   ├── api-zod/             # Zod-схемы (авто-генерация из OpenAPI)
 │   └── api-client-react/    # React Query клиент (авто-генерация из OpenAPI)
-└── docker-compose.yml       # Деплой: PostgreSQL + API-сервер
+└── docker-compose.yml       # Root stack: PostgreSQL + API + admin service
 ```
 
 ---
@@ -354,8 +354,8 @@ Action Sheet с опциями: воспроизвести, скачать, уд
 - Отдельный operational UI на feature branch `codex/feat/admin-topology-dashboard`; `artifacts/music-player` и HomeNode не менялись.
 - Визуальная основа -- вариант 2: центральная topology-схема с устойчивым left-to-right layout. Из варианта 1 добавлены четыре метрики: активные модули, поиски в минуту, глубина очереди и error rate; рядом остаётся rail инцидентов с фильтрацией, фокусом сервиса и локальным acknowledgement.
 - Типизированный `DashboardSnapshot` описывает метрики, сервисы, связи, инциденты, deployments и provider health. `VITE_ADMIN_API_URL` включает HTTP-адаптер для `GET /api/admin/dashboard`; при пустой переменной используется demo snapshot, а ошибка обновления сохраняет last-known-good состояние как stale.
-- `Dockerfile` собирает Vite bundle и отдаёт его через nginx. `nginx.conf` объявляет `/healthz` и SPA fallback; корневой `docker-compose.yml` содержит сервис `admin`, пригодный для Docker/Coolify.
-- Проверено в отчётах checkpoint: 41 dashboard test, dashboard typecheck/build, workspace typecheck и локальный Docker `/healthz` (`200`, `ok`).
+- `Dockerfile` собирает Vite bundle и отдаёт его через nginx. `nginx.conf` объявляет `/healthz` и SPA fallback; корневой `docker-compose.yml` поднимает PostgreSQL, API и `admin` service.
+- Проверено в отчётах checkpoint: 41 dashboard test, dashboard typecheck/build, workspace typecheck, локальный Docker `/healthz` (`200`, `ok`) и Docker/Compose/Coolify readiness конфигурации. Deployment в Coolify или на HomeNode не выполнялся.
 - Следующий этап: production backend telemetry/API для `/api/admin/dashboard`, затем визуальное подтверждение владельца перед merge в `main`; технический desktop/mobile QA focus, incidents, refresh и reduced motion уже пройден.
 
 ---
@@ -365,7 +365,7 @@ Action Sheet с опциями: воспроизвести, скачать, уд
 **ORM:** Drizzle ORM + PostgreSQL  
 **Провайдер:** встроенный PostgreSQL (через `DATABASE_URL` env)
 
-### 4.1 Схема
+### 5.1 Схема
 
 #### `track_search_cache`
 
@@ -402,7 +402,7 @@ login           TEXT
 created_at / updated_at  TIMESTAMP
 ```
 
-### 4.2 Миграции
+### 5.2 Миграции
 
 Drizzle Kit. Миграции запускаются **автоматически при старте** сервера (`src/lib/migrate.ts`).
 
@@ -445,7 +445,18 @@ const parseResult = SearchTracksBody.safeParse(req.body);
 
 ### `artifacts/admin-dashboard/Dockerfile`
 
-Собирает standalone admin dashboard с pinned `pnpm@10.33.2`, затем nginx отдаёт production bundle. Runtime health endpoint -- `GET /healthz`; service `admin` определён в корневом `docker-compose.yml` и предназначен для Docker/Coolify.
+Собирает standalone admin dashboard с pinned `pnpm@10.33.2`, затем nginx отдаёт production bundle. Runtime health endpoint -- `GET /healthz`; service `admin` определён в корневом `docker-compose.yml`. Локально проверены image, Compose configuration и Coolify readiness; deployment в Coolify/HomeNode не выполнялся.
+
+### Корневой `docker-compose.yml`
+
+```yaml
+services:
+  db:     # PostgreSQL 16-alpine
+  api:    # API-сервер на порту 8080
+  admin:  # Admin dashboard на порту 3001
+```
+
+Это полный root stack для PostgreSQL, API и admin service. Конфигурация локально проверена для Docker/Compose и готовности к Coolify; фактического deployment в Coolify/HomeNode не было.
 
 ### `artifacts/api-server/docker-compose.yml`
 
@@ -454,6 +465,8 @@ services:
   db:     # PostgreSQL 16-alpine
   api:    # API-сервер на порту 8080
 ```
+
+Этот вложенный compose относится только к API и PostgreSQL; admin service входит в корневой `docker-compose.yml`.
 
 **Переменные окружения:**
 

@@ -4,7 +4,7 @@ Last updated: 2026-07-14.
 
 ## Что сделано
 
-- Проверен Git checkout: локальный `HEAD` совпадает с `origin/main` на commit `d6590464ef244e9d15d96e7dbc98377762efb066`.
+- Исторический baseline перед cleanup: локальный `HEAD` совпадал с `origin/main` на commit `d6590464ef244e9d15d96e7dbc98377762efb066`.
 - Подтверждён remote проекта: `github.com/ALTIS13/apollo-trackfinder-api`.
 - Удалены Replit-артефакты из tracked-файлов: `.replit`, `.replitignore`, `replit.md`, `replit.nix`, `.replit-artifact/*`, `attached_assets/*`.
 - Удалена ignored локальная папка `.local` с кешами/логами.
@@ -20,7 +20,8 @@ Last updated: 2026-07-14.
 - По решению владельца Expo Go/static deployment выведен из целевого workflow; мобильный артефакт должен собираться в APK и проверяться на физических устройствах через ADB.
 - На feature branch `codex/feat/admin-topology-dashboard` завершён standalone Apollo TF Admin Topology Dashboard в `artifacts/admin-dashboard`. Визуальная основа -- вариант 2: центральный left-to-right topology workspace; из варианта 1 сохранены четыре операционные метрики и workflow инцидентов.
 - Dashboard использует типизированный `DashboardSnapshot`. При заданном `VITE_ADMIN_API_URL` HTTP-адаптер запрашивает `GET /api/admin/dashboard`; без URL сохраняется детерминированный demo fallback, а при ошибке последняя корректная snapshot остаётся доступной как stale.
-- Добавлены standalone Vite-to-nginx image, `/healthz`, SPA fallback и сервис `admin` в корневом `docker-compose.yml` для Docker/Coolify. `HomeNode` не менялся.
+- Добавлены standalone Vite-to-nginx image, `/healthz`, SPA fallback и сервис `admin` в корневом `docker-compose.yml`. Docker image, Compose configuration и готовность конфигурации к Coolify проверены локально; deployment в Coolify или на HomeNode не выполнялся, HomeNode не менялся.
+- Текущий checkout/`HEAD` находится на feature branch `codex/feat/admin-topology-dashboard`; dashboard checkpoint изолирован в этой ветке и не merged в `main`. Corrective documentation commit основан на clean branch tip `abdc38458f3e415f3a029ed6af5ddee0f881abe8`.
 
 ## Validation
 
@@ -37,7 +38,7 @@ Last updated: 2026-07-14.
 - `git diff --cached --check`: passed; sensitive-pattern scan по Git index не нашёл ключей, токенов или приватных infrastructure values.
 - Admin dashboard: `pnpm --filter @workspace/admin-dashboard test` -- passed, 8 files / 41 tests; dashboard typecheck и production build -- passed.
 - Workspace `pnpm run typecheck` -- passed после устранения конфликтующих React type definitions в lockfile/catalog.
-- Local Docker validation admin image -- passed: image built with pinned pnpm 10.33.2, disposable container returned `200` and `ok` from `/healthz`, then was removed.
+- Local Docker/Compose validation -- passed: admin image built with pinned pnpm 10.33.2, disposable container returned `200` and `ok` from `/healthz`, then was removed. Эта проверка подтверждает локальную Docker/Compose/Coolify readiness конфигурации, но не deployment в Coolify/HomeNode.
 - Codex in-app browser QA -- passed at `1536x1090` and `390x844`: no page-level horizontal overflow, topology uses an internal portrait scroller, node/incident focus works, acknowledgement survives dashboard refresh, open/all filters work, and reduced-motion removes animated traffic packets while preserving status dots and labels.
 
 ## Commit/push

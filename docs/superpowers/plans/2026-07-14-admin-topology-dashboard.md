@@ -1,6 +1,6 @@
 # Apollo TF Admin Topology Dashboard Implementation Plan
 
-> **Checkpoint (2026-07-14):** Tasks 1-5 are implemented on `codex/feat/admin-topology-dashboard`. The delivered UI follows concept 2, with concept 1's four metrics and incident workflow. The typed `GET /api/admin/dashboard` adapter has a demo fallback; desktop/mobile browser QA, Docker/Coolify delivery, and a local `/healthz` probe are validated. Backend telemetry/API and owner visual approval remain before merge to `main`.
+> **Checkpoint (2026-07-14):** Tasks 1-5 are implemented on `codex/feat/admin-topology-dashboard`. The delivered UI follows concept 2, with concept 1's four metrics and incident workflow. The typed `GET /api/admin/dashboard` adapter has a demo fallback; desktop/mobile browser QA, local Docker image/Compose/Coolify-readiness configuration, and a local `/healthz` probe are validated. No deployment to Coolify or HomeNode occurred. Backend telemetry/API and owner visual approval remain before merge to `main`.
 
 **Goal:** Build a standalone, container-ready Apollo TF admin dashboard that combines concept 2's topology with concept 1's four-metric summary and incident workflow.
 
@@ -273,6 +273,6 @@ git commit -m "docs(admin): record topology dashboard checkpoint"
 ## Final checkpoint record
 
 - Dashboard remains isolated in `artifacts/admin-dashboard` on feature branch `codex/feat/admin-topology-dashboard`; HomeNode was not changed.
-- Delivery status is based on Task 1-4 reports: 41 admin tests, dashboard typecheck/build, workspace typecheck, Docker/Coolify compose configuration, and a local image `/healthz` request returning `200`/`ok`.
+- Delivery status is based on Task 1-4 reports: 41 admin tests, dashboard typecheck/build, workspace typecheck, locally validated Docker image/Compose/Coolify-readiness configuration, and a local image `/healthz` request returning `200`/`ok`. This is readiness evidence only; no deployment to Coolify/HomeNode occurred.
 - The frontend contract is typed `DashboardSnapshot`; `VITE_ADMIN_API_URL` enables `GET /api/admin/dashboard`, while empty configuration uses the demo snapshot and a failed refresh retains the last known good snapshot as stale.
-- Technical browser validation passed in desktop and mobile portrait, including node focus, incident navigation/acknowledgement/filtering, refresh controls, internal topology scrolling, and reduced motion. Before merge to `main`, implement backend telemetry/API for the endpoint and obtain owner visual approval.
+- Technical browser validation passed in desktop and mobile portrait, including node focus, incident navigation/acknowledgement/filtering, refresh controls, internal topology scrolling, and reduced motion. The exact concept/implementation captures, native `1536x1090` mapping, and mismatch/resolution ledger are recorded in `.superpowers/sdd/task-5-report.md`. Before merge to `main`, implement backend telemetry/API for the endpoint and obtain owner visual approval.
