@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { demoSnapshot } from "../data/demo-snapshot";
-import { layoutTopology } from "./topology-layout";
+import {
+  layoutTopology,
+  NODE_WIDTH,
+  TOPOLOGY_RANK_SEPARATION,
+} from "./topology-layout";
 
 describe("layoutTopology", () => {
   it("places request flow in stable left-to-right layers", () => {
@@ -9,6 +13,10 @@ describe("layoutTopology", () => {
 
     expect(byId.get("public-web")!.x).toBeLessThan(byId.get("core-api")!.x);
     expect(byId.get("core-api")!.x).toBeLessThan(byId.get("search-media")!.x);
+    expect(byId.get("core-api")!.x - byId.get("public-web")!.x).toBe(
+      NODE_WIDTH + TOPOLOGY_RANK_SEPARATION,
+    );
+    expect(TOPOLOGY_RANK_SEPARATION).toBe(84);
     expect(layout.nodes.every((node) => node.width === 190 && node.height === 76)).toBe(true);
   });
 

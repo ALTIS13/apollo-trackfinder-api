@@ -123,8 +123,9 @@ export const demoSnapshot: DashboardSnapshot = {
       id: "core-api-search-media",
       source: "core-api",
       target: "search-media",
-      status: "healthy",
+      status: "warning",
       requestsPerMinute: 894,
+      incidentId: "incident-soundcloud-degradation",
     },
     {
       id: "core-api-download-worker",
@@ -132,6 +133,7 @@ export const demoSnapshot: DashboardSnapshot = {
       target: "download-worker",
       status: "degraded",
       requestsPerMinute: 146,
+      incidentId: "incident-download-errors",
     },
     {
       id: "account-integrations-postgresql",
@@ -153,6 +155,7 @@ export const demoSnapshot: DashboardSnapshot = {
       target: "media-storage",
       status: "degraded",
       requestsPerMinute: 146,
+      incidentId: "incident-download-errors",
     },
   ],
   incidents: [
@@ -163,6 +166,13 @@ export const demoSnapshot: DashboardSnapshot = {
       status: "open",
       serviceId: "download-worker",
       createdAt: "2026-07-14T09:18:00.000Z",
+      diagnostic: {
+        code: "DLW-E502",
+        message: "Соединение Download Worker с Media Storage прервано",
+        observedAt: "2026-07-14T09:18:14.000Z",
+        logExcerpt:
+          "ERROR DLW-E502 media-storage write failed: upstream connection reset",
+      },
     },
     {
       id: "incident-soundcloud-degradation",
@@ -171,6 +181,13 @@ export const demoSnapshot: DashboardSnapshot = {
       status: "open",
       serviceId: "search-media",
       createdAt: "2026-07-14T09:12:00.000Z",
+      diagnostic: {
+        code: "SC-429",
+        message: "SoundCloud ограничивает частоту запросов поиска",
+        observedAt: "2026-07-14T09:12:31.000Z",
+        logExcerpt:
+          "WARN SC-429 provider request throttled: retry window 45s",
+      },
     },
     {
       id: "incident-account-latency",

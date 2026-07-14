@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -61,6 +61,26 @@ beforeAll(() => {
       removeListener: vi.fn(),
       dispatchEvent: vi.fn(),
     })),
+  });
+
+  Object.defineProperty(Element.prototype, "scrollIntoView", {
+    configurable: true,
+    value: vi.fn(),
+  });
+
+  Object.defineProperties(HTMLElement.prototype, {
+    offsetWidth: {
+      configurable: true,
+      get() {
+        return Number.parseFloat(this.style.width) || 1;
+      },
+    },
+    offsetHeight: {
+      configurable: true,
+      get() {
+        return Number.parseFloat(this.style.height) || 1;
+      },
+    },
   });
 });
 
@@ -183,6 +203,105 @@ describe("Apollo TF admin dashboard", () => {
     expect(
       screen.getByRole("button", { name: "Download Worker" }),
     ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("opens the exact journal evidence from a disconnected topology contact", async () => {
+    render(<App />);
+
+    const contacts = screen.getAllByRole("button", {
+      name: "Соединение разорвано, ошибка DLW-E502. Открыть журнал",
+    });
+    await userEvent.click(contacts[0]);
+
+    expect(
+      screen.getByRole("button", { name: "Download Worker" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    const journal = screen.getByRole("region", {
+      name: "Журнал инцидента Ошибки download-worker",
+    });
+    expect(within(journal).getByText("DLW-E502")).toBeVisible();
+    expect(within(journal).getByText(/upstream connection reset/)).toBeVisible();
+  });
+
+  it.each([
+    ["Enter", "{Enter}"],
+    ["Space", " "],
+  ])("opens disconnected contact evidence with %s", async (_key, input) => {
+    render(<App />);
+
+    const contact = screen.getAllByRole("button", {
+      name: "Соединение разорвано, ошибка DLW-E502. Открыть журнал",
+    })[0];
+    contact.focus();
+    await userEvent.keyboard(input);
+
+    expect(
+      screen.getByRole("region", {
+        name: "Журнал инцидента Ошибки download-worker",
+      }),
+    ).toBeVisible();
+  });
+
+  it("does not expose an incident action when a custom adapter bypasses endpoint validation", () => {
+    const invalidSnapshot: DashboardSnapshot = {
+      ...demoSnapshot,
+      incidents: demoSnapshot.incidents.map((incident) =>
+        incident.id === "incident-soundcloud-degradation"
+          ? { ...incident, serviceId: "account-integrations" }
+          : incident,
+      ),
+    };
+
+    render(
+      <App
+        adapter={createAdapter(async () => invalidSnapshot, invalidSnapshot)}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", {
+        name: "Нестабильное соединение, предупреждение SC-429. Открыть журнал",
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("img", { name: "Нестабильное соединение" }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not invent an error code when the linked journal has none", async () => {
+    const noCodeSnapshot: DashboardSnapshot = {
+      ...demoSnapshot,
+      incidents: demoSnapshot.incidents.map((incident) =>
+        incident.id === "incident-download-errors" && incident.diagnostic !== undefined
+          ? {
+              ...incident,
+              diagnostic: {
+                message: incident.diagnostic.message,
+                observedAt: incident.diagnostic.observedAt,
+                logExcerpt: incident.diagnostic.logExcerpt,
+              },
+            }
+          : incident,
+      ),
+    };
+    render(
+      <App
+        adapter={createAdapter(async () => noCodeSnapshot, noCodeSnapshot)}
+      />,
+    );
+
+    const contacts = screen.getAllByRole("button", {
+      name: "Соединение разорвано. Открыть журнал",
+    });
+    await userEvent.click(contacts[0]);
+
+    const journal = screen.getByRole("region", {
+      name: "Журнал инцидента Ошибки download-worker",
+    });
+    expect(within(journal).queryByText("Код ошибки")).not.toBeInTheDocument();
+    expect(
+      within(journal).getByText("Соединение Download Worker с Media Storage прервано"),
+    ).toBeVisible();
   });
 
   it("toggles between all and open incidents", async () => {

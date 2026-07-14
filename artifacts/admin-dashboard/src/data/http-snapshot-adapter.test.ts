@@ -102,6 +102,71 @@ describe("HTTP dashboard snapshot adapter", () => {
       },
     ],
     [
+      "an unknown edge incident reference",
+      {
+        ...demoSnapshot,
+        edges: [
+          { ...demoSnapshot.edges[0], incidentId: "missing-incident" },
+        ],
+      },
+    ],
+    [
+      "an oversized diagnostic journal excerpt",
+      {
+        ...demoSnapshot,
+        incidents: [
+          {
+            ...demoSnapshot.incidents[0],
+            diagnostic: {
+              message: "Ошибка записи",
+              observedAt: demoSnapshot.incidents[0].createdAt,
+              logExcerpt: "x".repeat(2049),
+            },
+          },
+        ],
+      },
+    ],
+    [
+      "a healthy edge linked to an incident",
+      {
+        ...demoSnapshot,
+        edges: demoSnapshot.edges.map((edge, index) =>
+          index === 0
+            ? { ...edge, incidentId: "incident-download-errors" }
+            : edge,
+        ),
+      },
+    ],
+    [
+      "an edge linked to an incident without diagnostics",
+      {
+        ...demoSnapshot,
+        incidents: demoSnapshot.incidents.map((incident) =>
+          incident.id === "incident-soundcloud-degradation"
+            ? {
+                id: incident.id,
+                title: incident.title,
+                severity: incident.severity,
+                status: incident.status,
+                serviceId: incident.serviceId,
+                createdAt: incident.createdAt,
+              }
+            : incident,
+        ),
+      },
+    ],
+    [
+      "an edge linked to an incident for an unrelated service",
+      {
+        ...demoSnapshot,
+        incidents: demoSnapshot.incidents.map((incident) =>
+          incident.id === "incident-soundcloud-degradation"
+            ? { ...incident, serviceId: "account-integrations" }
+            : incident,
+        ),
+      },
+    ],
+    [
       "an oversized collection",
       {
         ...demoSnapshot,
@@ -122,6 +187,30 @@ describe("HTTP dashboard snapshot adapter", () => {
     await expect(adapter.loadSnapshot()).rejects.toThrow(
       "Invalid admin dashboard snapshot",
     );
+  });
+
+  it("accepts a linked bounded diagnostic without inventing an error code", async () => {
+    const incident = {
+      ...demoSnapshot.incidents[0],
+      diagnostic: {
+        message: "Соединение с хранилищем прервано",
+        observedAt: demoSnapshot.incidents[0].createdAt,
+        logExcerpt: "ERROR write failed after upstream disconnect",
+      },
+    };
+    const body = {
+      ...demoSnapshot,
+      incidents: [incident, ...demoSnapshot.incidents.slice(1)],
+    };
+    const adapter = createHttpDashboardSnapshotAdapter({
+      fetchSnapshot: vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue(body),
+      }),
+    });
+
+    await expect(adapter.loadSnapshot()).resolves.toEqual(body);
+    expect(incident.diagnostic).not.toHaveProperty("code");
   });
 
   it("aborts a hung request after 10 seconds", async () => {

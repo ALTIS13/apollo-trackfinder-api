@@ -21,7 +21,11 @@ import {
 import { getServiceNeighborhood } from "../lib/dashboard-model";
 import { layoutTopology } from "../lib/topology-layout";
 import type { DashboardSnapshot, HealthStatus } from "../types/dashboard";
-import { FlowingEdge, type TopologyFlowEdge } from "./FlowingEdge";
+import {
+  FlowingEdge,
+  getEdgeAccessibleLabel,
+  type TopologyFlowEdge,
+} from "./FlowingEdge";
 import { ServiceNode, type ServiceFlowNode } from "./ServiceNode";
 
 const nodeTypes: NodeTypes = { service: ServiceNode };
@@ -49,6 +53,7 @@ interface TopologyPanelProps {
   selectedServiceId?: string;
   neighborhood?: Set<string>;
   onSelectService: (serviceId?: string) => void;
+  onOpenIncident?: (incidentId: string) => void;
 }
 
 interface TopologyCanvasProps extends TopologyPanelProps {
@@ -107,6 +112,7 @@ function TopologyCanvas({
   selectedServiceId,
   neighborhood,
   onSelectService,
+  onOpenIncident,
   scrollContainerRef,
 }: TopologyCanvasProps) {
   const reducedMotion = useReducedMotion() ?? false;
@@ -128,6 +134,10 @@ function TopologyCanvas({
     [selectedServiceId, snapshot.edges],
   );
   const activeNeighborhood = neighborhood ?? fallbackNeighborhood;
+  const incidentsById = useMemo(
+    () => new Map(snapshot.incidents.map((incident) => [incident.id, incident])),
+    [snapshot.incidents],
+  );
   const nodes = useMemo<ServiceFlowNode[]>(() => {
     const positions = new Map(layout.nodes.map((node) => [node.id, node]));
     return snapshot.modules.map((module) => {
@@ -165,32 +175,78 @@ function TopologyCanvas({
   ]);
   const edges = useMemo<TopologyFlowEdge[]>(
     () =>
-      snapshot.edges.map((edge) => ({
-        id: edge.id,
-        type: "flowing",
-        source: edge.source,
-        target: edge.target,
-        label: formatTrafficLabel(edge.requestsPerMinute),
-        markerEnd: { type: MarkerType.ArrowClosed, color: "currentColor" },
-        data: {
-          status: edge.status,
-          motionEnabled:
-            edge.requestsPerMinute > 0 &&
-            motionEnabled &&
-            (selectedServiceId === undefined ||
+      snapshot.edges.map((edge) => {
+        const incident =
+          edge.incidentId === undefined
+            ? undefined
+            : incidentsById.get(edge.incidentId);
+        const linkedIncident =
+          incident?.diagnostic !== undefined &&
+          (edge.status === "warning" || edge.status === "degraded") &&
+          (incident.serviceId === edge.source || incident.serviceId === edge.target)
+            ? incident
+            : undefined;
+        const canOpenIncident =
+          linkedIncident !== undefined && onOpenIncident !== undefined;
+        return {
+          id: edge.id,
+          type: "flowing",
+          source: edge.source,
+          target: edge.target,
+          focusable: canOpenIncident,
+          ariaRole: canOpenIncident ? "button" : "img",
+          ariaLabel: getEdgeAccessibleLabel(
+            edge.status,
+            linkedIncident?.diagnostic?.code,
+            canOpenIncident,
+          ),
+          domAttributes:
+            !canOpenIncident || linkedIncident === undefined
+              ? undefined
+              : {
+                  onKeyDown: (event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    onOpenIncident(linkedIncident.id);
+                  },
+                },
+          label: formatTrafficLabel(edge.requestsPerMinute),
+          markerEnd: { type: MarkerType.ArrowClosed, color: "currentColor" },
+          data: {
+            status: edge.status,
+            diagnostic:
+              linkedIncident?.diagnostic === undefined
+                ? undefined
+                : {
+                    incidentId: linkedIncident.id,
+                    code: linkedIncident.diagnostic.code,
+                    message: linkedIncident.diagnostic.message,
+                  },
+            actionable: canOpenIncident,
+            motionEnabled:
+              edge.requestsPerMinute > 0 &&
+              motionEnabled &&
+              (selectedServiceId === undefined ||
+                edge.source === selectedServiceId ||
+                edge.target === selectedServiceId),
+          },
+          style: {
+            opacity:
+              selectedServiceId === undefined ||
               edge.source === selectedServiceId ||
-              edge.target === selectedServiceId),
-        },
-        style: {
-          opacity:
-            selectedServiceId === undefined ||
-            edge.source === selectedServiceId ||
-            edge.target === selectedServiceId
-              ? 1
-              : 0.28,
-        },
-      })),
-    [motionEnabled, selectedServiceId, snapshot.edges],
+              edge.target === selectedServiceId
+                ? 1
+                : 0.28,
+          },
+        };
+      }),
+    [
+      incidentsById,
+      motionEnabled,
+      onOpenIncident,
+      selectedServiceId,
+      snapshot.edges,
+    ],
   );
 
   useEffect(() => {
@@ -266,8 +322,11 @@ function TopologyCanvas({
         nodesDraggable={false}
         nodesConnectable={false}
         nodesFocusable
-        edgesFocusable={false}
         onNodeClick={(_, node) => onSelectService(node.id)}
+        onEdgeClick={(_, edge) => {
+          const incidentId = edge.data?.diagnostic?.incidentId;
+          if (incidentId !== undefined) onOpenIncident?.(incidentId);
+        }}
         onNodesChange={handleNodesChange}
         onPaneClick={() => onSelectService(undefined)}
         proOptions={{ hideAttribution: true }}

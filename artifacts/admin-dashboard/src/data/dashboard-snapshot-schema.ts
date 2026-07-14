@@ -33,6 +33,14 @@ const edgeSchema = z.object({
   target: idSchema,
   status: healthStatusSchema,
   requestsPerMinute: nonNegativeNumberSchema,
+  incidentId: idSchema.optional(),
+}).strict();
+
+const incidentDiagnosticSchema = z.object({
+  code: z.string().trim().min(1).max(64).optional(),
+  message: z.string().trim().min(1).max(512),
+  observedAt: timestampSchema,
+  logExcerpt: z.string().trim().min(1).max(2048).optional(),
 }).strict();
 
 const incidentSchema = z.object({
@@ -42,6 +50,7 @@ const incidentSchema = z.object({
   status: z.enum(["open", "acknowledged", "resolved"]),
   serviceId: idSchema,
   createdAt: timestampSchema,
+  diagnostic: incidentDiagnosticSchema.optional(),
 }).strict();
 
 const providerSchema = z.object({
@@ -83,6 +92,9 @@ const dashboardSnapshotSchema = z.object({
   const moduleIds = uniqueIds(snapshot.modules, "modules");
   uniqueIds(snapshot.edges, "edges");
   uniqueIds(snapshot.incidents, "incidents");
+  const incidentsById = new Map(
+    snapshot.incidents.map((incident) => [incident.id, incident]),
+  );
   uniqueIds(snapshot.providers, "providers");
 
   snapshot.incidents.forEach((incident, index) => {
@@ -109,6 +121,41 @@ const dashboardSnapshotSchema = z.object({
         message: `Unknown edge target: ${edge.target}`,
         path: ["edges", index, "target"],
       });
+    }
+    if (edge.incidentId !== undefined) {
+      const incident = incidentsById.get(edge.incidentId);
+      if (incident === undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Unknown edge incident: ${edge.incidentId}`,
+          path: ["edges", index, "incidentId"],
+        });
+        return;
+      }
+      if (edge.status !== "warning" && edge.status !== "degraded") {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Incident links require warning or degraded edge status: ${edge.id}`,
+          path: ["edges", index, "status"],
+        });
+      }
+      if (incident.diagnostic === undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Linked incident has no diagnostic: ${incident.id}`,
+          path: ["edges", index, "incidentId"],
+        });
+      }
+      if (
+        incident.serviceId !== edge.source &&
+        incident.serviceId !== edge.target
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Linked incident service is not an edge endpoint: ${incident.serviceId}`,
+          path: ["edges", index, "incidentId"],
+        });
+      }
     }
   });
 });

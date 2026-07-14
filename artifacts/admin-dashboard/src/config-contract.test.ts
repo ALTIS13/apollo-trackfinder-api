@@ -40,6 +40,13 @@ describe("admin dashboard delivery contracts", () => {
     expect(dashboardCss).toMatch(/@media\s*\(max-width:\s*800px\)/);
     expect(dashboardCss).toMatch(/\.topology-scroll\s*{[^}]*overflow-x:\s*auto/s);
     expect(dashboardCss).toMatch(/\.topology-canvas\s*{[^}]*min-width:\s*760px/s);
+    expect(dashboardCss).toMatch(
+      /\.operational-layout\s*{[^}]*"topology incidents"\s*"details details"/s,
+    );
+    expect(dashboardCss).toMatch(
+      /\.incident-rail\s*{[^}]*position:\s*static;[^}]*height:\s*100%;[^}]*align-self:\s*stretch/s,
+    );
+    expect(dashboardCss).not.toMatch(/\.incident-(?:row|title|rail)[^{]*:hover/);
   });
 
   it("keeps base, hover, and subtle small text contrast at or above WCAG AA", () => {

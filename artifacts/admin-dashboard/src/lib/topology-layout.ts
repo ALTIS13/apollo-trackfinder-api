@@ -3,6 +3,7 @@ import type { ServiceEdge, ServiceModule } from "../types/dashboard";
 
 export const NODE_WIDTH = 190;
 export const NODE_HEIGHT = 76;
+export const TOPOLOGY_RANK_SEPARATION = 84;
 
 export interface LayoutNode {
   id: string;
@@ -32,7 +33,13 @@ export function layoutTopology(modules: ServiceModule[], edges: ServiceEdge[]): 
       compareStrings(left.id, right.id),
   );
 
-  graph.setGraph({ rankdir: "LR", ranksep: 72, nodesep: 34, marginx: 24, marginy: 24 });
+  graph.setGraph({
+    rankdir: "LR",
+    ranksep: TOPOLOGY_RANK_SEPARATION,
+    nodesep: 34,
+    marginx: 24,
+    marginy: 24,
+  });
   graph.setDefaultEdgeLabel(() => ({}));
   canonicalModules.forEach((module) => graph.setNode(module.id, { width: NODE_WIDTH, height: NODE_HEIGHT }));
   canonicalEdges.forEach((edge) => graph.setEdge(edge.source, edge.target));

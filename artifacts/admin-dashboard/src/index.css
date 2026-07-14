@@ -517,7 +517,7 @@ svg {
   display: grid;
   grid-template-areas:
     "topology incidents"
-    "details incidents";
+    "details details";
   grid-template-columns: minmax(0, 1fr) 286px;
   gap: 12px;
   margin-top: 12px;
@@ -631,7 +631,7 @@ svg {
 .topology-canvas {
   width: 100%;
   min-width: 760px;
-  height: 560px;
+  height: 420px;
   background: var(--color-surface);
 }
 
@@ -680,15 +680,79 @@ svg {
   opacity: 0.45;
 }
 
-.react-flow__edge-text {
-  fill: var(--color-muted);
-  font-family: "Plus Jakarta Sans Variable", sans-serif;
-  font-size: 9px;
+.topology-edge-contact {
+  pointer-events: none;
 }
 
-.react-flow__edge-textbg {
-  fill: var(--color-surface);
-  fill-opacity: 0.92;
+.topology-edge-contact[data-actionable="true"] {
+  cursor: pointer;
+  pointer-events: all;
+}
+
+.topology-edge-contact-hitbox {
+  fill: transparent;
+  stroke: transparent;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.topology-edge-contact-rail,
+.topology-edge-contact-notch,
+.topology-edge-contact-tongue {
+  stroke-linejoin: miter;
+  vector-effect: non-scaling-stroke;
+}
+
+.topology-edge-contact-rail {
+  fill: var(--color-surface-raised);
+  stroke-width: 1.15;
+}
+
+.topology-edge-contact-notch,
+.topology-edge-contact-tongue {
+  fill: none;
+  stroke-linecap: square;
+  stroke-width: 1;
+}
+
+.react-flow__edge[role="button"]:focus-visible {
+  outline: none;
+}
+
+.react-flow__edge[role="button"]:focus-visible .topology-edge-contact-hitbox {
+  stroke: var(--color-accent);
+}
+
+.topology-edge-warning-spark {
+  filter: drop-shadow(0 0 3px #f59e0b);
+  vector-effect: non-scaling-stroke;
+}
+
+.topology-edge-contact-status rect {
+  fill: rgba(17, 19, 24, 0.96);
+  stroke: #454b57;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.topology-edge-contact-status text,
+.topology-edge-traffic {
+  font-family: "Plus Jakarta Sans Variable", sans-serif;
+  font-variant-numeric: tabular-nums;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
+.topology-edge-contact-status text {
+  fill: currentColor;
+  font-size: 7px;
+  font-weight: 750;
+}
+
+.topology-edge-traffic {
+  fill: var(--color-text);
+  font-size: 9px;
+  font-weight: 650;
 }
 
 .react-flow__node:focus-visible {
@@ -797,12 +861,11 @@ svg {
 }
 
 .incident-rail {
-  position: sticky;
-  top: 76px;
+  position: static;
   grid-area: incidents;
-  height: calc(100vh - 92px);
-  max-height: calc(100vh - 92px);
-  align-self: start;
+  height: 100%;
+  max-height: none;
+  align-self: stretch;
   overflow: hidden;
   scroll-margin-top: 80px;
 }
@@ -862,7 +925,7 @@ svg {
 }
 
 .incident-list {
-  max-height: calc(100vh - 150px);
+  max-height: calc(100% - 56px);
   overflow-y: auto;
 }
 
@@ -898,6 +961,10 @@ svg {
   color: var(--color-info);
 }
 
+.incident-row[data-selected="true"] {
+  background: rgba(112, 94, 255, 0.08);
+}
+
 .incident-severity {
   display: inline-flex;
   align-items: center;
@@ -930,13 +997,15 @@ svg {
   text-align: left;
 }
 
-.incident-title:hover {
-  color: #c2bcff;
+.incident-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
-.incident-row > button:last-child {
+.incident-actions > button {
   display: inline-flex;
-  grid-column: 1 / -1;
   width: fit-content;
   min-height: 27px;
   align-items: center;
@@ -950,18 +1019,83 @@ svg {
   font-size: 9px;
 }
 
-.incident-row > button:last-child:disabled {
+.incident-acknowledge:disabled {
   color: var(--color-healthy);
   cursor: default;
   opacity: 0.85;
 }
 
 .incident-rail:has(.incident-readonly-note) .incident-list {
-  max-height: calc(100vh - 182px);
+  max-height: calc(100% - 88px);
 }
 
-.incident-row > button:last-child svg {
+.incident-actions svg {
   width: 11px;
+}
+
+.incident-journal-toggle svg:last-child {
+  transition: transform 160ms ease;
+}
+
+.incident-journal-toggle[aria-expanded="true"] svg:last-child {
+  transform: rotate(180deg);
+}
+
+.incident-diagnostic {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 7px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+  color: var(--color-muted);
+}
+
+.incident-diagnostic-heading,
+.incident-diagnostic-code {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.incident-diagnostic-heading {
+  color: var(--color-subtle);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.incident-diagnostic p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.incident-diagnostic-code span {
+  color: var(--color-subtle);
+}
+
+.incident-diagnostic-code code {
+  color: var(--color-degraded);
+  font-family: "Plus Jakarta Sans Variable", sans-serif;
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.incident-diagnostic pre {
+  max-height: 112px;
+  margin: 0;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  color: #d8dbe2;
+  background: #0b0d11;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 8px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .detail-tables {
@@ -980,10 +1114,10 @@ svg {
 
 .data-panel-header {
   display: flex;
-  min-height: 60px;
+  min-height: 48px;
   align-items: center;
   gap: 10px;
-  padding: 11px 13px;
+  padding: 8px 13px;
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -1026,7 +1160,7 @@ table {
 
 th,
 td {
-  padding: 9px 10px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--color-border);
   text-align: left;
   vertical-align: middle;

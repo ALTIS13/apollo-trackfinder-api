@@ -32,6 +32,14 @@ export interface ServiceEdge {
   target: string;
   status: HealthStatus;
   requestsPerMinute: number;
+  incidentId?: string;
+}
+
+export interface IncidentDiagnostic {
+  code?: string;
+  message: string;
+  observedAt: string;
+  logExcerpt?: string;
 }
 
 export interface Incident {
@@ -41,6 +49,7 @@ export interface Incident {
   status: IncidentStatus;
   serviceId: string;
   createdAt: string;
+  diagnostic?: IncidentDiagnostic;
 }
 
 export interface ProviderHealth {
