@@ -127,6 +127,7 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
   const contactX = targetX - CONTACT_HALF_LENGTH - TARGET_LINE_STUB;
   const contactY = targetY;
   const contactOffset = contactOffsets[status];
+  const connectedFill = status === "healthy" ? color : undefined;
   const sourceFaceX = -contactOffset;
   const sourceSlotX = sourceFaceX - 6;
   const targetBodyX = 1 + contactOffset;
@@ -198,7 +199,7 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
           <path
             className="topology-edge-contact-rail"
             d={`M -${CONTACT_HALF_LENGTH} -2.25 H ${sourceFaceX} V -1.15 H ${sourceSlotX} V 1.15 H ${sourceFaceX} V 2.25 H -${CONTACT_HALF_LENGTH} Z`}
-            style={{ stroke: color }}
+            style={{ fill: connectedFill, stroke: color }}
           />
           <path
             className="topology-edge-contact-notch"
@@ -214,7 +215,7 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
           <path
             className="topology-edge-contact-rail"
             d={`M ${CONTACT_HALF_LENGTH} -2.25 H ${targetBodyX} V -0.75 H ${targetTongueX} V 0.75 H ${targetBodyX} V 2.25 H ${CONTACT_HALF_LENGTH} Z`}
-            style={{ stroke: color }}
+            style={{ fill: connectedFill, stroke: color }}
           />
           <path
             className="topology-edge-contact-tongue"

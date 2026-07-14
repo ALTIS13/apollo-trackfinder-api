@@ -217,5 +217,14 @@ describe("admin dashboard delivery contracts", () => {
     expect(dashboardCss).toMatch(
       /\.service-node-terminal\s*{[^}]*width:\s*6px;[^}]*height:\s*16px/s,
     );
+    expect(dashboardCss).toMatch(
+      /\.service-node-terminal\s*{[^}]*border-block:\s*1px solid var\(--color-surface\)/s,
+    );
+    expect(dashboardCss).toMatch(
+      /\.service-node-terminal\s*{[^}]*border-inline:\s*0/s,
+    );
+    expect(dashboardCss).toMatch(
+      /\.service-node-terminal\s*{[^}]*box-shadow:\s*none/s,
+    );
   });
 });

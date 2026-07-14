@@ -102,6 +102,27 @@ describe("FlowingEdge", () => {
     expect(getByText("240/мин")).toBeInTheDocument();
   });
 
+  it("renders a healthy contact as one solid interlocked coupling", () => {
+    const { container } = renderEdge({ status: "healthy" });
+    const rails = container.querySelectorAll(".topology-edge-contact-rail");
+
+    expect(rails).toHaveLength(2);
+    rails.forEach((rail) => {
+      expect(rail).toHaveStyle({ fill: "#22c55e" });
+    });
+  });
+
+  it.each(["warning", "degraded", "unknown"] as const)(
+    "keeps the intentional gap visible for a %s contact",
+    (status) => {
+      const { container } = renderEdge({ status });
+
+      container.querySelectorAll(".topology-edge-contact-rail").forEach((rail) => {
+        expect(rail).not.toHaveAttribute("style", expect.stringContaining("fill"));
+      });
+    },
+  );
+
   it("keeps both outer contact ends on the final horizontal segment of a bent edge", () => {
     const { container } = renderEdge({ sourceY: 0, targetY: 80 });
     const contact = container.querySelector(".topology-edge-contact");

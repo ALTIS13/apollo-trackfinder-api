@@ -870,9 +870,10 @@ svg {
   width: 6px;
   height: 16px;
   transform: translateY(-50%);
-  border: 1px solid var(--color-surface);
+  border-block: 1px solid var(--color-surface);
+  border-inline: 0;
   background: currentColor;
-  box-shadow: 0 0 0 1px var(--color-border-strong);
+  box-shadow: none;
   pointer-events: none;
 }
 
