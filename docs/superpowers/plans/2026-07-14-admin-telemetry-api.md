@@ -172,6 +172,6 @@ Run: `pnpm --filter @workspace/admin-dashboard-contract test && pnpm --filter @w
 
 Expected: all tests/typechecks/builds pass; Compose renders without exposing a literal credential; no HomeNode or Coolify changes occur.
 
-- [ ] **Step 5: Independent review and publication checkpoint**
+- [x] **Step 5: Independent review and publication checkpoint**
 
 Request read-only review for auth, secret handling, contract drift, bounded memory, and container wiring. Fix all Critical/Important findings, rerun complete verification, commit to `codex/feat/admin-telemetry-api`, push the feature branch, and leave merge to `main` only after the stage is reviewed.
