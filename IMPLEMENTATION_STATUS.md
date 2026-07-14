@@ -25,7 +25,7 @@ Last updated: 2026-07-14.
 - Dashboard использует типизированный `DashboardSnapshot` и явные adapter mode/capabilities. CommandBar показывает `Демо` для demo adapter и `Продакшн` для HTTP adapter. Demo mode стартует live из детерминированного snapshot и допускает локальный acknowledgement; production HTTP mode показывает fallback как непроверенный, сразу запрашивает same-origin `GET /api/admin/dashboard`, становится live только после schema-validated ответа, offline после первого отказа и stale только после отказа, следующего за успешным remote snapshot. Remote incidents доступны только для чтения.
 - Каждый HTTP 200 JSON проверяется Zod-схемой до изменения state: проверяются все поля/enums/timestamps, ровно четыре metrics, лимиты коллекций, уникальность IDs для metrics/modules/edges/incidents/providers и ссылки edges/incidents. Запрос имеет 10-секундный abort timeout; ручное и interval-обновление используют single-flight.
 - Standalone Vite-to-nginx image сохраняет `/healthz` и SPA fallback. nginx проксирует и добавляет server-side `X-Admin-Dashboard-Token` только для exact `GET /api/admin/dashboard`; non-GET exact path получает `405`, остальные `/api/*` получают `404` без proxy/token. Docker resolver и variable-form upstream откладывают DNS resolution до API-запроса и сохраняют URI/query, поэтому `/healthz` стартует при unresolvable upstream hostname. Root Compose задаёт upstream/token только контейнеру и не содержит obsolete top-level `version`. Backend endpoint ещё не реализован и в будущем обязан проверять forwarded token; deployment в Coolify/HomeNode не выполнялся, HomeNode не менялся.
-- Admin topology paths `dagre -> lodash` и `graphlib -> lodash` принудительно переведены на patched `lodash@4.18.1`; admin-scoped production audit paths отсутствуют. Текущий checkout остаётся на `codex/feat/admin-topology-dashboard` и не merged в `main`.
+- Admin topology paths `dagre -> lodash` и `graphlib -> lodash` принудительно переведены на patched `lodash@4.18.1`; admin-scoped production audit paths отсутствуют. Проверенный dashboard и connector diagnostics merged в `main`.
 
 ## Validation
 
@@ -53,10 +53,9 @@ Last updated: 2026-07-14.
 
 - Cleanup и операционная документация опубликованы в `main` commit `9a7d770fc053fcc64daeb337749920ce85f46506`.
 - Smart Git HTTPS завершался `Recv failure: Connection was reset`, поэтому commit опубликован через GitHub Git Database API после проверки parent и полного tree SHA.
-- Локальные `main` и `origin/main` выровнены на `7a1b262ff19a5ba6867ccdff70b30466dfe77811`; admin dashboard в `main` не merged.
+- Feature commit `2481f57b674be15e48140e818653a104e9dff3b0` опубликован в `origin/codex/feat/admin-topology-dashboard`, fast-forward merged в `main` и опубликован в `origin/main` после повторной validation на merged result.
 - Финальное whole-branch review для admin dashboard завершилось `Final Review: Approved` без открытых branch findings.
-- Feature branch `codex/feat/admin-topology-dashboard` опубликована и отслеживает `origin`; reviewed implementation checkpoint -- `8001817d557e8cb87ae243c6b3721e9c6b50d255`, после него добавлена только статусная документация. Ветка оставлена отдельной до визуального подтверждения владельца.
-- Текущий connector diagnostics/layout этап находится в рабочем дереве feature branch; независимый review и validation завершены, ожидаются commit/push и fast-forward merge в `main`.
+- Feature branch сохранена в origin как проверяемая история серьёзного UI-этапа; активный checkout возвращён на `main`.
 
 ## Следующий логичный этап реализации
 
