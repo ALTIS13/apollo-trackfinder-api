@@ -11,6 +11,7 @@
 apollo-trackfinder/
 ├── artifacts/
 │   ├── api-server/          # Бэкенд (Express + Node.js)
+│   ├── admin-dashboard/     # Admin topology dashboard (React + Vite + nginx)
 │   ├── trackfinder-mobile/  # Мобильное приложение (Expo / React Native)
 │   └── music-player/        # Веб-плеер (React + Vite)
 ├── lib/
@@ -346,7 +347,20 @@ Action Sheet с опциями: воспроизвести, скачать, уд
 
 ---
 
-## 4. База данных — `lib/db`
+## 4. Admin topology dashboard — `artifacts/admin-dashboard`
+
+**Стек:** React 19, Vite, TypeScript, React Flow, Dagre, Framer Motion, Vitest, nginx.
+
+- Отдельный operational UI на feature branch `codex/feat/admin-topology-dashboard`; `artifacts/music-player` и HomeNode не менялись.
+- Визуальная основа -- вариант 2: центральная topology-схема с устойчивым left-to-right layout. Из варианта 1 добавлены четыре метрики: активные модули, поиски в минуту, глубина очереди и error rate; рядом остаётся rail инцидентов с фильтрацией, фокусом сервиса и локальным acknowledgement.
+- Типизированный `DashboardSnapshot` описывает метрики, сервисы, связи, инциденты, deployments и provider health. `VITE_ADMIN_API_URL` включает HTTP-адаптер для `GET /api/admin/dashboard`; при пустой переменной используется demo snapshot, а ошибка обновления сохраняет last-known-good состояние как stale.
+- `Dockerfile` собирает Vite bundle и отдаёт его через nginx. `nginx.conf` объявляет `/healthz` и SPA fallback; корневой `docker-compose.yml` содержит сервис `admin`, пригодный для Docker/Coolify.
+- Проверено в отчётах checkpoint: 41 dashboard test, dashboard typecheck/build, workspace typecheck и локальный Docker `/healthz` (`200`, `ok`).
+- Следующий этап: production backend telemetry/API для `/api/admin/dashboard`, затем финальное визуальное подтверждение desktop/mobile, focus, incidents, refresh и reduced motion перед merge в `main`.
+
+---
+
+## 5. База данных — `lib/db`
 
 **ORM:** Drizzle ORM + PostgreSQL  
 **Провайдер:** встроенный PostgreSQL (через `DATABASE_URL` env)
@@ -394,7 +408,7 @@ Drizzle Kit. Миграции запускаются **автоматическ�
 
 ---
 
-## 5. Общие библиотеки — `lib/`
+## 6. Общие библиотеки — `lib/`
 
 ### `lib/api-spec` — OpenAPI-спецификация
 
@@ -419,7 +433,7 @@ const parseResult = SearchTracksBody.safeParse(req.body);
 
 ---
 
-## 6. Деплой — Docker
+## 7. Деплой — Docker
 
 ### `artifacts/api-server/Dockerfile`
 
@@ -428,6 +442,10 @@ const parseResult = SearchTracksBody.safeParse(req.body);
 3. Копирует монорепозиторий, запускает `pnpm install --frozen-lockfile`
 4. Собирает через `esbuild` (`pnpm run build`)
 5. Запускает `node dist/index.mjs`
+
+### `artifacts/admin-dashboard/Dockerfile`
+
+Собирает standalone admin dashboard с pinned `pnpm@10.33.2`, затем nginx отдаёт production bundle. Runtime health endpoint -- `GET /healthz`; service `admin` определён в корневом `docker-compose.yml` и предназначен для Docker/Coolify.
 
 ### `artifacts/api-server/docker-compose.yml`
 
@@ -459,11 +477,12 @@ docker compose up -d --build
 
 ---
 
-## 7. Среда разработки
+## 8. Среда разработки
 
 | Workflow | Команда | Порт |
 |----------|---------|------|
 | API Server | `pnpm --filter @workspace/api-server run dev` | 8080 |
+| Admin Dashboard | `pnpm --filter @workspace/admin-dashboard dev` | 5173 |
 | TrackFinder Mobile | `expo start --localhost` | dynamic |
 | Music Player (web) | `vite --host 0.0.0.0` | 25424 |
 | Mockup Sandbox | `vite dev` | 8081 |

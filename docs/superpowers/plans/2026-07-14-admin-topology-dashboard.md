@@ -1,6 +1,6 @@
 # Apollo TF Admin Topology Dashboard Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Checkpoint (2026-07-14):** Tasks 1-4 are implemented on `codex/feat/admin-topology-dashboard`; the documentation checkpoint is complete. The delivered UI follows concept 2, with concept 1's four metrics and incident workflow. The typed `GET /api/admin/dashboard` adapter has a demo fallback; Docker/Coolify delivery and a local `/healthz` probe are validated. Backend telemetry/API and final visual confirmation remain before merge to `main`.
 
 **Goal:** Build a standalone, container-ready Apollo TF admin dashboard that combines concept 2's topology with concept 1's four-metric summary and incident workflow.
 
@@ -35,7 +35,7 @@
 - Produces: `DashboardSnapshot`, `DashboardMetric`, `ServiceModule`, `ServiceEdge`, `Incident`, `ProviderHealth`.
 - Produces: `getOpenIncidentCount(snapshot)`, `getServiceNeighborhood(snapshot, serviceId)`, and `filterIncidents(snapshot, filter, serviceId)`.
 
-- [ ] **Step 1: Write the failing model tests**
+- [x] **Step 1: Write the failing model tests**
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -61,13 +61,13 @@ describe("dashboard model", () => {
 });
 ```
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run: `pnpm --filter @workspace/admin-dashboard test -- src/lib/dashboard-model.test.ts`
 
 Expected: FAIL because `dashboard-model.ts` and the package do not exist yet.
 
-- [ ] **Step 3: Add the package, types, deterministic snapshot, and minimal model implementation**
+- [x] **Step 3: Add the package, types, deterministic snapshot, and minimal model implementation**
 
 ```ts
 export function getOpenIncidentCount(snapshot: DashboardSnapshot): number {
@@ -84,7 +84,7 @@ export function getServiceNeighborhood(snapshot: DashboardSnapshot, serviceId: s
 }
 ```
 
-- [ ] **Step 4: Run the focused test and verify GREEN**
+- [x] **Step 4: Run the focused test and verify GREEN**
 
 Run: `pnpm --filter @workspace/admin-dashboard test -- src/lib/dashboard-model.test.ts`
 
@@ -100,7 +100,7 @@ Expected: PASS with 3 tests.
 - Consumes: `ServiceModule[]`, `ServiceEdge[]`.
 - Produces: `layoutTopology(modules, edges): { nodes: LayoutNode[]; width: number; height: number }`.
 
-- [ ] **Step 1: Write the failing layout tests**
+- [x] **Step 1: Write the failing layout tests**
 
 ```ts
 it("places request flow in stable left-to-right layers", () => {
@@ -112,13 +112,13 @@ it("places request flow in stable left-to-right layers", () => {
 });
 ```
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run: `pnpm --filter @workspace/admin-dashboard test -- src/lib/topology-layout.test.ts`
 
 Expected: FAIL because `layoutTopology` is missing.
 
-- [ ] **Step 3: Implement Dagre layered layout with fixed dimensions and deterministic ordering**
+- [x] **Step 3: Implement Dagre layered layout with fixed dimensions and deterministic ordering**
 
 ```ts
 graph.setGraph({ rankdir: "LR", ranksep: 72, nodesep: 34, marginx: 24, marginy: 24 });
@@ -128,7 +128,7 @@ edges.forEach((edge) => graph.setEdge(edge.source, edge.target));
 dagre.layout(graph);
 ```
 
-- [ ] **Step 4: Run the focused test and verify GREEN**
+- [x] **Step 4: Run the focused test and verify GREEN**
 
 Run: `pnpm --filter @workspace/admin-dashboard test -- src/lib/topology-layout.test.ts`
 
@@ -151,7 +151,7 @@ Expected: PASS with deterministic left-to-right coordinates.
 - Consumes: `DashboardSnapshot` and model/layout helpers.
 - Produces: node focus, incident filtering, local acknowledge state, refresh controls.
 
-- [ ] **Step 1: Write failing interaction tests**
+- [x] **Step 1: Write failing interaction tests**
 
 ```tsx
 it("filters incidents when a service is selected", async () => {
@@ -168,21 +168,21 @@ it("acknowledges an incident", async () => {
 });
 ```
 
-- [ ] **Step 2: Run the component tests and verify RED**
+- [x] **Step 2: Run the component tests and verify RED**
 
 Run: `pnpm --filter @workspace/admin-dashboard test -- src/App.test.tsx`
 
 Expected: FAIL because the app components do not exist.
 
-- [ ] **Step 3: Implement the app shell and interactions**
+- [x] **Step 3: Implement the app shell and interactions**
 
 Use React Flow for selection, pan, zoom, keyboard focus, and viewport ownership. Render four metrics before the graph, preserve the incident rail on desktop, and use semantic buttons for service nodes and incident actions.
 
-- [ ] **Step 4: Implement evidence-bearing motion**
+- [x] **Step 4: Implement evidence-bearing motion**
 
 Animate packets only on active edges, use semantic warning/degraded pulses, pause motion when the document is hidden, and disable it under `prefers-reduced-motion`.
 
-- [ ] **Step 5: Run component and model tests and verify GREEN**
+- [x] **Step 5: Run component and model tests and verify GREEN**
 
 Run: `pnpm --filter @workspace/admin-dashboard test`
 
@@ -204,15 +204,15 @@ Expected: all admin dashboard tests pass.
 - Consumes: approved design tokens and `DashboardSnapshot`.
 - Produces: responsive desktop/mobile shell and nginx health endpoint `/healthz`.
 
-- [ ] **Step 1: Add the accepted design tokens and responsive layout**
+- [x] **Step 1: Add the accepted design tokens and responsive layout**
 
 Implement the exact near-black, charcoal, violet, green, amber, red, blue, and gray roles from the design spec. Use 6px controls/panels, 8px metric modules, stable graph dimensions, horizontal topology scrolling on portrait, and no nested card containers.
 
-- [ ] **Step 2: Add deployments and provider tables**
+- [x] **Step 2: Add deployments and provider tables**
 
 Keep versions, health, latency, and update state visible without hover. Use compact in-cell trends and semantic text labels in addition to color.
 
-- [ ] **Step 3: Add the production image**
+- [x] **Step 3: Add the production image**
 
 ```dockerfile
 FROM node:22-alpine AS build
@@ -230,7 +230,7 @@ EXPOSE 80
 HEALTHCHECK CMD wget -qO- http://127.0.0.1/healthz || exit 1
 ```
 
-- [ ] **Step 4: Validate the container configuration**
+- [x] **Step 4: Validate the container configuration**
 
 Run: `docker build -f artifacts/admin-dashboard/Dockerfile -t apollo-tf-admin:local .`
 
@@ -243,29 +243,36 @@ Expected: image builds and `/healthz` returns `200`.
 - Modify: `MODULES.md`
 - Modify: `docs/superpowers/plans/2026-07-14-admin-topology-dashboard.md`
 
-- [ ] **Step 1: Run all focused checks**
+- [x] **Step 1: Run all focused checks**
 
 Run: `pnpm --filter @workspace/admin-dashboard test && pnpm --filter @workspace/admin-dashboard typecheck && pnpm --filter @workspace/admin-dashboard build`
 
 Expected: all commands pass without warnings from application code.
 
-- [ ] **Step 2: Run workspace regression checks**
+- [x] **Step 2: Run workspace regression checks**
 
 Run: `pnpm run typecheck`
 
 Expected: workspace typecheck passes.
 
-- [ ] **Step 3: Verify in the Codex in-app browser**
+- [x] **Step 3: Verify in the Codex in-app browser**
 
 Open the Vite URL, validate desktop and mobile portrait, exercise node focus, incident acknowledgement, incident filters, refresh controls, and reduced-motion behavior.
 
-- [ ] **Step 4: Perform concept fidelity comparison**
+- [x] **Step 4: Perform concept fidelity comparison**
 
 Capture the implementation at the closest practical native concept viewport. Inspect concept 1, concept 2, and the implementation screenshot with `view_image`; record at least five comparison points and fix all material mismatches.
 
-- [ ] **Step 5: Update project status and commit the feature branch**
+- [x] **Step 5: Update project status and commit the feature branch**
 
 ```bash
-git add artifacts/admin-dashboard docker-compose.yml docs IMPLEMENTATION_STATUS.md MODULES.md pnpm-lock.yaml
-git commit -m "feat(admin): add animated topology dashboard"
+git add IMPLEMENTATION_STATUS.md MODULES.md docs/superpowers/plans/2026-07-14-admin-topology-dashboard.md .superpowers/sdd/task-5-report.md
+git commit -m "docs(admin): record topology dashboard checkpoint"
 ```
+
+## Final checkpoint record
+
+- Dashboard remains isolated in `artifacts/admin-dashboard` on feature branch `codex/feat/admin-topology-dashboard`; HomeNode was not changed.
+- Delivery status is based on Task 1-4 reports: 41 admin tests, dashboard typecheck/build, workspace typecheck, Docker/Coolify compose configuration, and a local image `/healthz` request returning `200`/`ok`.
+- The frontend contract is typed `DashboardSnapshot`; `VITE_ADMIN_API_URL` enables `GET /api/admin/dashboard`, while empty configuration uses the demo snapshot and a failed refresh retains the last known good snapshot as stale.
+- Before merge to `main`, implement backend telemetry/API for the endpoint and perform a final visual confirmation in desktop and mobile portrait, including node focus, incidents, refresh controls, and reduced motion.

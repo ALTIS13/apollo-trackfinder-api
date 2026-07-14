@@ -18,6 +18,9 @@ Last updated: 2026-07-14.
 - Зафиксированы правила: основной branch `main`, серьёзные изменения в `codex/<logical-name>`, проверка и merge только после validation.
 - `.ops-private/` исключён из Git; локально подготовлены памятки по HomeNode и DNS для Apollo TF.
 - По решению владельца Expo Go/static deployment выведен из целевого workflow; мобильный артефакт должен собираться в APK и проверяться на физических устройствах через ADB.
+- На feature branch `codex/feat/admin-topology-dashboard` завершён standalone Apollo TF Admin Topology Dashboard в `artifacts/admin-dashboard`. Визуальная основа -- вариант 2: центральный left-to-right topology workspace; из варианта 1 сохранены четыре операционные метрики и workflow инцидентов.
+- Dashboard использует типизированный `DashboardSnapshot`. При заданном `VITE_ADMIN_API_URL` HTTP-адаптер запрашивает `GET /api/admin/dashboard`; без URL сохраняется детерминированный demo fallback, а при ошибке последняя корректная snapshot остаётся доступной как stale.
+- Добавлены standalone Vite-to-nginx image, `/healthz`, SPA fallback и сервис `admin` в корневом `docker-compose.yml` для Docker/Coolify. `HomeNode` не менялся.
 
 ## Validation
 
@@ -32,6 +35,9 @@ Last updated: 2026-07-14.
 - Fresh filtered build для API, web player и mockup sandbox: passed.
 - Fresh root `pnpm run build`: web, API и mockup прошли, старый mobile static Expo build остановился на зарезервированном Windows-порту `8081`. Этот delivery path после решения владельца считается superseded, а не целевым APK validation.
 - `git diff --cached --check`: passed; sensitive-pattern scan по Git index не нашёл ключей, токенов или приватных infrastructure values.
+- Admin dashboard: `pnpm --filter @workspace/admin-dashboard test` -- passed, 8 files / 41 tests; dashboard typecheck и production build -- passed.
+- Workspace `pnpm run typecheck` -- passed после устранения конфликтующих React type definitions в lockfile/catalog.
+- Local Docker validation admin image -- passed: image built with pinned pnpm 10.33.2, disposable container returned `200` and `ok` from `/healthz`, then was removed.
 
 ## Commit/push
 
@@ -41,11 +47,12 @@ Last updated: 2026-07-14.
 
 ## Следующий логичный этап реализации
 
-- Согласовать контейнерную архитектуру и одно из трёх визуальных направлений admin dashboard.
+- Реализовать backend telemetry/API, который будет поставлять production snapshot по `/api/admin/dashboard`; до этого frontend использует типизированный HTTP-контракт с demo fallback.
+- Перед merge feature branch `codex/feat/admin-topology-dashboard` в `main` повторно визуально подтвердить dashboard в desktop и mobile portrait, включая topology focus, инциденты, refresh и reduced-motion.
 - Уточнить границу отказа от Expo: сохранить Expo-модули через native prebuild/Gradle либо выполнить отдельную миграцию на bare React Native.
-- После согласования создать `codex/coolify-modular-admin`, реализовать и проверить изменения, затем подготовить merge в `main`.
 
 ## Notes
 
 - Web build проходит с предупреждением о chunk больше 500 kB.
 - Полный root build останется красным, пока старый Expo static build не будет заменён согласованным APK pipeline.
+- Admin topology dashboard не меняет HomeNode и не содержит provider credentials или его инвентарных данных.
