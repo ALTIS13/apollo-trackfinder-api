@@ -6,13 +6,10 @@ import {
 import type { DashboardSnapshotAdapter } from "../types/dashboard";
 
 export function createDashboardAdapterForEnvironment(
-  apiBaseUrl: string | undefined,
+  useHttpAdapter: boolean,
   fetchSnapshot?: DashboardSnapshotFetcher,
 ): DashboardSnapshotAdapter {
-  if (apiBaseUrl?.trim().length)
-    return createHttpDashboardSnapshotAdapter({
-      baseUrl: apiBaseUrl,
-      fetchSnapshot,
-    });
+  if (useHttpAdapter)
+    return createHttpDashboardSnapshotAdapter({ fetchSnapshot });
   return demoDashboardAdapter;
 }

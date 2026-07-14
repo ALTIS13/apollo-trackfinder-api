@@ -46,6 +46,7 @@ export default function App({ adapter = demoDashboardAdapter }: AppProps) {
               <IncidentRail
                 incidents={dashboard.incidents}
                 filter={dashboard.incidentFilter}
+                canAcknowledge={dashboard.canAcknowledgeIncidents}
                 onFilterChange={dashboard.setIncidentFilter}
                 onAcknowledge={dashboard.acknowledgeIncident}
                 onFocusService={dashboard.selectService}

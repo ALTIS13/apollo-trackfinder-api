@@ -49,11 +49,12 @@ services:
     build:
       context: .
       dockerfile: artifacts/admin-dashboard/Dockerfile
-      args:
-        VITE_ADMIN_API_URL: "${VITE_ADMIN_API_URL:-https://api.apollot.ru}"
     restart: unless-stopped
     ports:
       - "3001:80"
+    environment:
+      APOLLO_API_UPSTREAM: "http://api:8080"
+      ADMIN_DASHBOARD_TOKEN: "${ADMIN_DASHBOARD_TOKEN:-}"
 
 volumes:
   pgdata:

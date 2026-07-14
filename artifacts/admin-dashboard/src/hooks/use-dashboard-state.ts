@@ -34,39 +34,55 @@ export function useDashboardState(
   );
   const [connectionState, setConnectionState] =
     useState<DashboardConnectionState>(
-      adapter.initialSnapshot === undefined ? "refreshing" : "live",
+      adapter.mode === "http" || adapter.initialSnapshot === undefined
+        ? "refreshing"
+        : "live",
     );
   const [selectedServiceId, setSelectedServiceId] = useState<string>();
   const [incidentFilter, setIncidentFilter] = useState<IncidentFilter>("all");
   const [isAutoRefreshEnabled, setAutoRefreshEnabled] = useState(false);
   const snapshotRef = useRef(snapshot);
-  const requestIdRef = useRef(0);
+  const hasVerifiedRemoteSnapshotRef = useRef(false);
+  const refreshPromiseRef = useRef<Promise<void> | undefined>(undefined);
   const acknowledgedIncidentIdsRef = useRef(new Set<string>());
 
-  const refresh = useCallback(async () => {
-    const requestId = ++requestIdRef.current;
-    setConnectionState("refreshing");
-    try {
-      const adapterSnapshot = await adapter.loadSnapshot();
-      if (requestId !== requestIdRef.current) return;
-      const nextSnapshot = applyLocalAcknowledgements(
-        adapterSnapshot,
-        acknowledgedIncidentIdsRef.current,
-      );
-      snapshotRef.current = nextSnapshot;
-      setSnapshot(nextSnapshot);
-      setConnectionState("live");
-    } catch {
-      if (requestId !== requestIdRef.current) return;
-      setConnectionState(
-        snapshotRef.current === undefined ? "offline" : "stale",
-      );
-    }
+  const refresh = useCallback(() => {
+    if (refreshPromiseRef.current !== undefined)
+      return refreshPromiseRef.current;
+
+    const request = (async () => {
+      await Promise.resolve();
+      setConnectionState("refreshing");
+      try {
+        const adapterSnapshot = await adapter.loadSnapshot();
+        const nextSnapshot = adapter.capabilities.canAcknowledgeIncidents
+          ? applyLocalAcknowledgements(
+              adapterSnapshot,
+              acknowledgedIncidentIdsRef.current,
+            )
+          : adapterSnapshot;
+        snapshotRef.current = nextSnapshot;
+        hasVerifiedRemoteSnapshotRef.current = adapter.mode === "http";
+        setSnapshot(nextSnapshot);
+        setConnectionState("live");
+      } catch {
+        const hasLastKnownGood =
+          adapter.mode === "http"
+            ? hasVerifiedRemoteSnapshotRef.current
+            : snapshotRef.current !== undefined;
+        setConnectionState(hasLastKnownGood ? "stale" : "offline");
+      } finally {
+        refreshPromiseRef.current = undefined;
+      }
+    })();
+    refreshPromiseRef.current = request;
+    return request;
   }, [adapter]);
 
   useEffect(() => {
-    if (adapter.initialSnapshot === undefined) void refresh();
-  }, [adapter.initialSnapshot, refresh]);
+    if (adapter.mode === "http" || adapter.initialSnapshot === undefined)
+      void refresh();
+  }, [adapter.initialSnapshot, adapter.mode, refresh]);
 
   useEffect(() => {
     if (!isAutoRefreshEnabled) return;
@@ -75,6 +91,7 @@ export function useDashboardState(
   }, [isAutoRefreshEnabled, refresh]);
 
   const acknowledgeIncident = useCallback((incidentId: string) => {
+    if (!adapter.capabilities.canAcknowledgeIncidents) return;
     acknowledgedIncidentIdsRef.current.add(incidentId);
     setSnapshot((current) => {
       if (current === undefined) return current;
@@ -89,7 +106,7 @@ export function useDashboardState(
       snapshotRef.current = nextSnapshot;
       return nextSnapshot;
     });
-  }, []);
+  }, [adapter.capabilities.canAcknowledgeIncidents]);
 
   const neighborhood = useMemo(
     () =>
@@ -115,6 +132,7 @@ export function useDashboardState(
     incidents,
     neighborhood,
     isAutoRefreshEnabled,
+    canAcknowledgeIncidents: adapter.capabilities.canAcknowledgeIncidents,
     selectService: setSelectedServiceId,
     setIncidentFilter,
     acknowledgeIncident,

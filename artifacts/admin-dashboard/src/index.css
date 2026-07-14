@@ -11,8 +11,8 @@
   --color-border-strong: #373c47;
   --color-text: #f4f5f8;
   --color-muted: #9ca4b5;
-  --color-subtle: #747d90;
-  --color-accent: #7768f7;
+  --color-subtle: #7f889b;
+  --color-accent: #6f5ee8;
   --color-accent-soft: #272345;
   --color-healthy: #4dcc70;
   --color-warning: #f0b429;
@@ -851,6 +851,15 @@ svg {
   white-space: nowrap;
 }
 
+.incident-readonly-note {
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-subtle);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
 .incident-list {
   max-height: calc(100vh - 150px);
   overflow-y: auto;
@@ -944,6 +953,10 @@ svg {
   color: var(--color-healthy);
   cursor: default;
   opacity: 0.85;
+}
+
+.incident-rail:has(.incident-readonly-note) .incident-list {
+  max-height: calc(100vh - 182px);
 }
 
 .incident-row > button:last-child svg {

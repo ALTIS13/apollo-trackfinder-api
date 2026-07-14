@@ -1,0 +1,3 @@
+#!/bin/sh
+
+export ADMIN_DASHBOARD_TOKEN="${ADMIN_DASHBOARD_TOKEN:-}"

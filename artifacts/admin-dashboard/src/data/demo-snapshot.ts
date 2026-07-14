@@ -234,6 +234,10 @@ export const demoSnapshot: DashboardSnapshot = {
 };
 
 export const demoDashboardAdapter: DashboardSnapshotAdapter = {
+  mode: "demo",
+  capabilities: {
+    canAcknowledgeIncidents: true,
+  },
   initialSnapshot: demoSnapshot,
   async loadSnapshot() {
     return { ...demoSnapshot, generatedAt: new Date().toISOString() };

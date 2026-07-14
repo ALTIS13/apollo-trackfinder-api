@@ -19,7 +19,7 @@ apollo-trackfinder/
 │   ├── api-spec/            # OpenAPI-спецификация
 │   ├── api-zod/             # Zod-схемы (авто-генерация из OpenAPI)
 │   └── api-client-react/    # React Query клиент (авто-генерация из OpenAPI)
-└── docker-compose.yml       # Root stack: PostgreSQL + API + admin service
+└── docker-compose.yml       # Root stack: PostgreSQL + API + web + admin services
 ```
 
 ---
@@ -352,11 +352,12 @@ Action Sheet с опциями: воспроизвести, скачать, уд
 **Стек:** React 19, Vite, TypeScript, React Flow, Dagre, Framer Motion, Vitest, nginx.
 
 - Отдельный operational UI на feature branch `codex/feat/admin-topology-dashboard`; `artifacts/music-player` и HomeNode не менялись.
-- Визуальная основа -- вариант 2: центральная topology-схема с устойчивым left-to-right layout. Из варианта 1 добавлены четыре метрики: активные модули, поиски в минуту, глубина очереди и error rate; рядом остаётся rail инцидентов с фильтрацией, фокусом сервиса и локальным acknowledgement.
-- Типизированный `DashboardSnapshot` описывает метрики, сервисы, связи, инциденты, deployments и provider health. `VITE_ADMIN_API_URL` включает HTTP-адаптер для `GET /api/admin/dashboard`; при пустой переменной используется demo snapshot, а ошибка обновления сохраняет last-known-good состояние как stale.
-- `Dockerfile` собирает Vite bundle и отдаёт его через nginx. `nginx.conf` объявляет `/healthz` и SPA fallback; корневой `docker-compose.yml` поднимает PostgreSQL, API и `admin` service.
-- Проверено в отчётах checkpoint: 41 dashboard test, dashboard typecheck/build, workspace typecheck, локальный Docker `/healthz` (`200`, `ok`) и Docker/Compose/Coolify readiness конфигурации. Deployment в Coolify или на HomeNode не выполнялся.
-- Следующий этап: production backend telemetry/API для `/api/admin/dashboard`, затем визуальное подтверждение владельца перед merge в `main`; технический desktop/mobile QA focus, incidents, refresh и reduced motion уже пройден.
+- Визуальная основа -- вариант 2: центральная topology-схема с устойчивым left-to-right layout. Из варианта 1 добавлены четыре метрики; incident rail поддерживает фильтрацию и service focus. Локальный acknowledgement доступен только в demo mode, remote mode явно read-only.
+- `DashboardSnapshotAdapter` объявляет mode/capabilities. Demo mode стартует live из `demoSnapshot`. Production HTTP mode сразу загружает same-origin `/api/admin/dashboard`, удерживает визуальный fallback в непроверенном refreshing/offline состоянии, становится live только после валидного remote snapshot и stale только после последующего отказа.
+- Каждый HTTP 200 JSON проходит Zod validation до state mutation: поля/enums/timestamps, bounded collections, unique service/incident IDs и edge/incident service references. HTTP adapter имеет 10-second abort timeout и single-flight refresh.
+- Production browser не получает API base или token. nginx проксирует `/api/` на runtime `APOLLO_API_UPSTREAM` и добавляет `X-Admin-Dashboard-Token` из `ADMIN_DASHBOARD_TOKEN`; `/healthz` и SPA fallback не зависят от доступности upstream. Root Compose задаёт runtime upstream/token для `admin` service.
+- `pnpm` override фиксирует `lodash@4.18.1` для `dagre`/`graphlib`; parsed production audit содержит 0 admin paths. Final-review verification включает 8 files / 54 tests, dashboard/workspace typecheck, production build, Docker `/healthz`, Compose config и scoped audit evidence.
+- Backend telemetry endpoint и проверка forwarded token ещё не реализованы; deployment в Coolify/HomeNode не выполнялся. Owner approval остаётся обязательным перед merge в `main`.
 
 ---
 
@@ -445,7 +446,7 @@ const parseResult = SearchTracksBody.safeParse(req.body);
 
 ### `artifacts/admin-dashboard/Dockerfile`
 
-Собирает standalone admin dashboard с pinned `pnpm@10.33.2`, затем nginx отдаёт production bundle. Runtime health endpoint -- `GET /healthz`; service `admin` определён в корневом `docker-compose.yml`. Локально проверены image, Compose configuration и Coolify readiness; deployment в Coolify/HomeNode не выполнялся.
+Собирает standalone admin dashboard с pinned `pnpm@10.33.2`, затем nginx отдаёт production bundle. nginx template читает runtime `APOLLO_API_UPSTREAM` и `ADMIN_DASHBOARD_TOKEN`, проксирует same-origin `/api/` и сохраняет независимый `GET /healthz`. Token не компилируется в browser bundle. Локальная проверка image/health/Compose не является deployment в Coolify/HomeNode.
 
 ### Корневой `docker-compose.yml`
 
@@ -453,10 +454,11 @@ const parseResult = SearchTracksBody.safeParse(req.body);
 services:
   db:     # PostgreSQL 16-alpine
   api:    # API-сервер на порту 8080
+  web:    # Web player на порту 3000
   admin:  # Admin dashboard на порту 3001
 ```
 
-Это полный root stack для PostgreSQL, API и admin service. Конфигурация локально проверена для Docker/Compose и готовности к Coolify; фактического deployment в Coolify/HomeNode не было.
+Root stack содержит PostgreSQL, API, web и admin services. Для admin Compose передаёт `APOLLO_API_UPSTREAM=http://api:8080` и server-side `ADMIN_DASHBOARD_TOKEN`; будущий backend endpoint обязан проверять forwarded `X-Admin-Dashboard-Token`. Endpoint/deployment пока не реализован.
 
 ### `artifacts/api-server/docker-compose.yml`
 
@@ -477,6 +479,8 @@ services:
 | `SERVER_URL` | Для self-hosted Spotify | Публичный URL сервера (`https://api.yourdomain.com`). Callback для Spotify Dashboard: `${SERVER_URL}/api/spotify/callback` |
 | `DATABASE_URL` | Авто | Заполняется docker-compose автоматически |
 | `PORT` | Авто | 8080 |
+| `APOLLO_API_UPSTREAM` | Для admin runtime | nginx upstream origin для same-origin `/api/` proxy |
+| `ADMIN_DASHBOARD_TOKEN` | До production deployment | Server-side token, который nginx пересылает как `X-Admin-Dashboard-Token`; не попадает в browser bundle |
 
 ### Запуск на своём сервере
 

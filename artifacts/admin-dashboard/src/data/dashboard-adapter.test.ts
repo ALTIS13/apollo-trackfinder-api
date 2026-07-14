@@ -4,25 +4,26 @@ import { createDashboardAdapterForEnvironment } from "./dashboard-adapter";
 
 describe("dashboard adapter environment wiring", () => {
   it("uses the demo adapter when no build-time API URL is configured", () => {
-    expect(createDashboardAdapterForEnvironment(" ")).toMatchObject({
+    expect(createDashboardAdapterForEnvironment(false)).toMatchObject({
       initialSnapshot: demoSnapshot,
     });
   });
 
-  it("uses the HTTP adapter when a build-time API URL is configured", async () => {
+  it("uses the same-origin HTTP adapter when production mode is configured", async () => {
     const fetchSnapshot = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue(demoSnapshot),
     });
-    const adapter = createDashboardAdapterForEnvironment(
-      "https://admin.example.test/",
-      fetchSnapshot,
-    );
+    const adapter = createDashboardAdapterForEnvironment(true, fetchSnapshot);
 
     await adapter.loadSnapshot();
     expect(fetchSnapshot).toHaveBeenCalledWith(
-      "https://admin.example.test/api/admin/dashboard",
-      { headers: { Accept: "application/json" } },
+      "/api/admin/dashboard",
+      expect.objectContaining({ headers: { Accept: "application/json" } }),
     );
+    expect(adapter).toMatchObject({
+      mode: "http",
+      capabilities: { canAcknowledgeIncidents: false },
+    });
   });
 });

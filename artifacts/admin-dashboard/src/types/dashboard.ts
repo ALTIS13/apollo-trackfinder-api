@@ -61,7 +61,15 @@ export interface DashboardSnapshot {
   providers: ProviderHealth[];
 }
 
+export type DashboardAdapterMode = "demo" | "http";
+
+export interface DashboardAdapterCapabilities {
+  canAcknowledgeIncidents: boolean;
+}
+
 export interface DashboardSnapshotAdapter {
+  mode: DashboardAdapterMode;
+  capabilities: DashboardAdapterCapabilities;
   initialSnapshot?: DashboardSnapshot;
   loadSnapshot: () => Promise<DashboardSnapshot>;
 }

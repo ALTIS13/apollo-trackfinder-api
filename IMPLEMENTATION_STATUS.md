@@ -19,9 +19,10 @@ Last updated: 2026-07-14.
 - `.ops-private/` исключён из Git; локально подготовлены памятки по HomeNode и DNS для Apollo TF.
 - По решению владельца Expo Go/static deployment выведен из целевого workflow; мобильный артефакт должен собираться в APK и проверяться на физических устройствах через ADB.
 - На feature branch `codex/feat/admin-topology-dashboard` завершён standalone Apollo TF Admin Topology Dashboard в `artifacts/admin-dashboard`. Визуальная основа -- вариант 2: центральный left-to-right topology workspace; из варианта 1 сохранены четыре операционные метрики и workflow инцидентов.
-- Dashboard использует типизированный `DashboardSnapshot`. При заданном `VITE_ADMIN_API_URL` HTTP-адаптер запрашивает `GET /api/admin/dashboard`; без URL сохраняется детерминированный demo fallback, а при ошибке последняя корректная snapshot остаётся доступной как stale.
-- Добавлены standalone Vite-to-nginx image, `/healthz`, SPA fallback и сервис `admin` в корневом `docker-compose.yml`. Docker image, Compose configuration и готовность конфигурации к Coolify проверены локально; deployment в Coolify или на HomeNode не выполнялся, HomeNode не менялся.
-- Текущий checkout/`HEAD` находится на feature branch `codex/feat/admin-topology-dashboard`; dashboard checkpoint изолирован в этой ветке и не merged в `main`. Corrective documentation commit основан на clean branch tip `abdc38458f3e415f3a029ed6af5ddee0f881abe8`.
+- Dashboard использует типизированный `DashboardSnapshot` и явные adapter mode/capabilities. Demo mode стартует live из детерминированного snapshot и допускает локальный acknowledgement; production HTTP mode показывает fallback как непроверенный, сразу запрашивает same-origin `GET /api/admin/dashboard`, становится live только после schema-validated ответа, offline после первого отказа и stale только после отказа, следующего за успешным remote snapshot. Remote incidents доступны только для чтения.
+- Каждый HTTP 200 JSON проверяется Zod-схемой до изменения state: проверяются все поля/enums/timestamps, лимиты коллекций, уникальность service/incident IDs и ссылки edges/incidents. Запрос имеет 10-секундный abort timeout; ручное и interval-обновление используют single-flight.
+- Standalone Vite-to-nginx image сохраняет `/healthz` и SPA fallback. Браузер обращается только к `/api/admin/dashboard`; nginx runtime proxy использует `APOLLO_API_UPSTREAM` и добавляет `X-Admin-Dashboard-Token` из server-side `ADMIN_DASHBOARD_TOKEN`. Root Compose задаёт upstream/token только контейнеру. Backend endpoint ещё не реализован и в будущем обязан проверять forwarded token; deployment в Coolify/HomeNode не выполнялся, HomeNode не менялся.
+- Admin topology paths `dagre -> lodash` и `graphlib -> lodash` принудительно переведены на patched `lodash@4.18.1`; admin-scoped production audit paths отсутствуют. Текущий checkout остаётся на `codex/feat/admin-topology-dashboard`, основанном на pre-fix `0240fef`, и не merged в `main`.
 
 ## Validation
 
@@ -36,9 +37,9 @@ Last updated: 2026-07-14.
 - Fresh filtered build для API, web player и mockup sandbox: passed.
 - Fresh root `pnpm run build`: web, API и mockup прошли, старый mobile static Expo build остановился на зарезервированном Windows-порту `8081`. Этот delivery path после решения владельца считается superseded, а не целевым APK validation.
 - `git diff --cached --check`: passed; sensitive-pattern scan по Git index не нашёл ключей, токенов или приватных infrastructure values.
-- Admin dashboard: `pnpm --filter @workspace/admin-dashboard test` -- passed, 8 files / 41 tests; dashboard typecheck и production build -- passed.
+- Admin dashboard final-review wave: `pnpm --filter @workspace/admin-dashboard test` -- passed, 8 files / 54 tests; dashboard typecheck и production build -- passed. Focused RED/GREEN evidence для bootstrap/failure, schema rejection, timeout/single-flight, remote read-only incidents, proxy contract и contrast записано в `.superpowers/sdd/final-review-fix-report.md`.
 - Workspace `pnpm run typecheck` -- passed после устранения конфликтующих React type definitions в lockfile/catalog.
-- Local Docker/Compose validation -- passed: admin image built with pinned pnpm 10.33.2, disposable container returned `200` and `ok` from `/healthz`, then was removed. Эта проверка подтверждает локальную Docker/Compose/Coolify readiness конфигурации, но не deployment в Coolify/HomeNode.
+- Local Docker/Compose validation -- admin image and runtime template build locally; disposable `/healthz` validation and final Compose evidence are recorded in `.superpowers/sdd/final-review-fix-report.md`. Эта проверка подтверждает только локальную readiness конфигурации, не deployment в Coolify/HomeNode.
 - Codex in-app browser QA -- passed at `1536x1090` and `390x844`: no page-level horizontal overflow, topology uses an internal portrait scroller, node/incident focus works, acknowledgement survives dashboard refresh, open/all filters work, and reduced-motion removes animated traffic packets while preserving status dots and labels.
 
 ## Commit/push
@@ -49,7 +50,7 @@ Last updated: 2026-07-14.
 
 ## Следующий логичный этап реализации
 
-- Реализовать backend telemetry/API, который будет поставлять production snapshot по `/api/admin/dashboard`; до этого frontend использует типизированный HTTP-контракт с demo fallback.
+- Реализовать backend telemetry/API для `/api/admin/dashboard` и обязательную проверку forwarded `X-Admin-Dashboard-Token`; текущий frontend/proxy-контракт не означает, что endpoint или deployment уже существует.
 - Получить визуальное подтверждение владельца в открытой Codex in-app browser вкладке; техническая desktop/mobile проверка topology focus, incidents, refresh и reduced-motion уже пройдена.
 - Уточнить границу отказа от Expo: сохранить Expo-модули через native prebuild/Gradle либо выполнить отдельную миграцию на bare React Native.
 

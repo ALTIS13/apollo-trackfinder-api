@@ -21,6 +21,7 @@ const severityIcons = {
 interface IncidentRailProps {
   incidents: Incident[];
   filter: IncidentFilter;
+  canAcknowledge: boolean;
   onFilterChange: (filter: IncidentFilter) => void;
   onAcknowledge: (incidentId: string) => void;
   onFocusService: (serviceId: string) => void;
@@ -29,6 +30,7 @@ interface IncidentRailProps {
 export function IncidentRail({
   incidents,
   filter,
+  canAcknowledge,
   onFilterChange,
   onAcknowledge,
   onFocusService,
@@ -64,6 +66,11 @@ export function IncidentRail({
           </button>
         </div>
       </div>
+      {!canAcknowledge ? (
+        <p className="incident-readonly-note" role="note">
+          Удаленные инциденты доступны только для чтения
+        </p>
+      ) : null}
       <p
         ref={feedbackRef}
         role="status"
@@ -100,14 +107,16 @@ export function IncidentRail({
             </time>
             <button
               type="button"
-              disabled={incident.status !== "open"}
+              disabled={!canAcknowledge || incident.status !== "open"}
               onClick={() => {
                 shouldFocusFeedbackRef.current = filter === "open";
                 onAcknowledge(incident.id);
                 setAnnouncement(`Инцидент «${incident.title}» подтвержден`);
               }}
               aria-label={
-                incident.status === "open"
+                !canAcknowledge && incident.status === "open"
+                  ? `Инцидент ${incident.title}: подтверждение недоступно в режиме только для чтения`
+                  : incident.status === "open"
                   ? `Подтвердить инцидент ${incident.title}`
                   : incident.status === "acknowledged"
                     ? `Инцидент ${incident.title} подтвержден`
@@ -116,7 +125,9 @@ export function IncidentRail({
             >
               {incident.status !== "open" ? <CircleCheck aria-hidden="true" /> : null}
               {incident.status === "open"
-                ? "Подтвердить"
+                ? canAcknowledge
+                  ? "Подтвердить"
+                  : "Только чтение"
                 : incident.status === "acknowledged"
                   ? "Подтверждено"
                   : "Закрыто"}

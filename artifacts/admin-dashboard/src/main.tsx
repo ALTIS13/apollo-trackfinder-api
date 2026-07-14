@@ -7,7 +7,7 @@ import "./index.css";
 
 const root = document.getElementById("root");
 if (root === null) throw new Error("Не найден корневой элемент приложения");
-const adapter = createDashboardAdapterForEnvironment(import.meta.env.VITE_ADMIN_API_URL);
+const adapter = createDashboardAdapterForEnvironment(import.meta.env.PROD);
 
 createRoot(root).render(
   <StrictMode>

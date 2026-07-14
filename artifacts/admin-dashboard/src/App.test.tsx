@@ -76,8 +76,13 @@ function snapshotAt(generatedAt: string): DashboardSnapshot {
 function createAdapter(
   loadSnapshot: DashboardSnapshotAdapter["loadSnapshot"],
   initialSnapshot: DashboardSnapshot | null = demoSnapshot,
+  mode: "demo" | "http" = "demo",
 ): DashboardSnapshotAdapter {
   return {
+    mode,
+    capabilities: {
+      canAcknowledgeIncidents: mode === "demo",
+    },
     initialSnapshot: initialSnapshot ?? undefined,
     loadSnapshot,
   };
@@ -291,6 +296,75 @@ describe("Apollo TF admin dashboard", () => {
     expect(
       screen.getByRole("button", {
         name: "Инцидент Ошибки download-worker подтвержден",
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByRole("button", {
+        name: "Подтвердить инцидент Ошибки download-worker",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("requests configured HTTP data on mount despite the visual fallback", async () => {
+    const loadSnapshot = vi.fn(
+      () => new Promise<DashboardSnapshot>(() => undefined),
+    );
+
+    render(<App adapter={createAdapter(loadSnapshot, demoSnapshot, "http")} />);
+
+    await waitFor(() => expect(loadSnapshot).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent(
+      "Обновление",
+    );
+    expect(screen.getByText("Активные модули")).toBeVisible();
+  });
+
+  it("shows offline after the first HTTP request fails while retaining fallback data", async () => {
+    const loadSnapshot = vi.fn().mockRejectedValue(new Error("offline"));
+
+    render(<App adapter={createAdapter(loadSnapshot, demoSnapshot, "http")} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent(
+        "Нет связи",
+      ),
+    );
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Активные модули")).toBeVisible();
+  });
+
+  it("shows stale only when an HTTP request fails after verified remote data", async () => {
+    const loadSnapshot = vi
+      .fn()
+      .mockResolvedValueOnce(snapshotAt("2026-07-14T09:45:00.000Z"))
+      .mockRejectedValueOnce(new Error("offline"));
+
+    render(<App adapter={createAdapter(loadSnapshot, demoSnapshot, "http")} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent(
+        "Актуально",
+      ),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Обновить" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent(
+        "Данные устарели",
+      ),
+    );
+  });
+
+  it("keeps remote incidents read-only and explains the capability", async () => {
+    const loadSnapshot = vi.fn().mockResolvedValue(demoSnapshot);
+
+    render(<App adapter={createAdapter(loadSnapshot, demoSnapshot, "http")} />);
+
+    expect(
+      screen.getByText("Удаленные инциденты доступны только для чтения"),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", {
+        name: "Инцидент Ошибки download-worker: подтверждение недоступно в режиме только для чтения",
       }),
     ).toBeDisabled();
     expect(
