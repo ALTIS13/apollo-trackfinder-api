@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from "child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 
 export interface YtDlpEntry {
   id: string;
@@ -165,7 +165,10 @@ export type AudioQuality = "128" | "192" | "256" | "320" | "flac";
  * NOTE: Do NOT use "--extractor-args youtube:player_client=mweb" — mweb
  * produces 0 bytes when piping to stdout. The default client works correctly.
  */
-export function spawnAudioDownload(trackUrl: string, quality: AudioQuality = "256"): ChildProcess {
+export function spawnAudioDownload(
+  trackUrl: string,
+  quality: AudioQuality = "256",
+): ChildProcessWithoutNullStreams {
   const isFlac = quality === "flac";
   const formatArgs = isFlac
     ? ["--audio-format", "flac"]

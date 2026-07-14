@@ -22,7 +22,7 @@ function makeRedirectUri(hostname: string): string {
   if (process.env["SERVER_URL"]) {
     return `${process.env["SERVER_URL"].replace(/\/$/, "")}/api/spotify/callback`;
   }
-  const domain = process.env["REPLIT_DOMAINS"]?.split(",")[0] ?? hostname;
+  const domain = process.env["PUBLIC_API_DOMAIN"] ?? hostname;
   return `https://${domain}/api/spotify/callback`;
 }
 

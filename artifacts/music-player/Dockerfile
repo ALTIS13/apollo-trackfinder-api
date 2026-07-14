@@ -20,7 +20,6 @@ RUN pnpm install --frozen-lockfile
 
 COPY lib/api-client-react ./lib/api-client-react
 COPY artifacts/music-player ./artifacts/music-player
-COPY attached_assets ./attached_assets
 
 ARG VITE_API_URL
 ENV VITE_API_URL=${VITE_API_URL}

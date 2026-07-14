@@ -42,7 +42,7 @@ export async function searchBandcamp(
 
   return entries
     .filter((e) => e.id && e.title)
-    .map((e) => {
+    .map((e): NormalizedTrack | null => {
       const url = e.webpage_url ?? "";
       if (!url) return null;
       return {

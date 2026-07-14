@@ -44,6 +44,9 @@ Thumbs.db
 .cursor/rules/nx-rules.mdc
 .github/instructions/nx.instructions.md
 
-# Replit
+# local generated caches
 .cache/
 .local/
+
+# private operations data, SSH material, and local infrastructure notes
+/.ops-private/

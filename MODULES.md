@@ -54,7 +54,7 @@ apollo-trackfinder/
 | Эндпоинт | Метод | Описание |
 |----------|-------|----------|
 | `/spotify/status` | GET | Проверяет, авторизован ли текущий сессионный пользователь |
-| `/spotify/login` | GET | Инициирует OAuth 2.0 Authorization Code Flow. Генерирует state с зашифрованным session ID и nonce. `redirect_uri` определяется из `SERVER_URL` env (для self-hosted) или `REPLIT_DOMAINS`. |
+| `/spotify/login` | GET | Инициирует OAuth 2.0 Authorization Code Flow. Генерирует state с зашифрованным session ID и nonce. `redirect_uri` определяется из `SERVER_URL` env или `PUBLIC_API_DOMAIN`. |
 | `/spotify/callback` | GET | Обменивает код на токены, сохраняет в БД, редиректит в приложение |
 | `/spotify/logout` | POST | Удаляет токены сессии из БД |
 | `/spotify/liked` | GET | Получает лайкнутые треки пользователя (пагинация) |
@@ -459,7 +459,7 @@ docker compose up -d --build
 
 ---
 
-## 7. Среда разработки (Replit)
+## 7. Среда разработки
 
 | Workflow | Команда | Порт |
 |----------|---------|------|
@@ -468,8 +468,8 @@ docker compose up -d --build
 | Music Player (web) | `vite --host 0.0.0.0` | 25424 |
 | Mockup Sandbox | `vite dev` | 8081 |
 
-**Мобильное приложение в Expo Go:**  
-QR-код генерируется автоматически. URL формируется из `REPLIT_EXPO_DEV_DOMAIN` env var.
+**Мобильная поставка:**
+Expo Go и custom static deployment больше не являются целевым способом поставки. Следующий мобильный этап должен выдавать APK, устанавливаемый и проверяемый через ADB на физических Android-устройствах. Текущий код всё ещё использует Expo SDK; решение между native prebuild/Gradle и миграцией на bare React Native фиксируется до реализации APK pipeline.
 
 **API URL в мобильном:**  
 Задаётся через `EXPO_PUBLIC_DOMAIN` при сборке или вручную в настройках (`ServerSettings`).
