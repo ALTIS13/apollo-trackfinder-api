@@ -10,7 +10,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
+    "@types/dagre": "^0.7.54",
     "vite": "catalog:",
     "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "dagre": "^0.8.5"
   }
 }
