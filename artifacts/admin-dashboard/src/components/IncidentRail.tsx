@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { Incident, IncidentFilter } from "../types/dashboard";
 
 const severityLabels = {
@@ -26,6 +27,8 @@ export function IncidentRail({
   onAcknowledge,
   onFocusService,
 }: IncidentRailProps) {
+  const [announcement, setAnnouncement] = useState("");
+
   return (
     <aside className="incident-rail" aria-label="Инциденты">
       <header>
@@ -47,6 +50,9 @@ export function IncidentRail({
           </button>
         </div>
       </header>
+      <p role="status" aria-label="Состояние инцидентов" aria-live="polite">
+        {announcement}
+      </p>
       {incidents.length === 0 ? <p>Инцидентов нет</p> : null}
       <div className="incident-list">
         {incidents.map((incident) => (
@@ -67,21 +73,27 @@ export function IncidentRail({
             <time dateTime={incident.createdAt}>
               {incidentTimeFormatter.format(new Date(incident.createdAt))}
             </time>
-            {incident.status === "open" ? (
-              <button
-                type="button"
-                onClick={() => onAcknowledge(incident.id)}
-                aria-label={`Подтвердить инцидент ${incident.title}`}
-              >
-                Подтвердить
-              </button>
-            ) : (
-              <span>
-                {incident.status === "acknowledged"
+            <button
+              type="button"
+              disabled={incident.status !== "open"}
+              onClick={() => {
+                onAcknowledge(incident.id);
+                setAnnouncement(`Инцидент «${incident.title}» подтвержден`);
+              }}
+              aria-label={
+                incident.status === "open"
+                  ? `Подтвердить инцидент ${incident.title}`
+                  : incident.status === "acknowledged"
+                    ? `Инцидент ${incident.title} подтвержден`
+                    : `Инцидент ${incident.title} закрыт`
+              }
+            >
+              {incident.status === "open"
+                ? "Подтвердить"
+                : incident.status === "acknowledged"
                   ? "Подтверждено"
                   : "Закрыто"}
-              </span>
-            )}
+            </button>
           </article>
         ))}
       </div>

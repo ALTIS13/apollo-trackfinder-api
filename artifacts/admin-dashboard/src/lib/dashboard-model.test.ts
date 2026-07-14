@@ -18,4 +18,21 @@ describe("dashboard model", () => {
       "incident-download-errors",
     ]);
   });
+
+  it("sorts incidents by severity and then newest first regardless of fixture order", () => {
+    const reordered = {
+      ...demoSnapshot,
+      incidents: [
+        { ...demoSnapshot.incidents[2], severity: "warning" as const, createdAt: "2026-07-14T09:20:00.000Z" },
+        { ...demoSnapshot.incidents[1], severity: "critical" as const, createdAt: "2026-07-14T09:10:00.000Z" },
+        { ...demoSnapshot.incidents[0], severity: "critical" as const, createdAt: "2026-07-14T09:30:00.000Z" },
+      ],
+    };
+
+    expect(filterIncidents(reordered, "all").map((incident) => incident.id)).toEqual([
+      "incident-download-errors",
+      "incident-soundcloud-degradation",
+      "incident-account-latency",
+    ]);
+  });
 });

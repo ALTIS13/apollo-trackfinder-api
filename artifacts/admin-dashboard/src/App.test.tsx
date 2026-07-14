@@ -1,9 +1,11 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { formatTrafficLabel } from "./components/TopologyPanel";
+import { demoSnapshot } from "./data/demo-snapshot";
+import type { DashboardSnapshot, DashboardSnapshotAdapter } from "./types/dashboard";
 
 beforeAll(() => {
   vi.stubGlobal(
@@ -62,7 +64,24 @@ beforeAll(() => {
   });
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+function snapshotAt(generatedAt: string): DashboardSnapshot {
+  return { ...demoSnapshot, generatedAt };
+}
+
+function createAdapter(
+  loadSnapshot: DashboardSnapshotAdapter["loadSnapshot"],
+  initialSnapshot: DashboardSnapshot | null = demoSnapshot,
+): DashboardSnapshotAdapter {
+  return {
+    initialSnapshot: initialSnapshot ?? undefined,
+    loadSnapshot,
+  };
+}
 
 describe("Apollo TF admin dashboard", () => {
   it("renders the four scan-first metrics before the topology", () => {
@@ -90,6 +109,44 @@ describe("Apollo TF admin dashboard", () => {
     expect(screen.queryByText("Деградация SoundCloud")).not.toBeInTheDocument();
   });
 
+  it("routes incident focus through the selected React Flow node", async () => {
+    render(<App />);
+
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Показать сервис: Ошибки download-worker",
+      }),
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Download Worker" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("toggles between all and open incidents", async () => {
+    render(<App />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Открытые" }));
+    expect(screen.queryByText("Задержка интеграций аккаунта")).not.toBeInTheDocument();
+    expect(screen.getByText("Ошибки download-worker")).toBeVisible();
+
+    await userEvent.click(screen.getByRole("button", { name: "Все" }));
+    expect(screen.getByText("Задержка интеграций аккаунта")).toBeVisible();
+  });
+
+  it("resets service selection and restores all incidents", async () => {
+    render(<App />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Download Worker" }));
+    await userEvent.click(screen.getByRole("button", { name: "Сбросить выбор" }));
+
+    expect(screen.getByText("Деградация SoundCloud")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Download Worker" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+  });
+
   it("acknowledges an incident", async () => {
     render(<App />);
     await userEvent.click(
@@ -98,6 +155,21 @@ describe("Apollo TF admin dashboard", () => {
       }),
     );
     expect(screen.getByText("Подтверждено")).toBeVisible();
+  });
+
+  it("keeps acknowledgement focus and announces feedback", async () => {
+    render(<App />);
+    const action = screen.getByRole("button", {
+      name: "Подтвердить инцидент Ошибки download-worker",
+    });
+
+    action.focus();
+    await userEvent.click(action);
+
+    expect(screen.getByRole("button", { name: "Инцидент Ошибки download-worker подтвержден" })).toHaveFocus();
+    expect(screen.getByRole("status", { name: "Состояние инцидентов" })).toHaveTextContent(
+      "Инцидент «Ошибки download-worker» подтвержден",
+    );
   });
 
   it("gives every open incident a unique acknowledge action", () => {
@@ -117,5 +189,61 @@ describe("Apollo TF admin dashboard", () => {
 
   it("keeps traffic labels compact between topology nodes", () => {
     expect(formatTrafficLabel(244)).toBe("244/мин");
+  });
+
+  it("shows refreshing state and the adapter timestamp after manual refresh", async () => {
+    let resolveRefresh!: (snapshot: DashboardSnapshot) => void;
+    const loadSnapshot = vi.fn(
+      () =>
+        new Promise<DashboardSnapshot>((resolve) => {
+          resolveRefresh = resolve;
+        }),
+    );
+    render(<App adapter={createAdapter(loadSnapshot)} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Обновить" }));
+    expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent("Обновление");
+    expect(screen.getByRole("button", { name: "Обновление" })).toBeDisabled();
+
+    resolveRefresh(snapshotAt("2026-07-14T09:45:00.000Z"));
+    await waitFor(() =>
+      expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent("Актуально"),
+    );
+    expect(screen.getByText("12:45")).toHaveAttribute("datetime", "2026-07-14T09:45:00.000Z");
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes through the adapter every 15 seconds when enabled", async () => {
+    vi.useFakeTimers();
+    const loadSnapshot = vi.fn().mockResolvedValue(snapshotAt("2026-07-14T09:45:00.000Z"));
+    render(<App adapter={createAdapter(loadSnapshot)} />);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Автообновление" }));
+    await act(async () => vi.advanceTimersByTime(15_000));
+
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the last snapshot visible when refresh fails", async () => {
+    const loadSnapshot = vi.fn().mockRejectedValue(new Error("network unavailable"));
+    render(<App adapter={createAdapter(loadSnapshot)} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Обновить" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent("Данные устарели"),
+    );
+    expect(screen.getByText("Активные модули")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Download Worker" })).toBeVisible();
+  });
+
+  it("shows offline state when the adapter has no last known snapshot", async () => {
+    const loadSnapshot = vi.fn().mockRejectedValue(new Error("offline"));
+    render(<App adapter={createAdapter(loadSnapshot, null)} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("dashboard-connection-status")).toHaveTextContent("Нет связи"),
+    );
+    expect(screen.getByText("Нет сохраненного снимка")).toBeVisible();
   });
 });

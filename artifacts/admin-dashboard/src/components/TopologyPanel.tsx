@@ -5,11 +5,12 @@ import {
   ReactFlowProvider,
   useReactFlow,
   type EdgeTypes,
+  type NodeChange,
   type NodeTypes,
 } from "@xyflow/react";
 import { Maximize2, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
 import { useReducedMotion } from "framer-motion";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { getServiceNeighborhood } from "../lib/dashboard-model";
 import { layoutTopology } from "../lib/topology-layout";
 import type { DashboardSnapshot, HealthStatus } from "../types/dashboard";
@@ -27,6 +28,13 @@ const statusLabels: Record<HealthStatus, string> = {
 
 export function formatTrafficLabel(requestsPerMinute: number): string {
   return `${requestsPerMinute}/мин`;
+}
+
+export function isDashboardMotionEnabled(
+  documentVisible: boolean,
+  reducedMotion: boolean,
+): boolean {
+  return documentVisible && !reducedMotion;
 }
 
 interface TopologyPanelProps {
@@ -91,6 +99,11 @@ function TopologyCanvas({
 }: TopologyPanelProps) {
   const reducedMotion = useReducedMotion() ?? false;
   const documentVisible = useDocumentVisible();
+  const { getNode, getZoom, setCenter } = useReactFlow();
+  const motionEnabled = isDashboardMotionEnabled(
+    documentVisible,
+    reducedMotion,
+  );
   const layout = useMemo(
     () => layoutTopology(snapshot.modules, snapshot.edges),
     [snapshot.edges, snapshot.modules],
@@ -117,22 +130,24 @@ function TopologyCanvas({
         height: position.height,
         selected: module.id === selectedServiceId,
         draggable: false,
+        ariaLabel: module.name,
+        style: {
+          opacity:
+            activeNeighborhood !== undefined &&
+            !activeNeighborhood.has(module.id)
+              ? 0.28
+              : 1,
+        },
         data: {
           module,
-          dimmed:
-            activeNeighborhood !== undefined &&
-            !activeNeighborhood.has(module.id),
-          motionEnabled: documentVisible && !reducedMotion,
-          onSelect: onSelectService,
+          motionEnabled,
         },
       };
     });
   }, [
     activeNeighborhood,
-    documentVisible,
     layout.nodes,
-    onSelectService,
-    reducedMotion,
+    motionEnabled,
     selectedServiceId,
     snapshot.modules,
   ]);
@@ -149,8 +164,7 @@ function TopologyCanvas({
           status: edge.status,
           motionEnabled:
             edge.requestsPerMinute > 0 &&
-            documentVisible &&
-            !reducedMotion &&
+            motionEnabled &&
             (selectedServiceId === undefined ||
               edge.source === selectedServiceId ||
               edge.target === selectedServiceId),
@@ -164,7 +178,45 @@ function TopologyCanvas({
               : 0.28,
         },
       })),
-    [documentVisible, reducedMotion, selectedServiceId, snapshot.edges],
+    [motionEnabled, selectedServiceId, snapshot.edges],
+  );
+
+  useEffect(() => {
+    if (selectedServiceId === undefined) return;
+    const selectedNode = getNode(selectedServiceId);
+    if (selectedNode === undefined) return;
+    const position = selectedNode.position;
+    const width =
+      selectedNode.measured?.width ?? selectedNode.width ?? 190;
+    const height =
+      selectedNode.measured?.height ?? selectedNode.height ?? 76;
+
+    void setCenter(position.x + width / 2, position.y + height / 2, {
+      duration: reducedMotion ? 0 : 240,
+      zoom: getZoom(),
+    });
+  }, [getNode, getZoom, reducedMotion, selectedServiceId, setCenter]);
+
+  const handleNodesChange = useCallback(
+    (changes: NodeChange<ServiceFlowNode>[]) => {
+      const selectedChange = changes.find(
+        (change) => change.type === "select" && change.selected,
+      );
+      if (selectedChange?.type === "select") {
+        if (selectedChange.id !== selectedServiceId)
+          onSelectService(selectedChange.id);
+        return;
+      }
+
+      const currentSelectionCleared = changes.some(
+        (change) =>
+          change.type === "select" &&
+          !change.selected &&
+          change.id === selectedServiceId,
+      );
+      if (currentSelectionCleared) onSelectService(undefined);
+    },
+    [onSelectService, selectedServiceId],
   );
 
   return (
@@ -180,8 +232,10 @@ function TopologyCanvas({
         maxZoom={1.6}
         nodesDraggable={false}
         nodesConnectable={false}
-        nodesFocusable={false}
+        nodesFocusable
         edgesFocusable={false}
+        onNodeClick={(_, node) => onSelectService(node.id)}
+        onNodesChange={handleNodesChange}
         onPaneClick={() => onSelectService(undefined)}
         proOptions={{ hideAttribution: true }}
       >

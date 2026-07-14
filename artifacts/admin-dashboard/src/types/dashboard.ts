@@ -2,6 +2,11 @@ export type HealthStatus = "healthy" | "warning" | "degraded" | "unknown";
 export type IncidentSeverity = "critical" | "warning" | "info";
 export type IncidentStatus = "open" | "acknowledged" | "resolved";
 export type IncidentFilter = "all" | "open";
+export type DashboardConnectionState =
+  | "live"
+  | "stale"
+  | "offline"
+  | "refreshing";
 
 export interface DashboardMetric {
   id: string;
@@ -50,4 +55,9 @@ export interface DashboardSnapshot {
   edges: ServiceEdge[];
   incidents: Incident[];
   providers: ProviderHealth[];
+}
+
+export interface DashboardSnapshotAdapter {
+  initialSnapshot?: DashboardSnapshot;
+  loadSnapshot: () => Promise<DashboardSnapshot>;
 }

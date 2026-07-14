@@ -1,5 +1,7 @@
 import type { DashboardSnapshot, Incident, IncidentFilter } from "../types/dashboard";
 
+const severityOrder = { critical: 0, warning: 1, info: 2 } as const;
+
 export function getOpenIncidentCount(snapshot: DashboardSnapshot): number {
   return snapshot.incidents.filter((incident) => incident.status === "open").length;
 }
@@ -18,9 +20,16 @@ export function filterIncidents(
   filter: IncidentFilter,
   serviceId?: string,
 ): Incident[] {
-  return snapshot.incidents.filter(
-    (incident) =>
-      (filter === "all" || incident.status === "open") &&
-      (serviceId === undefined || incident.serviceId === serviceId),
-  );
+  return snapshot.incidents
+    .filter(
+      (incident) =>
+        (filter === "all" || incident.status === "open") &&
+        (serviceId === undefined || incident.serviceId === serviceId),
+    )
+    .sort(
+      (left, right) =>
+        severityOrder[left.severity] - severityOrder[right.severity] ||
+        Date.parse(right.createdAt) - Date.parse(left.createdAt) ||
+        left.id.localeCompare(right.id),
+    );
 }

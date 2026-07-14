@@ -12,19 +12,17 @@ const statusLabels = {
 
 export interface ServiceNodeData extends Record<string, unknown> {
   module: ServiceModule;
-  dimmed: boolean;
   motionEnabled: boolean;
-  onSelect: (serviceId: string) => void;
 }
 
 export type ServiceFlowNode = Node<ServiceNodeData, "service">;
 
 function ServiceNodeComponent({ data, selected }: NodeProps<ServiceFlowNode>) {
-  const { module, dimmed, motionEnabled, onSelect } = data;
+  const { module, motionEnabled } = data;
   const pulse = module.status === "degraded" && motionEnabled;
 
   return (
-    <div className="service-node-root" data-dimmed={dimmed || undefined}>
+    <div className="service-node-root">
       <Handle
         type="target"
         position={Position.Left}
@@ -37,7 +35,6 @@ function ServiceNodeComponent({ data, selected }: NodeProps<ServiceFlowNode>) {
         data-status={module.status}
         aria-label={module.name}
         aria-pressed={selected}
-        onClick={() => onSelect(module.id)}
       >
         <span className="service-node-heading">
           <span>{module.name}</span>

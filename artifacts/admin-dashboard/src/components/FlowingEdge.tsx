@@ -60,6 +60,7 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
         labelY={labelY}
         markerEnd={markerEnd}
         style={{
+          ...props.style,
           stroke: color,
           strokeDasharray: edgeDashes[status],
           strokeWidth: 2,

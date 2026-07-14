@@ -1,207 +1,38 @@
-:root {
-  color-scheme: dark;
-  font-family: system-ui, sans-serif;
-  background: #101010;
-  color: #f5f5f5;
-}
-
 * {
   box-sizing: border-box;
 }
+
 body {
   margin: 0;
 }
+
 button,
 input {
   font: inherit;
 }
-button {
-  cursor: pointer;
-}
-button:disabled {
-  cursor: default;
-}
 
-.dashboard-shell {
-  min-height: 100vh;
-  padding: 20px;
-}
-.dashboard-header,
-.topology-panel-header,
-.service-node-heading {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.dashboard-header,
-.topology-panel-header {
-  flex-wrap: wrap;
-}
-.dashboard-header h1 {
-  white-space: nowrap;
-}
-.dashboard-header h1,
-.topology-panel-header h2,
-.incident-rail h2 {
-  margin: 0 auto 0 0;
-}
-.summary-strip {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin-block: 20px;
-}
-.summary-metric {
-  min-width: 0;
-  padding: 12px;
-  border: 1px solid #3f3f46;
-}
-.summary-metric strong {
-  display: block;
-  font-size: 1.75rem;
-}
-.metric-trend {
-  display: flex;
-  align-items: end;
-  gap: 3px;
-  height: 24px;
-}
-.metric-trend > span {
-  width: 5px;
-  background: currentColor;
-}
-.dashboard-content {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
-  gap: 16px;
-}
 .topology-panel {
   min-width: 0;
 }
+
 .topology-scroll {
   min-width: 0;
   overflow-x: auto;
 }
+
 .topology-canvas {
   width: 100%;
   min-width: 760px;
   height: 560px;
 }
+
 .topology-controls {
   position: absolute;
-  z-index: 5;
-  left: 12px;
-  bottom: 12px;
-  display: flex;
-  gap: 4px;
-}
-.topology-controls button,
-.topology-panel-header button,
-.dashboard-header button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.topology-controls svg,
-.topology-panel-header svg,
-.dashboard-header svg {
-  width: 18px;
-  height: 18px;
-}
-.status-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.status-legend span::before {
-  content: "";
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin-right: 4px;
-  border-radius: 50%;
-  background: currentColor;
-}
-[data-status="healthy"] {
-  color: #22c55e;
-}
-[data-status="warning"] {
-  color: #f59e0b;
-}
-[data-status="degraded"] {
-  color: #ef4444;
-}
-[data-status="unknown"] {
-  color: #94a3b8;
-}
-.service-node-root[data-dimmed] {
-  opacity: 0.28;
-}
-.service-node {
-  width: 190px;
-  height: 76px;
-  padding: 10px;
-  text-align: left;
-  color: #f5f5f5;
-  background: #202020;
-  border: 1px solid currentColor;
-}
-.service-node-heading > span:first-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #f5f5f5;
-}
-.service-status-dot {
-  width: 8px;
-  height: 8px;
-  margin-left: auto;
-  border-radius: 50%;
-  background: currentColor;
-}
-.service-node-meta,
-.service-node-status {
-  display: block;
-  font-size: 0.75rem;
-}
-.incident-rail header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-.incident-list {
-  display: grid;
-  gap: 12px;
-  margin-top: 12px;
-}
-.incident-row {
-  display: grid;
-  gap: 6px;
-  padding-block: 10px;
-  border-top: 1px solid #3f3f46;
-}
-.incident-title {
-  padding: 0;
-  text-align: left;
-  color: inherit;
-  background: none;
-  border: 0;
-  font-weight: 700;
-}
-.incident-filters {
-  display: flex;
-  gap: 4px;
+  z-index: 1;
 }
 
-@media (max-width: 800px) {
-  .summary-strip {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .dashboard-content {
-    grid-template-columns: 1fr;
-  }
-  .topology-panel-header h2 {
-    flex-basis: 100%;
-  }
+.service-node-root,
+.service-node {
+  width: 100%;
+  height: 100%;
 }

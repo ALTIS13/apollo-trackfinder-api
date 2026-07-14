@@ -1,4 +1,7 @@
-import type { DashboardSnapshot } from "../types/dashboard";
+import type {
+  DashboardSnapshot,
+  DashboardSnapshotAdapter,
+} from "../types/dashboard";
 
 export const demoSnapshot: DashboardSnapshot = {
   generatedAt: "2026-07-14T09:30:00.000Z",
@@ -180,4 +183,11 @@ export const demoSnapshot: DashboardSnapshot = {
     { id: "bandcamp", name: "Bandcamp", status: "healthy", latencyMs: 276 },
     { id: "deezer", name: "Deezer", status: "unknown", latencyMs: 0 },
   ],
+};
+
+export const demoDashboardAdapter: DashboardSnapshotAdapter = {
+  initialSnapshot: demoSnapshot,
+  async loadSnapshot() {
+    return { ...demoSnapshot, generatedAt: new Date().toISOString() };
+  },
 };
