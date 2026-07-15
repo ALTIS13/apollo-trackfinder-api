@@ -54,6 +54,58 @@ session-only positions.
 - `pnpm typecheck` in `artifacts/admin-dashboard` -- exit `0`.
 - `pnpm run typecheck` at repository root -- exit `0`; libraries and all six filtered artifact/script projects typechecked.
 - `pnpm build` in `artifacts/admin-dashboard` -- exit `0`; Vite transformed 2556 modules and built the production bundle.
+
+---
+
+## Crossed Stroke-Footprint Follow-Up
+
+### Scope
+
+- Pre-follow-up HEAD: `43be802`.
+- Changed only `topology-connector-geometry.ts`, its test, and this existing report.
+- No browser automation or dev server was run. No status, API, persistence,
+  HomeNode, Coolify, layout, styling, or infrastructure files were changed.
+
+### Root Cause And Fix
+
+The bounded crossed route used a midpoint vertical bend. For a branch source at
+`488` and female outer boundary at `485.5`, that centerline was `486.75`.
+Its six-unit conductor painted to `489.75`, beyond the female socket
+center-band boundary at `488.5`.
+
+Crossed bounded routes now place their vertical bend at the target X, which is
+the female outer boundary. Its painted right edge therefore ends at the
+allowed boundary. Positive short spans retain their midpoint bend, and the
+normal-clearance path selection continues to use rounded smooth steps.
+
+### TDD Evidence
+
+#### RED
+
+1. `pnpm vitest run src/lib/topology-connector-geometry.test.ts -t "keeps a crossed off-row vertical stroke outside the female socket"` -- exit `1`.
+   1 test failed and 8 were skipped: painted edge `489.75` was expected to be
+   less than or equal to the permitted edge `488.5`.
+
+#### GREEN
+
+1. `pnpm vitest run src/lib/topology-connector-geometry.test.ts -t "keeps a one-unit off-row short vertical stroke outside the female socket"` -- exit `0`.
+   1 passed and 9 were skipped before the crossed-route implementation,
+   preserving the positive short-span footprint behavior.
+2. `pnpm vitest run src/lib/topology-connector-geometry.test.ts` -- exit `0`; 10 passed after the minimal crossed bend implementation.
+3. `pnpm vitest run src/lib/topology-connector-geometry.test.ts src/components/FlowingEdge.test.tsx src/components/TopologyPanel.test.tsx` -- exit `0`; 3 files and 46 tests passed from the final source state.
+
+The new tests inspect the vertical `M`/`L` segment and assert its painted right
+edge, including the conductor half-width, stays at or left of the female
+socket center-band boundary. The existing normal multi-row regression still
+requires a rounded `Q` smooth-step segment.
+
+### Final Validation
+
+- `pnpm test` in `artifacts/admin-dashboard` -- exit `0`; 11 files and 118 tests passed.
+- `pnpm typecheck` in `artifacts/admin-dashboard` -- exit `0`.
+- `pnpm run typecheck` at repository root -- exit `0`; libraries and all six filtered artifact/script projects typechecked.
+- `pnpm build` in `artifacts/admin-dashboard` -- exit `0`; Vite transformed 2556 modules and built the production bundle.
+- `git diff --check` -- exit `0` after the report append.
 - `git diff --check` -- exit `0` after the off-row report append.
 
 ---

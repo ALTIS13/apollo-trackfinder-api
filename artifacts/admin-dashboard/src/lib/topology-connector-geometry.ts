@@ -12,8 +12,8 @@ function buildBoundedOrthogonalPath(
   targetX: number,
   targetY: number,
 ): string {
-  const midpointX = (sourceX + targetX) / 2;
-  return `M${sourceX} ${sourceY} L${midpointX} ${sourceY} L${midpointX} ${targetY} L${targetX} ${targetY}`;
+  const bendX = sourceX > targetX ? targetX : (sourceX + targetX) / 2;
+  return `M${sourceX} ${sourceY} L${bendX} ${sourceY} L${bendX} ${targetY} L${targetX} ${targetY}`;
 }
 
 export interface ConnectorGeometryInput {

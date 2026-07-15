@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Position } from "@xyflow/react";
 import {
   buildConnectorGeometry,
+  CONDUCTOR_WIDTH,
   type ConnectorGeometryInput,
 } from "./topology-connector-geometry";
 
@@ -65,6 +66,20 @@ function expectPathToStayWithinHorizontalBounds(
   xCoordinates.forEach((x) => {
     expect(x).toBeGreaterThanOrEqual(minimumX);
     expect(x).toBeLessThanOrEqual(maximumX);
+  });
+}
+
+function getVerticalLineSegmentXs(path: string): number[] {
+  const points = Array.from(
+    path.matchAll(/(?:M|L)(-?(?:\d+\.?\d*|\.\d+))\s+(-?(?:\d+\.?\d*|\.\d+))/g),
+    ([, x, y]) => ({ x: Number(x), y: Number(y) }),
+  );
+
+  return points.slice(1).flatMap((point, index) => {
+    const previousPoint = points[index];
+    return point.x === previousPoint.x && point.y !== previousPoint.y
+      ? [point.x]
+      : [];
   });
 }
 
@@ -195,6 +210,26 @@ describe("buildConnectorGeometry", () => {
     );
   });
 
+  it("keeps a one-unit off-row short vertical stroke outside the female socket", () => {
+    const geometry = buildConnectorGeometry({
+      sourceX: 488,
+      sourceY: 140,
+      sourcePosition: Position.Right,
+      targetX: 551.642,
+      targetY: 141,
+      targetPosition: Position.Left,
+      sharedBranchLength: 17.142,
+    });
+    const verticalSegmentXs = getVerticalLineSegmentXs(geometry.sourcePath);
+
+    expect(verticalSegmentXs).toHaveLength(1);
+    verticalSegmentXs.forEach((verticalX) => {
+      expect(verticalX + CONDUCTOR_WIDTH / 2).toBeLessThanOrEqual(
+        geometry.femaleOuterX + CONDUCTOR_WIDTH / 2,
+      );
+    });
+  });
+
   it("keeps a zero-clearance crossed target bounded without a shared trunk", () => {
     const geometry = buildConnectorGeometry({
       sourceX: 488,
@@ -235,5 +270,25 @@ describe("buildConnectorGeometry", () => {
       geometry.branchSourceX,
       geometry.femaleOuterX,
     );
+  });
+
+  it("keeps a crossed off-row vertical stroke outside the female socket", () => {
+    const geometry = buildConnectorGeometry({
+      sourceX: 488,
+      sourceY: 140,
+      sourcePosition: Position.Right,
+      targetX: 529.5,
+      targetY: 141,
+      targetPosition: Position.Left,
+      sharedBranchLength: 0,
+    });
+    const verticalSegmentXs = getVerticalLineSegmentXs(geometry.sourcePath);
+
+    expect(verticalSegmentXs).toHaveLength(1);
+    verticalSegmentXs.forEach((verticalX) => {
+      expect(verticalX + CONDUCTOR_WIDTH / 2).toBeLessThanOrEqual(
+        geometry.femaleOuterX + CONDUCTOR_WIDTH / 2,
+      );
+    });
   });
 });
