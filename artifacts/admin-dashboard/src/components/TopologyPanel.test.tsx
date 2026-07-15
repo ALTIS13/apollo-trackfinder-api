@@ -3,6 +3,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { useState } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { demoSnapshot } from "../data/demo-snapshot";
+import {
+  CONNECTOR_BEND_RADIUS,
+  CONTACT_HALF_LENGTH,
+  TARGET_STUB_LENGTH,
+} from "../lib/topology-connector-geometry";
 
 const flowApi = vi.hoisted(() => ({
   fitView: vi.fn(),
@@ -148,12 +153,23 @@ describe("TopologyPanel", () => {
     render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
 
     await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    const coreNode = getReactFlowProps().nodes.find((node) => node.id === "core-api");
+    if (coreNode === undefined) throw new Error("Core API node was not rendered");
+    const coreWidth = coreNode.width ?? coreNode.measured?.width;
+    if (coreWidth === undefined) throw new Error("Core API node width was not measured");
+    const targetX =
+      coreNode.position.x +
+      coreWidth +
+      CONNECTOR_BEND_RADIUS +
+      2 * CONTACT_HALF_LENGTH +
+      TARGET_STUB_LENGTH +
+      6.436;
     act(() => {
       getReactFlowProps().onNodesChange([
         {
           type: "position",
           id: "download-worker",
-          position: { x: 545.936, y: 140 },
+          position: { x: targetX, y: 140 },
         },
       ]);
     });
