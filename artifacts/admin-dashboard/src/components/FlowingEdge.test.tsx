@@ -92,13 +92,15 @@ describe("FlowingEdge", () => {
     expect(
       container.querySelector(".topology-edge-contact-male"),
     ).toHaveAttribute("data-contact-kind", "male");
-    const maskGap = container.querySelector("mask[id^='edge-contact-gap-'] rect:last-child");
-    expect(maskGap).toHaveAttribute("width", "32");
+    const routeCover = container.querySelector(".topology-edge-contact-route-cover");
+    expect(routeCover).toHaveAttribute("x", "-16");
+    expect(routeCover).toHaveAttribute("width", "32");
     expect(container.querySelector(".topology-edge-contact-female .topology-edge-contact-rail"))
       .toHaveAttribute("d", expect.stringContaining("M -16 -2.25"));
     expect(container.querySelector(".topology-edge-contact-male .topology-edge-contact-rail"))
       .toHaveAttribute("d", expect.stringContaining("M 16 -2.25"));
-    expect(path?.getAttribute("style")).toContain("mask");
+    expect(path?.getAttribute("style")).not.toContain("mask");
+    expect(path?.getAttribute("d")).toMatch(/L120 0$/);
     expect(getByText("240/мин")).toBeInTheDocument();
   });
 
@@ -126,23 +128,55 @@ describe("FlowingEdge", () => {
   it("keeps both outer contact ends on the final horizontal segment of a bent edge", () => {
     const { container } = renderEdge({ sourceY: 0, targetY: 80 });
     const contact = container.querySelector(".topology-edge-contact");
-    const maskGap = container.querySelector("mask[id^='edge-contact-gap-'] rect:last-child");
+    const routeCover = container.querySelector(".topology-edge-contact-route-cover");
 
     expect(contact).toHaveAttribute("transform", "translate(92 80)");
-    expect(maskGap).toHaveAttribute("x", "76");
-    expect(maskGap).toHaveAttribute("width", "32");
+    expect(routeCover).toHaveAttribute("x", "-16");
+    expect(routeCover).toHaveAttribute("width", "32");
   });
 
-  it("produces distinct mask IDs for edge IDs that sanitize to the same text", () => {
-    const first = renderEdge({ id: "edge:a" });
-    const firstMaskId = first.container.querySelector("mask")?.id;
-    first.unmount();
-    const second = renderEdge({ id: "edge?a" });
-    const secondMaskId = second.container.querySelector("mask")?.id;
+  it("keeps the route visible while the contact body occludes its center span", () => {
+    const { container } = renderEdge();
+    const path = container.querySelector(".react-flow__edge-path");
+    const routeCover = container.querySelector(".topology-edge-contact-route-cover");
 
-    expect(firstMaskId).toBeDefined();
-    expect(secondMaskId).toBeDefined();
-    expect(firstMaskId).not.toBe(secondMaskId);
+    expect(container.querySelector("mask")).not.toBeInTheDocument();
+    expect(path?.getAttribute("style")).not.toContain("mask");
+    expect(routeCover).toHaveAttribute("x", "-16");
+    expect(routeCover).toHaveAttribute("y", "-3");
+    expect(routeCover).toHaveAttribute("width", "32");
+    expect(routeCover).toHaveAttribute("height", "6");
+  });
+
+  it("matches the cable stroke to the straight contact body height", () => {
+    const { container } = renderEdge();
+    const path = container.querySelector(".react-flow__edge-path");
+    const rails = container.querySelectorAll(".topology-edge-contact-rail");
+
+    expect(path).toHaveStyle({ strokeWidth: "4.5" });
+    rails.forEach((rail) => {
+      expect(rail).toHaveAttribute("d", expect.stringContaining("-2.25"));
+      expect(rail).toHaveAttribute("d", expect.stringContaining("2.25"));
+    });
+  });
+
+  it("keeps the route cover opaque while dimming the edge visuals", () => {
+    const { container } = renderEdge({
+      status: "degraded",
+      style: { opacity: 0.28 },
+    });
+    const contact = container.querySelector<SVGElement>(".topology-edge-contact");
+    const routeCover = container.querySelector<SVGElement>(
+      ".topology-edge-contact-route-cover",
+    );
+    const routeOcclusion = container.querySelector<SVGElement>(
+      ".topology-edge-contact-route-occlusion",
+    );
+
+    expect(contact).toHaveStyle({ opacity: "0.28" });
+    expect(contact).not.toContainElement(routeCover);
+    expect(routeOcclusion).toContainElement(routeCover);
+    expect(routeOcclusion).not.toHaveAttribute("style");
   });
 
   it("shows warning evidence and flicker only while motion is enabled", () => {

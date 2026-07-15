@@ -36,6 +36,7 @@ const contactOffsets: Record<HealthStatus, number> = {
 };
 
 const CONTACT_HALF_LENGTH = 16;
+const CABLE_STROKE_WIDTH = 4.5;
 const TARGET_LINE_STUB = 12;
 const EDGE_BEND_RADIUS = 7.5;
 const MAX_VISIBLE_STATUS_CODE_LENGTH = 12;
@@ -72,13 +73,6 @@ function getStatusText(status: HealthStatus, code?: string) {
     return visibleCode === undefined ? "ERROR" : `ERROR ${visibleCode}`;
   if (status === "unknown") return "NO DATA";
   return undefined;
-}
-
-function getMaskId(edgeId: string) {
-  const encodedId = Array.from(edgeId, (character) =>
-    character.codePointAt(0)!.toString(16),
-  ).join("-");
-  return `edge-contact-gap-${encodedId}`;
 }
 
 export function getEdgeAccessibleLabel(
@@ -139,33 +133,33 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
     statusText === undefined
       ? 0
       : Math.min(104, Math.max(46, statusText.length * 5.4 + 12));
-  const maskId = getMaskId(props.id);
   return (
     <>
-      <defs>
-        <mask id={maskId} maskUnits="userSpaceOnUse">
-          <rect x={-10_000} y={-10_000} width={20_000} height={20_000} fill="white" />
-          <rect
-            x={contactX - CONTACT_HALF_LENGTH}
-            y={contactY - 15}
-            width={CONTACT_HALF_LENGTH * 2}
-            height={30}
-            rx={6}
-            fill="black"
-          />
-        </mask>
-      </defs>
       <BaseEdge
         path={edgePath}
         markerEnd={markerEnd}
         style={{
           ...props.style,
-          mask: `url(#${maskId})`,
           stroke: color,
           strokeDasharray: edgeDashes[status],
-          strokeWidth: 2,
+          strokeWidth: CABLE_STROKE_WIDTH,
         }}
       />
+      <g
+        className="topology-edge-contact-route-occlusion"
+        aria-hidden="true"
+        transform={`translate(${contactX} ${contactY})`}
+        pointerEvents="none"
+      >
+        <rect
+          className="topology-edge-contact-route-cover"
+          x={-CONTACT_HALF_LENGTH}
+          y={-3}
+          width={CONTACT_HALF_LENGTH * 2}
+          height={6}
+          fill="var(--color-surface)"
+        />
+      </g>
       <g
         className="topology-edge-contact"
         data-state={contactStates[status]}
