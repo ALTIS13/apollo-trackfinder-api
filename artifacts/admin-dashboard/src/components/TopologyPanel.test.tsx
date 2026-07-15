@@ -10,6 +10,7 @@ import {
   TARGET_STUB_LENGTH,
 } from "../lib/topology-connector-geometry";
 import { getEvidenceLabelRect } from "../lib/topology-evidence-layout";
+import { getSharedSourceRoutes } from "../lib/topology-shared-routes";
 import { getEvidenceLabelText, getEvidenceLabelWidth } from "./FlowingEdge";
 import { Position } from "@xyflow/react";
 
@@ -52,11 +53,7 @@ vi.mock("framer-motion", async (importOriginal) => ({
   useReducedMotion: () => motionPreference.reduced,
 }));
 
-import {
-  getSharedSourceRoutes,
-  isDashboardMotionEnabled,
-  TopologyPanel,
-} from "./TopologyPanel";
+import { isDashboardMotionEnabled, TopologyPanel } from "./TopologyPanel";
 
 function StatefulTopologyPanel() {
   const [selectedServiceId, setSelectedServiceId] = useState<string>();
@@ -244,16 +241,16 @@ describe("TopologyPanel", () => {
     expect(manualBounds.x + manualBounds.width).toBe(1590);
     expect(flowApi.fitView).not.toHaveBeenCalled();
   });
-  it("assigns ordered statuses to every shared source edge and the trunk to the last", () => {
+  it("assigns ordered status bands to every shared source edge and a deterministic trunk owner", () => {
     expect(
       Array.from(
         getSharedSourceRoutes(
           demoSnapshot.edges,
           new Map([
-            ["core-api", { x: 298, width: 190 }],
-            ["account-integrations", { x: 572, width: 190 }],
-            ["search-media", { x: 572, width: 190 }],
-            ["download-worker", { x: 572, width: 190 }],
+            ["core-api", { x: 298, y: 0, width: 190, height: 76 }],
+            ["account-integrations", { x: 572, y: 0, width: 190, height: 76 }],
+            ["search-media", { x: 572, y: 240, width: 190, height: 76 }],
+            ["download-worker", { x: 572, y: 120, width: 190, height: 76 }],
           ]),
         ).entries(),
       ),
@@ -261,15 +258,12 @@ describe("TopologyPanel", () => {
       [
         "core-api-account-integrations",
         {
-          statuses: ["healthy", "warning", "degraded"],
-          renderTrunk: false,
-          sharedBranchLength: 24,
-        },
-      ],
-      [
-        "core-api-search-media",
-        {
-          statuses: ["healthy", "warning", "degraded"],
+          statusBands: [
+            { status: "healthy", count: 1 },
+            { status: "degraded", count: 1 },
+            { status: "warning", count: 1 },
+          ],
+          aggregateStatus: "degraded",
           renderTrunk: false,
           sharedBranchLength: 24,
         },
@@ -277,7 +271,25 @@ describe("TopologyPanel", () => {
       [
         "core-api-download-worker",
         {
-          statuses: ["healthy", "warning", "degraded"],
+          statusBands: [
+            { status: "healthy", count: 1 },
+            { status: "degraded", count: 1 },
+            { status: "warning", count: 1 },
+          ],
+          aggregateStatus: "degraded",
+          renderTrunk: false,
+          sharedBranchLength: 24,
+        },
+      ],
+      [
+        "core-api-search-media",
+        {
+          statusBands: [
+            { status: "healthy", count: 1 },
+            { status: "degraded", count: 1 },
+            { status: "warning", count: 1 },
+          ],
+          aggregateStatus: "degraded",
           renderTrunk: true,
           sharedBranchLength: 24,
         },
@@ -332,9 +344,6 @@ describe("TopologyPanel", () => {
       expect(
         sharedRoutes.filter((edge) => edge.data?.renderSharedTrunk),
       ).toHaveLength(1);
-      expect(
-        sharedRoutes.find((edge) => edge.data?.renderSharedTrunk)?.id,
-      ).toBe("core-api-download-worker");
     });
   });
 

@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { memo } from "react";
 import type { HealthStatus, ServiceModule } from "../types/dashboard";
+import { getWorstHealthStatus } from "../lib/topology-shared-routes";
 
 const statusLabels = {
   healthy: "Работает",
@@ -35,8 +36,6 @@ const terminalColors: Record<HealthStatus, string> = {
   degraded: "#ef4444",
   unknown: "#94a3b8",
 };
-const multiStatusTerminalBackground =
-  "linear-gradient(to bottom, #22c55e 0 2px, #f59e0b 2px 4px, #ef4444 4px 6px)";
 
 export interface ServiceNodeData extends Record<string, unknown> {
   module: ServiceModule;
@@ -49,6 +48,8 @@ export type ServiceFlowNode = Node<ServiceNodeData, "service">;
 
 function ServiceNodeComponent({ data, selected }: NodeProps<ServiceFlowNode>) {
   const { module, motionEnabled, sourceStatuses, targetStatuses } = data;
+  const targetAggregateStatus = getWorstHealthStatus(targetStatuses);
+  const sourceAggregateStatus = getWorstHealthStatus(sourceStatuses);
   const pulse = module.status === "degraded" && motionEnabled;
   const ServiceIcon =
     serviceIcons[module.id as keyof typeof serviceIcons] ?? Layers3;
@@ -64,11 +65,9 @@ function ServiceNodeComponent({ data, selected }: NodeProps<ServiceFlowNode>) {
       <span
         className="service-node-terminal service-node-terminal--target"
         data-statuses={targetStatuses.join(" ")}
+        data-aggregate-status={targetAggregateStatus}
         style={{
-          background:
-            targetStatuses.length > 1
-              ? multiStatusTerminalBackground
-              : terminalColors[targetStatuses[0] ?? module.status],
+          background: terminalColors[targetAggregateStatus ?? module.status],
         }}
         aria-hidden="true"
       />
@@ -116,11 +115,9 @@ function ServiceNodeComponent({ data, selected }: NodeProps<ServiceFlowNode>) {
       <span
         className="service-node-terminal service-node-terminal--source"
         data-statuses={sourceStatuses.join(" ")}
+        data-aggregate-status={sourceAggregateStatus}
         style={{
-          background:
-            sourceStatuses.length > 1
-              ? multiStatusTerminalBackground
-              : terminalColors[sourceStatuses[0] ?? module.status],
+          background: terminalColors[sourceAggregateStatus ?? module.status],
         }}
         aria-hidden="true"
       />

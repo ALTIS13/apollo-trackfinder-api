@@ -4,7 +4,10 @@ import {
   type EdgeProps,
 } from "@xyflow/react";
 import { motion } from "framer-motion";
+import { useId } from "react";
 import { buildConnectorGeometry } from "../lib/topology-connector-geometry";
+import { buildStatusGradientStops } from "../lib/topology-status-gradient";
+import type { SharedStatusBand } from "../lib/topology-shared-routes";
 import type { HealthStatus } from "../types/dashboard";
 
 const edgeColors: Record<HealthStatus, string> = {
@@ -17,15 +20,6 @@ const edgeColors: Record<HealthStatus, string> = {
 const ROUTE_COLOR = "#596273";
 const ROUTE_WIDTH = 1.75;
 const STATUS_LANE_WIDTH = 1;
-const sharedStatusLaneOrder = ["healthy", "warning", "degraded"] as const;
-const sharedStatusLaneOffsets: Record<
-  (typeof sharedStatusLaneOrder)[number],
-  number
-> = {
-  healthy: -1,
-  warning: 0,
-  degraded: 1,
-};
 
 const contactStates = {
   healthy: "connected",
@@ -58,7 +52,7 @@ export interface FlowingEdgeData extends Record<string, unknown> {
   motionEnabled: boolean;
   actionable?: boolean;
   diagnostic?: FlowingEdgeDiagnostic;
-  sharedStatuses?: HealthStatus[];
+  sharedStatusBands?: SharedStatusBand[];
   sharedBranchLength?: number;
   renderSharedTrunk?: boolean;
   evidenceLane?: number;
@@ -120,10 +114,9 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
     targetPosition,
   } = props;
   const status = data?.status ?? "unknown";
-  const sharedStatuses = data?.sharedStatuses ?? [];
-  const orderedSharedStatuses = sharedStatusLaneOrder.filter((sharedStatus) =>
-    sharedStatuses.includes(sharedStatus),
-  );
+  const sharedStatusBands = data?.sharedStatusBands ?? [];
+  const gradientStops = buildStatusGradientStops(sharedStatusBands);
+  const gradientId = `${useId()}-${props.id}`.replace(/[^a-zA-Z0-9_-]/g, "-");
   const geometry = buildConnectorGeometry({
     sourceX,
     sourceY,
@@ -222,21 +215,35 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
             strokeWidth={ROUTE_WIDTH}
             strokeLinecap="butt"
           />
-          {orderedSharedStatuses.map((sharedStatus) => {
-            const offset = sharedStatusLaneOffsets[sharedStatus];
-            return (
+          {gradientStops.length > 0 ? (
+            <>
+              <defs>
+                <linearGradient
+                  id={gradientId}
+                  gradientUnits="userSpaceOnUse"
+                  x1={sourceX}
+                  x2={geometry.branchSourceX}
+                >
+                  {gradientStops.map((stop, index) => (
+                    <stop
+                      key={`${stop.offset}:${stop.status}:${index}`}
+                      offset={`${stop.offset * 100}%`}
+                      stopColor={edgeColors[stop.status]}
+                      stopOpacity={1}
+                    />
+                  ))}
+                </linearGradient>
+              </defs>
               <path
-                key={sharedStatus}
                 className="topology-edge-shared-trunk topology-edge-status-lane"
                 d={geometry.sharedTrunkPath}
                 fill="none"
-                stroke={edgeColors[sharedStatus]}
+                stroke={`url(#${gradientId})`}
                 strokeWidth={STATUS_LANE_WIDTH}
                 strokeLinecap="butt"
-                transform={`translate(0 ${offset})`}
               />
-            );
-          })}
+            </>
+          ) : null}
         </>
       ) : null}
       <g

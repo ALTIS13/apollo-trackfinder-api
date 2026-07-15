@@ -22,13 +22,8 @@ import {
 } from "react";
 import { getServiceNeighborhood } from "../lib/dashboard-model";
 import { layoutTopology } from "../lib/topology-layout";
-import {
-  buildConnectorGeometry,
-  CONNECTOR_BEND_RADIUS,
-  CONTACT_HALF_LENGTH,
-  SHARED_TRUNK_LENGTH,
-  TARGET_STUB_LENGTH,
-} from "../lib/topology-connector-geometry";
+import { buildConnectorGeometry } from "../lib/topology-connector-geometry";
+import { getSharedSourceRoutes } from "../lib/topology-shared-routes";
 import {
   assignEvidenceLabelLanes,
   getEvidenceLabelRect,
@@ -79,59 +74,6 @@ const alignmentModes = ["free", "align"] as const;
 const EVIDENCE_LABEL_HEIGHT = 14;
 const EVIDENCE_LABEL_BASE_OFFSET = 22;
 const EVIDENCE_LABEL_LANE_GAP = 4;
-
-export interface SharedSourceRoute {
-  statuses: HealthStatus[];
-  renderTrunk: boolean;
-  sharedBranchLength: number;
-}
-
-export interface TopologyNodePosition {
-  x: number;
-  width: number;
-}
-
-export function getSharedSourceRoutes(
-  edges: ServiceEdge[],
-  nodePositions: ReadonlyMap<string, TopologyNodePosition>,
-): Map<string, SharedSourceRoute> {
-  const edgesBySource = new Map<string, ServiceEdge[]>();
-  edges.forEach((edge) => {
-    const sourceEdges = edgesBySource.get(edge.source) ?? [];
-    sourceEdges.push(edge);
-    edgesBySource.set(edge.source, sourceEdges);
-  });
-
-  const routes = new Map<string, SharedSourceRoute>();
-  edgesBySource.forEach((sourceEdges) => {
-    if (sourceEdges.length < 2) return;
-    const sourcePosition = nodePositions.get(sourceEdges[0].source);
-    if (sourcePosition === undefined) return;
-    const sourceX = sourcePosition.x + sourcePosition.width;
-    const sharedBranchLength = sourceEdges.reduce(
-      (shortestClearance, edge) => {
-        const targetPosition = nodePositions.get(edge.target);
-        if (targetPosition === undefined) return 0;
-        const femaleOuterX =
-          targetPosition.x - 2 * CONTACT_HALF_LENGTH - TARGET_STUB_LENGTH;
-        const clearance = femaleOuterX - sourceX - CONNECTOR_BEND_RADIUS;
-        return Math.min(shortestClearance, Math.max(0, clearance));
-      },
-      SHARED_TRUNK_LENGTH,
-    );
-    const statuses = statusOrder.filter((status) =>
-      sourceEdges.some((edge) => edge.status === status),
-    );
-    sourceEdges.forEach((edge, index) => {
-      routes.set(edge.id, {
-        statuses,
-        renderTrunk: index === sourceEdges.length - 1,
-        sharedBranchLength,
-      });
-    });
-  });
-  return routes;
-}
 
 function getTerminalStatuses(edges: ServiceEdge[]) {
   const byService = new Map<
@@ -489,7 +431,7 @@ function TopologyCanvas({
                     message: linkedIncident.diagnostic.message,
                   },
             actionable: canOpenIncident,
-            sharedStatuses: sharedSourceRoutes.get(edge.id)?.statuses,
+            sharedStatusBands: sharedSourceRoutes.get(edge.id)?.statusBands,
             sharedBranchLength:
               sharedSourceRoutes.get(edge.id)?.sharedBranchLength,
             renderSharedTrunk: sharedSourceRoutes.get(edge.id)?.renderTrunk,

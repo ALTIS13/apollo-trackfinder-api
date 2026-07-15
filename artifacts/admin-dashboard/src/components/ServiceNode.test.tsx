@@ -46,15 +46,14 @@ describe("ServiceNode", () => {
     );
 
     expect(target).toHaveAttribute("data-statuses", "healthy");
+    expect(target).toHaveAttribute("data-aggregate-status", "healthy");
     expect(target).toHaveStyle({ background: "#22c55e" });
     expect(source).toHaveAttribute(
       "data-statuses",
       "healthy warning degraded",
     );
-    expect(source).toHaveStyle({
-      background:
-        "linear-gradient(to bottom, #22c55e 0 2px, #f59e0b 2px 4px, #ef4444 4px 6px)",
-    });
+    expect(source).toHaveAttribute("data-aggregate-status", "degraded");
+    expect(source).toHaveStyle({ background: "#ef4444" });
     expect(source).toHaveAttribute(
       "aria-hidden",
       "true",

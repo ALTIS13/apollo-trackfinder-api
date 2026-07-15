@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import type { CSSProperties } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HealthStatus } from "../types/dashboard";
+import type { SharedStatusBand } from "../lib/topology-shared-routes";
 import { FlowingEdge, getEvidenceLabelWidth } from "./FlowingEdge";
 
 afterEach(cleanup);
@@ -24,7 +25,7 @@ interface RenderEdgeOptions {
     message: string;
   };
   style?: CSSProperties;
-  sharedStatuses?: HealthStatus[];
+  sharedStatusBands?: SharedStatusBand[];
   sharedBranchLength?: number;
   renderSharedTrunk?: boolean;
   evidenceLane?: number;
@@ -38,7 +39,7 @@ function renderEdge({
   targetY = 0,
   diagnostic,
   style,
-  sharedStatuses,
+  sharedStatusBands,
   sharedBranchLength,
   renderSharedTrunk,
   evidenceLane,
@@ -48,7 +49,7 @@ function renderEdge({
     motionEnabled,
     actionable: diagnostic !== undefined,
     diagnostic,
-    sharedStatuses,
+    sharedStatusBands,
     renderSharedTrunk,
     evidenceLane,
     ...(sharedBranchLength === undefined ? {} : { sharedBranchLength }),
@@ -275,16 +276,14 @@ describe("FlowingEdge", () => {
     expect(targetPath).toHaveAttribute("d", "M88 80 L120 80");
   });
 
-  it("renders an opaque shared source trunk once with fixed status lanes", () => {
+  it("renders one opaque gradient status lane for a shared source trunk", () => {
     const { container } = renderEdge({
       sourceY: 0,
       targetY: 80,
-      sharedStatuses: [
-        "unknown",
-        "degraded",
-        "healthy",
-        "warning",
-        "degraded",
+      sharedStatusBands: [
+        { status: "healthy", count: 2 },
+        { status: "warning", count: 1 },
+        { status: "degraded", count: 2 },
       ],
       sharedBranchLength: 24,
       renderSharedTrunk: true,
@@ -296,59 +295,35 @@ describe("FlowingEdge", () => {
       ".topology-edge-shared-trunk.topology-edge-status-lane",
     );
 
-    expect(container.querySelector("linearGradient")).not.toBeInTheDocument();
+    const gradient = container.querySelector("linearGradient");
     expect(base).toHaveLength(1);
     expect(base[0]).toHaveAttribute("stroke", "#596273");
     expect(base[0]).toHaveAttribute("stroke-width", "1.75");
-    expect(lanes).toHaveLength(3);
-    lanes.forEach((lane) => {
-      expect(lane).toHaveAttribute("d", "M 0 0 H 24");
-      expect(lane).not.toHaveAttribute("stroke-dasharray");
-      expect(lane).toHaveAttribute("stroke-width", "1");
-    });
-    expect(lanes[0]).toHaveAttribute("stroke", "#22c55e");
-    expect(lanes[0]).toHaveAttribute("transform", "translate(0 -1)");
-    expect(lanes[1]).toHaveAttribute("stroke", "#f59e0b");
-    expect(lanes[1]).toHaveAttribute("transform", "translate(0 0)");
-    expect(lanes[2]).toHaveAttribute("stroke", "#ef4444");
-    expect(lanes[2]).toHaveAttribute("transform", "translate(0 1)");
-    expect(
-      container.querySelector(
-        '.topology-edge-shared-trunk[stroke="#94a3b8"]',
-      ),
-    ).not.toBeInTheDocument();
+    expect(gradient).toHaveAttribute("gradientUnits", "userSpaceOnUse");
+    expect(gradient).toHaveAttribute("x1", "0");
+    expect(gradient).toHaveAttribute("x2", "24");
+    expect(lanes).toHaveLength(1);
+    expect(lanes[0]).toHaveAttribute("d", "M 0 0 H 24");
+    expect(lanes[0]).toHaveAttribute("stroke-width", "1");
+    expect(lanes[0]?.getAttribute("stroke")).toMatch(/^url\(#.+\)$/);
+    expect(lanes[0]).not.toHaveAttribute("transform");
+    expect(gradient?.querySelectorAll("stop")).toHaveLength(6);
+    expect(gradient?.querySelectorAll("stop")[0]).toHaveAttribute(
+      "stop-color",
+      "#22c55e",
+    );
+    expect(gradient?.querySelectorAll("stop")[3]).toHaveAttribute(
+      "stop-color",
+      "#f59e0b",
+    );
+    expect(gradient?.querySelectorAll("stop")[5]).toHaveAttribute(
+      "stop-color",
+      "#ef4444",
+    );
+    gradient?.querySelectorAll("stop").forEach((stop) =>
+      expect(stop).toHaveAttribute("stop-opacity", "1"),
+    );
   });
-
-  it.each([
-    [["healthy"], [["#22c55e", "translate(0 -1)"]]],
-    [["warning"], [["#f59e0b", "translate(0 0)"]]],
-    [["degraded"], [["#ef4444", "translate(0 1)"]]],
-    [
-      ["healthy", "degraded"],
-      [
-        ["#22c55e", "translate(0 -1)"],
-        ["#ef4444", "translate(0 1)"],
-      ],
-    ],
-  ] as const)(
-    "keeps fixed shared lane offsets for the active subset %#",
-    (sharedStatuses, expectedLanes) => {
-      const { container } = renderEdge({
-        sharedStatuses: [...sharedStatuses],
-        sharedBranchLength: 24,
-        renderSharedTrunk: true,
-      });
-      const lanes = container.querySelectorAll(
-        ".topology-edge-shared-trunk.topology-edge-status-lane",
-      );
-
-      expect(lanes).toHaveLength(expectedLanes.length);
-      expectedLanes.forEach(([stroke, transform], index) => {
-        expect(lanes[index]).toHaveAttribute("stroke", stroke);
-        expect(lanes[index]).toHaveAttribute("transform", transform);
-      });
-    },
-  );
 
   it("keeps unknown status paint on an individual edge", () => {
     const { container } = renderEdge({ status: "unknown" });
@@ -367,7 +342,7 @@ describe("FlowingEdge", () => {
     const { container } = renderEdge({
       sourceY: 0,
       targetY: 80,
-      sharedStatuses: ["healthy", "warning", "degraded"],
+      sharedStatusBands: [{ status: "healthy", count: 1 }],
       sharedBranchLength: 1,
       renderSharedTrunk: true,
     });
@@ -385,7 +360,7 @@ describe("FlowingEdge", () => {
     const { container } = renderEdge({
       sourceY: 0,
       targetY: 80,
-      sharedStatuses: ["healthy", "warning", "degraded"],
+      sharedStatusBands: [{ status: "healthy", count: 1 }],
       sharedBranchLength: 24,
     });
 
@@ -449,7 +424,7 @@ describe("FlowingEdge", () => {
     const { container } = renderEdge({
       status: "degraded",
       style: { opacity: 0.28 },
-      sharedStatuses: ["healthy", "warning", "degraded"],
+      sharedStatusBands: [{ status: "healthy", count: 1 }],
       sharedBranchLength: 24,
       renderSharedTrunk: true,
     });
