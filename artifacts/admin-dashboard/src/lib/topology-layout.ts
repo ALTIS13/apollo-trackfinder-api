@@ -3,8 +3,8 @@ import type { ServiceEdge, ServiceModule } from "../types/dashboard";
 
 export const NODE_WIDTH = 190;
 export const NODE_HEIGHT = 76;
-export const TOPOLOGY_RANK_SEPARATION = 84;
-export const TOPOLOGY_NODE_SEPARATION = 40;
+export const TOPOLOGY_RANK_SEPARATION = 132;
+export const TOPOLOGY_NODE_SEPARATION = 56;
 
 export interface LayoutNode {
   id: string;

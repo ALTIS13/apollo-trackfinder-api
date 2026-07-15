@@ -18,12 +18,18 @@ describe("layoutTopology", () => {
     expect(byId.get("core-api")!.x - byId.get("public-web")!.x).toBe(
       NODE_WIDTH + TOPOLOGY_RANK_SEPARATION,
     );
-    expect(TOPOLOGY_RANK_SEPARATION).toBe(84);
+    expect(TOPOLOGY_RANK_SEPARATION).toBe(132);
+    expect(byId.get("core-api")!.x - byId.get("public-web")!.x).toBe(
+      NODE_WIDTH + 132,
+    );
     expect(
       byId.get("download-worker")!.y -
         byId.get("account-integrations")!.y,
     ).toBe(NODE_HEIGHT + TOPOLOGY_NODE_SEPARATION);
-    expect(TOPOLOGY_NODE_SEPARATION).toBe(40);
+    expect(TOPOLOGY_NODE_SEPARATION).toBe(56);
+    expect(
+      byId.get("download-worker")!.y - byId.get("account-integrations")!.y,
+    ).toBe(NODE_HEIGHT + 56);
     expect(layout.nodes.every((node) => node.width === 190 && node.height === 76)).toBe(true);
   });
 
