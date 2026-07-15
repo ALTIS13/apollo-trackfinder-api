@@ -126,14 +126,14 @@ describe("topology alignment", () => {
     const targetTie = alignTopologyPosition({
       nodeId: "moving",
       position: { x: 48, y: 48 },
-      width: 4,
-      height: 4,
+      width: 0,
+      height: 0,
       nodes: [
         {
           id: "peer",
-          position: { x: 49, y: 49 },
-          width: 4,
-          height: 4,
+          position: { x: 46, y: 48 },
+          width: 8,
+          height: 0,
         },
       ],
       zoom: 1,
@@ -158,8 +158,8 @@ describe("topology alignment", () => {
       precision: false,
     });
 
-    expect(targetTie.guides[0]).toEqual({ axis: "x", position: 49 });
-    expect(targetTie.position.x).toBe(49);
+    expect(targetTie.guides[0]).toEqual({ axis: "x", position: 46 });
+    expect(targetTie.position.x).toBe(46);
     expect(sourceTie.guides[0]).toEqual({ axis: "x", position: 49 });
     expect(sourceTie.position.x).toBe(49);
   });
