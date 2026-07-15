@@ -819,7 +819,7 @@ export function TopologyPanel(props: TopologyPanelProps) {
         </button>
       </div>
       <div className="topology-scroll" ref={scrollContainerRef}>
-        <ReactFlowProvider initialWidth={760} initialHeight={560} fitView>
+        <ReactFlowProvider initialWidth={760} initialHeight={560}>
           <TopologyCanvas
             {...props}
             scrollContainerRef={scrollContainerRef}

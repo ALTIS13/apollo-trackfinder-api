@@ -24,6 +24,9 @@ const flowApi = vi.hoisted(() => ({
 }));
 const motionPreference = vi.hoisted(() => ({ reduced: false }));
 const reactFlowProps = vi.hoisted(() => ({ latest: undefined as unknown }));
+const reactFlowProviderProps = vi.hoisted(() => ({
+  latest: undefined as unknown,
+}));
 
 vi.mock("@xyflow/react", async (importOriginal) => {
   const original = await importOriginal<typeof import("@xyflow/react")>();
@@ -34,6 +37,12 @@ vi.mock("@xyflow/react", async (importOriginal) => {
     ReactFlow: (props: React.ComponentProps<typeof original.ReactFlow>) => {
       reactFlowProps.latest = props;
       return React.createElement(original.ReactFlow, props);
+    },
+    ReactFlowProvider: (
+      props: React.ComponentProps<typeof original.ReactFlowProvider>,
+    ) => {
+      reactFlowProviderProps.latest = props;
+      return React.createElement(original.ReactFlowProvider, props);
     },
     useReactFlow: () => flowApi,
   };
@@ -86,6 +95,7 @@ afterEach(() => {
   flowApi.getNode.mockReset();
   motionPreference.reduced = false;
   reactFlowProps.latest = undefined;
+  reactFlowProviderProps.latest = undefined;
 });
 
 function getReactFlowProps() {
@@ -117,6 +127,15 @@ function getReactFlowProps() {
 }
 
 describe("TopologyPanel", () => {
+  it("leaves initial fitting exclusively to the visual-bounds fit effect", async () => {
+    render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
+
+    await waitFor(() => expect(reactFlowProviderProps.latest).toBeDefined());
+
+    expect(reactFlowProviderProps.latest).not.toHaveProperty("fitView");
+    await waitFor(() => expect(flowApi.fitBounds).toHaveBeenCalledTimes(1));
+  });
+
   it("assigns evidence lanes only to non-healthy edges and fits the visual bounds once", async () => {
     render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
 
@@ -191,9 +210,38 @@ describe("TopologyPanel", () => {
     render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
 
     await waitFor(() => expect(flowApi.fitBounds).toHaveBeenCalledTimes(1));
+    const initialBounds = flowApi.fitBounds.mock.calls[0]?.[0];
+
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        {
+          type: "position",
+          id: "media-storage",
+          position: { x: 1400, y: -400 },
+        },
+      ]);
+    });
+    await waitFor(() =>
+      expect(
+        getReactFlowProps().nodes.find((node) => node.id === "media-storage")
+          ?.position,
+      ).toEqual({ x: 1400, y: -400 }),
+    );
+    expect(flowApi.fitBounds).toHaveBeenCalledTimes(1);
+
     fireEvent.click(screen.getByRole("button", { name: "Вписать топологию" }));
 
     expect(flowApi.fitBounds).toHaveBeenCalledTimes(2);
+    const manualBounds = flowApi.fitBounds.mock.calls[1]?.[0] as {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    };
+    expect(manualBounds).not.toEqual(initialBounds);
+    expect(manualBounds.y).toBeLessThanOrEqual(-400);
+    expect(manualBounds.x + manualBounds.width).toBe(1590);
     expect(flowApi.fitView).not.toHaveBeenCalled();
   });
   it("assigns ordered statuses to every shared source edge and the trunk to the last", () => {
