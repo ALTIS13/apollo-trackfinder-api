@@ -2,6 +2,7 @@ import {
   Background,
   ReactFlow,
   ReactFlowProvider,
+  ViewportPortal,
   useReactFlow,
   type EdgeTypes,
   type NodeChange,
@@ -30,6 +31,13 @@ import {
   applyPositionChanges,
   prunePositionOverrides,
 } from "../lib/topology-position-overrides";
+import {
+  alignTopologyPosition,
+  moveTopologyPositionByKeyboard,
+  TOPOLOGY_GRID_SIZE,
+  type AlignmentGuide,
+  type TopologyAlignmentMode,
+} from "../lib/topology-alignment";
 import type {
   DashboardSnapshot,
   HealthStatus,
@@ -161,6 +169,7 @@ interface TopologyPanelProps {
 
 interface TopologyCanvasProps extends TopologyPanelProps {
   scrollContainerRef: RefObject<HTMLDivElement | null>;
+  alignmentMode: TopologyAlignmentMode;
 }
 
 function useDocumentVisible() {
@@ -236,6 +245,7 @@ function TopologyCanvas({
   onSelectService,
   onOpenIncident,
   scrollContainerRef,
+  alignmentMode,
 }: TopologyCanvasProps) {
   const reducedMotion = useReducedMotion() ?? false;
   const documentVisible = useDocumentVisible();
@@ -247,6 +257,7 @@ function TopologyCanvas({
   const [positionOverrides, setPositionOverrides] = useState<
     Map<string, XYPosition>
   >(() => new Map());
+  const [alignmentGuides, setAlignmentGuides] = useState<AlignmentGuide[]>([]);
   const layout = useMemo(
     () => layoutTopology(snapshot.modules, snapshot.edges),
     [snapshot.edges, snapshot.modules],
@@ -301,6 +312,10 @@ function TopologyCanvas({
       prunePositionOverrides(overrides, moduleIds),
     );
   }, [moduleIds]);
+
+  useEffect(() => {
+    setAlignmentGuides([]);
+  }, [alignmentMode]);
 
   const nodes = useMemo<ServiceFlowNode[]>(() => {
     return snapshot.modules.map((module) => {
@@ -464,8 +479,32 @@ function TopologyCanvas({
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<ServiceFlowNode>[]) => {
+      const normalizedChanges = changes.map((change) => {
+        if (change.type !== "position" || change.position === undefined)
+          return change;
+        const moving = currentNodePositions.get(change.id);
+        if (moving === undefined) return change;
+        const aligned = alignTopologyPosition({
+          nodeId: change.id,
+          position: change.position,
+          width: moving.width,
+          height: moving.height,
+          nodes: Array.from(currentNodePositions, ([id, node]) => ({
+            id,
+            position: { x: node.x, y: node.y },
+            width: node.width,
+            height: node.height,
+          })),
+          zoom: getZoom(),
+          mode: alignmentMode,
+          precision: false,
+        });
+        if (change.dragging === true) setAlignmentGuides(aligned.guides);
+        else setAlignmentGuides([]);
+        return { ...change, position: aligned.position };
+      });
       setPositionOverrides((overrides) =>
-        applyPositionChanges(overrides, changes),
+        applyPositionChanges(overrides, normalizedChanges),
       );
 
       const selectedChange = changes.find(
@@ -485,11 +524,77 @@ function TopologyCanvas({
       );
       if (currentSelectionCleared) onSelectService(undefined);
     },
-    [onSelectService, selectedServiceId],
+    [alignmentMode, currentNodePositions, getZoom, onSelectService, selectedServiceId],
+  );
+
+  const handleKeyDownCapture = useCallback(
+    (event: React.KeyboardEvent) => {
+      if (
+        alignmentMode !== "align" ||
+        !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key) ||
+        !(event.target instanceof Element)
+      )
+        return;
+      const nodeElement = event.target.closest<HTMLElement>(
+        ".react-flow__node[data-id]",
+      );
+      const nodeId = nodeElement?.dataset.id;
+      if (nodeId === undefined) return;
+      const moving = currentNodePositions.get(nodeId);
+      if (moving === undefined) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      const precision = event.altKey;
+      const moved = moveTopologyPositionByKeyboard({
+        key: event.key as "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown",
+        position: { x: moving.x, y: moving.y },
+        zoom: getZoom(),
+        precision,
+      });
+      const gridPhase = {
+        x: moving.x % TOPOLOGY_GRID_SIZE,
+        y: moving.y % TOPOLOGY_GRID_SIZE,
+      };
+      const aligned = alignTopologyPosition({
+        nodeId,
+        position: {
+          x: moved.x - gridPhase.x,
+          y: moved.y - gridPhase.y,
+        },
+        width: moving.width,
+        height: moving.height,
+        nodes: Array.from(currentNodePositions, ([id, node]) => ({
+          id,
+          position: {
+            x: node.x - gridPhase.x,
+            y: node.y - gridPhase.y,
+          },
+          width: node.width,
+          height: node.height,
+        })),
+        zoom: getZoom(),
+        mode: alignmentMode,
+        precision: false,
+      });
+      const position = precision
+        ? moved
+        : {
+            x: aligned.position.x + gridPhase.x,
+            y: aligned.position.y + gridPhase.y,
+          };
+      setAlignmentGuides([]);
+      setPositionOverrides((overrides) =>
+        applyPositionChanges(overrides, [
+          { type: "position", id: nodeId, position },
+        ]),
+      );
+    },
+    [alignmentMode, currentNodePositions, getZoom],
   );
 
   return (
-    <div className="topology-canvas">
+    <div className="topology-canvas" onKeyDownCapture={handleKeyDownCapture}>
       <ReactFlow<ServiceFlowNode, TopologyFlowEdge>
         nodes={nodes}
         edges={edges}
@@ -502,6 +607,8 @@ function TopologyCanvas({
         nodesDraggable
         nodesConnectable={false}
         nodesFocusable
+        snapToGrid={alignmentMode === "align"}
+        snapGrid={[TOPOLOGY_GRID_SIZE, TOPOLOGY_GRID_SIZE]}
         onNodeClick={(_, node) => onSelectService(node.id)}
         onEdgeClick={(_, edge) => {
           const incidentId = edge.data?.diagnostic?.incidentId;
@@ -512,10 +619,28 @@ function TopologyCanvas({
         proOptions={{ hideAttribution: true }}
       >
         <Background gap={24} size={1} />
+        <ViewportPortal>
+          {alignmentGuides.map((guide) => (
+            <span
+              key={`${guide.axis}:${guide.position}`}
+              className={`topology-alignment-guide topology-alignment-guide--${guide.axis}`}
+              data-alignment-axis={guide.axis}
+              style={
+                guide.axis === "x"
+                  ? { left: guide.position }
+                  : { top: guide.position }
+              }
+              aria-hidden="true"
+            />
+          ))}
+        </ViewportPortal>
         <ViewportControls
           reducedMotion={reducedMotion}
           hasPositionOverrides={positionOverrides.size > 0}
-          onResetLayout={() => setPositionOverrides(new Map())}
+          onResetLayout={() => {
+            setPositionOverrides(new Map());
+            setAlignmentGuides([]);
+          }}
         />
       </ReactFlow>
     </div>
@@ -524,11 +649,30 @@ function TopologyCanvas({
 
 export function TopologyPanel(props: TopologyPanelProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const [alignmentMode, setAlignmentMode] =
+    useState<TopologyAlignmentMode>("align");
 
   return (
     <section className="topology-panel" id="topology" aria-label="Топология сервисов">
       <div className="topology-panel-header">
         <h2>Топология сервисов</h2>
+        <div
+          className="topology-alignment-mode"
+          role="radiogroup"
+          aria-label="Режим размещения"
+        >
+          {(["free", "align"] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              role="radio"
+              aria-checked={alignmentMode === mode}
+              onClick={() => setAlignmentMode(mode)}
+            >
+              {mode === "free" ? "Свободно" : "Выровнять"}
+            </button>
+          ))}
+        </div>
         <div className="status-legend" aria-label="Статусы">
           {(Object.keys(statusLabels) as HealthStatus[]).map((status) => (
             <span key={status} data-status={status}>
@@ -550,6 +694,7 @@ export function TopologyPanel(props: TopologyPanelProps) {
           <TopologyCanvas
             {...props}
             scrollContainerRef={scrollContainerRef}
+            alignmentMode={alignmentMode}
           />
         </ReactFlowProvider>
       </div>

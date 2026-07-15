@@ -622,6 +622,34 @@ svg {
   width: 13px;
 }
 
+.topology-alignment-mode {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  background: var(--color-surface-soft);
+}
+
+.topology-alignment-mode button {
+  min-height: 30px;
+  padding: 0 9px;
+  border: 0;
+  border-right: 1px solid var(--color-border);
+  color: var(--color-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.topology-alignment-mode button:last-child {
+  border-right: 0;
+}
+
+.topology-alignment-mode button[aria-checked="true"] {
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+}
+
 .topology-scroll {
   min-width: 0;
   overflow-x: auto;
@@ -673,6 +701,25 @@ svg {
 
 .topology-controls svg {
   width: 14px;
+}
+
+.topology-alignment-guide {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  background: var(--color-accent);
+}
+
+.topology-alignment-guide--x {
+  top: -4096px;
+  width: 1px;
+  height: 8192px;
+}
+
+.topology-alignment-guide--y {
+  left: -4096px;
+  width: 8192px;
+  height: 1px;
 }
 
 .react-flow__background pattern circle {
@@ -1578,6 +1625,11 @@ tr:has(.status-cell[data-status="unknown"]) .provider-trend-bars span {
   }
 
   .status-legend {
+    order: 4;
+    width: 100%;
+  }
+
+  .topology-alignment-mode {
     order: 3;
     width: 100%;
   }

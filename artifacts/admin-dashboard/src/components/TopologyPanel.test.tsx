@@ -104,6 +104,8 @@ function getReactFlowProps() {
       };
     }>;
     onNodesChange: (changes: unknown[]) => void;
+    snapToGrid?: boolean;
+    snapGrid?: [number, number];
   };
 }
 
@@ -153,6 +155,7 @@ describe("TopologyPanel", () => {
     render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
 
     await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
     const coreNode = getReactFlowProps().nodes.find((node) => node.id === "core-api");
     if (coreNode === undefined) throw new Error("Core API node was not rendered");
     const coreWidth = coreNode.width ?? coreNode.measured?.width;
@@ -295,6 +298,168 @@ describe("TopologyPanel", () => {
     await waitFor(() => expect(onSelectService).toHaveBeenCalledWith("download-worker"));
   });
 
+  it("switches alignment mode without moving controlled nodes and exposes grid snap props", async () => {
+    render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
+
+    await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    const initialPosition = {
+      ...getReactFlowProps().nodes.find((node) => node.id === "core-api")!.position,
+    };
+    expect(screen.getByRole("radio", { name: "Выровнять" })).toBeChecked();
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
+    expect(getReactFlowProps().snapToGrid).toBe(false);
+    expect(getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position).toEqual(
+      initialPosition,
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "Выровнять" }));
+    expect(getReactFlowProps().snapGrid).toEqual([24, 24]);
+    expect(getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position).toEqual(
+      initialPosition,
+    );
+  });
+
+  it("normalizes aligned drags, publishes nearby guides, and preserves free drags", async () => {
+    const view = render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
+
+    await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        {
+          type: "position",
+          id: "account-integrations",
+          position: { x: 238, y: 72 },
+        },
+      ]);
+    });
+    fireEvent.click(screen.getByRole("radio", { name: "Выровнять" }));
+
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        {
+          type: "position",
+          id: "core-api",
+          position: { x: 49, y: 71 },
+          dragging: true,
+        },
+      ]);
+    });
+    await waitFor(() =>
+      expect(getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position).toEqual({
+        x: 48,
+        y: 72,
+      }),
+    );
+    expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(2);
+
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        {
+          type: "position",
+          id: "core-api",
+          position: { x: 48, y: 72 },
+          dragging: false,
+        },
+      ]);
+    });
+    await waitFor(() =>
+      expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(0),
+    );
+
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        { type: "position", id: "core-api", position: { x: 49, y: 71 } },
+      ]);
+    });
+    await waitFor(() =>
+      expect(getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position).toEqual({
+        x: 49,
+        y: 71,
+      }),
+    );
+  });
+
+  it("moves focused nodes by the alignment grid and uses zoom-aware Alt precision", async () => {
+    render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
+
+    const node = await screen.findByTestId("rf__node-core-api");
+    const initialPosition = {
+      ...getReactFlowProps().nodes.find((item) => item.id === "core-api")!.position,
+    };
+    node.focus();
+    fireEvent.keyDown(node, { key: "ArrowRight" });
+    await waitFor(() => {
+      const updatedPosition = getReactFlowProps().nodes.find(
+        (item) => item.id === "core-api",
+      )!.position;
+      expect(updatedPosition.x - initialPosition.x).toBe(24);
+    });
+    const updatedPosition = {
+      ...getReactFlowProps().nodes.find((item) => item.id === "core-api")!.position,
+    };
+    fireEvent.keyDown(node, { key: "ArrowRight", altKey: true });
+    await waitFor(() => {
+      const nextPosition = getReactFlowProps().nodes.find(
+        (item) => item.id === "core-api",
+      )!.position;
+      expect(nextPosition.x - updatedPosition.x).toBeCloseTo(1 / 0.8, 6);
+    });
+  });
+
+  it("clears alignment guides when changing mode, resetting layout, or unmounting", async () => {
+    const view = render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
+
+    await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        { type: "position", id: "account-integrations", position: { x: 238, y: 72 } },
+      ]);
+    });
+    fireEvent.click(screen.getByRole("radio", { name: "Выровнять" }));
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        {
+          type: "position",
+          id: "core-api",
+          position: { x: 49, y: 71 },
+          dragging: true,
+        },
+      ]);
+    });
+    await waitFor(() =>
+      expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(2),
+    );
+
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
+    await waitFor(() =>
+      expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(0),
+    );
+
+    fireEvent.click(screen.getByRole("radio", { name: "Выровнять" }));
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        {
+          type: "position",
+          id: "core-api",
+          position: { x: 49, y: 71 },
+          dragging: true,
+        },
+      ]);
+    });
+    await waitFor(() =>
+      expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(2),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Сбросить раскладку" }));
+    await waitFor(() =>
+      expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(0),
+    );
+
+    view.unmount();
+    expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(0);
+  });
+
   it("enables layout reset after a draggable node position change and clears the session layout", async () => {
     render(<StatefulTopologyPanel />);
 
@@ -324,6 +489,7 @@ describe("TopologyPanel", () => {
     render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
 
     await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
     const initialNode = getReactFlowProps().nodes.find((node) => node.id === "core-api");
     if (initialNode === undefined) throw new Error("Core API node was not rendered");
 
@@ -360,6 +526,7 @@ describe("TopologyPanel", () => {
     );
 
     await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
     const initialPosition = {
       ...getReactFlowProps().nodes.find((node) => node.id === "core-api")!.position,
     };

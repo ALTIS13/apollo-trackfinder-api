@@ -227,4 +227,16 @@ describe("admin dashboard delivery contracts", () => {
       /\.service-node-terminal\s*{[^}]*box-shadow:\s*none/s,
     );
   });
+
+  it("keeps topology alignment controls segmented and on a separate mobile header row", () => {
+    expect(dashboardCss).toMatch(
+      /\.topology-alignment-mode\s*{[^}]*display:\s*inline-flex;[^}]*overflow:\s*hidden/s,
+    );
+    expect(dashboardCss).toMatch(
+      /\.topology-alignment-guide\s*{[^}]*position:\s*absolute;[^}]*pointer-events:\s*none/s,
+    );
+    expect(dashboardCss).toMatch(
+      /@media\s*\(max-width:\s*540px\)\s*{[\s\S]*\.topology-alignment-mode\s*{[^}]*order:\s*3;[^}]*width:\s*100%/s,
+    );
+  });
 });
