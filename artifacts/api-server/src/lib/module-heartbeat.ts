@@ -25,7 +25,7 @@ const MAX_NONCES = 128;
 const NONCE_TTL_MS = 5 * 60_000;
 const HEARTBEAT_FRESHNESS_MS = 90_000;
 const TIMESTAMP_TOLERANCE_MS = 60_000;
-const MAX_NONCE_LENGTH = 256;
+const NONCE_PATTERN = /^[\x20-\x7e]{16,64}$/;
 const DUMMY_SECRET = randomBytes(32).toString("hex");
 
 const moduleHeartbeatPayloadSchema = z
@@ -39,7 +39,6 @@ const moduleHeartbeatPayloadSchema = z
   .strict();
 
 const heartbeatKeysSchema = z.record(z.string(), z.string().min(32).max(512));
-const timestampSchema = z.string().datetime({ offset: true });
 
 export interface SignatureInput {
   moduleId: string;
@@ -144,16 +143,18 @@ function hasMatchingSignature(
 }
 
 function parseSignedTimestamp(timestamp: string): number | undefined {
-  if (!timestampSchema.safeParse(timestamp).success) return undefined;
-  const signedAt = Date.parse(timestamp);
-  return Number.isFinite(signedAt) ? signedAt : undefined;
+  if (!/^\d+$/.test(timestamp)) return undefined;
+  const signedSeconds = Number(timestamp);
+  if (!Number.isSafeInteger(signedSeconds)) return undefined;
+  const signedAt = signedSeconds * 1_000;
+  return Number.isSafeInteger(signedAt) ? signedAt : undefined;
 }
 
 export class ModuleHeartbeatService {
   private readonly keys: Map<string, string>;
   private readonly now: () => number;
   private readonly heartbeats = new Map<string, AcceptedHeartbeat>();
-  private nonces = new Map<string, number>();
+  private nonces = new Map<string, Map<string, number>>();
 
   constructor(options: ModuleHeartbeatServiceOptions) {
     this.keys = new Map(
@@ -190,12 +191,13 @@ export class ModuleHeartbeatService {
     }
 
     const signedAt = parseSignedTimestamp(timestamp);
-    if (
-      signedAt === undefined ||
-      nonce.trim().length === 0 ||
-      nonce.length > MAX_NONCE_LENGTH
-    ) {
-      return { kind: "invalid" };
+    if (signedAt === undefined || !NONCE_PATTERN.test(nonce)) {
+      return { kind: "unauthorized" };
+    }
+
+    const receivedAt = this.now();
+    if (Math.abs(receivedAt - signedAt) > TIMESTAMP_TOLERANCE_MS) {
+      return { kind: "unauthorized" };
     }
 
     let parsedBody: unknown;
@@ -208,11 +210,6 @@ export class ModuleHeartbeatService {
     const payload = moduleHeartbeatPayloadSchema.safeParse(parsedBody);
     if (!payload.success) return { kind: "invalid" };
 
-    const receivedAt = this.now();
-    if (Math.abs(receivedAt - signedAt) > TIMESTAMP_TOLERANCE_MS) {
-      return { kind: "invalid" };
-    }
-
     const previousHeartbeat = this.heartbeats.get(moduleId);
     if (
       previousHeartbeat !== undefined &&
@@ -222,16 +219,16 @@ export class ModuleHeartbeatService {
     }
 
     const liveNonces = new Map(
-      Array.from(this.nonces).filter(
+      Array.from(this.nonces.get(moduleId) ?? []).filter(
         ([, recordedAt]) => receivedAt - recordedAt <= NONCE_TTL_MS,
       ),
     );
     if (liveNonces.has(nonce) || liveNonces.size >= MAX_NONCES) {
-      return { kind: "invalid" };
+      return { kind: "unauthorized" };
     }
 
     liveNonces.set(nonce, receivedAt);
-    this.nonces = liveNonces;
+    this.nonces.set(moduleId, liveNonces);
     this.heartbeats.set(moduleId, {
       signedAt,
       receivedAt,

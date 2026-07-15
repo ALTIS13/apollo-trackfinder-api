@@ -8,6 +8,7 @@ import {
 const SEARCH_MEDIA_SECRET = "s".repeat(32);
 const ACCOUNT_INTEGRATIONS_SECRET = "a".repeat(32);
 const INITIAL_NOW = Date.parse("2026-07-15T04:31:02.000Z");
+const INITIAL_TIMESTAMP = String(Math.floor(INITIAL_NOW / 1_000));
 
 const validPayload = {
   schemaVersion: 1,
@@ -38,6 +39,14 @@ function createService(now = INITIAL_NOW) {
   };
 }
 
+function timestampFor(time: number): string {
+  return String(Math.floor(time / 1_000));
+}
+
+function nonceFor(value: string | number): string {
+  return `nonce-${String(value).padStart(16, "0")}`;
+}
+
 function createHeartbeatInput(
   options: {
     moduleId?: string;
@@ -49,8 +58,8 @@ function createHeartbeatInput(
   } = {},
 ) {
   const moduleId = options.moduleId ?? "search-media";
-  const timestamp = options.timestamp ?? new Date(INITIAL_NOW).toISOString();
-  const nonce = options.nonce ?? "nonce-1";
+  const timestamp = options.timestamp ?? INITIAL_TIMESTAMP;
+  const nonce = options.nonce ?? nonceFor("default");
   const rawBody = options.rawBody ?? Buffer.from(JSON.stringify(validPayload));
   const secret = options.secret ?? SEARCH_MEDIA_SECRET;
   const hasExplicitSignature = Object.hasOwn(options, "signature");
@@ -81,7 +90,7 @@ describe("ModuleHeartbeatService", () => {
     });
   });
 
-  it("accepts a valid signed heartbeat and exposes its observation", () => {
+  it("accepts a signed Unix-second heartbeat and exposes its observation", () => {
     const { service } = createService();
 
     expect(service.ingest(createHeartbeatInput())).toEqual({
@@ -160,29 +169,87 @@ describe("ModuleHeartbeatService", () => {
     });
   });
 
-  it.each([-60_001, 60_001])(
-    "rejects a signed timestamp outside the 60-second window",
+  it.each([-61_000, 61_000])(
+    "returns unauthorized for a signed timestamp outside the 60-second window",
     (offset) => {
       const { service } = createService();
-      const timestamp = new Date(INITIAL_NOW + offset).toISOString();
+      const timestamp = timestampFor(INITIAL_NOW + offset);
 
       expect(
         service.ingest(
           createHeartbeatInput({
             timestamp,
-            nonce: `outside-${offset}`,
+            nonce: nonceFor(`outside-${offset}`),
           }),
         ),
-      ).toEqual({ kind: "invalid" });
+      ).toEqual({ kind: "unauthorized" });
     },
   );
+
+  it("prioritizes expired timestamp authentication over JSON validation", () => {
+    const { service } = createService();
+
+    expect(
+      service.ingest(
+        createHeartbeatInput({
+          timestamp: timestampFor(INITIAL_NOW - 61_000),
+          nonce: nonceFor("expired-json"),
+          rawBody: Buffer.from("{"),
+        }),
+      ),
+    ).toEqual({ kind: "unauthorized" });
+  });
+
+  it("rejects an ISO timestamp even when its signature is valid", () => {
+    const { service } = createService();
+
+    expect(
+      service.ingest(
+        createHeartbeatInput({
+          timestamp: new Date(INITIAL_NOW).toISOString(),
+          nonce: nonceFor("iso-timestamp"),
+        }),
+      ),
+    ).toEqual({ kind: "unauthorized" });
+  });
+
+  it.each([
+    ["short", "short-nonce"],
+    ["long", "a".repeat(65)],
+    ["non-ASCII", `${nonceFor("unicode")}é`],
+    ["control-character", `${nonceFor("control")}\n`],
+  ])("returns unauthorized for a %s nonce", (_label, nonce) => {
+    const { service } = createService();
+
+    expect(service.ingest(createHeartbeatInput({ nonce }))).toEqual({
+      kind: "unauthorized",
+    });
+  });
 
   it("rejects a replayed nonce", () => {
     const { service } = createService();
     const input = createHeartbeatInput();
 
     expect(service.ingest(input)).toMatchObject({ kind: "accepted" });
-    expect(service.ingest(input)).toEqual({ kind: "invalid" });
+    expect(service.ingest(input)).toEqual({ kind: "unauthorized" });
+  });
+
+  it("allows the same nonce from different configured modules", () => {
+    const { service } = createService();
+    const nonce = nonceFor("shared");
+
+    expect(service.ingest(createHeartbeatInput({ nonce }))).toMatchObject({
+      kind: "accepted",
+    });
+    expect(
+      service.ingest(
+        createHeartbeatInput({
+          moduleId: "account-integrations",
+          secret: ACCOUNT_INTEGRATIONS_SECRET,
+          nonce,
+        }),
+      ),
+    ).toMatchObject({ kind: "accepted" });
   });
 
   it("rejects the 129th live nonce without evicting replay records", () => {
@@ -190,15 +257,44 @@ describe("ModuleHeartbeatService", () => {
     let firstInput: ReturnType<typeof createHeartbeatInput> | undefined;
 
     for (let index = 0; index < 128; index += 1) {
-      const input = createHeartbeatInput({ nonce: `nonce-${index}` });
+      const input = createHeartbeatInput({ nonce: nonceFor(index) });
       if (index === 0) firstInput = input;
       expect(service.ingest(input)).toMatchObject({ kind: "accepted" });
     }
 
     expect(
-      service.ingest(createHeartbeatInput({ nonce: "nonce-128" })),
-    ).toEqual({ kind: "invalid" });
-    expect(service.ingest(firstInput!)).toEqual({ kind: "invalid" });
+      service.ingest(createHeartbeatInput({ nonce: nonceFor(128) })),
+    ).toEqual({ kind: "unauthorized" });
+    expect(service.ingest(firstInput!)).toEqual({ kind: "unauthorized" });
+  });
+
+  it("keeps replay records and nonce capacity independent for each module", () => {
+    const { service } = createService();
+
+    for (let index = 0; index < 128; index += 1) {
+      expect(
+        service.ingest(createHeartbeatInput({ nonce: nonceFor(index) })),
+      ).toMatchObject({ kind: "accepted" });
+    }
+
+    expect(
+      service.ingest(
+        createHeartbeatInput({
+          moduleId: "account-integrations",
+          secret: ACCOUNT_INTEGRATIONS_SECRET,
+          nonce: nonceFor("account-module"),
+        }),
+      ),
+    ).toMatchObject({ kind: "accepted" });
+    expect(
+      service.ingest(
+        createHeartbeatInput({
+          moduleId: "account-integrations",
+          secret: ACCOUNT_INTEGRATIONS_SECRET,
+          nonce: nonceFor("account-module"),
+        }),
+      ),
+    ).toEqual({ kind: "unauthorized" });
   });
 
   it("prunes nonce records only after they are older than five minutes", () => {
@@ -206,7 +302,7 @@ describe("ModuleHeartbeatService", () => {
 
     for (let index = 0; index < 128; index += 1) {
       expect(
-        state.service.ingest(createHeartbeatInput({ nonce: `nonce-${index}` })),
+        state.service.ingest(createHeartbeatInput({ nonce: nonceFor(index) })),
       ).toMatchObject({ kind: "accepted" });
     }
 
@@ -214,8 +310,8 @@ describe("ModuleHeartbeatService", () => {
     expect(
       state.service.ingest(
         createHeartbeatInput({
-          nonce: "nonce-after-expiry",
-          timestamp: new Date(state.now).toISOString(),
+          nonce: nonceFor("after-expiry"),
+          timestamp: timestampFor(state.now),
         }),
       ),
     ).toMatchObject({ kind: "accepted" });
@@ -223,13 +319,17 @@ describe("ModuleHeartbeatService", () => {
 
   it("accepts equal signed timestamps with distinct nonces", () => {
     const { service } = createService();
-    const timestamp = new Date(INITIAL_NOW).toISOString();
+    const timestamp = INITIAL_TIMESTAMP;
 
     expect(
-      service.ingest(createHeartbeatInput({ timestamp, nonce: "nonce-a" })),
+      service.ingest(
+        createHeartbeatInput({ timestamp, nonce: nonceFor("equal-a") }),
+      ),
     ).toMatchObject({ kind: "accepted" });
     expect(
-      service.ingest(createHeartbeatInput({ timestamp, nonce: "nonce-b" })),
+      service.ingest(
+        createHeartbeatInput({ timestamp, nonce: nonceFor("equal-b") }),
+      ),
     ).toMatchObject({ kind: "accepted" });
   });
 
@@ -239,16 +339,16 @@ describe("ModuleHeartbeatService", () => {
     expect(
       service.ingest(
         createHeartbeatInput({
-          timestamp: new Date(INITIAL_NOW + 1).toISOString(),
-          nonce: "newer",
+          timestamp: timestampFor(INITIAL_NOW + 1_000),
+          nonce: nonceFor("newer"),
         }),
       ),
     ).toMatchObject({ kind: "accepted" });
     expect(
       service.ingest(
         createHeartbeatInput({
-          timestamp: new Date(INITIAL_NOW).toISOString(),
-          nonce: "older",
+          timestamp: INITIAL_TIMESTAMP,
+          nonce: nonceFor("older"),
         }),
       ),
     ).toEqual({ kind: "stale" });
@@ -280,7 +380,7 @@ describe("ModuleHeartbeatService", () => {
 
     expect(
       service.ingest(
-        createHeartbeatInput({ rawBody, nonce: `invalid-${_label}` }),
+        createHeartbeatInput({ rawBody, nonce: nonceFor(`invalid-${_label}`) }),
       ),
     ).toEqual({ kind: "invalid" });
   });
