@@ -711,7 +711,7 @@ svg {
 
 .topology-edge-contact-rail {
   fill: var(--color-surface-raised);
-  stroke-width: 1.15;
+  stroke-width: 0;
 }
 
 .topology-edge-contact-notch,
