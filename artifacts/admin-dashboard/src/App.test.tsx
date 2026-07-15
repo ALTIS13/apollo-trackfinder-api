@@ -185,6 +185,32 @@ describe("Apollo TF admin dashboard", () => {
     expect(providers).toHaveTextContent("Тренд");
   });
 
+  it("renders module heartbeat times and labels unobserved modules", () => {
+    const modules = demoSnapshot.modules.map((module, index) =>
+      index === 0
+        ? { ...module, lastHeartbeatAt: "2026-07-14T09:28:00.000Z" }
+        : module,
+    );
+    const snapshot: DashboardSnapshot = { ...demoSnapshot, modules };
+
+    render(<App adapter={createAdapter(async () => snapshot, snapshot)} />);
+
+    const deployments = screen.getByRole("table", {
+      name: "Деплойменты сервисов",
+    });
+    expect(deployments).toHaveTextContent("Последний сигнал");
+    expect(
+      within(screen.getByRole("row", { name: /Public Web/ })).getAllByRole(
+        "time",
+      )[1],
+    ).toHaveAttribute("datetime", "2026-07-14T09:28:00.000Z");
+    expect(
+      within(screen.getByRole("row", { name: /PostgreSQL/ })).getByText(
+        "Нет данных",
+      ),
+    ).toBeVisible();
+  });
+
   it("labels missing deployment and provider observation times without inventing dates", () => {
     const modules = demoSnapshot.modules.map((module) => {
       if (module.id !== "public-web") return module;

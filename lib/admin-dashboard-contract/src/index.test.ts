@@ -59,6 +59,24 @@ describe("admin dashboard contract", () => {
     expect(parseDashboardSnapshot(validSnapshot)).toEqual(validSnapshot);
   });
 
+  it("accepts an optional module heartbeat receipt time", () => {
+    const snapshot = {
+      ...validSnapshot,
+      modules: validSnapshot.modules.map((module, index) =>
+        index === 0
+          ? { ...module, lastHeartbeatAt: "2026-07-15T04:31:02.123Z" }
+          : module,
+      ),
+    };
+    expect(parseDashboardSnapshot(snapshot)).toEqual(snapshot);
+    expect(() =>
+      parseDashboardSnapshot({
+        ...snapshot,
+        modules: [{ ...snapshot.modules[0], lastHeartbeatAt: "not-a-time" }],
+      }),
+    ).toThrow("Invalid admin dashboard snapshot");
+  });
+
   it("rejects an incident linked from a healthy edge", () => {
     expect(() =>
       parseDashboardSnapshot({

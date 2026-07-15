@@ -31,6 +31,7 @@ const moduleSchema = z
     version: z.string().trim().min(1).max(128),
     availableVersion: z.string().trim().min(1).max(128).optional(),
     lastDeploymentAt: timestampSchema.optional(),
+    lastHeartbeatAt: timestampSchema.optional(),
     requestsPerMinute: nonNegativeNumberSchema,
   })
   .strict();

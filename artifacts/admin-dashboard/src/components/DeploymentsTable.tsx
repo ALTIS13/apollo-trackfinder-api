@@ -44,6 +44,7 @@ export function DeploymentsTable({ modules }: DeploymentsTableProps) {
               <th scope="col">Доступна</th>
               <th scope="col">Состояние</th>
               <th scope="col">Последний деплой</th>
+              <th scope="col">Последний сигнал</th>
             </tr>
           </thead>
           <tbody>
@@ -89,6 +90,17 @@ export function DeploymentsTable({ modules }: DeploymentsTableProps) {
                       <time dateTime={module.lastDeploymentAt}>
                         {deploymentFormatter.format(
                           new Date(module.lastDeploymentAt),
+                        )}
+                      </time>
+                    )}
+                  </td>
+                  <td>
+                    {module.lastHeartbeatAt === undefined ? (
+                      <span className="table-empty-value">Нет данных</span>
+                    ) : (
+                      <time dateTime={module.lastHeartbeatAt}>
+                        {deploymentFormatter.format(
+                          new Date(module.lastHeartbeatAt),
                         )}
                       </time>
                     )}

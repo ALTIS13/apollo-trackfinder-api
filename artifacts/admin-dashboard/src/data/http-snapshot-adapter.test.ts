@@ -20,6 +20,25 @@ describe("HTTP dashboard snapshot adapter", () => {
     expect(responseJson).toHaveBeenCalledTimes(1);
   });
 
+  it("accepts and preserves a module heartbeat timestamp in a valid response", async () => {
+    const body = {
+      ...demoSnapshot,
+      modules: demoSnapshot.modules.map((module, index) =>
+        index === 0
+          ? { ...module, lastHeartbeatAt: "2026-07-15T04:31:02.123Z" }
+          : module,
+      ),
+    };
+    const adapter = createHttpDashboardSnapshotAdapter({
+      fetchSnapshot: vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue(body),
+      }),
+    });
+
+    await expect(adapter.loadSnapshot()).resolves.toEqual(body);
+  });
+
   it("keeps the demo snapshot as an unverified fallback and rejects a non-OK response", async () => {
     const fetchSnapshot = vi.fn().mockResolvedValue({
       ok: false,

@@ -42,6 +42,7 @@ export const demoSnapshot: DashboardSnapshot = {
       status: "healthy",
       version: "2.14.0",
       lastDeploymentAt: "2026-07-14T08:58:00.000Z",
+      lastHeartbeatAt: "2026-07-14T09:29:54.000Z",
       requestsPerMinute: 1284,
     },
     {
@@ -51,6 +52,7 @@ export const demoSnapshot: DashboardSnapshot = {
       version: "2.14.0",
       availableVersion: "2.14.1",
       lastDeploymentAt: "2026-07-14T09:21:00.000Z",
+      lastHeartbeatAt: "2026-07-14T09:29:49.000Z",
       requestsPerMinute: 1284,
     },
     {
@@ -59,6 +61,7 @@ export const demoSnapshot: DashboardSnapshot = {
       status: "healthy",
       version: "2.13.4",
       lastDeploymentAt: "2026-07-14T08:45:00.000Z",
+      lastHeartbeatAt: "2026-07-14T09:29:46.000Z",
       requestsPerMinute: 244,
     },
     {
@@ -68,6 +71,7 @@ export const demoSnapshot: DashboardSnapshot = {
       version: "2.14.0",
       availableVersion: "2.14.1",
       lastDeploymentAt: "2026-07-14T09:07:00.000Z",
+      lastHeartbeatAt: "2026-07-14T09:29:42.000Z",
       requestsPerMinute: 894,
     },
     {
@@ -77,6 +81,7 @@ export const demoSnapshot: DashboardSnapshot = {
       version: "2.13.9",
       availableVersion: "2.14.0",
       lastDeploymentAt: "2026-07-14T08:33:00.000Z",
+      lastHeartbeatAt: "2026-07-14T09:29:39.000Z",
       requestsPerMinute: 146,
     },
     {
