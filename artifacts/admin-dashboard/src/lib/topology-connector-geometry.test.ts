@@ -6,7 +6,79 @@ import {
   CONTACT_TERMINAL_CLEARANCE,
   type ConnectorGeometry,
   type ConnectorGeometryInput,
+  type RoutePoint,
 } from "./topology-connector-geometry";
+
+interface ParsedPathCommand {
+  type: "M" | "L" | "Q";
+  start: RoutePoint;
+  end: RoutePoint;
+  controls: RoutePoint[];
+}
+
+function parseAbsolutePath(path: string): ParsedPathCommand[] {
+  const chunks = Array.from(path.matchAll(/([A-Z])([^A-Z]*)/g));
+  const normalizedPath = path.replace(/\s/g, "");
+  const normalizedChunks = chunks
+    .map(([chunk]) => chunk)
+    .join("")
+    .replace(/\s/g, "");
+
+  expect(chunks).not.toHaveLength(0);
+  expect(normalizedChunks).toBe(normalizedPath);
+
+  let current: RoutePoint | undefined;
+  return chunks.map(([, rawType, coordinateText], index) => {
+    if (rawType !== "M" && rawType !== "L" && rawType !== "Q") {
+      throw new Error(`Unsupported absolute path command: ${rawType}`);
+    }
+
+    const values = Array.from(
+      coordinateText.matchAll(/-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi),
+      ([value]) => Number(value),
+    );
+    const expectedValueCount = rawType === "Q" ? 4 : 2;
+    expect(values).toHaveLength(expectedValueCount);
+    values.forEach((value) => expect(Number.isFinite(value)).toBe(true));
+
+    if (rawType === "M") {
+      expect(index).toBe(0);
+      current = { x: values[0], y: values[1] };
+      return { type: rawType, start: current, end: current, controls: [] };
+    }
+    if (current === undefined) throw new Error("Path must begin with M");
+
+    const start = current;
+    const controls =
+      rawType === "Q" ? [{ x: values[0], y: values[1] }] : [];
+    const end =
+      rawType === "Q"
+        ? { x: values[2], y: values[3] }
+        : { x: values[0], y: values[1] };
+    current = end;
+    return { type: rawType, start, end, controls };
+  });
+}
+
+function pointLiesOnSegment(
+  point: RoutePoint,
+  start: RoutePoint,
+  end: RoutePoint,
+) {
+  if (start.x === end.x && point.x === start.x) {
+    return point.y >= Math.min(start.y, end.y) && point.y <= Math.max(start.y, end.y);
+  }
+  if (start.y === end.y && point.y === start.y) {
+    return point.x >= Math.min(start.x, end.x) && point.x <= Math.max(start.x, end.x);
+  }
+  return false;
+}
+
+function pointLiesOnCanonicalRoute(point: RoutePoint, route: RoutePoint[]) {
+  return route
+    .slice(0, -1)
+    .some((start, index) => pointLiesOnSegment(point, start, route[index + 1]));
+}
 
 function selectedSegment(geometry: ConnectorGeometry) {
   const start = geometry.routePoints[geometry.contactSegmentIndex];
@@ -17,6 +89,71 @@ function selectedSegment(geometry: ConnectorGeometry) {
   }
 
   return { start, end };
+}
+
+function expectValidSplitPath(
+  path: string,
+  expectedStart: RoutePoint,
+  expectedEnd: RoutePoint,
+  geometry: ConnectorGeometry,
+) {
+  const commands = parseAbsolutePath(path);
+  const movementCommands = commands.slice(1);
+  const { start: selectedStart, end: selectedEnd } = selectedSegment(geometry);
+
+  expect(commands[0]).toMatchObject({ type: "M", end: expectedStart });
+  expect(commands.at(-1)?.end).toEqual(expectedEnd);
+  expect(movementCommands).not.toHaveLength(0);
+
+  commands.forEach((command) => {
+    [command.start, ...command.controls, command.end].forEach((point) => {
+      expect(Number.isFinite(point.x)).toBe(true);
+      expect(Number.isFinite(point.y)).toBe(true);
+      expect(pointLiesOnCanonicalRoute(point, geometry.routePoints)).toBe(true);
+    });
+  });
+
+  movementCommands.forEach((command) => {
+    expect(command.end).not.toEqual(command.start);
+    command.controls.forEach((control) => {
+      expect(control).not.toEqual(command.start);
+      expect(control).not.toEqual(command.end);
+    });
+
+    const isHorizontalAcrossSelectedSplit =
+      command.start.y === geometry.contactY &&
+      command.end.y === geometry.contactY &&
+      command.start.x >= selectedStart.x &&
+      command.start.x <= selectedEnd.x &&
+      command.end.x >= selectedStart.x &&
+      command.end.x <= selectedEnd.x;
+    if (isHorizontalAcrossSelectedSplit) {
+      expect(command.end.x).toBeGreaterThan(command.start.x);
+    }
+
+    if (command.type === "Q") {
+      const [control] = command.controls;
+      const cornerIndex = geometry.routePoints.findIndex(
+        (point) => point.x === control.x && point.y === control.y,
+      );
+      expect(cornerIndex).toBeGreaterThan(0);
+      expect(cornerIndex).toBeLessThan(geometry.routePoints.length - 1);
+      expect(
+        pointLiesOnSegment(
+          command.start,
+          geometry.routePoints[cornerIndex - 1],
+          control,
+        ),
+      ).toBe(true);
+      expect(
+        pointLiesOnSegment(
+          command.end,
+          control,
+          geometry.routePoints[cornerIndex + 1],
+        ),
+      ).toBe(true);
+    }
+  });
 }
 
 function expectCanonicalContact(geometry: ConnectorGeometry) {
@@ -30,18 +167,53 @@ function expectCanonicalContact(geometry: ConnectorGeometry) {
     geometry.contactSegmentIndex + 1 === lastPointIndex
       ? CONTACT_TERMINAL_CLEARANCE
       : CONTACT_BEND_CLEARANCE;
+  const routeSource = geometry.routePoints[0];
+  const routeTarget = geometry.routePoints.at(-1)!;
+
+  geometry.routePoints.forEach((point) => {
+    expect(Number.isFinite(point.x)).toBe(true);
+    expect(Number.isFinite(point.y)).toBe(true);
+  });
 
   expect(end.x).toBeGreaterThan(start.x);
   expect(start.y).toBe(end.y);
-  expect(geometry.contactX).toBeGreaterThanOrEqual(start.x + startClearance);
-  expect(geometry.contactX).toBeLessThanOrEqual(end.x - endClearance);
+  expect(geometry.femaleOuterX).toBeGreaterThanOrEqual(
+    start.x + startClearance,
+  );
+  expect(geometry.maleOuterX).toBeLessThanOrEqual(end.x - endClearance);
   expect(geometry.routePoints[geometry.contactSegmentIndex].y).toBe(
     geometry.contactY,
   );
   expect(geometry.femaleOuterX).toBe(geometry.contactX - 16);
   expect(geometry.maleOuterX).toBe(geometry.contactX + 16);
-  expect(geometry.sourcePath).toMatch(new RegExp(`${geometry.femaleOuterX}`));
-  expect(geometry.targetPath).toMatch(new RegExp(`${geometry.maleOuterX}`));
+
+  expectValidSplitPath(
+    geometry.sourcePath,
+    routeSource,
+    { x: geometry.femaleOuterX, y: geometry.contactY },
+    geometry,
+  );
+  expectValidSplitPath(
+    geometry.targetPath,
+    { x: geometry.maleOuterX, y: geometry.contactY },
+    routeTarget,
+    geometry,
+  );
+
+  const sourceSplitCommand = parseAbsolutePath(geometry.sourcePath).at(-1)!;
+  const targetSplitCommand = parseAbsolutePath(geometry.targetPath)[1];
+  expect(sourceSplitCommand.end).toEqual({
+    x: geometry.femaleOuterX,
+    y: geometry.contactY,
+  });
+  expect(sourceSplitCommand.start.y).toBe(geometry.contactY);
+  expect(sourceSplitCommand.end.x).toBeGreaterThan(sourceSplitCommand.start.x);
+  expect(targetSplitCommand.start).toEqual({
+    x: geometry.maleOuterX,
+    y: geometry.contactY,
+  });
+  expect(targetSplitCommand.end.y).toBe(geometry.contactY);
+  expect(targetSplitCommand.end.x).toBeGreaterThan(targetSplitCommand.start.x);
 
   geometry.routePoints.slice(1, -1).forEach((point, index) => {
     const previous = geometry.routePoints[index];
@@ -53,54 +225,57 @@ function expectCanonicalContact(geometry: ConnectorGeometry) {
   });
 }
 
+function expectVerticalStrokesOutsidePlug(geometry: ConnectorGeometry) {
+  const verticalCommands = [
+    ...parseAbsolutePath(geometry.sourcePath),
+    ...parseAbsolutePath(geometry.targetPath),
+  ].filter(
+    (command) =>
+      command.type === "L" &&
+      command.start.x === command.end.x &&
+      command.start.y !== command.end.y,
+  );
+
+  expect(verticalCommands).not.toHaveLength(0);
+  verticalCommands.forEach((command) => {
+    expect(
+      command.start.x <= geometry.femaleOuterX ||
+        command.start.x >= geometry.maleOuterX,
+    ).toBe(true);
+  });
+}
+
+const connectorInput = (
+  overrides: Partial<ConnectorGeometryInput> = {},
+): ConnectorGeometryInput => ({
+  sourceX: 0,
+  sourceY: 0,
+  sourcePosition: Position.Right,
+  targetX: 160,
+  targetY: 80,
+  targetPosition: Position.Left,
+  ...overrides,
+});
+
 describe("buildConnectorGeometry", () => {
   it.each([
     {
       name: "same-row route",
-      input: {
-        sourceX: 0,
-        sourceY: 0,
-        sourcePosition: Position.Right,
-        targetX: 160,
-        targetY: 0,
-        targetPosition: Position.Left,
-      },
+      input: connectorInput({ targetY: 0 }),
     },
     {
       name: "different-row route",
-      input: {
-        sourceX: 0,
-        sourceY: 0,
-        sourcePosition: Position.Right,
-        targetX: 160,
-        targetY: 80,
-        targetPosition: Position.Left,
-      },
+      input: connectorInput(),
     },
     {
       name: "shortened shared trunk route",
-      input: {
-        sourceX: 0,
-        sourceY: 0,
-        sourcePosition: Position.Right,
-        targetX: 160,
-        targetY: 80,
-        targetPosition: Position.Left,
-        sharedBranchLength: 24,
-      },
+      input: connectorInput({ sharedBranchLength: 24 }),
     },
     {
       name: "target-left-of-source route",
-      input: {
-        sourceX: 120,
-        sourceY: 0,
-        sourcePosition: Position.Right,
-        targetX: 0,
-        targetY: 80,
-        targetPosition: Position.Left,
-      },
+      input: connectorInput({ sourceX: 120, targetX: 0 }),
     },
-  ] satisfies { name: string; input: ConnectorGeometryInput }[])(
+  ])(
     "centers the plug on an eligible straight segment for $name",
     ({ input }) => {
       const geometry = buildConnectorGeometry(input);
@@ -111,14 +286,9 @@ describe("buildConnectorGeometry", () => {
   );
 
   it("uses the lower deterministic detour when no normal segment fits the plug", () => {
-    const geometry = buildConnectorGeometry({
-      sourceX: 0,
-      sourceY: 0,
-      sourcePosition: Position.Right,
-      targetX: 59,
-      targetY: 0,
-      targetPosition: Position.Left,
-    });
+    const geometry = buildConnectorGeometry(
+      connectorInput({ targetX: 59, targetY: 0 }),
+    );
 
     expectCanonicalContact(geometry);
     expect(geometry.usedDetour).toBe(true);
@@ -126,18 +296,133 @@ describe("buildConnectorGeometry", () => {
   });
 
   it("preserves the shared trunk while branching from its shortened endpoint", () => {
-    const geometry = buildConnectorGeometry({
-      sourceX: 0,
-      sourceY: 0,
-      sourcePosition: Position.Right,
-      targetX: 160,
-      targetY: 80,
-      targetPosition: Position.Left,
-      sharedBranchLength: 24,
-    });
+    const geometry = buildConnectorGeometry(
+      connectorInput({ sharedBranchLength: 24 }),
+    );
 
+    expectCanonicalContact(geometry);
     expect(geometry.sharedTrunkPath).toBe("M 0 0 H 24");
     expect(geometry.branchSourceX).toBe(24);
-    expect(geometry.sourcePath).toMatch(/^M24 0/);
+    expect(geometry.routePoints[0]).toEqual({ x: 24, y: 0 });
+  });
+
+  it("keeps a one-unit shared trunk owner and sibling on the same branch origin", () => {
+    const ownerInput = connectorInput({
+      targetX: 52.5,
+      sharedBranchLength: 1,
+    });
+    const owner = buildConnectorGeometry(ownerInput);
+    const sibling = buildConnectorGeometry({ ...ownerInput, targetX: 120 });
+
+    [owner, sibling].forEach(expectCanonicalContact);
+    expect([owner.branchSourceX, sibling.branchSourceX]).toEqual([1, 1]);
+    expect([owner.sharedTrunkPath, sibling.sharedTrunkPath]).toEqual([
+      "M 0 0 H 1",
+      "M 0 0 H 1",
+    ]);
+    expect([owner.routePoints[0], sibling.routePoints[0]]).toEqual([
+      { x: 1, y: 0 },
+      { x: 1, y: 0 },
+    ]);
+    expect(owner.usedDetour).toBe(true);
+    expect(sibling.usedDetour).toBe(false);
+  });
+
+  it("starts a trunk owner and sibling at the source when no shared clearance fits", () => {
+    const owner = buildConnectorGeometry(
+      connectorInput({ targetX: 70, sharedBranchLength: 0 }),
+    );
+    const sibling = buildConnectorGeometry(
+      connectorInput({ targetX: 120, sharedBranchLength: 0 }),
+    );
+
+    [owner, sibling].forEach(expectCanonicalContact);
+    expect([owner.branchSourceX, sibling.branchSourceX]).toEqual([0, 0]);
+    expect([owner.sharedTrunkPath, sibling.sharedTrunkPath]).toEqual([
+      undefined,
+      undefined,
+    ]);
+    expect([owner.routePoints[0], sibling.routePoints[0]]).toEqual([
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+    ]);
+    expect(owner.usedDetour).toBe(true);
+    expect(sibling.usedDetour).toBe(false);
+  });
+
+  it("keeps the prior 17.142-unit same-row branch continuous through a detour", () => {
+    const geometry = buildConnectorGeometry(
+      connectorInput({
+        sourceX: 488,
+        sourceY: 140,
+        targetX: 551.642,
+        targetY: 140,
+        sharedBranchLength: 17.142,
+      }),
+    );
+
+    expectCanonicalContact(geometry);
+    expect(geometry.branchSourceX).toBeCloseTo(505.142, 3);
+    expect(geometry.routePoints[0]).toEqual({ x: 505.142, y: 140 });
+    expect(geometry.routePoints.at(-1)).toEqual({ x: 551.642, y: 140 });
+    expect(geometry.sharedTrunkPath).toBe("M 488 140 H 505.142");
+    expect(geometry.usedDetour).toBe(true);
+  });
+
+  it("keeps a one-unit off-row short shared branch and vertical strokes continuous", () => {
+    const geometry = buildConnectorGeometry(
+      connectorInput({
+        sourceX: 488,
+        sourceY: 140,
+        targetX: 551.642,
+        targetY: 141,
+        sharedBranchLength: 17.142,
+      }),
+    );
+
+    expectCanonicalContact(geometry);
+    expectVerticalStrokesOutsidePlug(geometry);
+    expect(geometry.routePoints[0]).toEqual({ x: 505.142, y: 140 });
+    expect(geometry.routePoints.at(-1)).toEqual({ x: 551.642, y: 141 });
+    expect(geometry.usedDetour).toBe(true);
+  });
+
+  it("keeps a zero-clearance crossed target continuous without a shared trunk", () => {
+    const geometry = buildConnectorGeometry(
+      connectorInput({
+        sourceX: 488,
+        sourceY: 140,
+        targetX: 529.5,
+        targetY: 140,
+        sharedBranchLength: 0,
+      }),
+    );
+
+    expectCanonicalContact(geometry);
+    expect(geometry.branchSourceX).toBe(488);
+    expect(geometry.sharedTrunkPath).toBeUndefined();
+    expect(geometry.routePoints[0]).toEqual({ x: 488, y: 140 });
+    expect(geometry.routePoints.at(-1)).toEqual({ x: 529.5, y: 140 });
+    expect(geometry.usedDetour).toBe(true);
+  });
+
+  it("keeps a crossed one-unit off-row target and vertical strokes continuous", () => {
+    const geometry = buildConnectorGeometry(
+      connectorInput({
+        sourceX: 488,
+        sourceY: 140,
+        targetX: 529.5,
+        targetY: 141,
+        sharedBranchLength: 0,
+      }),
+    );
+
+    expectCanonicalContact(geometry);
+    expectVerticalStrokesOutsidePlug(geometry);
+    expect(geometry.branchSourceX).toBe(488);
+    expect(geometry.sharedTrunkPath).toBeUndefined();
+    expect(geometry.routePoints[0]).toEqual({ x: 488, y: 140 });
+    expect(geometry.routePoints.at(-1)).toEqual({ x: 529.5, y: 141 });
+    expect(geometry.usedDetour).toBe(true);
   });
 });
