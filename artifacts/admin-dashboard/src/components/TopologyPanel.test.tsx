@@ -318,6 +318,42 @@ describe("TopologyPanel", () => {
     );
   });
 
+  it("uses a roving tab stop and arrow keys to select alignment modes", async () => {
+    render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
+
+    await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    const initialPosition = {
+      ...getReactFlowProps().nodes.find((node) => node.id === "core-api")!.position,
+    };
+    const freeMode = screen.getByRole("radio", { name: "Свободно" });
+    const alignMode = screen.getByRole("radio", { name: "Выровнять" });
+
+    expect(freeMode).toHaveAttribute("tabindex", "-1");
+    expect(alignMode).toHaveAttribute("tabindex", "0");
+    alignMode.focus();
+
+    fireEvent.keyDown(alignMode, { key: "ArrowLeft" });
+    expect(freeMode).toBeChecked();
+    expect(freeMode).toHaveFocus();
+    expect(freeMode).toHaveAttribute("tabindex", "0");
+    expect(alignMode).toHaveAttribute("tabindex", "-1");
+
+    fireEvent.keyDown(freeMode, { key: "ArrowRight" });
+    expect(alignMode).toBeChecked();
+    expect(alignMode).toHaveFocus();
+
+    fireEvent.keyDown(alignMode, { key: "ArrowUp" });
+    expect(freeMode).toBeChecked();
+    expect(freeMode).toHaveFocus();
+
+    fireEvent.keyDown(freeMode, { key: "ArrowDown" });
+    expect(alignMode).toBeChecked();
+    expect(alignMode).toHaveFocus();
+    expect(getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position).toEqual(
+      initialPosition,
+    );
+  });
+
   it("normalizes aligned drags, publishes nearby guides, and preserves free drags", async () => {
     const view = render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
 
@@ -407,7 +443,7 @@ describe("TopologyPanel", () => {
     });
   });
 
-  it("clears alignment guides when changing mode, resetting layout, or unmounting", async () => {
+  it("clears alignment guides when changing mode or resetting layout", async () => {
     const view = render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
 
     await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
@@ -455,9 +491,42 @@ describe("TopologyPanel", () => {
     await waitFor(() =>
       expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(0),
     );
+  });
 
-    view.unmount();
-    expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(0);
+  it("starts a remounted panel without transient alignment guides", async () => {
+    const firstMount = render(
+      <TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />,
+    );
+
+    await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        { type: "position", id: "account-integrations", position: { x: 238, y: 72 } },
+      ]);
+    });
+    fireEvent.click(screen.getByRole("radio", { name: "Выровнять" }));
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        {
+          type: "position",
+          id: "core-api",
+          position: { x: 49, y: 71 },
+          dragging: true,
+        },
+      ]);
+    });
+    await waitFor(() =>
+      expect(firstMount.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(2),
+    );
+
+    firstMount.unmount();
+    const secondMount = render(
+      <TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />,
+    );
+
+    await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    expect(secondMount.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(0);
   });
 
   it("enables layout reset after a draggable node position change and clears the session layout", async () => {

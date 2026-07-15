@@ -65,6 +65,7 @@ const statusOrder: HealthStatus[] = [
   "degraded",
   "unknown",
 ];
+const alignmentModes = ["free", "align"] as const;
 
 export interface SharedSourceRoute {
   statuses: HealthStatus[];
@@ -652,6 +653,39 @@ export function TopologyPanel(props: TopologyPanelProps) {
   const [alignmentMode, setAlignmentMode] =
     useState<TopologyAlignmentMode>("align");
 
+  const handleAlignmentModeKeyDown = useCallback(
+    (
+      event: React.KeyboardEvent<HTMLButtonElement>,
+      mode: TopologyAlignmentMode,
+    ) => {
+      const currentIndex = alignmentModes.indexOf(mode);
+      let nextIndex: number;
+
+      switch (event.key) {
+        case "ArrowLeft":
+        case "ArrowUp":
+          nextIndex =
+            (currentIndex - 1 + alignmentModes.length) % alignmentModes.length;
+          break;
+        case "ArrowRight":
+        case "ArrowDown":
+          nextIndex = (currentIndex + 1) % alignmentModes.length;
+          break;
+        default:
+          return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      const nextMode = alignmentModes[nextIndex];
+      setAlignmentMode(nextMode);
+      event.currentTarget.parentElement
+        ?.querySelector<HTMLButtonElement>(`[data-alignment-mode="${nextMode}"]`)
+        ?.focus();
+    },
+    [],
+  );
+
   return (
     <section className="topology-panel" id="topology" aria-label="Топология сервисов">
       <div className="topology-panel-header">
@@ -661,13 +695,16 @@ export function TopologyPanel(props: TopologyPanelProps) {
           role="radiogroup"
           aria-label="Режим размещения"
         >
-          {(["free", "align"] as const).map((mode) => (
+          {alignmentModes.map((mode) => (
             <button
               key={mode}
               type="button"
               role="radio"
               aria-checked={alignmentMode === mode}
+              tabIndex={alignmentMode === mode ? 0 : -1}
+              data-alignment-mode={mode}
               onClick={() => setAlignmentMode(mode)}
+              onKeyDown={(event) => handleAlignmentModeKeyDown(event, mode)}
             >
               {mode === "free" ? "Свободно" : "Выровнять"}
             </button>
