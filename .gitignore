@@ -48,6 +48,7 @@ Thumbs.db
 .cache/
 .local/
 /.superpowers/
+/.worktrees/
 
 # private operations data, SSH material, and local infrastructure notes
 /.ops-private/
