@@ -1,7 +1,7 @@
 import { once } from "node:events";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import express from "express";
+import express, { type Express } from "express";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createModuleHeartbeatSignature,
@@ -71,14 +71,27 @@ async function startHeartbeatServer(
   });
   app.use("/api", createModuleHeartbeatRouter({ service }));
   app.use(express.json());
+  app.get("/api/ordinary", (_req, res) => {
+    res.status(200).json({ ok: true });
+  });
 
-  const server = app.listen(0, "127.0.0.1");
+  return { ...(await startServer(app)), capturedLogs };
+}
+
+async function startProductionServer() {
+  process.env["DATABASE_URL"] ??= "postgres://unused:unused@127.0.0.1:1/unused";
+  process.env["LOG_LEVEL"] ??= "silent";
+  const { default: app } = await import("../app");
+  return startServer(app);
+}
+
+async function startServer(serverApp: Express) {
+  const server = serverApp.listen(0, "127.0.0.1");
   servers.push(server);
   await once(server, "listening");
   const address = server.address() as AddressInfo;
   return {
     baseUrl: `http://127.0.0.1:${address.port}/api`,
-    capturedLogs,
   };
 }
 
@@ -90,17 +103,28 @@ async function sendHeartbeat(
     nonce?: string;
     timestamp?: string;
     signature?: string;
+    contentType?: string | null;
+    contentEncoding?: string;
   } = {},
 ) {
   const moduleId = options.moduleId ?? "search-media";
   const rawBody = options.rawBody ?? Buffer.from(JSON.stringify(validPayload));
   const nonce = options.nonce ?? nonceFor("default");
   const timestamp = options.timestamp ?? TIMESTAMP;
+  const contentType =
+    options.contentType === undefined
+      ? "application/json"
+      : options.contentType;
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
     "X-Apollo-Heartbeat-Timestamp": timestamp,
     "X-Apollo-Heartbeat-Nonce": nonce,
   };
+  if (contentType !== null) {
+    headers["Content-Type"] = contentType;
+  }
+  if (options.contentEncoding !== undefined) {
+    headers["Content-Encoding"] = options.contentEncoding;
+  }
   if (Object.hasOwn(options, "signature")) {
     if (options.signature !== undefined) {
       headers["X-Apollo-Heartbeat-Signature"] = options.signature;
@@ -237,17 +261,21 @@ describe("POST /api/internal/modules/:moduleId/heartbeat", () => {
     });
   });
 
-  it("returns method_not_allowed for GET on the exact heartbeat route", async () => {
-    const { baseUrl } = await startHeartbeatServer(createService());
-    const response = await fetch(
-      `${baseUrl}/internal/modules/search-media/heartbeat`,
-    );
+  it.each(["GET", "PUT", "PATCH", "DELETE", "OPTIONS"])(
+    "returns method_not_allowed for %s on the exact heartbeat route",
+    async (method) => {
+      const { baseUrl } = await startProductionServer();
+      const response = await fetch(
+        `${baseUrl}/internal/modules/search-media/heartbeat`,
+        { method },
+      );
 
-    expect(response.status).toBe(405);
-    await expect(response.json()).resolves.toEqual({
-      error: "method_not_allowed",
-    });
-  });
+      expect(response.status).toBe(405);
+      await expect(response.json()).resolves.toEqual({
+        error: "method_not_allowed",
+      });
+    },
+  );
 
   it("keeps the exact 8 KiB parser boundary and rejects larger bodies without mutation", async () => {
     const service = createService();
@@ -288,6 +316,98 @@ describe("POST /api/internal/modules/:moduleId/heartbeat", () => {
         requestsPerMinute: 0,
       },
     ]);
+  });
+
+  it.each([
+    ["text/plain", "text/plain"],
+    ["missing content type", null],
+  ])(
+    "rejects an over-limit %s heartbeat before service mutation",
+    async (_label, contentType) => {
+      const service = createService();
+      const { baseUrl } = await startHeartbeatServer(service);
+      const response = await sendHeartbeat(baseUrl, {
+        rawBody: Buffer.alloc(8 * 1024 + 1, "x"),
+        nonce: nonceFor(`over-limit-${_label}`),
+        contentType,
+      });
+
+      expect(response.status).toBe(413);
+      await expect(response.json()).resolves.toEqual({
+        error: "heartbeat_too_large",
+      });
+      expect(
+        service
+          .snapshot()
+          .find((observation) => observation.moduleId === "search-media"),
+      ).toEqual({
+        moduleId: "search-media",
+        managed: true,
+        status: "unknown",
+        version: "unknown",
+        requestsPerMinute: 0,
+      });
+    },
+  );
+
+  it("rejects a signed non-JSON heartbeat without service mutation", async () => {
+    const service = createService();
+    const { baseUrl } = await startHeartbeatServer(service);
+    const response = await sendHeartbeat(baseUrl, {
+      nonce: nonceFor("non-json"),
+      contentType: "text/plain",
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "invalid_heartbeat",
+    });
+    expect(
+      service
+        .snapshot()
+        .find((observation) => observation.moduleId === "search-media"),
+    ).toEqual({
+      moduleId: "search-media",
+      managed: true,
+      status: "unknown",
+      version: "unknown",
+      requestsPerMinute: 0,
+    });
+  });
+
+  it("sanitizes unsupported content-encoding parser errors", async () => {
+    const rawBody = Buffer.from("private encoded heartbeat payload");
+    const { baseUrl, capturedLogs } =
+      await startHeartbeatServer(createService());
+    const response = await sendHeartbeat(baseUrl, {
+      rawBody,
+      nonce: nonceFor("unsupported-encoding"),
+      contentEncoding: "unsupported-test",
+    });
+    const body = await response.text();
+    const exposed = JSON.stringify({ body, capturedLogs });
+
+    expect(response.status).toBe(400);
+    expect(body).toBe('{"error":"invalid_heartbeat"}');
+    expect(exposed).not.toContain(rawBody.toString("utf8"));
+    expect(exposed).not.toContain("unsupported-test");
+    expect(exposed).not.toContain("UnsupportedMediaTypeError");
+    expect(capturedLogs).toEqual([
+      {
+        bindings: { errorType: "encoding.unsupported" },
+        message: "Module heartbeat parser failure",
+      },
+    ]);
+  });
+
+  it("does not apply heartbeat response headers to ordinary API handlers", async () => {
+    const { baseUrl } = await startHeartbeatServer(createService());
+    const response = await fetch(`${baseUrl}/ordinary`);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    expect(response.headers.get("cache-control")).toBeNull();
+    expect(response.headers.get("x-content-type-options")).toBeNull();
   });
 
   it("does not expose secrets or internal errors in responses or captured logs", async () => {

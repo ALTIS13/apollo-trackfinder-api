@@ -46,6 +46,8 @@ const PRODUCTION_ORIGINS = [
   "https://apollot.ru",
 ];
 
+app.use("/api", moduleHeartbeatRouter);
+
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -60,7 +62,6 @@ app.use(
   }),
 );
 
-app.use("/api", moduleHeartbeatRouter);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

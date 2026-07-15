@@ -14,11 +14,17 @@ export interface CreateModuleHeartbeatRouterOptions {
   service?: Pick<ModuleHeartbeatService, "ingest">;
 }
 
+const HEARTBEAT_PATH = "/internal/modules/:moduleId/heartbeat";
+
 function setHeartbeatResponseHeaders(res: Response): void {
   res.set({
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
   });
+}
+
+function isJsonContentType(req: Request): boolean {
+  return req.is("application/json") !== false;
 }
 
 function isRequestBodyTooLarge(error: unknown): boolean {
@@ -30,28 +36,44 @@ function isRequestBodyTooLarge(error: unknown): boolean {
   );
 }
 
+function getParserErrorType(error: unknown): string {
+  return typeof error === "object" &&
+    error !== null &&
+    "type" in error &&
+    typeof error.type === "string"
+    ? error.type
+    : "unknown";
+}
+
 export function createModuleHeartbeatRouter(
   options: CreateModuleHeartbeatRouterOptions = {},
 ): IRouter {
   const router = Router();
   const service = options.service ?? moduleHeartbeatService;
 
-  router.use((_req, res, next) => {
+  const applyHeartbeatResponseHeaders = (
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
     setHeartbeatResponseHeaders(res);
     next();
-  });
-
-  router.get("/internal/modules/:moduleId/heartbeat", (_req, res) => {
-    res.status(405).json({ error: "method_not_allowed" });
-  });
+  };
 
   router.post(
-    "/internal/modules/:moduleId/heartbeat",
-    express.raw({ type: "application/json", limit: "8kb" }),
+    HEARTBEAT_PATH,
+    applyHeartbeatResponseHeaders,
+    express.raw({ type: () => true, limit: "8kb" }),
     (req, res) => {
       try {
+        if (!isJsonContentType(req)) {
+          res.status(400).json({ error: "invalid_heartbeat" });
+          return;
+        }
+
+        const moduleId = req.params.moduleId;
         const result = service.ingest({
-          moduleId: req.params.moduleId ?? "",
+          moduleId: typeof moduleId === "string" ? moduleId : "",
           timestamp: req.get("X-Apollo-Heartbeat-Timestamp"),
           nonce: req.get("X-Apollo-Heartbeat-Nonce"),
           signature: req.get("X-Apollo-Heartbeat-Signature"),
@@ -85,13 +107,21 @@ export function createModuleHeartbeatRouter(
     },
   );
 
+  router.all(HEARTBEAT_PATH, applyHeartbeatResponseHeaders, (_req, res) => {
+    res.status(405).json({ error: "method_not_allowed" });
+  });
+
   router.use(
-    (error: unknown, _req: Request, res: Response, next: NextFunction) => {
-      if (!isRequestBodyTooLarge(error)) {
-        next(error);
-        return;
-      }
-      res.status(413).json({ error: "heartbeat_too_large" });
+    (error: unknown, req: Request, res: Response, _next: NextFunction) => {
+      req.log?.warn(
+        { errorType: getParserErrorType(error) },
+        "Module heartbeat parser failure",
+      );
+      res.status(isRequestBodyTooLarge(error) ? 413 : 400).json({
+        error: isRequestBodyTooLarge(error)
+          ? "heartbeat_too_large"
+          : "invalid_heartbeat",
+      });
     },
   );
 
