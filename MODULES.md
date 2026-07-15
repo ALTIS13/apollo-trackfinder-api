@@ -82,6 +82,24 @@ apollo-trackfinder/
 
 `GET /health` — возвращает статус сервера и версию.
 
+#### `module-heartbeats.ts` — Heartbeat независимых модулей
+
+`POST /api/internal/modules/:moduleId/heartbeat` принимает только JSON heartbeat от заранее настроенного модуля. Отправитель посылает его каждые 30 секунд. `moduleId` должен иметь отдельный ключ в API-only JSON map `APOLLO_MODULE_HEARTBEAT_KEYS`; пример формы значения: `{"search-media":"<per-module-secret>"}`. Пустая, невалидная или отсутствующая map безопасно отключает endpoint (`503 {"error":"heartbeat_disabled"}`), поэтому модульная телеметрия выключена по умолчанию.
+
+Запрос использует заголовки `X-Apollo-Heartbeat-Timestamp` (целое Unix-время в секундах), `X-Apollo-Heartbeat-Nonce` и `X-Apollo-Heartbeat-Signature`. Для raw UTF-8 body вычисляется `bodySha256` как lowercase hex SHA-256. Точная canonical string, включая символы новой строки, имеет вид:
+
+```text
+POST
+/api/internal/modules/<moduleId>/heartbeat
+<unix-seconds>
+<nonce>
+<bodySha256>
+```
+
+`X-Apollo-Heartbeat-Signature` равен `v1=<hex HMAC-SHA256(canonical string, per-module secret)>`. API принимает корректно подписанный timestamp только в своём окне допуска и защищает nonce от повтора. Полезная нагрузка имеет `schemaVersion: 1`, `status`, `version`, а также опциональные `deployedAt` и `requestsPerMinute`.
+
+Принятый heartbeat остаётся свежим 90 секунд. После этого в admin snapshot статус модуля становится `unknown`, а `lastHeartbeatAt` сохраняет последнее подтверждённое получение. Состояние хранится в памяти API: перезапуск API возвращает настроенные модули к `unknown` до следующего успешного heartbeat. Ключи не передаются web/admin/db/redis контейнерам и не попадают в Vite bundle или nginx.
+
 ### 1.3 Адаптеры — `src/adapters/`
 
 Каждый адаптер нормализует ответ источника в единый тип `NormalizedTrack`.
@@ -459,7 +477,7 @@ services:
   admin:  # Admin dashboard на порту 3001
 ```
 
-Root stack содержит PostgreSQL, API, web и admin services. Compose передаёт одинаковый server-side `ADMIN_DASHBOARD_TOKEN` API и admin nginx; браузер его не получает. Admin port привязан к `127.0.0.1`, а UI дополнительно требует `ADMIN_ACCESS_USER`/`ADMIN_ACCESS_PASSWORD`. Пустой service token отключает backend endpoint; пустые operator credentials закрывают UI. Deployment в Coolify/HomeNode пока не выполнялся.
+Root stack содержит PostgreSQL, API, web и admin services. Compose передаёт одинаковый server-side `ADMIN_DASHBOARD_TOKEN` API и admin nginx; браузер его не получает. `APOLLO_MODULE_HEARTBEAT_KEYS` передаётся только API container. Admin port привязан к `127.0.0.1`, а UI дополнительно требует `ADMIN_ACCESS_USER`/`ADMIN_ACCESS_PASSWORD`. Пустой service token отключает backend endpoint; пустые operator credentials закрывают UI. Deployment в Coolify/HomeNode пока не выполнялся.
 
 ### `artifacts/api-server/docker-compose.yml`
 
@@ -469,7 +487,7 @@ services:
   api:    # API-сервер на порту 8080
 ```
 
-Этот вложенный compose относится к API, PostgreSQL и Redis; admin service входит в корневой `docker-compose.yml`. `ADMIN_DASHBOARD_TOKEN` передаётся только API service.
+Этот вложенный compose относится к API, PostgreSQL и Redis; admin service входит в корневой `docker-compose.yml`. `ADMIN_DASHBOARD_TOKEN` и `APOLLO_MODULE_HEARTBEAT_KEYS` передаются только API service.
 
 **Переменные окружения:**
 
@@ -484,6 +502,7 @@ services:
 | `ADMIN_DASHBOARD_TOKEN` | До production deployment | Server-side token, который nginx пересылает как `X-Admin-Dashboard-Token`; не попадает в browser bundle |
 | `ADMIN_ACCESS_USER` | Для доступа к admin UI | Operator username для nginx Basic Auth; допустимы буквы, цифры и `_.@-` |
 | `ADMIN_ACCESS_PASSWORD` | Для доступа к admin UI | Operator password; хэшируется при старте контейнера и удаляется из окружения nginx process |
+| `APOLLO_MODULE_HEARTBEAT_KEYS` | Нет | API-only JSON map `{ "moduleId": "per-module-secret" }`; пустое/невалидное значение отключает module heartbeat endpoint |
 | `APOLLO_API_VERSION` | Нет | Версия in-process API-модулей в admin snapshot; default `unknown` |
 | `APOLLO_DEPLOYED_AT` | Нет | ISO timestamp фактического deployment; при отсутствии UI показывает `Нет данных` |
 

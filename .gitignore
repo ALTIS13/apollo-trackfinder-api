@@ -52,3 +52,8 @@ Thumbs.db
 
 # private operations data, SSH material, and local infrastructure notes
 /.ops-private/
+
+# local environment files; the documented template remains versioned
+.env
+.env.*
+!.env.example

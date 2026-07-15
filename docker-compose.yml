@@ -30,6 +30,7 @@ services:
       SERVER_URL: "${SERVER_URL:-https://api.apollot.ru}"
       WEB_URL: "${WEB_URL:-https://web.apollot.ru}"
       ADMIN_DASHBOARD_TOKEN: "${ADMIN_DASHBOARD_TOKEN:-}"
+      APOLLO_MODULE_HEARTBEAT_KEYS: "${APOLLO_MODULE_HEARTBEAT_KEYS:-}"
       APOLLO_API_VERSION: "${APOLLO_API_VERSION:-unknown}"
       APOLLO_DEPLOYED_AT: "${APOLLO_DEPLOYED_AT:-}"
     depends_on:

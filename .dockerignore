@@ -4,6 +4,10 @@ node_modules
 .cache
 .config
 *.log
+.env
+.env.*
+!.env.example
+.ops-private/
 
 artifacts/trackfinder-mobile
 artifacts/mockup-sandbox

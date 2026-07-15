@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -7,6 +7,14 @@ const workspaceRoot = resolve(apiRoot, "../..");
 
 function readWorkspaceFile(path: string): string {
   return readFileSync(resolve(workspaceRoot, path), "utf8");
+}
+
+function readDirectoryFiles(absolutePath: string): string[] {
+  return readdirSync(absolutePath, { withFileTypes: true }).flatMap((entry) =>
+    entry.isDirectory()
+      ? readDirectoryFiles(resolve(absolutePath, entry.name))
+      : [readFileSync(resolve(absolutePath, entry.name), "utf8")],
+  );
 }
 
 function serviceBlock(compose: string, service: string): string {
@@ -39,6 +47,15 @@ describe("admin telemetry container contract", () => {
   const loggerSource = readWorkspaceFile(
     "artifacts/api-server/src/lib/logger.ts",
   );
+  const gitignore = readWorkspaceFile(".gitignore");
+  const dockerignore = readWorkspaceFile(".dockerignore");
+  const webDockerfile = readWorkspaceFile("artifacts/music-player/Dockerfile");
+  const viteSources = [
+    ...readDirectoryFiles(resolve(workspaceRoot, "artifacts/admin-dashboard/src")),
+    ...readDirectoryFiles(resolve(workspaceRoot, "artifacts/music-player/src")),
+    readWorkspaceFile("artifacts/admin-dashboard/vite.config.ts"),
+    readWorkspaceFile("artifacts/music-player/vite.config.ts"),
+  ];
 
   it("passes the runtime token only to API and admin services", () => {
     const interpolation = 'ADMIN_DASHBOARD_TOKEN: "${ADMIN_DASHBOARD_TOKEN:-}"';
@@ -111,6 +128,48 @@ describe("admin telemetry container contract", () => {
     assertInterpolatedTokens(rootCompose);
     assertInterpolatedTokens(apiCompose);
     expect(loggerSource).toContain("req.headers['x-admin-dashboard-token']");
+  });
+
+  it("passes module heartbeat keys only to API containers and excludes operator files", () => {
+    const interpolation =
+      'APOLLO_MODULE_HEARTBEAT_KEYS: "${APOLLO_MODULE_HEARTBEAT_KEYS:-}"';
+    const secretName = "APOLLO_MODULE_HEARTBEAT_KEYS";
+
+    expect(serviceBlock(rootCompose, "api")).toContain(interpolation);
+    expect(serviceBlock(apiCompose, "api")).toContain(interpolation);
+
+    for (const compose of [rootCompose, apiCompose]) {
+      expect(compose).not.toMatch(
+        /args:\s*(?:\r?\n[ \t]+[^\r\n]+)*\r?\n[ \t]+APOLLO_MODULE_HEARTBEAT_KEYS:/,
+      );
+    }
+
+    for (const service of [
+      serviceBlock(rootCompose, "admin"),
+      serviceBlock(rootCompose, "web"),
+      serviceBlock(rootCompose, "db"),
+      serviceBlock(apiCompose, "db"),
+      serviceBlock(apiCompose, "redis"),
+    ]) {
+      expect(service).not.toContain(secretName);
+    }
+
+    for (const source of [
+      apiDockerfile,
+      adminDockerfile,
+      webDockerfile,
+      adminNginx,
+      ...viteSources,
+    ]) {
+      expect(source).not.toContain(secretName);
+    }
+
+    for (const ignoreFile of [gitignore, dockerignore]) {
+      expect(ignoreFile).toContain(".env");
+      expect(ignoreFile).toContain(".env.*");
+      expect(ignoreFile).toContain(".ops-private");
+      expect(ignoreFile).toContain("!.env.example");
+    }
   });
 
   it("requires operator authentication and rate limits the public admin surface", () => {
