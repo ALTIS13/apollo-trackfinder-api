@@ -235,9 +235,7 @@ describe("Apollo TF admin dashboard", () => {
 
   it("filters incidents when a service is selected", async () => {
     render(<App />);
-    await userEvent.click(
-      screen.getByRole("button", { name: "Download Worker" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Download Worker" }));
     expect(screen.getByText("Ошибки download-worker")).toBeVisible();
     expect(screen.queryByText("Деградация SoundCloud")).not.toBeInTheDocument();
   });
@@ -376,9 +374,7 @@ describe("Apollo TF admin dashboard", () => {
   it("resets service selection and restores all incidents", async () => {
     render(<App />);
 
-    await userEvent.click(
-      screen.getByRole("button", { name: "Download Worker" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Download Worker" }));
     await userEvent.click(
       screen.getByRole("button", { name: "Сбросить выбор" }),
     );

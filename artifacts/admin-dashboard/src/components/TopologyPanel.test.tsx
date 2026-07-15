@@ -1,5 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { demoSnapshot } from "../data/demo-snapshot";
 
@@ -27,6 +28,18 @@ import {
   isDashboardMotionEnabled,
   TopologyPanel,
 } from "./TopologyPanel";
+
+function StatefulTopologyPanel() {
+  const [selectedServiceId, setSelectedServiceId] = useState<string>();
+
+  return (
+    <TopologyPanel
+      snapshot={demoSnapshot}
+      selectedServiceId={selectedServiceId}
+      onSelectService={setSelectedServiceId}
+    />
+  );
+}
 
 beforeAll(() => {
   vi.stubGlobal("DOMMatrixReadOnly", class DOMMatrixReadOnly { m22 = 1; });
@@ -149,6 +162,31 @@ describe("TopologyPanel", () => {
     fireEvent.keyDown(node, { key: "Enter" });
 
     await waitFor(() => expect(onSelectService).toHaveBeenCalledWith("download-worker"));
+  });
+
+  it("enables layout reset after a draggable node position change and clears the session layout", async () => {
+    render(<StatefulTopologyPanel />);
+
+    const resetLayout = screen.getByRole("button", {
+      name: "Сбросить раскладку",
+    });
+    expect(resetLayout).toBeDisabled();
+
+    const node = await screen.findByTestId("rf__node-core-api");
+    const initialTransform = node.style.transform;
+    expect(node).toHaveClass("draggable");
+    fireEvent.keyDown(node, { key: "Enter" });
+    fireEvent.keyDown(node, { key: "ArrowRight" });
+
+    await waitFor(() => {
+      expect(resetLayout).toBeEnabled();
+      expect(node.style.transform).not.toBe(initialTransform);
+    });
+    fireEvent.click(resetLayout);
+    await waitFor(() => {
+      expect(resetLayout).toBeDisabled();
+      expect(node.style.transform).toBe(initialTransform);
+    });
   });
 
   it("disables evidence-bearing motion when hidden or reduced", () => {

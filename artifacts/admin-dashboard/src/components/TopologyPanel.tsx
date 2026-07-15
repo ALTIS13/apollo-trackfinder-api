@@ -6,6 +6,7 @@ import {
   type EdgeTypes,
   type NodeChange,
   type NodeTypes,
+  type XYPosition,
 } from "@xyflow/react";
 import { Maximize2, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
 import { useReducedMotion } from "framer-motion";
@@ -19,6 +20,10 @@ import {
 } from "react";
 import { getServiceNeighborhood } from "../lib/dashboard-model";
 import { layoutTopology } from "../lib/topology-layout";
+import {
+  applyPositionChanges,
+  prunePositionOverrides,
+} from "../lib/topology-position-overrides";
 import type {
   DashboardSnapshot,
   HealthStatus,
@@ -146,7 +151,17 @@ function useDocumentVisible() {
   return visible;
 }
 
-function ViewportControls({ reducedMotion }: { reducedMotion: boolean }) {
+interface ViewportControlsProps {
+  reducedMotion: boolean;
+  hasPositionOverrides: boolean;
+  onResetLayout: () => void;
+}
+
+function ViewportControls({
+  reducedMotion,
+  hasPositionOverrides,
+  onResetLayout,
+}: ViewportControlsProps) {
   const { fitView, zoomIn, zoomOut } = useReactFlow();
   const duration = reducedMotion ? 0 : 160;
 
@@ -173,6 +188,15 @@ function ViewportControls({ reducedMotion }: { reducedMotion: boolean }) {
       >
         <Maximize2 aria-hidden="true" />
       </button>
+      <button
+        type="button"
+        aria-label="Сбросить раскладку"
+        title="Сбросить раскладку"
+        disabled={!hasPositionOverrides}
+        onClick={onResetLayout}
+      >
+        <RotateCcw aria-hidden="true" />
+      </button>
     </div>
   );
 }
@@ -192,9 +216,16 @@ function TopologyCanvas({
     documentVisible,
     reducedMotion,
   );
+  const [positionOverrides, setPositionOverrides] = useState<
+    Map<string, XYPosition>
+  >(() => new Map());
   const layout = useMemo(
     () => layoutTopology(snapshot.modules, snapshot.edges),
     [snapshot.edges, snapshot.modules],
+  );
+  const moduleIds = useMemo(
+    () => new Set(snapshot.modules.map((module) => module.id)),
+    [snapshot.modules],
   );
   const fallbackNeighborhood = useMemo(
     () =>
@@ -216,20 +247,28 @@ function TopologyCanvas({
     () => getTerminalStatuses(snapshot.edges),
     [snapshot.edges],
   );
+
+  useEffect(() => {
+    setPositionOverrides((overrides) =>
+      prunePositionOverrides(overrides, moduleIds),
+    );
+  }, [moduleIds]);
+
   const nodes = useMemo<ServiceFlowNode[]>(() => {
     const positions = new Map(layout.nodes.map((node) => [node.id, node]));
     return snapshot.modules.map((module) => {
-      const position = positions.get(module.id);
-      if (position === undefined)
+      const dagrePosition = positions.get(module.id);
+      if (dagrePosition === undefined)
         throw new Error(`Не найдена позиция сервиса ${module.id}`);
+      const position = positionOverrides.get(module.id) ?? dagrePosition;
       return {
         id: module.id,
         type: "service",
         position: { x: position.x, y: position.y },
-        width: position.width,
-        height: position.height,
+        width: dagrePosition.width,
+        height: dagrePosition.height,
         selected: module.id === selectedServiceId,
-        draggable: false,
+        draggable: true,
         ariaLabel: module.name,
         style: {
           opacity:
@@ -252,6 +291,7 @@ function TopologyCanvas({
     activeNeighborhood,
     layout.nodes,
     motionEnabled,
+    positionOverrides,
     selectedServiceId,
     snapshot.modules,
     terminalStatuses,
@@ -373,6 +413,10 @@ function TopologyCanvas({
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<ServiceFlowNode>[]) => {
+      setPositionOverrides((overrides) =>
+        applyPositionChanges(overrides, changes),
+      );
+
       const selectedChange = changes.find(
         (change) => change.type === "select" && change.selected,
       );
@@ -404,7 +448,7 @@ function TopologyCanvas({
         fitViewOptions={{ padding: 0.12 }}
         minZoom={0.45}
         maxZoom={1.6}
-        nodesDraggable={false}
+        nodesDraggable
         nodesConnectable={false}
         nodesFocusable
         onNodeClick={(_, node) => onSelectService(node.id)}
@@ -417,7 +461,11 @@ function TopologyCanvas({
         proOptions={{ hideAttribution: true }}
       >
         <Background gap={24} size={1} />
-        <ViewportControls reducedMotion={reducedMotion} />
+        <ViewportControls
+          reducedMotion={reducedMotion}
+          hasPositionOverrides={positionOverrides.size > 0}
+          onResetLayout={() => setPositionOverrides(new Map())}
+        />
       </ReactFlow>
     </div>
   );
