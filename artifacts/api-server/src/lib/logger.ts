@@ -8,6 +8,9 @@ export const logger = pino({
     "req.headers.authorization",
     "req.headers.cookie",
     "req.headers['x-admin-dashboard-token']",
+    "req.headers['x-apollo-heartbeat-signature']",
+    "req.headers['x-apollo-heartbeat-timestamp']",
+    "req.headers['x-apollo-heartbeat-nonce']",
     "res.headers['set-cookie']",
   ],
   ...(isProduction

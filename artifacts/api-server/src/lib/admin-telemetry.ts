@@ -5,6 +5,7 @@ import {
   type ServiceEdge,
   type ServiceModule,
 } from "@workspace/admin-dashboard-contract";
+import type { ModuleHeartbeatObservation } from "./module-heartbeat.js";
 
 const DEFAULT_WINDOW_MS = 60_000;
 const DEFAULT_MAX_ENTRIES = 10_000;
@@ -67,7 +68,11 @@ function categorizeRequest(
 }
 
 function isExcludedPath(path: string): boolean {
-  return path === "/api/healthz" || path === "/api/admin/dashboard";
+  return (
+    path === "/api/healthz" ||
+    path === "/api/admin/dashboard" ||
+    /^\/api\/internal\/modules\/[^/]+\/heartbeat$/.test(path)
+  );
 }
 
 function isSearchRequest(event: RequestTelemetryEvent): boolean {
@@ -162,6 +167,7 @@ export interface AdminDashboardSnapshotDependencies {
   }>;
   isDatabaseReady: () => boolean;
   isRedisAvailable: () => boolean;
+  getModuleHeartbeats: () => ReadonlyArray<ModuleHeartbeatObservation>;
 }
 
 function combineStatus(left: HealthStatus, right: HealthStatus): HealthStatus {
@@ -243,7 +249,37 @@ export async function createAdminDashboardSnapshot(
       : {}),
     requestsPerMinute: moduleRequests[id] ?? 0,
   }));
-  const modulesById = new Map(modules.map((module) => [module.id, module]));
+  const managedHeartbeats = new Map(
+    dependencies
+      .getModuleHeartbeats()
+      .filter((observation) => observation.managed)
+      .map((observation) => [observation.moduleId, observation]),
+  );
+  const overlaidModules = modules.map((module) => {
+    const heartbeat = managedHeartbeats.get(module.id);
+    if (heartbeat === undefined) return module;
+
+    const {
+      lastDeploymentAt: _localDeploymentAt,
+      lastHeartbeatAt: _localHeartbeatAt,
+      ...baseModule
+    } = module;
+    return {
+      ...baseModule,
+      status: heartbeat.status,
+      version: heartbeat.version,
+      ...(heartbeat.deployedAt === undefined
+        ? {}
+        : { lastDeploymentAt: heartbeat.deployedAt }),
+      ...(heartbeat.lastHeartbeatAt === undefined
+        ? {}
+        : { lastHeartbeatAt: heartbeat.lastHeartbeatAt }),
+      requestsPerMinute: heartbeat.requestsPerMinute,
+    };
+  });
+  const modulesById = new Map(
+    overlaidModules.map((module) => [module.id, module]),
+  );
   const edgeDefinitions = [
     ["public-web", "core-api"],
     ["core-api", "account-integrations"],
@@ -262,9 +298,9 @@ export async function createAdminDashboardSnapshot(
       modulesById.get(source)!.status,
       modulesById.get(target)!.status,
     ),
-    requestsPerMinute: moduleRequests[target] ?? 0,
+    requestsPerMinute: modulesById.get(target)!.requestsPerMinute,
   }));
-  const activeModules = modules.filter(
+  const activeModules = overlaidModules.filter(
     (module) => module.status === "healthy",
   ).length;
   const providerNames = [
@@ -309,7 +345,7 @@ export async function createAdminDashboardSnapshot(
         trend: requestTelemetry.errorRateTrend,
       },
     ],
-    modules,
+    modules: overlaidModules,
     edges,
     incidents: [],
     providers: providerNames.map(([id, name]) => ({

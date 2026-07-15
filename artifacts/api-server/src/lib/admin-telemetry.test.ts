@@ -102,6 +102,31 @@ describe("RollingRequestTelemetry", () => {
       errorRatePercent: 20,
     });
   });
+
+  it("excludes only exact module heartbeat paths from operational telemetry", () => {
+    const now = Date.parse("2026-07-14T12:00:00.000Z");
+    const telemetry = new RollingRequestTelemetry();
+
+    telemetry.record({
+      method: "POST",
+      path: "/api/internal/modules/search-media/heartbeat",
+      statusCode: 202,
+      at: now,
+    });
+    telemetry.record({
+      method: "POST",
+      path: "/api/internal/modules/search-media/heartbeat/extra",
+      statusCode: 202,
+      at: now,
+    });
+
+    expect(telemetry.snapshot(now)).toMatchObject({
+      totalRequestsPerMinute: 1,
+      searchesPerMinute: 0,
+      accountRequestsPerMinute: 0,
+      downloadRequestsPerMinute: 0,
+    });
+  });
 });
 
 describe("createAdminDashboardSnapshot", () => {
@@ -133,6 +158,7 @@ describe("createAdminDashboardSnapshot", () => {
       }),
       isDatabaseReady: () => true,
       isRedisAvailable: () => false,
+      getModuleHeartbeats: () => [],
     });
 
     expect(parseDashboardSnapshot(snapshot)).toEqual(snapshot);
@@ -190,6 +216,7 @@ describe("createAdminDashboardSnapshot", () => {
       }),
       isDatabaseReady: () => false,
       isRedisAvailable: () => false,
+      getModuleHeartbeats: () => [],
     });
 
     expect(parseDashboardSnapshot(snapshot)).toEqual(snapshot);
@@ -200,5 +227,104 @@ describe("createAdminDashboardSnapshot", () => {
       snapshot.modules.find((module) => module.id === "download-worker")
         ?.status,
     ).toBe("unknown");
+  });
+
+  it("overlays managed heartbeat state before edge and active-module derivation", async () => {
+    const now = new Date("2026-07-15T04:31:02.000Z");
+    const snapshot = await createAdminDashboardSnapshot({
+      now: () => now,
+      deployedAt: "2026-07-15T04:00:00.000Z",
+      version: "2.0.0",
+      telemetry: new RollingRequestTelemetry(),
+      getQueueTelemetry: async () => ({
+        depth: 0,
+        status: "healthy" as const,
+        redisStatus: "healthy" as const,
+      }),
+      isDatabaseReady: () => true,
+      isRedisAvailable: () => true,
+      getModuleHeartbeats: () => [
+        {
+          moduleId: "search-media",
+          managed: true,
+          status: "warning" as const,
+          version: "3.0.0",
+          deployedAt: "2026-07-15T04:30:00.000Z",
+          lastHeartbeatAt: "2026-07-15T04:31:02.000Z",
+          requestsPerMinute: 77,
+        },
+        {
+          moduleId: "core-api",
+          managed: false,
+          status: "degraded" as const,
+          version: "unmanaged-version",
+          requestsPerMinute: 999,
+        },
+      ],
+    });
+
+    expect(
+      snapshot.modules.find((module) => module.id === "search-media"),
+    ).toMatchObject({
+      status: "warning",
+      version: "3.0.0",
+      lastDeploymentAt: "2026-07-15T04:30:00.000Z",
+      lastHeartbeatAt: "2026-07-15T04:31:02.000Z",
+      requestsPerMinute: 77,
+    });
+    expect(
+      snapshot.modules.find((module) => module.id === "core-api"),
+    ).toMatchObject({
+      status: "healthy",
+      version: "2.0.0",
+      lastDeploymentAt: "2026-07-15T04:00:00.000Z",
+      requestsPerMinute: 0,
+    });
+    expect(
+      snapshot.edges.find((edge) => edge.id === "core-api-search-media"),
+    ).toMatchObject({ status: "warning", requestsPerMinute: 77 });
+    expect(
+      snapshot.metrics.find((metric) => metric.id === "active-modules")?.value,
+    ).toBe("6");
+  });
+
+  it("keeps managed missing or stale state unknown without fabricated heartbeat data", async () => {
+    const snapshot = await createAdminDashboardSnapshot({
+      now: () => new Date("2026-07-15T04:31:02.000Z"),
+      deployedAt: "2026-07-15T04:00:00.000Z",
+      version: "2.0.0",
+      telemetry: new RollingRequestTelemetry(),
+      getQueueTelemetry: async () => ({
+        status: "unknown" as const,
+        redisStatus: "unknown" as const,
+      }),
+      isDatabaseReady: () => false,
+      isRedisAvailable: () => false,
+      getModuleHeartbeats: () => [
+        {
+          moduleId: "search-media",
+          managed: true,
+          status: "unknown" as const,
+          version: "3.0.0",
+          requestsPerMinute: 0,
+        },
+      ],
+    });
+
+    expect(
+      snapshot.modules.find((module) => module.id === "search-media"),
+    ).toMatchObject({
+      status: "unknown",
+      version: "3.0.0",
+      requestsPerMinute: 0,
+    });
+    expect(
+      snapshot.modules.find((module) => module.id === "search-media")
+        ?.lastDeploymentAt,
+    ).toBeUndefined();
+    expect(
+      snapshot.modules.find((module) => module.id === "search-media")
+        ?.lastHeartbeatAt,
+    ).toBeUndefined();
   });
 });

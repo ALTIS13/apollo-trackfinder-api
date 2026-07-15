@@ -5,6 +5,7 @@ import {
   adminRequestTelemetry,
   createAdminDashboardSnapshot,
 } from "../lib/admin-telemetry.js";
+import { moduleHeartbeatService } from "../lib/module-heartbeat.js";
 
 const DATABASE_PROBE_TIMEOUT_MS = 1_000;
 const DATABASE_PROBE_CACHE_MS = 5_000;
@@ -100,6 +101,7 @@ async function loadRuntimeSnapshot(): Promise<unknown> {
     getQueueTelemetry: async () => queueTelemetry,
     isDatabaseReady: () => databaseReady,
     isRedisAvailable,
+    getModuleHeartbeats: () => moduleHeartbeatService.snapshot(),
   });
 }
 

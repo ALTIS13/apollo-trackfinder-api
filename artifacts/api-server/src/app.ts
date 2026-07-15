@@ -5,6 +5,7 @@ import session from "express-session";
 import router from "./routes";
 import { logger } from "./lib/logger";
 import { adminRequestTelemetry } from "./lib/admin-telemetry";
+import { moduleHeartbeatRouter } from "./routes/module-heartbeats";
 
 const app: Express = express();
 
@@ -59,6 +60,7 @@ app.use(
   }),
 );
 
+app.use("/api", moduleHeartbeatRouter);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
