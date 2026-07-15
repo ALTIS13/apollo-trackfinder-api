@@ -32,22 +32,28 @@ function serviceBlock(compose: string, service: string): string {
 }
 
 function hasHeartbeatBuildArg(compose: string): boolean {
-  const document: unknown = parse(compose);
+  const document: unknown = parse(compose, { merge: true });
   if (!isRecord(document) || !isRecord(document.services)) return false;
 
   return Object.values(document.services).some((service) => {
     if (!isRecord(service) || !isRecord(service.build)) return false;
-    const args = service.build.args;
-    if (Array.isArray(args)) {
-      return args.some(
-        (argument) =>
-          typeof argument === "string" &&
-          (argument === HEARTBEAT_KEYS_ENV ||
-            argument.startsWith(`${HEARTBEAT_KEYS_ENV}=`)),
-      );
-    }
-    return isRecord(args) && Object.hasOwn(args, HEARTBEAT_KEYS_ENV);
+    return containsHeartbeatBuildArg(service.build.args);
   });
+}
+
+function containsHeartbeatBuildArg(args: unknown): boolean {
+  if (Array.isArray(args)) {
+    return args.some(
+      (argument) =>
+        typeof argument === "string" && argument.includes(HEARTBEAT_KEYS_ENV),
+    );
+  }
+  if (!isRecord(args)) return false;
+  return Object.entries(args).some(
+    ([name, value]) =>
+      name === HEARTBEAT_KEYS_ENV ||
+      (typeof value === "string" && value.includes(HEARTBEAT_KEYS_ENV)),
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -229,6 +235,22 @@ describe("admin telemetry container contract", () => {
     [
       "fully inline build mapping",
       "services:\n  api:\n    build: { args: { APOLLO_MODULE_HEARTBEAT_KEYS: value } }\n",
+    ],
+    [
+      "mapping value alias",
+      'services:\n  api:\n    build:\n      args:\n        INTERNAL_KEYS: "${APOLLO_MODULE_HEARTBEAT_KEYS}"\n',
+    ],
+    [
+      "list value alias",
+      "services:\n  api:\n    build:\n      args:\n        - INTERNAL_KEYS=${APOLLO_MODULE_HEARTBEAT_KEYS}\n",
+    ],
+    [
+      "merged mapping key",
+      "x-api-args: &api-args\n  APOLLO_MODULE_HEARTBEAT_KEYS: value\nservices:\n  api:\n    build:\n      args:\n        <<: *api-args\n",
+    ],
+    [
+      "merged mapping value alias",
+      'x-api-args: &api-args\n  INTERNAL_KEYS: "${APOLLO_MODULE_HEARTBEAT_KEYS}"\nservices:\n  api:\n    build:\n      args:\n        <<: *api-args\n',
     ],
   ])("rejects heartbeat keys from %s Compose build args", (_label, compose) => {
     expect(hasHeartbeatBuildArg(compose)).toBe(true);
