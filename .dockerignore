@@ -6,6 +6,8 @@ node_modules
 *.log
 .env
 .env.*
+**/.env
+**/.env.*
 !.env.example
 .ops-private/
 

@@ -1,9 +1,11 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const apiRoot = process.cwd();
 const workspaceRoot = resolve(apiRoot, "../..");
+const HEARTBEAT_KEYS_ENV = "APOLLO_MODULE_HEARTBEAT_KEYS";
 
 function readWorkspaceFile(path: string): string {
   return readFileSync(resolve(workspaceRoot, path), "utf8");
@@ -25,6 +27,113 @@ function serviceBlock(compose: string, service: string): string {
   );
   expect(match, `missing ${service} service`).not.toBeNull();
   return match![1];
+}
+
+function hasHeartbeatBuildArg(compose: string): boolean {
+  const lines = compose.replaceAll("\r\n", "\n").split("\n");
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const build = /^(\s*)build:\s*(.*)$/.exec(lines[index]);
+    if (build === null) continue;
+
+    const buildIndent = build[1].length;
+    const inlineBuild = build[2].trim();
+    if (inlineBuild.length > 0) {
+      if (hasHeartbeatInlineArgs(inlineBuild)) return true;
+      continue;
+    }
+
+    for (
+      let nestedIndex = index + 1;
+      nestedIndex < lines.length;
+      nestedIndex += 1
+    ) {
+      const line = lines[nestedIndex];
+      if (line.trim().length === 0) continue;
+      const indent = line.length - line.trimStart().length;
+      if (indent <= buildIndent) break;
+
+      const args = /^(\s*)args:\s*(.*)$/.exec(line);
+      if (args === null) continue;
+
+      const argsIndent = args[1].length;
+      const inlineArgs = args[2].trim();
+      if (inlineArgs.length > 0) {
+        if (hasHeartbeatKey(inlineArgs)) return true;
+        continue;
+      }
+
+      for (nestedIndex += 1; nestedIndex < lines.length; nestedIndex += 1) {
+        const argumentLine = lines[nestedIndex];
+        if (argumentLine.trim().length === 0) continue;
+        const argumentIndent =
+          argumentLine.length - argumentLine.trimStart().length;
+        if (argumentIndent <= argsIndent) {
+          nestedIndex -= 1;
+          break;
+        }
+        if (hasHeartbeatKey(argumentLine)) return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function hasHeartbeatInlineArgs(value: string): boolean {
+  const args = /(?:^|[\s,{])(?:args|["']args["'])\s*:\s*(.*)/.exec(value);
+  return args !== null && hasHeartbeatKey(args[1]);
+}
+
+function hasHeartbeatKey(value: string): boolean {
+  return new RegExp(
+    `(?:^|[\\s,{\\["'])${HEARTBEAT_KEYS_ENV}(?=$|[\\s:=,}\\]"'])`,
+  ).test(value);
+}
+
+function isGitIgnored(relativePath: string): boolean {
+  const result = spawnSync(
+    "git",
+    ["check-ignore", "--quiet", "--no-index", "--", relativePath],
+    { cwd: workspaceRoot, encoding: "utf8" },
+  );
+  if (result.error !== undefined) throw result.error;
+  expect(result.status, result.stderr).toBeOneOf([0, 1]);
+  return result.status === 0;
+}
+
+function isDockerIgnored(ignoreFile: string, relativePath: string): boolean {
+  const normalizedPath = relativePath.replaceAll("\\", "/");
+  let ignored = false;
+
+  for (const rawPattern of ignoreFile.split(/\r?\n/)) {
+    const trimmed = rawPattern.trim();
+    if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
+
+    const negated = trimmed.startsWith("!");
+    const pattern = negated ? trimmed.slice(1) : trimmed;
+    if (dockerPatternMatches(pattern, normalizedPath)) {
+      ignored = !negated;
+    }
+  }
+
+  return ignored;
+}
+
+function dockerPatternMatches(pattern: string, relativePath: string): boolean {
+  const normalizedPattern = pattern.replaceAll("\\", "/");
+  const directoryPattern = normalizedPattern.endsWith("/");
+  const source = directoryPattern
+    ? normalizedPattern.slice(0, -1)
+    : normalizedPattern;
+  const expression = source
+    .replace(/[|\\{}()[\]^$+?.]/g, "\\$&")
+    .replaceAll("**/", "(?:.*/)?")
+    .replaceAll("**", ".*")
+    .replaceAll("*", "[^/]*");
+  return new RegExp(`^${expression}${directoryPattern ? "(?:/|$)" : "$"}`).test(
+    relativePath,
+  );
 }
 
 describe("admin telemetry container contract", () => {
@@ -51,7 +160,9 @@ describe("admin telemetry container contract", () => {
   const dockerignore = readWorkspaceFile(".dockerignore");
   const webDockerfile = readWorkspaceFile("artifacts/music-player/Dockerfile");
   const viteSources = [
-    ...readDirectoryFiles(resolve(workspaceRoot, "artifacts/admin-dashboard/src")),
+    ...readDirectoryFiles(
+      resolve(workspaceRoot, "artifacts/admin-dashboard/src"),
+    ),
     ...readDirectoryFiles(resolve(workspaceRoot, "artifacts/music-player/src")),
     readWorkspaceFile("artifacts/admin-dashboard/vite.config.ts"),
     readWorkspaceFile("artifacts/music-player/vite.config.ts"),
@@ -133,15 +244,13 @@ describe("admin telemetry container contract", () => {
   it("passes module heartbeat keys only to API containers and excludes operator files", () => {
     const interpolation =
       'APOLLO_MODULE_HEARTBEAT_KEYS: "${APOLLO_MODULE_HEARTBEAT_KEYS:-}"';
-    const secretName = "APOLLO_MODULE_HEARTBEAT_KEYS";
+    const secretName = HEARTBEAT_KEYS_ENV;
 
     expect(serviceBlock(rootCompose, "api")).toContain(interpolation);
     expect(serviceBlock(apiCompose, "api")).toContain(interpolation);
 
     for (const compose of [rootCompose, apiCompose]) {
-      expect(compose).not.toMatch(
-        /args:\s*(?:\r?\n[ \t]+[^\r\n]+)*\r?\n[ \t]+APOLLO_MODULE_HEARTBEAT_KEYS:/,
-      );
+      expect(hasHeartbeatBuildArg(compose)).toBe(false);
     }
 
     for (const service of [
@@ -163,13 +272,43 @@ describe("admin telemetry container contract", () => {
     ]) {
       expect(source).not.toContain(secretName);
     }
+  });
 
-    for (const ignoreFile of [gitignore, dockerignore]) {
-      expect(ignoreFile).toContain(".env");
-      expect(ignoreFile).toContain(".env.*");
-      expect(ignoreFile).toContain(".ops-private");
-      expect(ignoreFile).toContain("!.env.example");
-    }
+  it.each([
+    [
+      "block mapping",
+      "services:\n  api:\n    build:\n      args:\n        APOLLO_MODULE_HEARTBEAT_KEYS: value\n",
+    ],
+    [
+      "inline mapping",
+      "services:\n  api:\n    build:\n      args: { APOLLO_MODULE_HEARTBEAT_KEYS: value }\n",
+    ],
+    [
+      "block list",
+      "services:\n  api:\n    build:\n      args:\n        - APOLLO_MODULE_HEARTBEAT_KEYS=value\n",
+    ],
+    [
+      "inline list",
+      "services:\n  api:\n    build:\n      args: [APOLLO_MODULE_HEARTBEAT_KEYS=value]\n",
+    ],
+    [
+      "fully inline build mapping",
+      "services:\n  api:\n    build: { args: { APOLLO_MODULE_HEARTBEAT_KEYS: value } }\n",
+    ],
+  ])("rejects heartbeat keys from %s Compose build args", (_label, compose) => {
+    expect(hasHeartbeatBuildArg(compose)).toBe(true);
+  });
+
+  it("applies Git and Docker ignore rules in order for operator files", () => {
+    expect(isGitIgnored(".env")).toBe(true);
+    expect(isGitIgnored("nested/.env.local")).toBe(true);
+    expect(isGitIgnored(".ops-private/notes.txt")).toBe(true);
+    expect(isGitIgnored(".env.example")).toBe(false);
+
+    expect(isDockerIgnored(dockerignore, ".env")).toBe(true);
+    expect(isDockerIgnored(dockerignore, "nested/.env.local")).toBe(true);
+    expect(isDockerIgnored(dockerignore, ".ops-private/notes.txt")).toBe(true);
+    expect(isDockerIgnored(dockerignore, ".env.example")).toBe(false);
   });
 
   it("requires operator authentication and rate limits the public admin surface", () => {
