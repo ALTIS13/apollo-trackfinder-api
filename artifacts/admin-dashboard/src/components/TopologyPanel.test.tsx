@@ -324,6 +324,12 @@ describe("TopologyPanel", () => {
           aggregateStatus: "degraded",
           renderTrunk: false,
           sharedBranchLength: 24,
+          branchIndex: 0,
+          branchCount: 1,
+          branchAttachmentY: 38,
+          branchChannel: 0,
+          sharedFanMinimumY: 38,
+          sharedFanMaximumY: 86,
         },
       ],
       [
@@ -337,6 +343,12 @@ describe("TopologyPanel", () => {
           aggregateStatus: "degraded",
           renderTrunk: false,
           sharedBranchLength: 24,
+          branchIndex: 0,
+          branchCount: 2,
+          branchAttachmentY: 62,
+          branchChannel: 1,
+          sharedFanMinimumY: 38,
+          sharedFanMaximumY: 86,
         },
       ],
       [
@@ -350,6 +362,12 @@ describe("TopologyPanel", () => {
           aggregateStatus: "degraded",
           renderTrunk: true,
           sharedBranchLength: 24,
+          branchIndex: 1,
+          branchCount: 2,
+          branchAttachmentY: 86,
+          branchChannel: 2,
+          sharedFanMinimumY: 38,
+          sharedFanMaximumY: 86,
         },
       ],
     ]);
@@ -676,6 +694,57 @@ describe("TopologyPanel", () => {
       ).toBe(264),
     );
     expect(264 % 24).toBe(0);
+  });
+
+  it("forgets free-move state when a module is removed before generated re-add", async () => {
+    const view = render(
+      <TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />,
+    );
+    const initialNode = await screen.findByTestId("rf__node-core-api");
+    const withoutCore = {
+      ...demoSnapshot,
+      modules: demoSnapshot.modules.filter((module) => module.id !== "core-api"),
+      edges: demoSnapshot.edges.filter(
+        (edge) => edge.source !== "core-api" && edge.target !== "core-api",
+      ),
+    };
+
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        { type: "position", id: "core-api", position: { x: 238, y: 111 } },
+      ]);
+    });
+    await waitFor(() =>
+      expect(
+        getReactFlowProps().nodes.find((item) => item.id === "core-api")?.position,
+      ).toEqual({ x: 238, y: 111 }),
+    );
+
+    view.rerender(
+      <TopologyPanel snapshot={withoutCore} onSelectService={vi.fn()} />,
+    );
+    await waitFor(() => expect(initialNode).not.toBeInTheDocument());
+    view.rerender(
+      <TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />,
+    );
+    const readdedNode = await screen.findByTestId("rf__node-core-api");
+    const generatedPosition = {
+      ...getReactFlowProps().nodes.find((item) => item.id === "core-api")!.position,
+    };
+    expect(generatedPosition.x % 24).not.toBe(0);
+
+    fireEvent.click(screen.getByRole("radio", { name: "Выровнять" }));
+    readdedNode.focus();
+    fireEvent.keyDown(readdedNode, { key: "ArrowRight" });
+
+    await waitFor(() => {
+      const moved = getReactFlowProps().nodes.find(
+        (item) => item.id === "core-api",
+      )!.position;
+      expect(moved.x - generatedPosition.x).toBe(24);
+      expect(moved.x % 24).toBe(generatedPosition.x % 24);
+    });
   });
 
   it("clears alignment guides when changing mode or resetting layout", async () => {

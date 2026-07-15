@@ -100,4 +100,25 @@ describe("evidence visual bounds", () => {
     expect(bottom).toBeGreaterThan(geometry.contactY + 24);
     expect(bounds.y).toBeLessThanOrEqual(evidenceRect.y);
   });
+
+  it("includes aggregate fan extents that are not part of the owner's solid route", () => {
+    const geometry = buildConnectorGeometry({
+      sourceX: 0,
+      sourceY: 0,
+      sourcePosition: Position.Right,
+      targetX: 200,
+      targetY: -80,
+      targetPosition: Position.Left,
+      sharedBranchLength: 0,
+      branchAttachmentY: -24,
+      branchChannel: 1,
+      sharedFanMinimumY: -24,
+      sharedFanMaximumY: 48,
+    });
+    const [routeRect] = getConnectorVisualRects(geometry, "1/мин");
+
+    expect(Math.max(...geometry.routePoints.map((point) => point.y))).toBe(-24);
+    expect(geometry.sharedRoutePoints).toContainEqual({ x: 0, y: 48 });
+    expect(routeRect!.y + routeRect!.height).toBeGreaterThan(48);
+  });
 });

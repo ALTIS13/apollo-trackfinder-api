@@ -6,7 +6,11 @@ import { resolve } from "node:path";
 import type { CSSProperties } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HealthStatus } from "../types/dashboard";
-import type { SharedStatusBand } from "../lib/topology-shared-routes";
+import type { ServiceEdge } from "../types/dashboard";
+import {
+  getSharedSourceRoutes,
+  type SharedStatusBand,
+} from "../lib/topology-shared-routes";
 import { FlowingEdge, getEvidenceLabelWidth } from "./FlowingEdge";
 
 afterEach(cleanup);
@@ -76,6 +80,65 @@ function renderEdge({
       />
     </svg>,
   );
+}
+
+function straightPathSegments(path: string) {
+  const commands = Array.from(path.matchAll(/([MLQ])([^MLQ]*)/g));
+  let current: { x: number; y: number } | undefined;
+  return commands.flatMap(([, type, coordinates]) => {
+    const values = Array.from(
+      coordinates.matchAll(/-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi),
+      ([value]) => Number(value),
+    );
+    if (type === "M") {
+      current = { x: values[0]!, y: values[1]! };
+      return [];
+    }
+    if (current === undefined) throw new Error("Expected an absolute SVG path");
+    if (type === "Q") {
+      current = { x: values[2]!, y: values[3]! };
+      return [];
+    }
+    const start = current;
+    const end = { x: values[0]!, y: values[1]! };
+    current = end;
+    return [{
+      horizontal: start.y === end.y,
+      fixed: start.y === end.y ? start.y : start.x,
+      minimum: Math.min(
+        start.y === end.y ? start.x : start.y,
+        start.y === end.y ? end.x : end.y,
+      ),
+      maximum: Math.max(
+        start.y === end.y ? start.x : start.y,
+        start.y === end.y ? end.x : end.y,
+      ),
+    }];
+  });
+}
+
+function expectRenderedSolidLanesDisjoint(container: HTMLElement) {
+  const edgeSegments = Array.from(
+    container.querySelectorAll<SVGPathElement>(
+      ".topology-edge-status-lane:not(.topology-edge-shared-trunk)",
+    ),
+    (path) => straightPathSegments(path.getAttribute("d") ?? ""),
+  );
+
+  edgeSegments.forEach((leftSegments, leftIndex) => {
+    edgeSegments.slice(leftIndex + 1).forEach((rightSegments) => {
+      leftSegments.forEach((left) => {
+        rightSegments.forEach((right) => {
+          if (left.horizontal !== right.horizontal || left.fixed !== right.fixed)
+            return;
+          expect(
+            Math.min(left.maximum, right.maximum) -
+              Math.max(left.minimum, right.minimum),
+          ).toBeLessThanOrEqual(0);
+        });
+      });
+    });
+  });
 }
 
 describe("FlowingEdge", () => {
@@ -410,6 +473,78 @@ describe("FlowingEdge", () => {
     ).toEqual(["1.75", "1", "1.75", "1"]);
   });
 
+  it("uses collision-proof gradient IDs for adversarial valid edge IDs", () => {
+    const definitions = [
+      {
+        id: "core:api",
+        y: 0,
+        bands: [
+          { status: "healthy" as const, count: 1 },
+          { status: "warning" as const, count: 1 },
+        ],
+      },
+      {
+        id: "core_3a_api",
+        y: 80,
+        bands: [
+          { status: "degraded" as const, count: 2 },
+          { status: "unknown" as const, count: 1 },
+        ],
+      },
+    ];
+    const view = render(
+      <svg>
+        {definitions.map((definition) => (
+          <FlowingEdge
+            key={definition.id}
+            id={definition.id}
+            source={`${definition.id}-source`}
+            target={`${definition.id}-target`}
+            sourceX={0}
+            sourceY={definition.y}
+            targetX={160}
+            targetY={definition.y}
+            sourcePosition={Position.Right}
+            targetPosition={Position.Left}
+            selected={false}
+            selectable={false}
+            deletable={false}
+            data={{
+              status: definition.bands[0]!.status,
+              motionEnabled: false,
+              sharedStatusBands: definition.bands,
+              sharedBranchLength: 24,
+              renderSharedTrunk: true,
+            }}
+            label="1/мин"
+          />
+        ))}
+      </svg>,
+    );
+    const gradients = Array.from(view.container.querySelectorAll("linearGradient"));
+    const lanes = Array.from(
+      view.container.querySelectorAll(
+        ".topology-edge-shared-trunk.topology-edge-status-lane",
+      ),
+    );
+    const ids = gradients.map((gradient) => gradient.id);
+
+    expect(new Set(ids).size).toBe(definitions.length);
+    expect(lanes.map((lane) => lane.getAttribute("stroke"))).toEqual(
+      ids.map((id) => `url(#${id})`),
+    );
+    expect(
+      gradients.map((gradient) =>
+        Array.from(gradient.querySelectorAll("stop"), (stop) =>
+          stop.getAttribute("stop-color"),
+        ),
+      ),
+    ).toEqual([
+      ["#22c55e", "#22c55e", "#f59e0b", "#f59e0b"],
+      ["#ef4444", "#ef4444", "#94a3b8", "#94a3b8"],
+    ]);
+  });
+
   it("keeps unknown status paint on an individual edge", () => {
     const { container } = renderEdge({ status: "unknown" });
     const lanes = container.querySelectorAll(
@@ -520,6 +655,88 @@ describe("FlowingEdge", () => {
         ".topology-edge-shared-trunk.topology-edge-status-lane",
       ),
     ).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      name: "same-direction fan-out",
+      source: { x: 0, y: 180, width: 190, height: 76 },
+      targets: [
+        { id: "above-a", x: 380, y: -80, width: 190, height: 76 },
+        { id: "above-b", x: 380, y: 20, width: 190, height: 76 },
+        { id: "above-c", x: 380, y: 80, width: 190, height: 76 },
+      ],
+    },
+    {
+      name: "same-row fan-out",
+      source: { x: 0, y: 100, width: 190, height: 76 },
+      targets: [
+        { id: "same-a", x: 380, y: 100, width: 190, height: 76 },
+        { id: "same-b", x: 400, y: 100, width: 190, height: 76 },
+        { id: "same-c", x: 420, y: 100, width: 190, height: 76 },
+      ],
+    },
+    {
+      name: "zero-clearance crossed fan-out",
+      source: { x: 120, y: 100, width: 190, height: 76 },
+      targets: [
+        { id: "cross-a", x: 260, y: -20, width: 190, height: 76 },
+        { id: "cross-b", x: 250, y: 20, width: 190, height: 76 },
+      ],
+    },
+  ])("renders one gradient owner and disjoint sibling solids for $name", ({ source, targets }) => {
+    const positions = new Map([
+      ["source", source],
+      ...targets.map((target) => [target.id, target] as const),
+    ]);
+    const edges: ServiceEdge[] = targets.map((target, index) => ({
+      id: `source-${target.id}`,
+      source: "source",
+      target: target.id,
+      status: index === 0 ? "warning" : "degraded",
+      requestsPerMinute: 1,
+    }));
+    const routes = getSharedSourceRoutes([...edges].reverse(), positions);
+    const { container } = render(
+      <svg>
+        {edges.map((candidate) => {
+          const target = positions.get(candidate.target)!;
+          const route = routes.get(candidate.id)!;
+          return (
+            <FlowingEdge
+              key={candidate.id}
+              id={candidate.id}
+              source={candidate.source}
+              target={candidate.target}
+              sourceX={source.x + source.width}
+              sourceY={source.y + source.height / 2}
+              targetX={target.x}
+              targetY={target.y + target.height / 2}
+              sourcePosition={Position.Right}
+              targetPosition={Position.Left}
+              selected={false}
+              selectable={false}
+              deletable={false}
+              data={{
+                ...route,
+                status: candidate.status,
+                motionEnabled: false,
+                sharedStatusBands: route.statusBands,
+                renderSharedTrunk: route.renderTrunk,
+              }}
+              label="1/мин"
+            />
+          );
+        })}
+      </svg>,
+    );
+
+    expect(
+      container.querySelectorAll(
+        ".topology-edge-shared-trunk.topology-edge-status-lane",
+      ),
+    ).toHaveLength(1);
+    expectRenderedSolidLanesDisjoint(container);
   });
 
   it("keeps gradient identity and semantic stops stable across reordered rerenders", () => {

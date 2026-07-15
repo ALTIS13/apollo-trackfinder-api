@@ -8,6 +8,8 @@ import {
   type ConnectorGeometryInput,
   type RoutePoint,
 } from "./topology-connector-geometry";
+import { getSharedSourceRoutes } from "./topology-shared-routes";
+import type { ServiceEdge } from "../types/dashboard";
 
 interface ParsedPathCommand {
   type: "M" | "L" | "Q";
@@ -277,6 +279,88 @@ function expectVerticalStrokesOutsidePlug(geometry: ConnectorGeometry) {
   });
 }
 
+function expectNoPositiveLengthOverlap(geometries: readonly ConnectorGeometry[]) {
+  const segments = geometries.map((geometry) =>
+    geometry.routePoints.slice(0, -1).map((start, index) => {
+      const end = geometry.routePoints[index + 1]!;
+      return {
+        horizontal: start.y === end.y,
+        fixed: start.y === end.y ? start.y : start.x,
+        minimum: Math.min(
+          start.y === end.y ? start.x : start.y,
+          start.y === end.y ? end.x : end.y,
+        ),
+        maximum: Math.max(
+          start.y === end.y ? start.x : start.y,
+          start.y === end.y ? end.x : end.y,
+        ),
+      };
+    }),
+  );
+
+  segments.forEach((leftSegments, leftIndex) => {
+    segments.slice(leftIndex + 1).forEach((rightSegments) => {
+      leftSegments.forEach((left) => {
+        rightSegments.forEach((right) => {
+          if (left.horizontal !== right.horizontal || left.fixed !== right.fixed)
+            return;
+          expect(
+            Math.min(left.maximum, right.maximum) -
+              Math.max(left.minimum, right.minimum),
+          ).toBeLessThanOrEqual(0);
+        });
+      });
+    });
+  });
+}
+
+function buildGroupedGeometries(input: {
+  source: { x: number; y: number; width: number; height: number };
+  targets: Array<{
+    id: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }>;
+  reverseEdges?: boolean;
+}) {
+  const positions = new Map([
+    ["source", input.source],
+    ...input.targets.map((target) => [target.id, target] as const),
+  ]);
+  const edges: ServiceEdge[] = input.targets.map((target, index) => ({
+    id: `source-${target.id}`,
+    source: "source",
+    target: target.id,
+    status: (["healthy", "warning", "degraded", "unknown"] as const)[
+      index % 4
+    ],
+    requestsPerMinute: 1,
+  }));
+  const orderedInput = input.reverseEdges ? [...edges].reverse() : edges;
+  const routes = getSharedSourceRoutes(orderedInput, positions);
+
+  return new Map(
+    edges.map((candidate) => {
+      const target = positions.get(candidate.target)!;
+      const route = routes.get(candidate.id);
+      return [
+        candidate.id,
+        buildConnectorGeometry({
+          sourceX: input.source.x + input.source.width,
+          sourceY: input.source.y + input.source.height / 2,
+          sourcePosition: Position.Right,
+          targetX: target.x,
+          targetY: target.y + target.height / 2,
+          targetPosition: Position.Left,
+          ...route,
+        }),
+      ] as const;
+    }),
+  );
+}
+
 const connectorInput = (
   overrides: Partial<ConnectorGeometryInput> = {},
 ): ConnectorGeometryInput => ({
@@ -290,6 +374,70 @@ const connectorInput = (
 });
 
 describe("buildConnectorGeometry", () => {
+  it.each([
+    {
+      name: "default above, same, and below targets",
+      source: { x: 0, y: 100, width: 190, height: 76 },
+      targets: [
+        { id: "above", x: 340, y: -40, width: 190, height: 76 },
+        { id: "same", x: 340, y: 100, width: 190, height: 76 },
+        { id: "below", x: 340, y: 240, width: 190, height: 76 },
+      ],
+    },
+    {
+      name: "two same-direction targets",
+      source: { x: 0, y: 180, width: 190, height: 76 },
+      targets: [
+        { id: "above-a", x: 380, y: -80, width: 190, height: 76 },
+        { id: "above-b", x: 380, y: 20, width: 190, height: 76 },
+        { id: "above-c", x: 380, y: 80, width: 190, height: 76 },
+      ],
+    },
+    {
+      name: "two same-row targets",
+      source: { x: 0, y: 100, width: 190, height: 76 },
+      targets: [
+        { id: "same-a", x: 380, y: 100, width: 190, height: 76 },
+        { id: "same-b", x: 400, y: 100, width: 190, height: 76 },
+        { id: "same-c", x: 420, y: 100, width: 190, height: 76 },
+      ],
+    },
+    {
+      name: "zero-clearance crossed targets",
+      source: { x: 120, y: 100, width: 190, height: 76 },
+      targets: [
+        { id: "cross-a", x: 260, y: -20, width: 190, height: 76 },
+        { id: "cross-b", x: 250, y: 20, width: 190, height: 76 },
+      ],
+    },
+  ])("keeps sibling solid geometry disjoint for $name", ({ name, source, targets }) => {
+    const geometries = buildGroupedGeometries({ source, targets });
+
+    geometries.forEach(expectCanonicalContact);
+    expectNoPositiveLengthOverlap([...geometries.values()]);
+    if (name === "zero-clearance crossed targets") {
+      geometries.forEach((geometry) => expect(geometry.usedDetour).toBe(true));
+    }
+  });
+
+  it("keeps crowded fan-out geometry stable when unrelated edge order changes", () => {
+    const input = {
+      source: { x: 0, y: 180, width: 190, height: 76 },
+      targets: [
+        { id: "above-a", x: 380, y: -80, width: 190, height: 76 },
+        { id: "above-b", x: 380, y: 20, width: 190, height: 76 },
+        { id: "above-c", x: 380, y: 80, width: 190, height: 76 },
+        { id: "same-a", x: 380, y: 180, width: 190, height: 76 },
+        { id: "same-b", x: 400, y: 180, width: 190, height: 76 },
+        { id: "same-c", x: 420, y: 180, width: 190, height: 76 },
+      ],
+    };
+
+    expect(buildGroupedGeometries(input)).toEqual(
+      buildGroupedGeometries({ ...input, reverseEdges: true }),
+    );
+  });
+
   it.each([
     {
       name: "same-row route",

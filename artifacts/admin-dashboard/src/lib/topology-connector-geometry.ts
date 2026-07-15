@@ -21,6 +21,11 @@ export interface ConnectorGeometryInput {
   targetY: number;
   targetPosition: Position;
   sharedBranchLength?: number;
+  branchAttachmentY?: number;
+  branchChannel?: number;
+  branchApproachX?: number;
+  sharedFanMinimumY?: number;
+  sharedFanMaximumY?: number;
 }
 
 export interface ConnectorGeometry {
@@ -35,6 +40,9 @@ export interface ConnectorGeometry {
   contactSegmentIndex: number;
   usedDetour: boolean;
   sharedTrunkPath?: string;
+  sharedRoutePoints: RoutePoint[];
+  sharedGradientStart: RoutePoint;
+  sharedGradientEnd: RoutePoint;
 }
 
 interface ContactSegment {
@@ -186,24 +194,141 @@ function buildDetourRoute(source: RoutePoint, target: RoutePoint): RoutePoint[] 
   ];
 }
 
+function buildFannedRoute(
+  source: RoutePoint,
+  target: RoutePoint,
+  branchChannel: number,
+  branchApproachX?: number,
+): { points: RoutePoint[]; usedDetour: boolean } {
+  const approachX =
+    branchApproachX ??
+    target.x - CONTACT_TERMINAL_CLEARANCE - branchChannel * CONNECTOR_BEND_RADIUS * 2;
+  if (source.x < approachX) {
+    return {
+      points: [
+        source,
+        { x: approachX, y: source.y },
+        { x: approachX, y: target.y },
+        target,
+      ],
+      usedDetour: false,
+    };
+  }
+
+  return {
+    points: buildFannedDetourRoute(
+      source,
+      target,
+      branchChannel,
+      branchApproachX,
+    ),
+    usedDetour: true,
+  };
+}
+
+function buildFannedDetourRoute(
+  source: RoutePoint,
+  target: RoutePoint,
+  branchChannel: number,
+  branchApproachX?: number,
+): RoutePoint[] {
+  const approachX =
+    branchApproachX ??
+    target.x - CONTACT_TERMINAL_CLEARANCE - branchChannel * CONNECTOR_BEND_RADIUS * 2;
+  const detourX =
+    Math.max(source.x, target.x) +
+    112 +
+    branchChannel * CONNECTOR_BEND_RADIUS * 2;
+  const detourY = Math.max(source.y, target.y) + 64;
+  return [
+    source,
+    { x: detourX, y: source.y },
+    { x: detourX, y: detourY },
+    { x: approachX, y: detourY },
+    { x: approachX, y: target.y },
+    target,
+  ];
+}
+
+function buildSharedRoute(input: ConnectorGeometryInput, branchSourceX: number) {
+  const minimumY = Math.min(input.sourceY, input.sharedFanMinimumY ?? input.sourceY);
+  const maximumY = Math.max(input.sourceY, input.sharedFanMaximumY ?? input.sourceY);
+  const pathParts: string[] = [];
+  const points: RoutePoint[] = [];
+
+  if (branchSourceX !== input.sourceX) {
+    pathParts.push(`M ${input.sourceX} ${input.sourceY} H ${branchSourceX}`);
+    points.push(
+      { x: input.sourceX, y: input.sourceY },
+      { x: branchSourceX, y: input.sourceY },
+    );
+  }
+  if (minimumY < input.sourceY) {
+    pathParts.push(`M ${branchSourceX} ${input.sourceY} V ${minimumY}`);
+    points.push({ x: branchSourceX, y: minimumY });
+  }
+  if (maximumY > input.sourceY) {
+    pathParts.push(`M ${branchSourceX} ${input.sourceY} V ${maximumY}`);
+    points.push({ x: branchSourceX, y: maximumY });
+  }
+
+  const verticalGradient = branchSourceX === input.sourceX && minimumY !== maximumY;
+  return {
+    path: pathParts.length === 0 ? undefined : pathParts.join(" "),
+    points,
+    gradientStart: verticalGradient
+      ? { x: branchSourceX, y: minimumY }
+      : { x: input.sourceX, y: input.sourceY },
+    gradientEnd: verticalGradient
+      ? { x: branchSourceX, y: maximumY }
+      : { x: branchSourceX, y: input.sourceY },
+  };
+}
+
 export function buildConnectorGeometry(input: ConnectorGeometryInput): ConnectorGeometry {
   const sharedBranchLength = Math.max(0, input.sharedBranchLength ?? 0);
   const branchSourceX = input.sourceX + sharedBranchLength;
-  const source = { x: branchSourceX, y: input.sourceY };
+  const branchChannel = Math.max(0, input.branchChannel ?? 0);
+  const source = {
+    x: branchSourceX,
+    y: branchChannel > 0 ? (input.branchAttachmentY ?? input.sourceY) : input.sourceY,
+  };
   const target = { x: input.targetX, y: input.targetY };
+  const fannedRoute =
+    branchChannel > 0
+      ? buildFannedRoute(
+          source,
+          target,
+          branchChannel,
+          input.branchApproachX,
+        )
+      : undefined;
   let routePoints = collapseRoutePoints(
-    buildNormalRoute(source, target, input.sharedBranchLength !== undefined),
+    fannedRoute !== undefined
+      ? fannedRoute.points
+      : buildNormalRoute(source, target, input.sharedBranchLength !== undefined),
   );
   let contactSegment = findContactSegment(routePoints);
-  const usedDetour = contactSegment === undefined;
+  let usedDetour = fannedRoute?.usedDetour ?? false;
 
-  if (usedDetour) {
-    routePoints = collapseRoutePoints(buildDetourRoute(source, target));
+  if (contactSegment === undefined) {
+    routePoints = collapseRoutePoints(
+      branchChannel > 0
+        ? buildFannedDetourRoute(
+            source,
+            target,
+            branchChannel,
+            input.branchApproachX,
+          )
+        : buildDetourRoute(source, target),
+    );
     contactSegment = findContactSegment(routePoints);
+    usedDetour = true;
   }
   if (contactSegment === undefined) {
     throw new Error("The deterministic connector detour must contain a plug segment");
   }
+  const sharedRoute = buildSharedRoute(input, branchSourceX);
 
   const contactY = routePoints[contactSegment.index].y;
   const contactX = contactSegment.contactX;
@@ -229,9 +354,9 @@ export function buildConnectorGeometry(input: ConnectorGeometryInput): Connector
     routePoints,
     contactSegmentIndex: contactSegment.index,
     usedDetour,
-    sharedTrunkPath:
-      sharedBranchLength > 0
-        ? `M ${input.sourceX} ${input.sourceY} H ${branchSourceX}`
-        : undefined,
+    sharedTrunkPath: sharedRoute.path,
+    sharedRoutePoints: sharedRoute.points,
+    sharedGradientStart: sharedRoute.gradientStart,
+    sharedGradientEnd: sharedRoute.gradientEnd,
   };
 }

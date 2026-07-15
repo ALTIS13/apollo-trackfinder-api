@@ -55,6 +55,11 @@ export interface FlowingEdgeData extends Record<string, unknown> {
   sharedStatusBands?: SharedStatusBand[];
   sharedBranchLength?: number;
   renderSharedTrunk?: boolean;
+  branchAttachmentY?: number;
+  branchChannel?: number;
+  branchApproachX?: number;
+  sharedFanMinimumY?: number;
+  sharedFanMaximumY?: number;
   evidenceLane?: number;
 }
 
@@ -67,7 +72,7 @@ function getLabelText(label: EdgeProps<TopologyFlowEdge>["label"]) {
 }
 
 function getGradientId(edgeId: string): string {
-  const encodedId = edgeId.replace(/[^a-zA-Z0-9_-]/g, (character) =>
+  const encodedId = edgeId.replace(/[^a-zA-Z0-9-]/g, (character) =>
     `_${character.codePointAt(0)!.toString(16)}_`,
   );
   return `topology-gradient-${encodedId}`;
@@ -132,6 +137,11 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
     targetY,
     targetPosition,
     sharedBranchLength: data?.sharedBranchLength,
+    branchAttachmentY: data?.branchAttachmentY,
+    branchChannel: data?.branchChannel,
+    branchApproachX: data?.branchApproachX,
+    sharedFanMinimumY: data?.sharedFanMinimumY,
+    sharedFanMaximumY: data?.sharedFanMaximumY,
   });
   const color = edgeColors[status];
   const labelText = getLabelText(props.label);
@@ -228,8 +238,10 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
                 <linearGradient
                   id={gradientId}
                   gradientUnits="userSpaceOnUse"
-                  x1={sourceX}
-                  x2={geometry.branchSourceX}
+                  x1={geometry.sharedGradientStart.x}
+                  y1={geometry.sharedGradientStart.y}
+                  x2={geometry.sharedGradientEnd.x}
+                  y2={geometry.sharedGradientEnd.y}
                 >
                   {gradientStops.map((stop, index) => (
                     <stop

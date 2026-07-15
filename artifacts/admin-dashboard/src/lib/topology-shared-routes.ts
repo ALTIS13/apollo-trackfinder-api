@@ -1,5 +1,6 @@
 import {
   CONNECTOR_BEND_RADIUS,
+  CONTACT_BEND_CLEARANCE,
   CONTACT_HALF_LENGTH,
   SHARED_TRUNK_LENGTH,
   TARGET_STUB_LENGTH,
@@ -16,6 +17,13 @@ export interface SharedSourceRoute {
   aggregateStatus: HealthStatus;
   renderTrunk: boolean;
   sharedBranchLength: number;
+  branchIndex: number;
+  branchCount: number;
+  branchAttachmentY: number;
+  branchChannel: number;
+  branchApproachX?: number;
+  sharedFanMinimumY: number;
+  sharedFanMaximumY: number;
 }
 
 export interface TopologyNodePosition {
@@ -37,6 +45,14 @@ export function getWorstHealthStatus(statuses: readonly HealthStatus[]): HealthS
 
 function targetCenterY(position: TopologyNodePosition): number {
   return (position.y ?? 0) + (position.height ?? 0) / 2;
+}
+
+type BranchDirection = "above" | "same" | "below";
+
+function branchDirection(sourceY: number, targetY: number): BranchDirection {
+  if (targetY < sourceY) return "above";
+  if (targetY > sourceY) return "below";
+  return "same";
 }
 
 export function getSharedSourceRoutes(
@@ -64,6 +80,7 @@ export function getSharedSourceRoutes(
       return centerDelta === 0 ? left.id.localeCompare(right.id) : centerDelta;
     });
     const sourceX = sourcePosition.x + sourcePosition.width;
+    const sourceY = targetCenterY(sourcePosition);
     const sharedBranchLength = orderedEdges.reduce(
       (shortestClearance, edge) => {
         const targetPosition = nodePositions.get(edge.target);
@@ -83,12 +100,106 @@ export function getSharedSourceRoutes(
     }, []);
     const aggregateStatus = getWorstHealthStatus(orderedEdges.map((edge) => edge.status));
 
+    const edgesByDirection = new Map<BranchDirection, ServiceEdge[]>([
+      ["above", []],
+      ["same", []],
+      ["below", []],
+    ]);
+    orderedEdges.forEach((edge) => {
+      const targetPosition = nodePositions.get(edge.target);
+      const direction = branchDirection(
+        sourceY,
+        targetPosition === undefined ? sourceY : targetCenterY(targetPosition),
+      );
+      edgesByDirection.get(direction)!.push(edge);
+    });
+    const crowdedBelowCount =
+      edgesByDirection.get("below")!.length > 1
+        ? edgesByDirection.get("below")!.length
+        : 0;
+    const metadata = new Map<
+      string,
+      Pick<
+        SharedSourceRoute,
+        | "branchIndex"
+        | "branchCount"
+        | "branchAttachmentY"
+        | "branchChannel"
+        | "branchApproachX"
+      >
+    >();
+    const sameRowApproaches = new Map<string, number>();
+    const sameRowEdges = [...edgesByDirection.get("same")!].sort((left, right) => {
+      const leftX = nodePositions.get(left.target)?.x ?? 0;
+      const rightX = nodePositions.get(right.target)?.x ?? 0;
+      return leftX === rightX ? left.id.localeCompare(right.id) : leftX - rightX;
+    });
+    if (sameRowEdges.length > 1) {
+      let previousTargetX: number | undefined;
+      sameRowEdges.forEach((edge) => {
+        const targetX = nodePositions.get(edge.target)?.x ?? sourceX;
+        const approachX =
+          previousTargetX === undefined || targetX <= previousTargetX
+            ? targetX - CONNECTOR_BEND_RADIUS
+            : (previousTargetX + targetX) / 2;
+        sameRowApproaches.set(edge.id, approachX);
+        previousTargetX = targetX;
+      });
+    }
+    let branchChannel = 0;
+    orderedEdges.forEach((edge) => {
+      const targetPosition = nodePositions.get(edge.target);
+      const direction = branchDirection(
+        sourceY,
+        targetPosition === undefined ? sourceY : targetCenterY(targetPosition),
+      );
+      const directionEdges = edgesByDirection.get(direction)!;
+      const branchIndex = directionEdges.findIndex((candidate) => candidate.id === edge.id);
+      const branchCount = directionEdges.length;
+      if (branchCount < 2) {
+        metadata.set(edge.id, {
+          branchIndex,
+          branchCount,
+          branchAttachmentY: sourceY,
+          branchChannel: 0,
+        });
+        return;
+      }
+
+      branchChannel += 1;
+      const slot =
+        direction === "above"
+          ? -(branchIndex + 1)
+          : direction === "below"
+            ? branchIndex + 1
+            : crowdedBelowCount + branchIndex + 1;
+      metadata.set(edge.id, {
+        branchIndex,
+        branchCount,
+        branchAttachmentY: sourceY + slot * CONTACT_BEND_CLEARANCE,
+        branchChannel,
+        ...(sameRowApproaches.has(edge.id)
+          ? { branchApproachX: sameRowApproaches.get(edge.id)! }
+          : {}),
+      });
+    });
+    const attachmentYs = [
+      sourceY,
+      ...Array.from(metadata.values(), (item) => item.branchAttachmentY),
+    ];
+    const sharedFanMinimumY = Math.min(...attachmentYs);
+    const sharedFanMaximumY = Math.max(...attachmentYs);
+
     orderedEdges.forEach((edge, index) => {
+      const branch = metadata.get(edge.id)!;
       routes.set(edge.id, {
         statusBands,
         aggregateStatus,
         renderTrunk: index === orderedEdges.length - 1,
         sharedBranchLength,
+        ...branch,
+        sharedFanMinimumY,
+        sharedFanMaximumY,
       });
     });
   });

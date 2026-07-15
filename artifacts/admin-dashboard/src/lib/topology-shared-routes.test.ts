@@ -31,6 +31,82 @@ function permutations<T>(values: readonly T[]): T[][] {
 }
 
 describe("getSharedSourceRoutes", () => {
+  it("assigns stable, distinct fan-out metadata only to crowded branch directions", () => {
+    const crowdedPositions = new Map([
+      ["core", { x: 0, y: 100, width: 190, height: 76 }],
+      ["above-a", { x: 320, y: -80, width: 190, height: 76 }],
+      ["above-b", { x: 320, y: 0, width: 190, height: 76 }],
+      ["same-a", { x: 320, y: 100, width: 190, height: 76 }],
+      ["same-b", { x: 560, y: 100, width: 190, height: 76 }],
+      ["below", { x: 320, y: 260, width: 190, height: 76 }],
+    ]);
+    const crowdedEdges = [
+      edge("core-above-b", "above-b", "warning"),
+      edge("core-same-b", "same-b", "healthy"),
+      edge("core-below", "below", "degraded"),
+      edge("core-above-a", "above-a", "healthy"),
+      edge("core-same-a", "same-a", "unknown"),
+    ];
+
+    const routes = getSharedSourceRoutes(crowdedEdges, crowdedPositions);
+    const reordered = getSharedSourceRoutes(
+      [...crowdedEdges].reverse(),
+      crowdedPositions,
+    );
+    const metadata = (id: string) => {
+      const route = routes.get(id) as unknown as Record<string, unknown>;
+      return {
+        branchIndex: route.branchIndex,
+        branchCount: route.branchCount,
+        branchAttachmentY: route.branchAttachmentY,
+        branchChannel: route.branchChannel,
+        branchApproachX: route.branchApproachX,
+        sharedFanMinimumY: route.sharedFanMinimumY,
+        sharedFanMaximumY: route.sharedFanMaximumY,
+      };
+    };
+
+    expect(metadata("core-above-a")).toMatchObject({
+      branchIndex: 0,
+      branchCount: 2,
+      branchChannel: 1,
+    });
+    expect(metadata("core-above-b")).toMatchObject({
+      branchIndex: 1,
+      branchCount: 2,
+      branchChannel: 2,
+    });
+    expect(metadata("core-same-a")).toMatchObject({
+      branchIndex: 0,
+      branchCount: 2,
+      branchChannel: 3,
+      branchApproachX: 312.5,
+    });
+    expect(metadata("core-same-b")).toMatchObject({
+      branchIndex: 1,
+      branchCount: 2,
+      branchChannel: 4,
+      branchApproachX: 440,
+    });
+    expect(metadata("core-below")).toMatchObject({
+      branchIndex: 0,
+      branchCount: 1,
+      branchAttachmentY: 138,
+      branchChannel: 0,
+    });
+    expect(new Set([
+      metadata("core-above-a").branchAttachmentY,
+      metadata("core-above-b").branchAttachmentY,
+      metadata("core-same-a").branchAttachmentY,
+      metadata("core-same-b").branchAttachmentY,
+    ]).size).toBe(4);
+    expect(metadata("core-above-a").sharedFanMinimumY).toBeLessThan(138);
+    expect(metadata("core-same-b").sharedFanMaximumY).toBeGreaterThan(138);
+    crowdedEdges.forEach((candidate) => {
+      expect(reordered.get(candidate.id)).toEqual(routes.get(candidate.id));
+    });
+  });
+
   it("orders source edges by target center then id and aggregates their statuses", () => {
     const routes = getSharedSourceRoutes(
       [

@@ -290,6 +290,15 @@ function TopologyCanvas({
           targetPosition: Position.Left,
           sharedBranchLength:
             sharedSourceRoutes.get(edge.id)?.sharedBranchLength,
+          branchAttachmentY:
+            sharedSourceRoutes.get(edge.id)?.branchAttachmentY,
+          branchChannel: sharedSourceRoutes.get(edge.id)?.branchChannel,
+          branchApproachX:
+            sharedSourceRoutes.get(edge.id)?.branchApproachX,
+          sharedFanMinimumY:
+            sharedSourceRoutes.get(edge.id)?.sharedFanMinimumY,
+          sharedFanMaximumY:
+            sharedSourceRoutes.get(edge.id)?.sharedFanMaximumY,
         }),
       );
     });
@@ -363,6 +372,9 @@ function TopologyCanvas({
     setPositionOverrides((overrides) =>
       prunePositionOverrides(overrides, moduleIds),
     );
+    freelyMovedNodeIds.current.forEach((nodeId) => {
+      if (!moduleIds.has(nodeId)) freelyMovedNodeIds.current.delete(nodeId);
+    });
   }, [moduleIds]);
 
   useEffect(() => {
@@ -464,6 +476,15 @@ function TopologyCanvas({
             sharedStatusBands: sharedSourceRoutes.get(edge.id)?.statusBands,
             sharedBranchLength:
               sharedSourceRoutes.get(edge.id)?.sharedBranchLength,
+            branchAttachmentY:
+              sharedSourceRoutes.get(edge.id)?.branchAttachmentY,
+            branchChannel: sharedSourceRoutes.get(edge.id)?.branchChannel,
+            branchApproachX:
+              sharedSourceRoutes.get(edge.id)?.branchApproachX,
+            sharedFanMinimumY:
+              sharedSourceRoutes.get(edge.id)?.sharedFanMinimumY,
+            sharedFanMaximumY:
+              sharedSourceRoutes.get(edge.id)?.sharedFanMaximumY,
             renderSharedTrunk: sharedSourceRoutes.get(edge.id)?.renderTrunk,
             ...(edge.status === "healthy"
               ? {}

@@ -35,10 +35,11 @@ export function getConnectorVisualRects(
   trafficLabel: string,
 ): EvidenceObstacle[] {
   const routeHalfWidth = CONNECTOR_VISUAL_METRICS.routeWidth / 2;
-  const minRouteX = Math.min(...geometry.routePoints.map((point) => point.x));
-  const minRouteY = Math.min(...geometry.routePoints.map((point) => point.y));
-  const maxRouteX = Math.max(...geometry.routePoints.map((point) => point.x));
-  const maxRouteY = Math.max(...geometry.routePoints.map((point) => point.y));
+  const visualRoutePoints = [...geometry.routePoints, ...geometry.sharedRoutePoints];
+  const minRouteX = Math.min(...visualRoutePoints.map((point) => point.x));
+  const minRouteY = Math.min(...visualRoutePoints.map((point) => point.y));
+  const maxRouteX = Math.max(...visualRoutePoints.map((point) => point.x));
+  const maxRouteY = Math.max(...visualRoutePoints.map((point) => point.y));
   const trafficWidth = Math.max(
     1,
     trafficLabel.length * CONNECTOR_VISUAL_METRICS.trafficLabelFontSize,
