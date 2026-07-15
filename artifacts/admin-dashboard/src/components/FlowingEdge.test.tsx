@@ -76,36 +76,50 @@ describe("FlowingEdge", () => {
       status: "warning",
       style: { opacity: 0.28 },
     });
-    const path = container.querySelector(".topology-edge-conductor");
+    const paths = container.querySelectorAll(
+      ".topology-edge-conductor-base, .topology-edge-status-lane",
+    );
 
-    expect(path).not.toHaveStyle({ opacity: "0.28" });
-    expect(path?.getAttribute("style")).not.toContain("stroke-dasharray");
+    paths.forEach((path) => {
+      expect(path).not.toHaveStyle({ opacity: "0.28" });
+      expect(path.getAttribute("style")).not.toContain("stroke-dasharray");
+    });
   });
 
   it.each([
     ["healthy", "#22c55e", 0],
     ["warning", "#f59e0b", 3],
     ["degraded", "#ef4444", 7],
-  ] as const)("renders %s as an opaque conductor", (status, color, offset) => {
-    const { container } = renderEdge({ status });
-    const segments = container.querySelectorAll(".topology-edge-conductor");
+  ] as const)(
+    "renders %s with neutral bases and fine opaque status lanes",
+    (status, color, offset) => {
+      const { container } = renderEdge({ status });
+      const bases = container.querySelectorAll(".topology-edge-conductor-base");
+      const lanes = container.querySelectorAll(".topology-edge-status-lane");
 
-    expect(segments).toHaveLength(2);
-    segments.forEach((segment) => {
-      expect(segment).toHaveStyle({ stroke: color, strokeWidth: "6" });
-      expect(segment.getAttribute("style")).not.toContain("stroke-dasharray");
-    });
-    container.querySelectorAll(".topology-edge-contact-rail").forEach((rail) =>
-      expect(rail).toHaveStyle({ fill: color }),
-    );
-    expect(
-      container.querySelector(".topology-edge-contact-route-cover"),
-    ).not.toBeInTheDocument();
-    expect(container.querySelector(".topology-edge-contact")).toHaveAttribute(
-      "data-offset",
-      String(offset),
-    );
-  });
+      expect(bases).toHaveLength(2);
+      bases.forEach((base) => {
+        expect(base).toHaveStyle({ stroke: "#596273", strokeWidth: "1.75" });
+        expect(base.getAttribute("style")).not.toContain("stroke-dasharray");
+      });
+      expect(lanes).toHaveLength(2);
+      lanes.forEach((lane, index) => {
+        expect(lane).toHaveStyle({ stroke: color, strokeWidth: "1" });
+        expect(lane).toHaveAttribute("d", bases[index].getAttribute("d"));
+        expect(lane.getAttribute("style")).not.toContain("stroke-dasharray");
+      });
+      container
+        .querySelectorAll(".topology-edge-contact-rail")
+        .forEach((rail) => expect(rail).toHaveStyle({ fill: color }));
+      expect(
+        container.querySelector(".topology-edge-contact-route-cover"),
+      ).not.toBeInTheDocument();
+      expect(container.querySelector(".topology-edge-contact")).toHaveAttribute(
+        "data-offset",
+        String(offset),
+      );
+    },
+  );
 
   it.each([
     ["healthy", "connected"],
@@ -140,11 +154,19 @@ describe("FlowingEdge", () => {
   it("renders every contact state as a solid interlocked coupling", () => {
     const { container } = renderEdge({ status: "degraded" });
     const rails = container.querySelectorAll(".topology-edge-contact-rail");
+    const outlines = container.querySelectorAll(
+      ".topology-edge-contact-outline",
+    );
+    const highlights = container.querySelectorAll(
+      ".topology-edge-contact-highlight",
+    );
 
     expect(rails).toHaveLength(2);
     rails.forEach((rail) => {
       expect(rail).toHaveStyle({ fill: "#ef4444" });
     });
+    expect(outlines).toHaveLength(2);
+    expect(highlights).toHaveLength(2);
   });
 
   it.each([
@@ -209,26 +231,33 @@ describe("FlowingEdge", () => {
     const { container } = renderEdge({
       sourceY: 0,
       targetY: 80,
-      sharedStatuses: ["healthy", "warning", "degraded"],
+      sharedStatuses: ["degraded", "healthy", "warning", "degraded"],
       sharedBranchLength: 24,
       renderSharedTrunk: true,
     });
-    const trunk = container.querySelectorAll(".topology-edge-shared-trunk");
+    const base = container.querySelectorAll(
+      ".topology-edge-shared-trunk.topology-edge-conductor-base",
+    );
+    const lanes = container.querySelectorAll(
+      ".topology-edge-shared-trunk.topology-edge-status-lane",
+    );
 
     expect(container.querySelector("linearGradient")).not.toBeInTheDocument();
-    expect(trunk).toHaveLength(3);
-    trunk.forEach((lane) => {
+    expect(base).toHaveLength(1);
+    expect(base[0]).toHaveAttribute("stroke", "#596273");
+    expect(base[0]).toHaveAttribute("stroke-width", "1.75");
+    expect(lanes).toHaveLength(3);
+    lanes.forEach((lane) => {
       expect(lane).toHaveAttribute("d", "M 0 0 H 24");
       expect(lane).not.toHaveAttribute("stroke-dasharray");
+      expect(lane).toHaveAttribute("stroke-width", "1");
     });
-    expect(trunk[0]).toHaveAttribute("stroke", "#22c55e");
-    expect(trunk[0]).toHaveAttribute("stroke-width", "6");
-    expect(trunk[1]).toHaveAttribute("stroke", "#f59e0b");
-    expect(trunk[1]).toHaveAttribute("stroke-width", "1.5");
-    expect(trunk[1]).toHaveAttribute("transform", "translate(0 -1.5)");
-    expect(trunk[2]).toHaveAttribute("stroke", "#ef4444");
-    expect(trunk[2]).toHaveAttribute("stroke-width", "1.5");
-    expect(trunk[2]).toHaveAttribute("transform", "translate(0 1.5)");
+    expect(lanes[0]).toHaveAttribute("stroke", "#22c55e");
+    expect(lanes[0]).toHaveAttribute("transform", "translate(0 -1)");
+    expect(lanes[1]).toHaveAttribute("stroke", "#f59e0b");
+    expect(lanes[1]).toHaveAttribute("transform", "translate(0 0)");
+    expect(lanes[2]).toHaveAttribute("stroke", "#ef4444");
+    expect(lanes[2]).toHaveAttribute("transform", "translate(0 1)");
   });
 
   it("uses the group branch length supplied through edge data", () => {
@@ -295,12 +324,14 @@ describe("FlowingEdge", () => {
     expect(paths[1]).toHaveAttribute("d", "M 108 0 H 120");
   });
 
-  it("matches conductor stroke to an unexpanded six-unit contact body", () => {
+  it("keeps the plug body thicker than its route and status lane", () => {
     const { container } = renderEdge();
-    const paths = container.querySelectorAll(".topology-edge-conductor");
+    const bases = container.querySelectorAll(".topology-edge-conductor-base");
+    const lanes = container.querySelectorAll(".topology-edge-status-lane");
     const rails = container.querySelectorAll(".topology-edge-contact-rail");
 
-    paths.forEach((path) => expect(path).toHaveStyle({ strokeWidth: "6" }));
+    bases.forEach((base) => expect(base).toHaveStyle({ strokeWidth: "1.75" }));
+    lanes.forEach((lane) => expect(lane).toHaveStyle({ strokeWidth: "1" }));
     rails.forEach((rail) => {
       expect(rail).toHaveAttribute("d", expect.stringContaining("-3"));
       expect(rail).toHaveAttribute("d", expect.stringContaining("3"));
@@ -317,7 +348,7 @@ describe("FlowingEdge", () => {
       renderSharedTrunk: true,
     });
     const painted = container.querySelectorAll<SVGElement>(
-      ".topology-edge-conductor, .topology-edge-shared-trunk, .topology-edge-contact, .topology-edge-plug-half",
+      ".topology-edge-conductor-base, .topology-edge-status-lane, .topology-edge-contact, .topology-edge-plug-half",
     );
 
     painted.forEach((element) => {

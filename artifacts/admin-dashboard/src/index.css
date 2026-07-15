@@ -684,6 +684,8 @@ svg {
   pointer-events: none;
 }
 
+.topology-edge-conductor-base,
+.topology-edge-status-lane,
 .topology-edge-shared-trunk {
   pointer-events: none;
   stroke-linecap: butt;
@@ -703,6 +705,8 @@ svg {
 }
 
 .topology-edge-contact-rail,
+.topology-edge-contact-outline,
+.topology-edge-contact-highlight,
 .topology-edge-contact-notch,
 .topology-edge-contact-tongue {
   stroke-linejoin: miter;
@@ -711,7 +715,21 @@ svg {
 
 .topology-edge-contact-rail {
   fill: var(--color-surface-raised);
+  filter: drop-shadow(0 0 1.5px currentColor);
   stroke-width: 0;
+}
+
+.topology-edge-contact-outline {
+  fill: none;
+  stroke: #111318;
+  stroke-width: 1.4;
+}
+
+.topology-edge-contact-highlight {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.58);
+  stroke-linecap: round;
+  stroke-width: 0.65;
 }
 
 .topology-edge-contact-notch,
