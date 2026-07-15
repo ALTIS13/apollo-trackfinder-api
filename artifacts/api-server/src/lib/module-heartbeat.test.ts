@@ -20,21 +20,33 @@ const validPayload = {
 
 function createService(now = INITIAL_NOW) {
   let currentNow = now;
+  let currentMonotonicNow = 10_000;
   const service = new ModuleHeartbeatService({
     keys: new Map([
       ["search-media", SEARCH_MEDIA_SECRET],
       ["account-integrations", ACCOUNT_INTEGRATIONS_SECRET],
     ]),
     now: () => currentNow,
+    monotonicNow: () => currentMonotonicNow,
   });
 
   return {
     service,
-    get now() {
+    advanceBy(milliseconds: number) {
+      currentNow += milliseconds;
+      currentMonotonicNow += milliseconds;
+    },
+    get wallNow() {
       return currentNow;
     },
-    set now(value: number) {
+    set wallNow(value: number) {
       currentNow = value;
+    },
+    get monotonicNow() {
+      return currentMonotonicNow;
+    },
+    set monotonicNow(value: number) {
+      currentMonotonicNow = value;
     },
   };
 }
@@ -341,13 +353,42 @@ describe("ModuleHeartbeatService", () => {
       ).toMatchObject({ kind: "accepted" });
     }
 
-    state.now += 5 * 60_000 + 1;
+    state.advanceBy(5 * 60_000 + 1);
     expect(
       state.service.ingest(
         createHeartbeatInput({
           nonce: nonceFor("after-expiry"),
-          timestamp: timestampFor(state.now),
+          timestamp: timestampFor(state.wallNow),
         }),
+      ),
+    ).toMatchObject({ kind: "accepted" });
+  });
+
+  it("expires replay entries by monotonic elapsed time when wall time moves backward", () => {
+    const state = createService();
+    const heartbeat = createHeartbeatInput({ nonce: nonceFor("wall-replay") });
+
+    expect(state.service.ingest(heartbeat)).toMatchObject({ kind: "accepted" });
+    state.wallNow -= 30_000;
+    state.monotonicNow += 5 * 60_000 + 1;
+
+    expect(state.service.ingest(heartbeat)).toMatchObject({ kind: "accepted" });
+  });
+
+  it("ages nonce capacity by monotonic elapsed time when wall time moves backward", () => {
+    const state = createService();
+
+    for (let index = 0; index < 128; index += 1) {
+      expect(
+        state.service.ingest(createHeartbeatInput({ nonce: nonceFor(index) })),
+      ).toMatchObject({ kind: "accepted" });
+    }
+    state.wallNow -= 30_000;
+    state.monotonicNow += 5 * 60_000 + 1;
+
+    expect(
+      state.service.ingest(
+        createHeartbeatInput({ nonce: nonceFor("aged-capacity") }),
       ),
     ).toMatchObject({ kind: "accepted" });
   });
@@ -467,7 +508,7 @@ describe("ModuleHeartbeatService", () => {
     expect(state.service.ingest(createHeartbeatInput())).toMatchObject({
       kind: "accepted",
     });
-    state.now += 90_000;
+    state.advanceBy(90_000);
 
     expect(
       state.service
@@ -486,7 +527,7 @@ describe("ModuleHeartbeatService", () => {
     expect(state.service.ingest(createHeartbeatInput())).toMatchObject({
       kind: "accepted",
     });
-    state.now += 90_001;
+    state.advanceBy(90_001);
 
     expect(
       state.service
@@ -498,6 +539,26 @@ describe("ModuleHeartbeatService", () => {
       status: "unknown",
       version: "2.15.0",
       deployedAt: "2026-07-15T04:30:00.000Z",
+      lastHeartbeatAt: "2026-07-15T04:31:02.000Z",
+      requestsPerMinute: 0,
+    });
+  });
+
+  it("expires freshness by monotonic elapsed time when wall time moves backward", () => {
+    const state = createService();
+
+    expect(state.service.ingest(createHeartbeatInput())).toMatchObject({
+      kind: "accepted",
+    });
+    state.wallNow -= 30_000;
+    state.monotonicNow += 90_001;
+
+    expect(
+      state.service
+        .snapshot()
+        .find((observation) => observation.moduleId === "search-media"),
+    ).toMatchObject({
+      status: "unknown",
       lastHeartbeatAt: "2026-07-15T04:31:02.000Z",
       requestsPerMinute: 0,
     });

@@ -5,7 +5,10 @@ import {
   type ServiceEdge,
   type ServiceModule,
 } from "@workspace/admin-dashboard-contract";
-import type { ModuleHeartbeatObservation } from "./module-heartbeat.js";
+import {
+  isCanonicalModuleHeartbeatPath,
+  type ModuleHeartbeatObservation,
+} from "./module-heartbeat.js";
 
 const DEFAULT_WINDOW_MS = 60_000;
 const DEFAULT_MAX_ENTRIES = 10_000;
@@ -71,7 +74,7 @@ function isExcludedPath(path: string): boolean {
   return (
     path === "/api/healthz" ||
     path === "/api/admin/dashboard" ||
-    /^\/api\/internal\/modules\/[^/]+\/heartbeat$/.test(path)
+    isCanonicalModuleHeartbeatPath(path)
   );
 }
 

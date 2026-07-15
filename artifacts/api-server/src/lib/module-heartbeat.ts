@@ -4,6 +4,7 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { z } from "zod";
 import type { HealthStatus } from "@workspace/admin-dashboard-contract";
 
@@ -26,6 +27,8 @@ const NONCE_TTL_MS = 5 * 60_000;
 const HEARTBEAT_FRESHNESS_MS = 90_000;
 const TIMESTAMP_TOLERANCE_MS = 60_000;
 const NONCE_PATTERN = /^[\x20-\x7e]{16,64}$/;
+const CANONICAL_HEARTBEAT_PATH_PATTERN =
+  /^\/api\/internal\/modules\/[a-z0-9]+(?:-[a-z0-9]+)*\/heartbeat$/;
 const DUMMY_SECRET = randomBytes(32).toString("hex");
 
 const moduleHeartbeatPayloadSchema = z
@@ -76,11 +79,13 @@ export type ModuleHeartbeatIngestResult =
 export interface ModuleHeartbeatServiceOptions {
   keys: ReadonlyMap<string, string>;
   now?: () => number;
+  monotonicNow?: () => number;
 }
 
 interface AcceptedHeartbeat {
   signedAt: number;
   receivedAt: number;
+  receivedMonotonicAt: number;
   status: HealthStatus;
   version: string;
   deployedAt?: string;
@@ -97,6 +102,10 @@ export function createModuleHeartbeatSignature(input: SignatureInput): string {
     bodyHash,
   ].join("\n");
   return `v1=${createHmac("sha256", input.secret).update(canonical).digest("hex")}`;
+}
+
+export function isCanonicalModuleHeartbeatPath(path: string): boolean {
+  return CANONICAL_HEARTBEAT_PATH_PATTERN.test(path);
 }
 
 export function parseModuleHeartbeatKeys(
@@ -153,6 +162,7 @@ function parseSignedTimestamp(timestamp: string): number | undefined {
 export class ModuleHeartbeatService {
   private readonly keys: Map<string, string>;
   private readonly now: () => number;
+  private readonly monotonicNow: () => number;
   private readonly heartbeats = new Map<string, AcceptedHeartbeat>();
   private nonces = new Map<string, Map<string, number>>();
 
@@ -163,6 +173,8 @@ export class ModuleHeartbeatService {
       ),
     );
     this.now = options.now ?? Date.now;
+    this.monotonicNow =
+      options.monotonicNow ?? performance.now.bind(performance);
   }
 
   ingest(input: ModuleHeartbeatIngestInput): ModuleHeartbeatIngestResult {
@@ -199,10 +211,11 @@ export class ModuleHeartbeatService {
     if (Math.abs(receivedAt - signedAt) > TIMESTAMP_TOLERANCE_MS) {
       return { kind: "unauthorized" };
     }
+    const receivedMonotonicAt = this.monotonicNow();
 
     const liveNonces = new Map(
       Array.from(this.nonces.get(moduleId) ?? []).filter(
-        ([, recordedAt]) => receivedAt - recordedAt <= NONCE_TTL_MS,
+        ([, recordedAt]) => receivedMonotonicAt - recordedAt <= NONCE_TTL_MS,
       ),
     );
     if (liveNonces.has(nonce) || liveNonces.size >= MAX_NONCES) {
@@ -227,11 +240,12 @@ export class ModuleHeartbeatService {
     const payload = moduleHeartbeatPayloadSchema.safeParse(parsedBody);
     if (!payload.success) return { kind: "invalid" };
 
-    liveNonces.set(nonce, receivedAt);
+    liveNonces.set(nonce, receivedMonotonicAt);
     this.nonces.set(moduleId, liveNonces);
     this.heartbeats.set(moduleId, {
       signedAt,
       receivedAt,
+      receivedMonotonicAt,
       status: payload.data.status,
       version: payload.data.version,
       ...(payload.data.deployedAt === undefined
@@ -243,7 +257,7 @@ export class ModuleHeartbeatService {
     return { kind: "accepted", receivedAt: new Date(receivedAt).toISOString() };
   }
 
-  snapshot(at = this.now()): ModuleHeartbeatObservation[] {
+  snapshot(at = this.monotonicNow()): ModuleHeartbeatObservation[] {
     return Array.from(this.keys.keys(), (moduleId) => {
       const heartbeat = this.heartbeats.get(moduleId);
       if (heartbeat === undefined) {
@@ -256,7 +270,8 @@ export class ModuleHeartbeatService {
         };
       }
 
-      const fresh = at - heartbeat.receivedAt <= HEARTBEAT_FRESHNESS_MS;
+      const fresh =
+        at - heartbeat.receivedMonotonicAt <= HEARTBEAT_FRESHNESS_MS;
       return {
         moduleId,
         managed: true,

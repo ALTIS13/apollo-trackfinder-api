@@ -119,9 +119,27 @@ describe("RollingRequestTelemetry", () => {
       statusCode: 202,
       at: now,
     });
+    telemetry.record({
+      method: "POST",
+      path: "/API/internal/modules/search-media/heartbeat",
+      statusCode: 404,
+      at: now,
+    });
+    telemetry.record({
+      method: "POST",
+      path: "/api/internal/modules/search-media/heartbeat/",
+      statusCode: 404,
+      at: now,
+    });
+    telemetry.record({
+      method: "POST",
+      path: "/api/internal/modules/search%2Dmedia/heartbeat",
+      statusCode: 404,
+      at: now,
+    });
 
     expect(telemetry.snapshot(now)).toMatchObject({
-      totalRequestsPerMinute: 1,
+      totalRequestsPerMinute: 4,
       searchesPerMinute: 0,
       accountRequestsPerMinute: 0,
       downloadRequestsPerMinute: 0,

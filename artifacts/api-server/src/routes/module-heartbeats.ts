@@ -6,6 +6,7 @@ import express, {
   type Response,
 } from "express";
 import {
+  isCanonicalModuleHeartbeatPath,
   moduleHeartbeatService,
   type ModuleHeartbeatService,
 } from "../lib/module-heartbeat.js";
@@ -15,6 +16,8 @@ export interface CreateModuleHeartbeatRouterOptions {
 }
 
 const HEARTBEAT_PATH = "/internal/modules/:moduleId/heartbeat";
+const HEARTBEAT_PATH_CANDIDATE =
+  /^\/api\/internal\/modules\/([^/]*)\/heartbeat\/?$/i;
 
 function setHeartbeatResponseHeaders(res: Response): void {
   res.set({
@@ -25,6 +28,49 @@ function setHeartbeatResponseHeaders(res: Response): void {
 
 function isJsonContentType(req: Request): boolean {
   return req.is("application/json") !== false;
+}
+
+function getRequestPath(req: Request): string {
+  const queryIndex = req.originalUrl.indexOf("?");
+  return queryIndex === -1
+    ? req.originalUrl
+    : req.originalUrl.slice(0, queryIndex);
+}
+
+function hasMalformedModuleId(path: string): boolean {
+  const match = HEARTBEAT_PATH_CANDIDATE.exec(path);
+  if (match === null) return false;
+
+  try {
+    decodeURIComponent(match[1] ?? "");
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function rejectNonIdentityEncoding(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
+  const contentEncoding = req.get("Content-Encoding");
+  if (contentEncoding === undefined) {
+    next();
+    return;
+  }
+
+  const encodings = contentEncoding.split(",").map((value) => value.trim());
+  if (
+    encodings.length === 0 ||
+    encodings.some((encoding) => encoding.toLowerCase() !== "identity")
+  ) {
+    res.status(400).json({ error: "invalid_heartbeat" });
+    return;
+  }
+
+  delete req.headers["content-encoding"];
+  next();
 }
 
 function isRequestBodyTooLarge(error: unknown): boolean {
@@ -48,8 +94,27 @@ function getParserErrorType(error: unknown): string {
 export function createModuleHeartbeatRouter(
   options: CreateModuleHeartbeatRouterOptions = {},
 ): IRouter {
-  const router = Router();
+  const router = Router({ caseSensitive: true, strict: true });
   const service = options.service ?? moduleHeartbeatService;
+
+  router.use((req: Request, res: Response, next: NextFunction) => {
+    const path = getRequestPath(req);
+    if (!HEARTBEAT_PATH_CANDIDATE.test(path)) {
+      next();
+      return;
+    }
+
+    setHeartbeatResponseHeaders(res);
+    if (isCanonicalModuleHeartbeatPath(path)) {
+      next();
+      return;
+    }
+
+    const malformedModuleId = hasMalformedModuleId(path);
+    res.status(malformedModuleId ? 400 : 404).json({
+      error: malformedModuleId ? "invalid_heartbeat" : "not_found",
+    });
+  });
 
   const applyHeartbeatResponseHeaders = (
     _req: Request,
@@ -63,7 +128,8 @@ export function createModuleHeartbeatRouter(
   router.post(
     HEARTBEAT_PATH,
     applyHeartbeatResponseHeaders,
-    express.raw({ type: () => true, limit: "8kb" }),
+    rejectNonIdentityEncoding,
+    express.raw({ type: () => true, limit: 8 * 1024, inflate: false }),
     (req, res) => {
       try {
         if (!isJsonContentType(req)) {
@@ -82,7 +148,9 @@ export function createModuleHeartbeatRouter(
 
         switch (result.kind) {
           case "accepted":
-            res.status(202).json({ receivedAt: result.receivedAt });
+            res
+              .status(202)
+              .json({ accepted: true, receivedAt: result.receivedAt });
             return;
           case "disabled":
             res.status(503).json({ error: "heartbeat_disabled" });
@@ -108,11 +176,13 @@ export function createModuleHeartbeatRouter(
   );
 
   router.all(HEARTBEAT_PATH, applyHeartbeatResponseHeaders, (_req, res) => {
+    res.set("Allow", "POST");
     res.status(405).json({ error: "method_not_allowed" });
   });
 
   router.use(
     (error: unknown, req: Request, res: Response, _next: NextFunction) => {
+      setHeartbeatResponseHeaders(res);
       req.log?.warn(
         { errorType: getParserErrorType(error) },
         "Module heartbeat parser failure",
