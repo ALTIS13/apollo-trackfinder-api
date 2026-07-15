@@ -1,12 +1,16 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render } from "@testing-library/react";
 import { Position } from "@xyflow/react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { CSSProperties } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HealthStatus } from "../types/dashboard";
 import { FlowingEdge } from "./FlowingEdge";
 
 afterEach(cleanup);
+
+const dashboardCss = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
 
 interface RenderEdgeOptions {
   id?: string;
@@ -169,6 +173,42 @@ describe("FlowingEdge", () => {
     expect(highlights).toHaveLength(2);
   });
 
+  it("paints each colored rail before its highlight and dark outline", () => {
+    const { container } = renderEdge({ status: "warning" });
+    const paintSelector = [
+      ".topology-edge-contact-rail",
+      ".topology-edge-contact-highlight",
+      ".topology-edge-contact-outline",
+    ].join(", ");
+
+    container.querySelectorAll(".topology-edge-plug-half").forEach((plug) => {
+      const paintOrder = Array.from(plug.querySelectorAll(paintSelector)).map(
+        (paint) => paint.getAttribute("class"),
+      );
+
+      expect(paintOrder).toEqual([
+        "topology-edge-contact-rail",
+        "topology-edge-contact-highlight",
+        "topology-edge-contact-outline",
+      ]);
+    });
+  });
+
+  it("uses an opaque highlight paint while preserving the currentColor glow", () => {
+    const highlightRule = dashboardCss.match(
+      /\.topology-edge-contact-highlight\s*{[^}]*}/s,
+    )?.[0];
+    const railRule = dashboardCss.match(
+      /\.topology-edge-contact-rail\s*{[^}]*}/s,
+    )?.[0];
+
+    expect(highlightRule).toMatch(/stroke:\s*#[0-9a-f]{6};/i);
+    expect(highlightRule).not.toMatch(/rgba?\(/i);
+    expect(railRule).toMatch(
+      /filter:\s*drop-shadow\([^)]*currentColor[^)]*\);/,
+    );
+  });
+
   it.each([
     {
       status: "warning" as const,
@@ -231,7 +271,13 @@ describe("FlowingEdge", () => {
     const { container } = renderEdge({
       sourceY: 0,
       targetY: 80,
-      sharedStatuses: ["degraded", "healthy", "warning", "degraded"],
+      sharedStatuses: [
+        "unknown",
+        "degraded",
+        "healthy",
+        "warning",
+        "degraded",
+      ],
       sharedBranchLength: 24,
       renderSharedTrunk: true,
     });
@@ -258,6 +304,55 @@ describe("FlowingEdge", () => {
     expect(lanes[1]).toHaveAttribute("transform", "translate(0 0)");
     expect(lanes[2]).toHaveAttribute("stroke", "#ef4444");
     expect(lanes[2]).toHaveAttribute("transform", "translate(0 1)");
+    expect(
+      container.querySelector(
+        '.topology-edge-shared-trunk[stroke="#94a3b8"]',
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [["healthy"], [["#22c55e", "translate(0 -1)"]]],
+    [["warning"], [["#f59e0b", "translate(0 0)"]]],
+    [["degraded"], [["#ef4444", "translate(0 1)"]]],
+    [
+      ["healthy", "degraded"],
+      [
+        ["#22c55e", "translate(0 -1)"],
+        ["#ef4444", "translate(0 1)"],
+      ],
+    ],
+  ] as const)(
+    "keeps fixed shared lane offsets for the active subset %#",
+    (sharedStatuses, expectedLanes) => {
+      const { container } = renderEdge({
+        sharedStatuses: [...sharedStatuses],
+        sharedBranchLength: 24,
+        renderSharedTrunk: true,
+      });
+      const lanes = container.querySelectorAll(
+        ".topology-edge-shared-trunk.topology-edge-status-lane",
+      );
+
+      expect(lanes).toHaveLength(expectedLanes.length);
+      expectedLanes.forEach(([stroke, transform], index) => {
+        expect(lanes[index]).toHaveAttribute("stroke", stroke);
+        expect(lanes[index]).toHaveAttribute("transform", transform);
+      });
+    },
+  );
+
+  it("keeps unknown status paint on an individual edge", () => {
+    const { container } = renderEdge({ status: "unknown" });
+    const lanes = container.querySelectorAll(
+      ".topology-edge-status-lane:not(.topology-edge-shared-trunk)",
+    );
+
+    expect(lanes).toHaveLength(2);
+    lanes.forEach((lane) => {
+      expect(lane).toHaveAttribute("stroke", "#94a3b8");
+      expect(lane).toHaveAttribute("stroke-width", "1");
+    });
   });
 
   it("uses the group branch length supplied through edge data", () => {

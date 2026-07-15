@@ -727,7 +727,7 @@ svg {
 
 .topology-edge-contact-highlight {
   fill: none;
-  stroke: rgba(255, 255, 255, 0.58);
+  stroke: #e2e8f0;
   stroke-linecap: round;
   stroke-width: 0.65;
 }
