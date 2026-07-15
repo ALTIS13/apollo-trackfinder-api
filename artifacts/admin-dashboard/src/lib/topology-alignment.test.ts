@@ -122,6 +122,48 @@ describe("topology alignment", () => {
     ).toEqual({ x: 54, y: 54 });
   });
 
+  it("resolves same-peer target and source anchor ties deterministically", () => {
+    const targetTie = alignTopologyPosition({
+      nodeId: "moving",
+      position: { x: 48, y: 48 },
+      width: 4,
+      height: 4,
+      nodes: [
+        {
+          id: "peer",
+          position: { x: 49, y: 49 },
+          width: 4,
+          height: 4,
+        },
+      ],
+      zoom: 1,
+      mode: "align",
+      precision: false,
+    });
+    const sourceTie = alignTopologyPosition({
+      nodeId: "moving",
+      position: { x: 48, y: 48 },
+      width: 4,
+      height: 4,
+      nodes: [
+        {
+          id: "peer",
+          position: { x: 49, y: 49 },
+          width: 0,
+          height: 0,
+        },
+      ],
+      zoom: 1,
+      mode: "align",
+      precision: false,
+    });
+
+    expect(targetTie.guides[0]).toEqual({ axis: "x", position: 49 });
+    expect(targetTie.position.x).toBe(49);
+    expect(sourceTie.guides[0]).toEqual({ axis: "x", position: 49 });
+    expect(sourceTie.position.x).toBe(49);
+  });
+
   it("bypasses alignment in free and precision modes", () => {
     const peer = {
       id: "peer",
