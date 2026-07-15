@@ -267,6 +267,10 @@ function TopologyCanvas({
         position: { x: position.x, y: position.y },
         width: dagrePosition.width,
         height: dagrePosition.height,
+        measured: {
+          width: dagrePosition.width,
+          height: dagrePosition.height,
+        },
         selected: module.id === selectedServiceId,
         draggable: true,
         ariaLabel: module.name,

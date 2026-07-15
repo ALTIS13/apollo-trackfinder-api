@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { demoSnapshot } from "../data/demo-snapshot";
@@ -13,11 +13,21 @@ const flowApi = vi.hoisted(() => ({
   zoomOut: vi.fn(),
 }));
 const motionPreference = vi.hoisted(() => ({ reduced: false }));
+const reactFlowProps = vi.hoisted(() => ({ latest: undefined as unknown }));
 
-vi.mock("@xyflow/react", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@xyflow/react")>()),
-  useReactFlow: () => flowApi,
-}));
+vi.mock("@xyflow/react", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@xyflow/react")>();
+  const React = await import("react");
+
+  return {
+    ...original,
+    ReactFlow: (props: React.ComponentProps<typeof original.ReactFlow>) => {
+      reactFlowProps.latest = props;
+      return React.createElement(original.ReactFlow, props);
+    },
+    useReactFlow: () => flowApi,
+  };
+});
 vi.mock("framer-motion", async (importOriginal) => ({
   ...(await importOriginal<typeof import("framer-motion")>()),
   useReducedMotion: () => motionPreference.reduced,
@@ -64,7 +74,24 @@ afterEach(() => {
   flowApi.setCenter.mockReset();
   flowApi.getNode.mockReset();
   motionPreference.reduced = false;
+  reactFlowProps.latest = undefined;
 });
+
+function getReactFlowProps() {
+  if (reactFlowProps.latest === undefined)
+    throw new Error("React Flow props were not captured");
+
+  return reactFlowProps.latest as {
+    nodes: Array<{
+      id: string;
+      position: { x: number; y: number };
+      width?: number;
+      height?: number;
+      measured?: { width?: number; height?: number };
+    }>;
+    onNodesChange: (changes: unknown[]) => void;
+  };
+}
 
 describe("TopologyPanel", () => {
   it("assigns ordered statuses to every shared source edge and the trunk to the last", () => {
@@ -186,6 +213,40 @@ describe("TopologyPanel", () => {
     await waitFor(() => {
       expect(resetLayout).toBeDisabled();
       expect(node.style.transform).toBe(initialTransform);
+    });
+  });
+
+  it("retains measured dimensions after consecutive controlled drag updates", async () => {
+    render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
+
+    await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    const initialNode = getReactFlowProps().nodes.find((node) => node.id === "core-api");
+    if (initialNode === undefined) throw new Error("Core API node was not rendered");
+
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        { type: "position", id: "core-api", position: { x: 640, y: 120 } },
+      ]);
+    });
+    await waitFor(() =>
+      expect(getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position).toEqual({
+        x: 640,
+        y: 120,
+      }),
+    );
+
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        { type: "position", id: "core-api", position: { x: 680, y: 152 } },
+      ]);
+    });
+    await waitFor(() => {
+      const node = getReactFlowProps().nodes.find((item) => item.id === "core-api");
+      expect(node?.position).toEqual({ x: 680, y: 152 });
+      expect(node?.measured).toEqual({
+        width: initialNode.width,
+        height: initialNode.height,
+      });
     });
   });
 
