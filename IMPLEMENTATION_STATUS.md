@@ -91,7 +91,7 @@ Last updated: 2026-07-15.
 - Module heartbeat whole-branch runtime fixes are committed locally on `codex/feat/module-heartbeat-adapter` as `f4c52444352a2288966b4a6169d849297f886b8d`; no push, merge, or infrastructure deployment was performed in this bounded fix wave.
 - Module heartbeat clock compatibility is committed locally on `codex/feat/module-heartbeat-adapter` as `b49d346bbb02e67f439847f11ef696b092932302`; the follow-up remains local with no push, merge, or infrastructure deployment.
 - Module heartbeat optional snapshot API compatibility is committed locally on `codex/feat/module-heartbeat-adapter` as `00237813b4f50e3cc51539432649cb84f7a6d207`; no push, merge, or infrastructure deployment was performed.
-- Module heartbeat adapter is approved for publication from validated feature tip `0f39175a484d96632a07e0fab48316065ce14fd4`; this validation snapshot precedes the publication status commit, feature push, and fast-forward merge.
+- Module heartbeat adapter feature branch is published through `f17cec5e7cca2884e9252e5fc8df74620729dc09`, then fast-forward merged into local `main`. Fresh merged-result validation passed after a frozen offline dependency install: shared contract 4/4, API 109 passed with 1 opt-in Redis skip, admin 120/120, workspace typecheck, API/admin production builds, both Compose configs, and `git diff --check`. Final `main` publication is recorded by the current docs-only status commit; no HomeNode/Coolify/Caddy/UFW/domain deployment was performed.
 
 ## Следующий логичный этап реализации
 
