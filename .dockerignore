@@ -9,6 +9,7 @@ node_modules
 **/.env
 **/.env.*
 !.env.example
+!**/.env.example
 .ops-private/
 
 artifacts/trackfinder-mobile
