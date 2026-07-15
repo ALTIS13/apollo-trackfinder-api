@@ -6,6 +6,16 @@ export const TARGET_STUB_LENGTH = 12;
 export const SHARED_TRUNK_LENGTH = 24;
 export const CONNECTOR_BEND_RADIUS = 7.5;
 
+function buildBoundedOrthogonalPath(
+  sourceX: number,
+  sourceY: number,
+  targetX: number,
+  targetY: number,
+): string {
+  const midpointX = (sourceX + targetX) / 2;
+  return `M${sourceX} ${sourceY} L${midpointX} ${sourceY} L${midpointX} ${targetY} L${targetX} ${targetY}`;
+}
+
 export interface ConnectorGeometryInput {
   sourceX: number;
   sourceY: number;
@@ -33,12 +43,17 @@ export function buildConnectorGeometry(input: ConnectorGeometryInput): Connector
   const maleOuterX = contactX + CONTACT_HALF_LENGTH;
   const sharedBranchLength = Math.max(0, input.sharedBranchLength ?? 0);
   const branchSourceX = input.sourceX + sharedBranchLength;
-  const isSameRowRightToLeft =
-    input.sourceY === input.targetY &&
+  const usesBoundedRightToLeftRoute =
     input.sourcePosition === Position.Right &&
-    input.targetPosition === Position.Left;
-  const sourcePath = isSameRowRightToLeft
-    ? `M${branchSourceX} ${input.sourceY} L${femaleOuterX} ${input.targetY}`
+    input.targetPosition === Position.Left &&
+    femaleOuterX - branchSourceX < TARGET_STUB_LENGTH * 2;
+  const sourcePath = usesBoundedRightToLeftRoute
+    ? buildBoundedOrthogonalPath(
+        branchSourceX,
+        input.sourceY,
+        femaleOuterX,
+        input.targetY,
+      )
     : getSmoothStepPath({
         sourceX: branchSourceX,
         sourceY: input.sourceY,

@@ -54,6 +54,58 @@ session-only positions.
 - `pnpm typecheck` in `artifacts/admin-dashboard` -- exit `0`.
 - `pnpm run typecheck` at repository root -- exit `0`; libraries and all six filtered artifact/script projects typechecked.
 - `pnpm build` in `artifacts/admin-dashboard` -- exit `0`; Vite transformed 2556 modules and built the production bundle.
+- `git diff --check` -- exit `0` after the off-row report append.
+
+---
+
+## Off-Row Short-Span Bounds Follow-Up
+
+### Scope
+
+- Pre-follow-up HEAD: `0d09788`
+- Changed only `topology-connector-geometry.ts`, its test, and this existing report.
+- No browser automation or dev server was run. No status, API, persistence,
+  HomeNode, Coolify, layout, styling, or infrastructure files were changed.
+
+### Root Cause And Fix
+
+The prior direct path was selected only when source and target Y coordinates
+were equal. A one-unit vertical move therefore restored the fixed 12-unit
+smooth-step offset, which pushed the conductor beyond the female outer edge.
+
+Right-to-left routes now select one bounded orthogonal path whenever horizontal
+clearance is below the safe two-offset threshold of 24 units, including
+crossed targets. Its X coordinates are only the branch origin, their midpoint,
+and the female outer edge, so they remain in the closed physical interval for
+all Y offsets. Normal-clearance routes retain rounded smooth-step paths.
+
+### TDD Evidence
+
+#### RED
+
+1. `pnpm vitest run src/lib/topology-connector-geometry.test.ts -t "one-unit off-row short branch"` -- exit `1`.
+   1 failed and 6 skipped tests: coordinate `516.892` exceeded the female
+   boundary `507.64200000000005`.
+2. `pnpm vitest run src/lib/topology-connector-geometry.test.ts -t "crossed off-row target"` -- exit `1`.
+   1 failed and 7 skipped tests: coordinate `499.75` exceeded the source
+   bound `488` for the crossed no-trunk fallback.
+
+#### GREEN
+
+1. `pnpm vitest run src/lib/topology-connector-geometry.test.ts` -- exit `0`; 8 passed after the generalized bounded route implementation.
+2. `pnpm vitest run src/lib/topology-connector-geometry.test.ts src/components/FlowingEdge.test.tsx src/components/TopologyPanel.test.tsx` -- exit `0`; 3 files and 44 tests passed from the final source state.
+
+The new coverage proves the one-unit off-row short span and crossed off-row
+fallback both keep every source-path X coordinate within the branch-origin and
+female-outer bounds. The existing normal-clearance regression still requires
+a rounded `Q` smooth-step segment.
+
+### Final Validation
+
+- `pnpm test` in `artifacts/admin-dashboard` -- exit `0`; 11 files and 116 tests passed.
+- `pnpm typecheck` in `artifacts/admin-dashboard` -- exit `0`.
+- `pnpm run typecheck` at repository root -- exit `0`; libraries and all six filtered artifact/script projects typechecked.
+- `pnpm build` in `artifacts/admin-dashboard` -- exit `0`; Vite transformed 2556 modules and built the production bundle.
 - `git diff --check` -- exit `0` after the follow-up report append.
 - `git diff --check` -- exit `0`.
 - `git diff --cached --check` -- exit `0` after force-staging the ignored report.

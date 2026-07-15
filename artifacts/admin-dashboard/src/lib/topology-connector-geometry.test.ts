@@ -175,6 +175,26 @@ describe("buildConnectorGeometry", () => {
     );
   });
 
+  it("keeps a one-unit off-row short branch within its female outer edge", () => {
+    const geometry = buildConnectorGeometry({
+      sourceX: 488,
+      sourceY: 140,
+      sourcePosition: Position.Right,
+      targetX: 551.642,
+      targetY: 141,
+      targetPosition: Position.Left,
+      sharedBranchLength: 17.142,
+    });
+
+    expect(geometry.branchSourceX).toBeCloseTo(505.142, 3);
+    expect(geometry.femaleOuterX).toBeCloseTo(507.642, 3);
+    expectPathToStayWithinHorizontalBounds(
+      geometry.sourcePath,
+      geometry.branchSourceX,
+      geometry.femaleOuterX,
+    );
+  });
+
   it("keeps a zero-clearance crossed target bounded without a shared trunk", () => {
     const geometry = buildConnectorGeometry({
       sourceX: 488,
@@ -182,6 +202,27 @@ describe("buildConnectorGeometry", () => {
       sourcePosition: Position.Right,
       targetX: 529.5,
       targetY: 140,
+      targetPosition: Position.Left,
+      sharedBranchLength: 0,
+    });
+
+    expect(geometry.branchSourceX).toBe(488);
+    expect(geometry.femaleOuterX).toBe(485.5);
+    expect(geometry.sharedTrunkPath).toBeUndefined();
+    expectPathToStayWithinHorizontalBounds(
+      geometry.sourcePath,
+      geometry.branchSourceX,
+      geometry.femaleOuterX,
+    );
+  });
+
+  it("keeps a crossed off-row target bounded without a shared trunk", () => {
+    const geometry = buildConnectorGeometry({
+      sourceX: 488,
+      sourceY: 140,
+      sourcePosition: Position.Right,
+      targetX: 529.5,
+      targetY: 141,
       targetPosition: Position.Left,
       sharedBranchLength: 0,
     });
