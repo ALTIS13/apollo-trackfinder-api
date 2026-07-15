@@ -234,6 +234,20 @@ describe("ModuleHeartbeatService", () => {
     expect(service.ingest(input)).toEqual({ kind: "unauthorized" });
   });
 
+  it("prioritizes a replayed nonce over malformed JSON", () => {
+    const { service } = createService();
+    const nonce = nonceFor("replay-malformed");
+
+    expect(service.ingest(createHeartbeatInput({ nonce }))).toMatchObject({
+      kind: "accepted",
+    });
+    expect(
+      service.ingest(
+        createHeartbeatInput({ nonce, rawBody: Buffer.from("{") }),
+      ),
+    ).toEqual({ kind: "unauthorized" });
+  });
+
   it("allows the same nonce from different configured modules", () => {
     const { service } = createService();
     const nonce = nonceFor("shared");
@@ -266,6 +280,27 @@ describe("ModuleHeartbeatService", () => {
       service.ingest(createHeartbeatInput({ nonce: nonceFor(128) })),
     ).toEqual({ kind: "unauthorized" });
     expect(service.ingest(firstInput!)).toEqual({ kind: "unauthorized" });
+  });
+
+  it("prioritizes full nonce capacity over strict payload validation", () => {
+    const { service } = createService();
+
+    for (let index = 0; index < 128; index += 1) {
+      expect(
+        service.ingest(createHeartbeatInput({ nonce: nonceFor(index) })),
+      ).toMatchObject({ kind: "accepted" });
+    }
+
+    expect(
+      service.ingest(
+        createHeartbeatInput({
+          nonce: nonceFor(128),
+          rawBody: Buffer.from(
+            JSON.stringify({ ...validPayload, extra: true }),
+          ),
+        }),
+      ),
+    ).toEqual({ kind: "unauthorized" });
   });
 
   it("keeps replay records and nonce capacity independent for each module", () => {
@@ -349,6 +384,28 @@ describe("ModuleHeartbeatService", () => {
         createHeartbeatInput({
           timestamp: INITIAL_TIMESTAMP,
           nonce: nonceFor("older"),
+        }),
+      ),
+    ).toEqual({ kind: "stale" });
+  });
+
+  it("prioritizes a lower signed timestamp over malformed JSON", () => {
+    const { service } = createService();
+
+    expect(
+      service.ingest(
+        createHeartbeatInput({
+          timestamp: timestampFor(INITIAL_NOW + 1_000),
+          nonce: nonceFor("newer-malformed"),
+        }),
+      ),
+    ).toMatchObject({ kind: "accepted" });
+    expect(
+      service.ingest(
+        createHeartbeatInput({
+          timestamp: INITIAL_TIMESTAMP,
+          nonce: nonceFor("older-malformed"),
+          rawBody: Buffer.from("{"),
         }),
       ),
     ).toEqual({ kind: "stale" });

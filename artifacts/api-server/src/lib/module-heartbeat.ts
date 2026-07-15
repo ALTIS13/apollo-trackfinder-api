@@ -200,16 +200,6 @@ export class ModuleHeartbeatService {
       return { kind: "unauthorized" };
     }
 
-    let parsedBody: unknown;
-    try {
-      parsedBody = JSON.parse(rawBody.toString("utf8"));
-    } catch {
-      return { kind: "invalid" };
-    }
-
-    const payload = moduleHeartbeatPayloadSchema.safeParse(parsedBody);
-    if (!payload.success) return { kind: "invalid" };
-
     const previousHeartbeat = this.heartbeats.get(moduleId);
     if (
       previousHeartbeat !== undefined &&
@@ -226,6 +216,16 @@ export class ModuleHeartbeatService {
     if (liveNonces.has(nonce) || liveNonces.size >= MAX_NONCES) {
       return { kind: "unauthorized" };
     }
+
+    let parsedBody: unknown;
+    try {
+      parsedBody = JSON.parse(rawBody.toString("utf8"));
+    } catch {
+      return { kind: "invalid" };
+    }
+
+    const payload = moduleHeartbeatPayloadSchema.safeParse(parsedBody);
+    if (!payload.success) return { kind: "invalid" };
 
     liveNonces.set(nonce, receivedAt);
     this.nonces.set(moduleId, liveNonces);
