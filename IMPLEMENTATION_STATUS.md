@@ -81,7 +81,7 @@ Last updated: 2026-07-15.
 - Connector continuity fix опубликован в `origin/codex/fix/admin-connector-continuity` commit `d05eff1735bd0954b2bbcadf557c8a2d27f050fd`, независимо одобрен без findings, fast-forward merged и опубликован в `origin/main`. Merged result повторно прошёл `90/90`, typecheck и production build; HomeNode/Coolify не изменялись.
 - Full-width connector cable fix опубликован в `origin/codex/fix/admin-connector-cables` commit `788ccbd13bc9bb35c29652e3d8039812156def55`, прошёл review-fix и повторный `APPROVED`, fast-forward merged и опубликован в `origin/main`. Merged result повторно прошёл `92/92`, typecheck и production build; HomeNode/Coolify не изменялись.
 - Connector join/gradient/layout fix опубликован в `origin/codex/fix/admin-connector-join-gradient` commit `a12c4bdbe44306758639fe82e6006dca5dfae5eb`, fast-forward merged и опубликован в `origin/main` после повторной merged-result validation `97/97`, typecheck и production build.
-- The feature branch `codex/feat/admin-draggable-connectors` through technical fix tip `c558c9b` and this status update are local only: neither has been pushed or merged, and merged-result validation has not run. HomeNode/Coolify were not changed.
+- Draggable unified connectors опубликованы в `origin/codex/feat/admin-draggable-connectors` through status tip `fce9f92` (technical fix tip `c558c9b`), затем fast-forward merged и опубликованы в `origin/main`. Merged result повторно прошёл 11 files / 118 tests, admin/root typecheck, production build (2556 modules) и `git diff --check`; HomeNode/Coolify не изменялись.
 
 ## Следующий логичный этап реализации
 
