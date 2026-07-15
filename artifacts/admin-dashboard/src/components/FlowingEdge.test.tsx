@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render } from "@testing-library/react";
-import { Position } from "@xyflow/react";
+import { Position, ReactFlowProvider } from "@xyflow/react";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { CSSProperties } from "react";
@@ -323,6 +323,91 @@ describe("FlowingEdge", () => {
     gradient?.querySelectorAll("stop").forEach((stop) =>
       expect(stop).toHaveAttribute("stop-opacity", "1"),
     );
+  });
+
+  it("uses distinct sanitized gradients for simultaneous shared trunks", () => {
+    const sharedData = {
+      status: "healthy" as const,
+      motionEnabled: false,
+      sharedStatusBands: [
+        { status: "healthy" as const, count: 1 },
+        { status: "warning" as const, count: 1 },
+      ],
+      sharedBranchLength: 24,
+      renderSharedTrunk: true,
+    };
+    const { container } = render(
+      <ReactFlowProvider>
+        <svg>
+          <FlowingEdge
+            id="edge/one"
+            source="source-one"
+            target="target-one"
+            sourceX={0}
+            sourceY={0}
+            targetX={120}
+            targetY={0}
+            sourcePosition={Position.Right}
+            targetPosition={Position.Left}
+            selected={false}
+            selectable={false}
+            deletable={false}
+            data={sharedData}
+            label="1/мин"
+            style={{ opacity: 0.28 }}
+          />
+          <FlowingEdge
+            id="edge:two"
+            source="source-two"
+            target="target-two"
+            sourceX={0}
+            sourceY={80}
+            targetX={120}
+            targetY={80}
+            sourcePosition={Position.Right}
+            targetPosition={Position.Left}
+            selected={false}
+            selectable={false}
+            deletable={false}
+            data={sharedData}
+            label="2/мин"
+            style={{ opacity: 0.28 }}
+          />
+        </svg>
+      </ReactFlowProvider>,
+    );
+    const gradients = Array.from(container.querySelectorAll("linearGradient"));
+    const lanes = Array.from(
+      container.querySelectorAll(
+        ".topology-edge-shared-trunk.topology-edge-status-lane",
+      ),
+    );
+    const sharedPaint = Array.from(
+      container.querySelectorAll(".topology-edge-shared-trunk"),
+    );
+    const gradientIds = gradients.map((gradient) => gradient.id);
+
+    expect(gradients).toHaveLength(2);
+    expect(new Set(gradientIds).size).toBe(2);
+    gradientIds.forEach((id) => expect(id).toMatch(/^[a-zA-Z0-9_-]+$/));
+    expect(lanes).toHaveLength(2);
+    lanes.forEach((lane, index) => {
+      expect(lane).toHaveAttribute("stroke", `url(#${gradientIds[index]})`);
+      expect(lane).toHaveAttribute("stroke-width", "1");
+      expect(lane).not.toHaveAttribute("transform");
+      expect(lane.getAttribute("style") ?? "").not.toContain("opacity");
+    });
+    expect(sharedPaint.map((element) => element.getAttribute("class"))).toEqual(
+      [
+        "topology-edge-shared-trunk topology-edge-conductor-base",
+        "topology-edge-shared-trunk topology-edge-status-lane",
+        "topology-edge-shared-trunk topology-edge-conductor-base",
+        "topology-edge-shared-trunk topology-edge-status-lane",
+      ],
+    );
+    expect(
+      sharedPaint.map((element) => element.getAttribute("stroke-width")),
+    ).toEqual(["1.75", "1", "1.75", "1"]);
   });
 
   it("keeps unknown status paint on an individual edge", () => {

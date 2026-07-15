@@ -2,26 +2,49 @@ import { describe, expect, it } from "vitest";
 import { buildStatusGradientStops } from "./topology-status-gradient";
 
 describe("buildStatusGradientStops", () => {
-  it("builds weighted opaque finite monotonic stops", () => {
+  it("builds exact weighted opaque transition stops", () => {
     const stops = buildStatusGradientStops([
       { status: "healthy", count: 2 },
       { status: "warning", count: 1 },
     ]);
 
-    expect(stops).toEqual([
-      { offset: 0, status: "healthy" },
-      { offset: expect.any(Number), status: "healthy" },
-      { offset: expect.any(Number), status: "warning" },
-      { offset: 1, status: "warning" },
+    expect(stops.map((stop) => stop.status)).toEqual([
+      "healthy",
+      "healthy",
+      "warning",
+      "warning",
     ]);
-    expect(stops.map((stop) => stop.offset)).toEqual(
-      expect.arrayContaining(stops.map((stop) => expect.any(Number))),
-    );
-    expect(stops[0]?.offset).toBe(0);
-    expect(stops.at(-1)?.offset).toBe(1);
+    expect(stops[0]?.offset).toBeCloseTo(0);
+    expect(stops[1]?.offset).toBeCloseTo(2 / 3 - 0.04);
+    expect(stops[2]?.offset).toBeCloseTo(2 / 3 + 0.04);
+    expect(stops[3]?.offset).toBeCloseTo(1);
     expect(stops.every((stop) => Number.isFinite(stop.offset))).toBe(true);
     expect(stops.every((stop, index) => index === 0 || stop.offset >= stops[index - 1]!.offset)).toBe(true);
     expect(stops.every((stop) => !("opacity" in stop))).toBe(true);
+  });
+
+  it.each([
+    ["zero", 0],
+    ["negative", -1],
+    ["NaN", Number.NaN],
+    ["positive infinity", Number.POSITIVE_INFINITY],
+    ["negative infinity", Number.NEGATIVE_INFINITY],
+  ])("rejects a %s individual band count", (_label, count) => {
+    expect(
+      buildStatusGradientStops([
+        { status: "healthy", count: 2 },
+        { status: "warning", count },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("rejects finite counts whose total overflows", () => {
+    expect(
+      buildStatusGradientStops([
+        { status: "healthy", count: Number.MAX_VALUE },
+        { status: "warning", count: Number.MAX_VALUE },
+      ]),
+    ).toEqual([]);
   });
 
   it("returns identical output for the same bands despite unrelated edge order", () => {

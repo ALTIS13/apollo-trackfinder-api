@@ -9,8 +9,13 @@ export interface StatusGradientStop {
 export function buildStatusGradientStops(
   bands: readonly SharedStatusBand[],
 ): StatusGradientStop[] {
+  if (
+    bands.length === 0 ||
+    bands.some((band) => !Number.isFinite(band.count) || band.count <= 0)
+  )
+    return [];
   const total = bands.reduce((sum, band) => sum + band.count, 0);
-  if (total <= 0 || bands.length === 0) return [];
+  if (!Number.isFinite(total)) return [];
   if (bands.length === 1) {
     return [
       { offset: 0, status: bands[0]!.status },
