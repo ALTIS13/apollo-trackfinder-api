@@ -74,12 +74,6 @@ function pointLiesOnSegment(
   return false;
 }
 
-function pointLiesOnCanonicalRoute(point: RoutePoint, route: RoutePoint[]) {
-  return route
-    .slice(0, -1)
-    .some((start, index) => pointLiesOnSegment(point, start, route[index + 1]));
-}
-
 function selectedSegment(geometry: ConnectorGeometry) {
   const start = geometry.routePoints[geometry.contactSegmentIndex];
   const end = geometry.routePoints[geometry.contactSegmentIndex + 1];
@@ -96,20 +90,25 @@ function expectValidSplitPath(
   expectedStart: RoutePoint,
   expectedEnd: RoutePoint,
   geometry: ConnectorGeometry,
+  firstSegmentIndex: number,
+  lastSegmentIndex: number,
 ) {
   const commands = parseAbsolutePath(path);
   const movementCommands = commands.slice(1);
-  const { start: selectedStart, end: selectedEnd } = selectedSegment(geometry);
+  let currentSegmentIndex = firstSegmentIndex;
+  const visitedSegmentIndexes = new Set([currentSegmentIndex]);
 
   expect(commands[0]).toMatchObject({ type: "M", end: expectedStart });
   expect(commands.at(-1)?.end).toEqual(expectedEnd);
   expect(movementCommands).not.toHaveLength(0);
+  expect(firstSegmentIndex).toBeGreaterThanOrEqual(0);
+  expect(lastSegmentIndex).toBeLessThan(geometry.routePoints.length - 1);
+  expect(firstSegmentIndex).toBeLessThanOrEqual(lastSegmentIndex);
 
   commands.forEach((command) => {
     [command.start, ...command.controls, command.end].forEach((point) => {
       expect(Number.isFinite(point.x)).toBe(true);
       expect(Number.isFinite(point.y)).toBe(true);
-      expect(pointLiesOnCanonicalRoute(point, geometry.routePoints)).toBe(true);
     });
   });
 
@@ -120,40 +119,69 @@ function expectValidSplitPath(
       expect(control).not.toEqual(command.end);
     });
 
-    const isHorizontalAcrossSelectedSplit =
-      command.start.y === geometry.contactY &&
-      command.end.y === geometry.contactY &&
-      command.start.x >= selectedStart.x &&
-      command.start.x <= selectedEnd.x &&
-      command.end.x >= selectedStart.x &&
-      command.end.x <= selectedEnd.x;
-    if (isHorizontalAcrossSelectedSplit) {
-      expect(command.end.x).toBeGreaterThan(command.start.x);
-    }
+    if (command.type === "L") {
+      expect(
+        command.start.x === command.end.x ||
+          command.start.y === command.end.y,
+      ).toBe(true);
 
-    if (command.type === "Q") {
+      const matchingSegmentIndexes = geometry.routePoints
+        .slice(firstSegmentIndex, lastSegmentIndex + 1)
+        .flatMap((segmentStart, offset) => {
+          const segmentIndex = firstSegmentIndex + offset;
+          const segmentEnd = geometry.routePoints[segmentIndex + 1];
+          return pointLiesOnSegment(command.start, segmentStart, segmentEnd) &&
+            pointLiesOnSegment(command.end, segmentStart, segmentEnd)
+            ? [segmentIndex]
+            : [];
+        });
+      expect(matchingSegmentIndexes).toContain(currentSegmentIndex);
+
+      const segmentStart = geometry.routePoints[currentSegmentIndex];
+      const segmentEnd = geometry.routePoints[currentSegmentIndex + 1];
+      const forwardDotProduct =
+        (command.end.x - command.start.x) *
+          (segmentEnd.x - segmentStart.x) +
+        (command.end.y - command.start.y) *
+          (segmentEnd.y - segmentStart.y);
+      expect(forwardDotProduct).toBeGreaterThan(0);
+    } else if (command.type === "Q") {
       const [control] = command.controls;
-      const cornerIndex = geometry.routePoints.findIndex(
-        (point) => point.x === control.x && point.y === control.y,
-      );
-      expect(cornerIndex).toBeGreaterThan(0);
-      expect(cornerIndex).toBeLessThan(geometry.routePoints.length - 1);
+      const cornerIndex = currentSegmentIndex + 1;
+      const incomingStart = geometry.routePoints[currentSegmentIndex];
+      const corner = geometry.routePoints[cornerIndex];
+      const outgoingEnd = geometry.routePoints[cornerIndex + 1];
+
+      expect(currentSegmentIndex).toBeLessThan(lastSegmentIndex);
+      expect(control).toEqual(corner);
       expect(
-        pointLiesOnSegment(
-          command.start,
-          geometry.routePoints[cornerIndex - 1],
-          control,
-        ),
+        pointLiesOnSegment(command.start, incomingStart, corner),
       ).toBe(true);
       expect(
-        pointLiesOnSegment(
-          command.end,
-          control,
-          geometry.routePoints[cornerIndex + 1],
-        ),
+        pointLiesOnSegment(command.end, corner, outgoingEnd),
       ).toBe(true);
+
+      const incomingDotProduct =
+        (corner.x - command.start.x) * (corner.x - incomingStart.x) +
+        (corner.y - command.start.y) * (corner.y - incomingStart.y);
+      const outgoingDotProduct =
+        (command.end.x - corner.x) * (outgoingEnd.x - corner.x) +
+        (command.end.y - corner.y) * (outgoingEnd.y - corner.y);
+      expect(incomingDotProduct).toBeGreaterThan(0);
+      expect(outgoingDotProduct).toBeGreaterThan(0);
+
+      currentSegmentIndex += 1;
+      visitedSegmentIndexes.add(currentSegmentIndex);
     }
   });
+
+  expect(currentSegmentIndex).toBe(lastSegmentIndex);
+  expect([...visitedSegmentIndexes]).toEqual(
+    Array.from(
+      { length: lastSegmentIndex - firstSegmentIndex + 1 },
+      (_, offset) => firstSegmentIndex + offset,
+    ),
+  );
 }
 
 function expectCanonicalContact(geometry: ConnectorGeometry) {
@@ -192,12 +220,16 @@ function expectCanonicalContact(geometry: ConnectorGeometry) {
     routeSource,
     { x: geometry.femaleOuterX, y: geometry.contactY },
     geometry,
+    0,
+    geometry.contactSegmentIndex,
   );
   expectValidSplitPath(
     geometry.targetPath,
     { x: geometry.maleOuterX, y: geometry.contactY },
     routeTarget,
     geometry,
+    geometry.contactSegmentIndex,
+    geometry.routePoints.length - 2,
   );
 
   const sourceSplitCommand = parseAbsolutePath(geometry.sourcePath).at(-1)!;
