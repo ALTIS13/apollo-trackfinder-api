@@ -75,6 +75,7 @@ Last updated: 2026-07-15.
 - Feature branch UI сохранена в origin как проверяемая история серьёзного этапа. Backend telemetry/API implementation commit `a5a1b52177f746fc6693b4c1356c83f405bbeeb1` и validation status commit `1f169e57f78ea9c8713ab04a11133e06d56d83d3` опубликованы в `origin/codex/feat/admin-telemetry-api`, затем fast-forward merged и опубликованы в `origin/main`; HomeNode/Coolify не изменялись.
 - Status terminal connector work опубликован в `origin/codex/fix/admin-connector-ports`; implementation commits `ed28e9c` и `6e4278b` прошли TDD, полный admin regression, два task review и whole-branch review `APPROVED` без findings. Проверенный feature tip `362d8f637760fc76d9a143e0d3adae67ba98a594` fast-forward merged и опубликован в `origin/main`; merged result повторно прошёл `86/86`, typecheck и production build.
 - Connector continuity fix опубликован в `origin/codex/fix/admin-connector-continuity` commit `d05eff1735bd0954b2bbcadf557c8a2d27f050fd`, независимо одобрен без findings, fast-forward merged и опубликован в `origin/main`. Merged result повторно прошёл `90/90`, typecheck и production build; HomeNode/Coolify не изменялись.
+- Full-width connector cable fix опубликован в `origin/codex/fix/admin-connector-cables` commit `788ccbd13bc9bb35c29652e3d8039812156def55`, прошёл review-fix и повторный `APPROVED`, fast-forward merged и опубликован в `origin/main`. Merged result повторно прошёл `92/92`, typecheck и production build; HomeNode/Coolify не изменялись.
 
 ## Следующий логичный этап реализации
 
