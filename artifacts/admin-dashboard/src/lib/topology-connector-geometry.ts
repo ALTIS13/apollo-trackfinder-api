@@ -4,6 +4,7 @@ export const CONDUCTOR_WIDTH = 6;
 export const CONTACT_HALF_LENGTH = 16;
 export const TARGET_STUB_LENGTH = 12;
 export const SHARED_TRUNK_LENGTH = 24;
+export const CONNECTOR_BEND_RADIUS = 7.5;
 
 export interface ConnectorGeometryInput {
   sourceX: number;
@@ -12,7 +13,7 @@ export interface ConnectorGeometryInput {
   targetX: number;
   targetY: number;
   targetPosition: Position;
-  sharedSource: boolean;
+  sharedBranchLength?: number;
 }
 
 export interface ConnectorGeometry {
@@ -30,12 +31,8 @@ export function buildConnectorGeometry(input: ConnectorGeometryInput): Connector
   const contactX = input.targetX - CONTACT_HALF_LENGTH - TARGET_STUB_LENGTH;
   const femaleOuterX = contactX - CONTACT_HALF_LENGTH;
   const maleOuterX = contactX + CONTACT_HALF_LENGTH;
-  const canShare =
-    input.sharedSource &&
-    input.sourcePosition === Position.Right &&
-    input.targetPosition === Position.Left &&
-    femaleOuterX > input.sourceX + SHARED_TRUNK_LENGTH + 7.5;
-  const branchSourceX = canShare ? input.sourceX + SHARED_TRUNK_LENGTH : input.sourceX;
+  const sharedBranchLength = Math.max(0, input.sharedBranchLength ?? 0);
+  const branchSourceX = input.sourceX + sharedBranchLength;
   const [sourcePath] = getSmoothStepPath({
     sourceX: branchSourceX,
     sourceY: input.sourceY,
@@ -43,7 +40,7 @@ export function buildConnectorGeometry(input: ConnectorGeometryInput): Connector
     targetX: femaleOuterX,
     targetY: input.targetY,
     targetPosition: input.targetPosition,
-    borderRadius: 7.5,
+    borderRadius: CONNECTOR_BEND_RADIUS,
     offset: TARGET_STUB_LENGTH,
   });
 
@@ -55,6 +52,9 @@ export function buildConnectorGeometry(input: ConnectorGeometryInput): Connector
     femaleOuterX,
     maleOuterX,
     branchSourceX,
-    sharedTrunkPath: canShare ? `M ${input.sourceX} ${input.sourceY} H ${branchSourceX}` : undefined,
+    sharedTrunkPath:
+      sharedBranchLength > 0
+        ? `M ${input.sourceX} ${input.sourceY} H ${branchSourceX}`
+        : undefined,
   };
 }

@@ -89,6 +89,15 @@ function getReactFlowProps() {
       height?: number;
       measured?: { width?: number; height?: number };
     }>;
+    edges: Array<{
+      id: string;
+      source: string;
+      target: string;
+      data?: {
+        sharedBranchLength?: number;
+        renderSharedTrunk?: boolean;
+      };
+    }>;
     onNodesChange: (changes: unknown[]) => void;
   };
 }
@@ -96,21 +105,100 @@ function getReactFlowProps() {
 describe("TopologyPanel", () => {
   it("assigns ordered statuses to every shared source edge and the trunk to the last", () => {
     expect(
-      Array.from(getSharedSourceRoutes(demoSnapshot.edges).entries()),
+      Array.from(
+        getSharedSourceRoutes(
+          demoSnapshot.edges,
+          new Map([
+            ["core-api", { x: 298, width: 190 }],
+            ["account-integrations", { x: 572, width: 190 }],
+            ["search-media", { x: 572, width: 190 }],
+            ["download-worker", { x: 572, width: 190 }],
+          ]),
+        ).entries(),
+      ),
     ).toEqual([
       [
         "core-api-account-integrations",
-        { statuses: ["healthy", "warning", "degraded"], renderTrunk: false },
+        {
+          statuses: ["healthy", "warning", "degraded"],
+          renderTrunk: false,
+          sharedBranchLength: 24,
+        },
       ],
       [
         "core-api-search-media",
-        { statuses: ["healthy", "warning", "degraded"], renderTrunk: false },
+        {
+          statuses: ["healthy", "warning", "degraded"],
+          renderTrunk: false,
+          sharedBranchLength: 24,
+        },
       ],
       [
         "core-api-download-worker",
-        { statuses: ["healthy", "warning", "degraded"], renderTrunk: true },
+        {
+          statuses: ["healthy", "warning", "degraded"],
+          renderTrunk: true,
+          sharedBranchLength: 24,
+        },
       ],
     ]);
+  });
+
+  it("keeps every shared Core API branch on one shortened trunk after the trunk owner moves left", async () => {
+    render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
+
+    await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        {
+          type: "position",
+          id: "download-worker",
+          position: { x: 545.936, y: 140 },
+        },
+      ]);
+    });
+
+    await waitFor(() => {
+      const sharedRoutes = getReactFlowProps().edges.filter(
+        (edge) => edge.source === "core-api",
+      );
+      const branchLengths = sharedRoutes.map(
+        (edge) => edge.data?.sharedBranchLength,
+      );
+
+      expect(branchLengths).toHaveLength(3);
+      expect(branchLengths.every((length) => typeof length === "number")).toBe(true);
+
+      const numericBranchLengths = branchLengths as number[];
+      numericBranchLengths.forEach((length) =>
+        expect(length).toBeCloseTo(numericBranchLengths[0], 6),
+      );
+      expect(numericBranchLengths[0]).toBeCloseTo(6.436, 3);
+      expect(numericBranchLengths[0]).toBeGreaterThan(0);
+      expect(numericBranchLengths[0]).toBeLessThan(24);
+      expect(
+        sharedRoutes.filter((edge) => edge.data?.renderSharedTrunk),
+      ).toHaveLength(1);
+      expect(
+        sharedRoutes.find((edge) => edge.data?.renderSharedTrunk)?.id,
+      ).toBe("core-api-download-worker");
+    });
+  });
+
+  it("disables the shared trunk for every branch when one target has no clearance", () => {
+    const routes = getSharedSourceRoutes(
+      demoSnapshot.edges,
+      new Map([
+        ["core-api", { x: 298, width: 190 }],
+        ["account-integrations", { x: 572, width: 190 }],
+        ["search-media", { x: 572, width: 190 }],
+        ["download-worker", { x: 539.5, width: 190 }],
+      ]),
+    );
+
+    expect(
+      Array.from(routes.values(), (route) => route.sharedBranchLength),
+    ).toEqual([0, 0, 0]);
   });
 
   it("centers an incident-selected node with zero-duration reduced motion", async () => {
@@ -248,6 +336,36 @@ describe("TopologyPanel", () => {
         height: initialNode.height,
       });
     });
+  });
+
+  it("does not retain a dragged node position after unmount and remount", async () => {
+    const firstMount = render(
+      <TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />,
+    );
+
+    await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    const initialPosition = {
+      ...getReactFlowProps().nodes.find((node) => node.id === "core-api")!.position,
+    };
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        { type: "position", id: "core-api", position: { x: 680, y: 152 } },
+      ]);
+    });
+    await waitFor(() =>
+      expect(
+        getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position,
+      ).toEqual({ x: 680, y: 152 }),
+    );
+
+    firstMount.unmount();
+    render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
+
+    await waitFor(() =>
+      expect(
+        getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position,
+      ).toEqual(initialPosition),
+    );
   });
 
   it("disables evidence-bearing motion when hidden or reduced", () => {

@@ -21,6 +21,7 @@ interface RenderEdgeOptions {
   };
   style?: CSSProperties;
   sharedStatuses?: HealthStatus[];
+  sharedBranchLength?: number;
   renderSharedTrunk?: boolean;
 }
 
@@ -33,8 +34,19 @@ function renderEdge({
   diagnostic,
   style,
   sharedStatuses,
+  sharedBranchLength,
   renderSharedTrunk,
 }: RenderEdgeOptions = {}) {
+  const data = {
+    status,
+    motionEnabled,
+    actionable: diagnostic !== undefined,
+    diagnostic,
+    sharedStatuses,
+    renderSharedTrunk,
+    ...(sharedBranchLength === undefined ? {} : { sharedBranchLength }),
+  };
+
   return render(
     <svg>
       <FlowingEdge
@@ -50,14 +62,7 @@ function renderEdge({
         selected={false}
         selectable={false}
         deletable={false}
-        data={{
-          status,
-          motionEnabled,
-          actionable: diagnostic !== undefined,
-          diagnostic,
-          sharedStatuses,
-          renderSharedTrunk,
-        }}
+        data={data}
         label="240/мин"
         style={style}
       />
@@ -143,16 +148,48 @@ describe("FlowingEdge", () => {
   });
 
   it.each([
-    [3, "warning"],
-    [7, "degraded"],
-  ] as const)(
-    "keeps the intentional %s-unit gap visible for a %s contact",
-    (offset, status) => {
+    {
+      status: "warning" as const,
+      offset: 3,
+      femaleRail: "M -16 -3 H -3 V -1.15 H -9 V 1.15 H -3 V 3 H -16 Z",
+      femaleSlot: "M -3 -1.15 H -9 V 1.15 H -3",
+      maleRail: "M 16 -3 H 4 V -0.75 H -2 V 0.75 H 4 V 3 H 16 Z",
+      maleTongue: "M -2 -0.75 H 4 V 0.75 H -2",
+    },
+    {
+      status: "degraded" as const,
+      offset: 7,
+      femaleRail: "M -16 -3 H -7 V -1.15 H -13 V 1.15 H -7 V 3 H -16 Z",
+      femaleSlot: "M -7 -1.15 H -13 V 1.15 H -7",
+      maleRail: "M 16 -3 H 8 V -0.75 H 2 V 0.75 H 8 V 3 H 16 Z",
+      maleTongue: "M 2 -0.75 H 8 V 0.75 H 2",
+    },
+  ])(
+    "draws the $offset-unit $status contact gap with matching female and male paths",
+    ({ offset, status, femaleRail, femaleSlot, maleRail, maleTongue }) => {
       const { container } = renderEdge({ status });
+      const female = container.querySelector(".topology-edge-contact-female");
+      const male = container.querySelector(".topology-edge-contact-male");
 
       expect(container.querySelector(".topology-edge-contact")).toHaveAttribute(
         "data-offset",
         String(offset),
+      );
+      expect(female?.querySelector(".topology-edge-contact-rail")).toHaveAttribute(
+        "d",
+        femaleRail,
+      );
+      expect(female?.querySelector(".topology-edge-contact-notch")).toHaveAttribute(
+        "d",
+        femaleSlot,
+      );
+      expect(male?.querySelector(".topology-edge-contact-rail")).toHaveAttribute(
+        "d",
+        maleRail,
+      );
+      expect(male?.querySelector(".topology-edge-contact-tongue")).toHaveAttribute(
+        "d",
+        maleTongue,
       );
     },
   );
@@ -173,6 +210,7 @@ describe("FlowingEdge", () => {
       sourceY: 0,
       targetY: 80,
       sharedStatuses: ["healthy", "warning", "degraded"],
+      sharedBranchLength: 24,
       renderSharedTrunk: true,
     });
     const trunk = container.querySelectorAll(".topology-edge-shared-trunk");
@@ -193,11 +231,30 @@ describe("FlowingEdge", () => {
     expect(trunk[2]).toHaveAttribute("transform", "translate(0 1.5)");
   });
 
+  it("uses the group branch length supplied through edge data", () => {
+    const { container } = renderEdge({
+      sourceY: 0,
+      targetY: 80,
+      sharedStatuses: ["healthy", "warning", "degraded"],
+      sharedBranchLength: 1,
+      renderSharedTrunk: true,
+    });
+
+    expect(container.querySelector(".topology-edge-conductor")).toHaveAttribute(
+      "d",
+      expect.stringMatching(/^M1 0/),
+    );
+    container.querySelectorAll(".topology-edge-shared-trunk").forEach((lane) =>
+      expect(lane).toHaveAttribute("d", "M 0 0 H 1"),
+    );
+  });
+
   it("starts every grouped branch after its shared source trunk", () => {
     const { container } = renderEdge({
       sourceY: 0,
       targetY: 80,
       sharedStatuses: ["healthy", "warning", "degraded"],
+      sharedBranchLength: 24,
     });
 
     expect(container.querySelector(".topology-edge-conductor")).toHaveAttribute(
@@ -256,6 +313,7 @@ describe("FlowingEdge", () => {
       status: "degraded",
       style: { opacity: 0.28 },
       sharedStatuses: ["healthy", "warning", "degraded"],
+      sharedBranchLength: 24,
       renderSharedTrunk: true,
     });
     const painted = container.querySelectorAll<SVGElement>(

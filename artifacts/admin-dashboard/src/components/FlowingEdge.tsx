@@ -54,6 +54,7 @@ export interface FlowingEdgeData extends Record<string, unknown> {
   actionable?: boolean;
   diagnostic?: FlowingEdgeDiagnostic;
   sharedStatuses?: HealthStatus[];
+  sharedBranchLength?: number;
   renderSharedTrunk?: boolean;
 }
 
@@ -117,7 +118,7 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
     targetX,
     targetY,
     targetPosition,
-    sharedSource: sharedStatuses.length > 0,
+    sharedBranchLength: data?.sharedBranchLength,
   });
   const color = edgeColors[status];
   const labelText = getLabelText(props.label);

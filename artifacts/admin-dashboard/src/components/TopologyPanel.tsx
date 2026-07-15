@@ -21,6 +21,12 @@ import {
 import { getServiceNeighborhood } from "../lib/dashboard-model";
 import { layoutTopology } from "../lib/topology-layout";
 import {
+  CONNECTOR_BEND_RADIUS,
+  CONTACT_HALF_LENGTH,
+  SHARED_TRUNK_LENGTH,
+  TARGET_STUB_LENGTH,
+} from "../lib/topology-connector-geometry";
+import {
   applyPositionChanges,
   prunePositionOverrides,
 } from "../lib/topology-position-overrides";
@@ -55,10 +61,17 @@ const statusOrder: HealthStatus[] = [
 export interface SharedSourceRoute {
   statuses: HealthStatus[];
   renderTrunk: boolean;
+  sharedBranchLength: number;
+}
+
+export interface TopologyNodePosition {
+  x: number;
+  width: number;
 }
 
 export function getSharedSourceRoutes(
   edges: ServiceEdge[],
+  nodePositions: ReadonlyMap<string, TopologyNodePosition>,
 ): Map<string, SharedSourceRoute> {
   const edgesBySource = new Map<string, ServiceEdge[]>();
   edges.forEach((edge) => {
@@ -70,6 +83,20 @@ export function getSharedSourceRoutes(
   const routes = new Map<string, SharedSourceRoute>();
   edgesBySource.forEach((sourceEdges) => {
     if (sourceEdges.length < 2) return;
+    const sourcePosition = nodePositions.get(sourceEdges[0].source);
+    if (sourcePosition === undefined) return;
+    const sourceX = sourcePosition.x + sourcePosition.width;
+    const sharedBranchLength = sourceEdges.reduce(
+      (shortestClearance, edge) => {
+        const targetPosition = nodePositions.get(edge.target);
+        if (targetPosition === undefined) return 0;
+        const femaleOuterX =
+          targetPosition.x - 2 * CONTACT_HALF_LENGTH - TARGET_STUB_LENGTH;
+        const clearance = femaleOuterX - sourceX - CONNECTOR_BEND_RADIUS;
+        return Math.min(shortestClearance, Math.max(0, clearance));
+      },
+      SHARED_TRUNK_LENGTH,
+    );
     const statuses = statusOrder.filter((status) =>
       sourceEdges.some((edge) => edge.status === status),
     );
@@ -77,6 +104,7 @@ export function getSharedSourceRoutes(
       routes.set(edge.id, {
         statuses,
         renderTrunk: index === sourceEdges.length - 1,
+        sharedBranchLength,
       });
     });
   });
@@ -239,9 +267,29 @@ function TopologyCanvas({
     () => new Map(snapshot.incidents.map((incident) => [incident.id, incident])),
     [snapshot.incidents],
   );
+  const currentNodePositions = useMemo(() => {
+    const dagrePositions = new Map(layout.nodes.map((node) => [node.id, node]));
+
+    return new Map(
+      snapshot.modules.map((module) => {
+        const dagrePosition = dagrePositions.get(module.id);
+        if (dagrePosition === undefined)
+          throw new Error(`Не найдена позиция сервиса ${module.id}`);
+        const override = positionOverrides.get(module.id);
+        return [
+          module.id,
+          {
+            ...dagrePosition,
+            x: override?.x ?? dagrePosition.x,
+            y: override?.y ?? dagrePosition.y,
+          },
+        ];
+      }),
+    );
+  }, [layout.nodes, positionOverrides, snapshot.modules]);
   const sharedSourceRoutes = useMemo(
-    () => getSharedSourceRoutes(snapshot.edges),
-    [snapshot.edges],
+    () => getSharedSourceRoutes(snapshot.edges, currentNodePositions),
+    [currentNodePositions, snapshot.edges],
   );
   const terminalStatuses = useMemo(
     () => getTerminalStatuses(snapshot.edges),
@@ -255,21 +303,19 @@ function TopologyCanvas({
   }, [moduleIds]);
 
   const nodes = useMemo<ServiceFlowNode[]>(() => {
-    const positions = new Map(layout.nodes.map((node) => [node.id, node]));
     return snapshot.modules.map((module) => {
-      const dagrePosition = positions.get(module.id);
-      if (dagrePosition === undefined)
+      const position = currentNodePositions.get(module.id);
+      if (position === undefined)
         throw new Error(`Не найдена позиция сервиса ${module.id}`);
-      const position = positionOverrides.get(module.id) ?? dagrePosition;
       return {
         id: module.id,
         type: "service",
         position: { x: position.x, y: position.y },
-        width: dagrePosition.width,
-        height: dagrePosition.height,
+        width: position.width,
+        height: position.height,
         measured: {
-          width: dagrePosition.width,
-          height: dagrePosition.height,
+          width: position.width,
+          height: position.height,
         },
         selected: module.id === selectedServiceId,
         draggable: true,
@@ -293,9 +339,8 @@ function TopologyCanvas({
     });
   }, [
     activeNeighborhood,
-    layout.nodes,
+    currentNodePositions,
     motionEnabled,
-    positionOverrides,
     selectedServiceId,
     snapshot.modules,
     terminalStatuses,
@@ -350,6 +395,8 @@ function TopologyCanvas({
                   },
             actionable: canOpenIncident,
             sharedStatuses: sharedSourceRoutes.get(edge.id)?.statuses,
+            sharedBranchLength:
+              sharedSourceRoutes.get(edge.id)?.sharedBranchLength,
             renderSharedTrunk: sharedSourceRoutes.get(edge.id)?.renderTrunk,
             motionEnabled:
               edge.requestsPerMinute > 0 &&
