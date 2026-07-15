@@ -4,12 +4,17 @@ import { useState } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { demoSnapshot } from "../data/demo-snapshot";
 import {
+  buildConnectorGeometry,
   CONNECTOR_BEND_RADIUS,
   CONTACT_HALF_LENGTH,
   TARGET_STUB_LENGTH,
 } from "../lib/topology-connector-geometry";
+import { getEvidenceLabelRect } from "../lib/topology-evidence-layout";
+import { getEvidenceLabelText, getEvidenceLabelWidth } from "./FlowingEdge";
+import { Position } from "@xyflow/react";
 
 const flowApi = vi.hoisted(() => ({
+  fitBounds: vi.fn(),
   fitView: vi.fn(),
   getNode: vi.fn(),
   getZoom: vi.fn(() => 0.8),
@@ -76,6 +81,7 @@ beforeAll(() => {
 
 afterEach(() => {
   cleanup();
+  flowApi.fitBounds.mockReset();
   flowApi.setCenter.mockReset();
   flowApi.getNode.mockReset();
   motionPreference.reduced = false;
@@ -101,6 +107,7 @@ function getReactFlowProps() {
       data?: {
         sharedBranchLength?: number;
         renderSharedTrunk?: boolean;
+        evidenceLane?: number;
       };
     }>;
     onNodesChange: (changes: unknown[]) => void;
@@ -110,6 +117,85 @@ function getReactFlowProps() {
 }
 
 describe("TopologyPanel", () => {
+  it("assigns evidence lanes only to non-healthy edges and fits the visual bounds once", async () => {
+    render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
+
+    await waitFor(() => expect(flowApi.fitBounds).toHaveBeenCalledTimes(1));
+    const warning = getReactFlowProps().edges.find(
+      (edge) => edge.id === "core-api-search-media",
+    );
+    const degraded = getReactFlowProps().edges.find(
+      (edge) => edge.id === "core-api-download-worker",
+    );
+    const downstreamDegraded = getReactFlowProps().edges.find(
+      (edge) => edge.id === "download-worker-media-storage",
+    );
+    const healthy = getReactFlowProps().edges.find(
+      (edge) => edge.id === "public-web-core-api",
+    );
+    const [bounds] = flowApi.fitBounds.mock.calls[0] as [
+      { x: number; y: number; width: number; height: number },
+    ];
+
+    expect(warning?.data?.evidenceLane).toEqual(expect.any(Number));
+    expect(degraded?.data?.evidenceLane).toEqual(expect.any(Number));
+    expect(healthy?.data?.evidenceLane).toBeUndefined();
+    const evidenceRects = [
+      { edge: warning, status: "warning" as const, code: "SC-429" },
+      { edge: degraded, status: "degraded" as const, code: "DLW-E502" },
+      {
+        edge: downstreamDegraded,
+        status: "degraded" as const,
+        code: "DLW-E502",
+      },
+    ].map(({ edge, status, code }) => {
+      if (edge === undefined) throw new Error("Evidence edge was not rendered");
+      const source = getReactFlowProps().nodes.find((node) => node.id === edge.source);
+      const target = getReactFlowProps().nodes.find((node) => node.id === edge.target);
+      if (source === undefined || target === undefined)
+        throw new Error("Evidence endpoint was not rendered");
+      const geometry = buildConnectorGeometry({
+        sourceX: source.position.x + (source.width ?? 190),
+        sourceY: source.position.y + (source.height ?? 76) / 2,
+        sourcePosition: Position.Right,
+        targetX: target.position.x,
+        targetY: target.position.y + (target.height ?? 76) / 2,
+        targetPosition: Position.Left,
+        sharedBranchLength: edge.data?.sharedBranchLength,
+      });
+      return getEvidenceLabelRect(
+        {
+          id: edge.id,
+          x: geometry.contactX,
+          y: geometry.contactY,
+          width: getEvidenceLabelWidth(getEvidenceLabelText(status, code)!),
+        },
+        edge.data?.evidenceLane ?? 0,
+        { labelHeight: 14, baseOffset: 22, laneGap: 4 },
+      );
+    });
+    expect(bounds.y).toBeLessThanOrEqual(
+      Math.min(...evidenceRects.map((rect) => rect.y)),
+    );
+
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        { type: "position", id: "core-api", position: { x: 320, y: 120 } },
+      ]);
+    });
+    await waitFor(() => expect(getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position).toEqual({ x: 312, y: 118 }));
+    expect(flowApi.fitBounds).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses current visual bounds for the manual fit control", async () => {
+    render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
+
+    await waitFor(() => expect(flowApi.fitBounds).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Вписать топологию" }));
+
+    expect(flowApi.fitBounds).toHaveBeenCalledTimes(2);
+    expect(flowApi.fitView).not.toHaveBeenCalled();
+  });
   it("assigns ordered statuses to every shared source edge and the trunk to the last", () => {
     expect(
       Array.from(

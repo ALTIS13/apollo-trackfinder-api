@@ -1,5 +1,6 @@
 import {
   Background,
+  Position,
   ReactFlow,
   ReactFlowProvider,
   ViewportPortal,
@@ -22,11 +23,18 @@ import {
 import { getServiceNeighborhood } from "../lib/dashboard-model";
 import { layoutTopology } from "../lib/topology-layout";
 import {
+  buildConnectorGeometry,
   CONNECTOR_BEND_RADIUS,
   CONTACT_HALF_LENGTH,
   SHARED_TRUNK_LENGTH,
   TARGET_STUB_LENGTH,
 } from "../lib/topology-connector-geometry";
+import {
+  assignEvidenceLabelLanes,
+  getEvidenceLabelRect,
+  getTopologyVisualBounds,
+  type EvidenceAnchor,
+} from "../lib/topology-evidence-layout";
 import {
   applyPositionChanges,
   prunePositionOverrides,
@@ -46,6 +54,8 @@ import type {
 import {
   FlowingEdge,
   getEdgeAccessibleLabel,
+  getEvidenceLabelText,
+  getEvidenceLabelWidth,
   type TopologyFlowEdge,
 } from "./FlowingEdge";
 import { ServiceNode, type ServiceFlowNode } from "./ServiceNode";
@@ -66,6 +76,9 @@ const statusOrder: HealthStatus[] = [
   "unknown",
 ];
 const alignmentModes = ["free", "align"] as const;
+const EVIDENCE_LABEL_HEIGHT = 14;
+const EVIDENCE_LABEL_BASE_OFFSET = 22;
+const EVIDENCE_LABEL_LANE_GAP = 4;
 
 export interface SharedSourceRoute {
   statuses: HealthStatus[];
@@ -192,15 +205,17 @@ function useDocumentVisible() {
 interface ViewportControlsProps {
   reducedMotion: boolean;
   hasPositionOverrides: boolean;
+  topologyVisualBounds: ReturnType<typeof getTopologyVisualBounds>;
   onResetLayout: () => void;
 }
 
 function ViewportControls({
   reducedMotion,
   hasPositionOverrides,
+  topologyVisualBounds,
   onResetLayout,
 }: ViewportControlsProps) {
-  const { fitView, zoomIn, zoomOut } = useReactFlow();
+  const { fitBounds, zoomIn, zoomOut } = useReactFlow();
   const duration = reducedMotion ? 0 : 160;
 
   return (
@@ -222,7 +237,10 @@ function ViewportControls({
       <button
         type="button"
         aria-label="Вписать топологию"
-        onClick={() => void fitView({ duration, padding: 0.12 })}
+        onClick={() => {
+          if (topologyVisualBounds !== undefined)
+            void fitBounds(topologyVisualBounds, { duration, padding: 0.12 });
+        }}
       >
         <Maximize2 aria-hidden="true" />
       </button>
@@ -250,7 +268,8 @@ function TopologyCanvas({
 }: TopologyCanvasProps) {
   const reducedMotion = useReducedMotion() ?? false;
   const documentVisible = useDocumentVisible();
-  const { getNode, getZoom, setCenter } = useReactFlow();
+  const { fitBounds, getNode, getZoom, setCenter } = useReactFlow();
+  const didInitialFit = useRef(false);
   const motionEnabled = isDashboardMotionEnabled(
     documentVisible,
     reducedMotion,
@@ -307,6 +326,66 @@ function TopologyCanvas({
     () => getTerminalStatuses(snapshot.edges),
     [snapshot.edges],
   );
+  const evidenceLayout = useMemo(() => {
+    const moduleRects = Array.from(currentNodePositions.values(), (node) => ({
+      x: node.x,
+      y: node.y,
+      width: node.width,
+      height: node.height,
+    }));
+    const anchors: EvidenceAnchor[] = [];
+
+    snapshot.edges.forEach((edge) => {
+      if (edge.status === "healthy") return;
+      const source = currentNodePositions.get(edge.source);
+      const target = currentNodePositions.get(edge.target);
+      if (source === undefined || target === undefined) return;
+      const incident =
+        edge.incidentId === undefined ? undefined : incidentsById.get(edge.incidentId);
+      const diagnosticCode =
+        incident?.diagnostic !== undefined &&
+        (edge.status === "warning" || edge.status === "degraded") &&
+        (incident.serviceId === edge.source || incident.serviceId === edge.target)
+          ? incident.diagnostic.code
+          : undefined;
+      const statusText = getEvidenceLabelText(edge.status, diagnosticCode);
+      if (statusText === undefined) return;
+      const geometry = buildConnectorGeometry({
+        sourceX: source.x + source.width,
+        sourceY: source.y + source.height / 2,
+        sourcePosition: Position.Right,
+        targetX: target.x,
+        targetY: target.y + target.height / 2,
+        targetPosition: Position.Left,
+        sharedBranchLength: sharedSourceRoutes.get(edge.id)?.sharedBranchLength,
+      });
+      anchors.push({
+        id: edge.id,
+        x: geometry.contactX,
+        y: geometry.contactY,
+        width: getEvidenceLabelWidth(statusText),
+      });
+    });
+
+    const lanes = assignEvidenceLabelLanes({
+      anchors,
+      obstacles: moduleRects,
+      labelHeight: EVIDENCE_LABEL_HEIGHT,
+      baseOffset: EVIDENCE_LABEL_BASE_OFFSET,
+      laneGap: EVIDENCE_LABEL_LANE_GAP,
+    });
+    const labelRects = anchors.map((anchor) =>
+      getEvidenceLabelRect(anchor, lanes.get(anchor.id) ?? 0, {
+        labelHeight: EVIDENCE_LABEL_HEIGHT,
+        baseOffset: EVIDENCE_LABEL_BASE_OFFSET,
+        laneGap: EVIDENCE_LABEL_LANE_GAP,
+      }),
+    );
+    return {
+      lanes,
+      topologyVisualBounds: getTopologyVisualBounds(moduleRects, labelRects),
+    };
+  }, [currentNodePositions, incidentsById, sharedSourceRoutes, snapshot.edges]);
 
   useEffect(() => {
     setPositionOverrides((overrides) =>
@@ -414,6 +493,9 @@ function TopologyCanvas({
             sharedBranchLength:
               sharedSourceRoutes.get(edge.id)?.sharedBranchLength,
             renderSharedTrunk: sharedSourceRoutes.get(edge.id)?.renderTrunk,
+            ...(edge.status === "healthy"
+              ? {}
+              : { evidenceLane: evidenceLayout.lanes.get(edge.id) }),
             motionEnabled:
               edge.requestsPerMinute > 0 &&
               motionEnabled &&
@@ -436,10 +518,21 @@ function TopologyCanvas({
       motionEnabled,
       onOpenIncident,
       selectedServiceId,
+      evidenceLayout.lanes,
       sharedSourceRoutes,
       snapshot.edges,
     ],
   );
+
+  useEffect(() => {
+    if (didInitialFit.current || evidenceLayout.topologyVisualBounds === undefined)
+      return;
+    didInitialFit.current = true;
+    void fitBounds(evidenceLayout.topologyVisualBounds, {
+      duration: reducedMotion ? 0 : 160,
+      padding: 0.12,
+    });
+  }, [evidenceLayout.topologyVisualBounds, fitBounds, reducedMotion]);
 
   useEffect(() => {
     if (selectedServiceId === undefined) return;
@@ -601,8 +694,6 @@ function TopologyCanvas({
         edges={edges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
-        fitView
-        fitViewOptions={{ padding: 0.12 }}
         minZoom={0.45}
         maxZoom={1.6}
         nodesDraggable
@@ -638,6 +729,7 @@ function TopologyCanvas({
         <ViewportControls
           reducedMotion={reducedMotion}
           hasPositionOverrides={positionOverrides.size > 0}
+          topologyVisualBounds={evidenceLayout.topologyVisualBounds}
           onResetLayout={() => {
             setPositionOverrides(new Map());
             setAlignmentGuides([]);

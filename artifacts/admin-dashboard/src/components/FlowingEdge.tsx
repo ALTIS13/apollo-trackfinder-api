@@ -42,8 +42,8 @@ const contactOffsets: Record<HealthStatus, number> = {
 };
 
 const CONTACT_HALF_LENGTH = 16;
-const STATUS_BADGE_ABOVE_Y = -58;
-const STATUS_BADGE_BELOW_Y = 44;
+const STATUS_BADGE_BASE_Y = -36;
+const STATUS_BADGE_LANE_STEP = 18;
 const STATUS_BADGE_TEXT_OFFSET = 7;
 const MAX_VISIBLE_STATUS_CODE_LENGTH = 12;
 
@@ -61,6 +61,7 @@ export interface FlowingEdgeData extends Record<string, unknown> {
   sharedStatuses?: HealthStatus[];
   sharedBranchLength?: number;
   renderSharedTrunk?: boolean;
+  evidenceLane?: number;
 }
 
 export type TopologyFlowEdge = Edge<FlowingEdgeData, "flowing">;
@@ -71,7 +72,7 @@ function getLabelText(label: EdgeProps<TopologyFlowEdge>["label"]) {
     : undefined;
 }
 
-function getStatusText(status: HealthStatus, code?: string) {
+export function getEvidenceLabelText(status: HealthStatus, code?: string) {
   const visibleCode =
     code === undefined || code.length <= MAX_VISIBLE_STATUS_CODE_LENGTH
       ? code
@@ -82,6 +83,10 @@ function getStatusText(status: HealthStatus, code?: string) {
     return visibleCode === undefined ? "ERROR" : `ERROR ${visibleCode}`;
   if (status === "unknown") return "NO DATA";
   return undefined;
+}
+
+export function getEvidenceLabelWidth(statusText: string): number {
+  return Math.min(104, Math.max(46, statusText.length * 5.4 + 12));
 }
 
 export function getEdgeAccessibleLabel(
@@ -140,13 +145,13 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
   const targetRailPath = `M ${CONTACT_HALF_LENGTH} -3 H ${targetBodyX} V -0.75 H ${targetTongueX} V 0.75 H ${targetBodyX} V 3 H ${CONTACT_HALF_LENGTH} Z`;
   const diagnostic = data?.diagnostic;
   const canOpenIncident = diagnostic !== undefined && data?.actionable === true;
-  const statusText = getStatusText(status, diagnostic?.code);
+  const statusText = getEvidenceLabelText(status, diagnostic?.code);
   const statusWidth =
     statusText === undefined
       ? 0
-      : Math.min(104, Math.max(46, statusText.length * 5.4 + 12));
+      : getEvidenceLabelWidth(statusText);
   const statusBadgeY =
-    targetY < sourceY ? STATUS_BADGE_BELOW_Y : STATUS_BADGE_ABOVE_Y;
+    STATUS_BADGE_BASE_Y - (data?.evidenceLane ?? 0) * STATUS_BADGE_LANE_STEP;
   const {
     strokeDasharray: _strokeDasharray,
     opacity: _opacity,
@@ -319,7 +324,10 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
         ) : null}
 
         {statusText === undefined ? null : (
-          <g className="topology-edge-contact-status">
+          <g
+            className="topology-edge-contact-status"
+            data-evidence-lane={data?.evidenceLane ?? 0}
+          >
             <rect
               x={-statusWidth / 2}
               y={statusBadgeY}

@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 import type { CSSProperties } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HealthStatus } from "../types/dashboard";
-import { FlowingEdge } from "./FlowingEdge";
+import { FlowingEdge, getEvidenceLabelWidth } from "./FlowingEdge";
 
 afterEach(cleanup);
 
@@ -27,6 +27,7 @@ interface RenderEdgeOptions {
   sharedStatuses?: HealthStatus[];
   sharedBranchLength?: number;
   renderSharedTrunk?: boolean;
+  evidenceLane?: number;
 }
 
 function renderEdge({
@@ -40,6 +41,7 @@ function renderEdge({
   sharedStatuses,
   sharedBranchLength,
   renderSharedTrunk,
+  evidenceLane,
 }: RenderEdgeOptions = {}) {
   const data = {
     status,
@@ -48,6 +50,7 @@ function renderEdge({
     diagnostic,
     sharedStatuses,
     renderSharedTrunk,
+    evidenceLane,
     ...(sharedBranchLength === undefined ? {} : { sharedBranchLength }),
   };
 
@@ -75,6 +78,10 @@ function renderEdge({
 }
 
 describe("FlowingEdge", () => {
+  it("uses the shared visible label width formula", () => {
+    expect(getEvidenceLabelWidth("WARNING SC-429")).toBe(87.60000000000001);
+    expect(getEvidenceLabelWidth("NO DATA")).toBe(49.800000000000004);
+  });
   it("keeps a warning conductor opaque when caller style dims the edge", () => {
     const { container } = renderEdge({
       status: "warning",
@@ -392,21 +399,24 @@ describe("FlowingEdge", () => {
   });
 
   it.each([
-    { sourceY: 0, targetY: 80, badgeY: "-58", textY: "-51" },
-    { sourceY: 0, targetY: 0, badgeY: "-58", textY: "-51" },
-    { sourceY: 80, targetY: 0, badgeY: "44", textY: "51" },
+    { sourceY: 0, targetY: 80, evidenceLane: 0, badgeY: "-36", textY: "-29" },
+    { sourceY: 0, targetY: 0, evidenceLane: 1, badgeY: "-54", textY: "-47" },
+    { sourceY: 80, targetY: 0, evidenceLane: 2, badgeY: "-72", textY: "-65" },
   ])(
-    "places status evidence in the free row channel for $sourceY -> $targetY",
-    ({ sourceY, targetY, badgeY, textY }) => {
+    "anchors status evidence above the plug in lane $evidenceLane",
+    ({ sourceY, targetY, evidenceLane, badgeY, textY }) => {
       const { container } = renderEdge({
         sourceY,
         targetY,
         status: "degraded",
+        evidenceLane,
       });
       const status = container.querySelector(".topology-edge-contact-status");
 
+      expect(status).toHaveAttribute("data-evidence-lane", String(evidenceLane));
       expect(status?.querySelector("rect")).toHaveAttribute("y", badgeY);
       expect(status?.querySelector("text")).toHaveAttribute("y", textY);
+      expect(container.querySelector(".topology-edge-traffic")).toHaveAttribute("y", "19");
     },
   );
 
