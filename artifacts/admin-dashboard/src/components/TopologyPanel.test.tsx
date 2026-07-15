@@ -23,7 +23,7 @@ vi.mock("framer-motion", async (importOriginal) => ({
 }));
 
 import {
-  getSharedSourceGradients,
+  getSharedSourceRoutes,
   isDashboardMotionEnabled,
   TopologyPanel,
 } from "./TopologyPanel";
@@ -54,13 +54,21 @@ afterEach(() => {
 });
 
 describe("TopologyPanel", () => {
-  it("assigns one ordered status gradient to the last edge sharing a source", () => {
+  it("assigns ordered statuses to every shared source edge and the trunk to the last", () => {
     expect(
-      Array.from(getSharedSourceGradients(demoSnapshot.edges).entries()),
+      Array.from(getSharedSourceRoutes(demoSnapshot.edges).entries()),
     ).toEqual([
       [
+        "core-api-account-integrations",
+        { statuses: ["healthy", "warning", "degraded"], renderTrunk: false },
+      ],
+      [
+        "core-api-search-media",
+        { statuses: ["healthy", "warning", "degraded"], renderTrunk: false },
+      ],
+      [
         "core-api-download-worker",
-        ["healthy", "warning", "degraded"],
+        { statuses: ["healthy", "warning", "degraded"], renderTrunk: true },
       ],
     ]);
   });

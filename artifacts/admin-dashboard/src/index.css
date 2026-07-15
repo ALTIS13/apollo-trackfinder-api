@@ -873,22 +873,20 @@ svg {
 .service-node-terminal {
   position: absolute;
   top: 50%;
-  width: 6px;
-  height: 16px;
+  width: 7px;
+  height: 6px;
   transform: translateY(-50%);
-  border-block: 1px solid var(--color-surface);
-  border-inline: 0;
-  background: currentColor;
+  border: 0;
   box-shadow: none;
   pointer-events: none;
 }
 
 .service-node-terminal--target {
-  left: -3px;
+  left: -3.5px;
 }
 
 .service-node-terminal--source {
-  right: -3px;
+  right: -3.5px;
 }
 
 .incident-rail {

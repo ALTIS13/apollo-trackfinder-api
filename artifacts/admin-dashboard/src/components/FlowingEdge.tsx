@@ -1,11 +1,13 @@
 import {
-  BaseEdge,
-  getSmoothStepPath,
   Position,
   type Edge,
   type EdgeProps,
 } from "@xyflow/react";
 import { motion } from "framer-motion";
+import {
+  buildConnectorGeometry,
+  CONDUCTOR_WIDTH,
+} from "../lib/topology-connector-geometry";
 import type { HealthStatus } from "../types/dashboard";
 
 const edgeColors: Record<HealthStatus, string> = {
@@ -15,11 +17,9 @@ const edgeColors: Record<HealthStatus, string> = {
   unknown: "#94a3b8",
 };
 
-const edgeDashes: Record<HealthStatus, string | undefined> = {
-  healthy: undefined,
-  warning: "8 6",
-  degraded: "4 5",
-  unknown: "2 6",
+const sharedLaneOffsets: Partial<Record<HealthStatus, number>> = {
+  warning: -1.5,
+  degraded: 1.5,
 };
 
 const contactStates = {
@@ -37,10 +37,6 @@ const contactOffsets: Record<HealthStatus, number> = {
 };
 
 const CONTACT_HALF_LENGTH = 16;
-const CABLE_STROKE_WIDTH = 4.5;
-const TARGET_LINE_STUB = 12;
-const EDGE_BEND_RADIUS = 7.5;
-const EDGE_ENDPOINT_OFFSET = TARGET_LINE_STUB;
 const STATUS_BADGE_ABOVE_Y = -58;
 const STATUS_BADGE_BELOW_Y = 44;
 const STATUS_BADGE_TEXT_OFFSET = 7;
@@ -58,6 +54,7 @@ export interface FlowingEdgeData extends Record<string, unknown> {
   actionable?: boolean;
   diagnostic?: FlowingEdgeDiagnostic;
   sharedStatuses?: HealthStatus[];
+  renderSharedTrunk?: boolean;
 }
 
 export type TopologyFlowEdge = Edge<FlowingEdgeData, "flowing">;
@@ -104,7 +101,6 @@ export function getEdgeAccessibleLabel(
 export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
   const {
     data,
-    markerEnd,
     sourceX,
     sourceY,
     sourcePosition,
@@ -113,35 +109,20 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
     targetPosition,
   } = props;
   const status = data?.status ?? "unknown";
-  const usesHorizontalRouting =
-    sourcePosition === Position.Right &&
-    targetPosition === Position.Left &&
-    sourceX < targetX;
-  const contactApproachX =
-    targetX - CONTACT_HALF_LENGTH * 2 - TARGET_LINE_STUB;
-  const routeCenterX = usesHorizontalRouting
-    ? Math.max(
-        sourceX + EDGE_ENDPOINT_OFFSET + EDGE_BEND_RADIUS,
-        contactApproachX - EDGE_BEND_RADIUS,
-      )
-    : undefined;
-  const [edgePath] = getSmoothStepPath({
+  const sharedStatuses = data?.sharedStatuses ?? [];
+  const geometry = buildConnectorGeometry({
     sourceX,
     sourceY,
     sourcePosition,
     targetX,
     targetY,
     targetPosition,
-    borderRadius: EDGE_BEND_RADIUS,
-    centerX: routeCenterX,
-    offset: routeCenterX === undefined ? undefined : EDGE_ENDPOINT_OFFSET,
+    sharedSource: sharedStatuses.length > 0,
   });
   const color = edgeColors[status];
   const labelText = getLabelText(props.label);
-  const contactX = targetX - CONTACT_HALF_LENGTH - TARGET_LINE_STUB;
-  const contactY = targetY;
   const contactOffset = contactOffsets[status];
-  const connectedFill = status === "healthy" ? color : undefined;
+  const connectedFill = color;
   const sourceFaceX = -contactOffset;
   const sourceSlotX = sourceFaceX - 6;
   const targetBodyX = 1 + contactOffset;
@@ -155,70 +136,65 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
       : Math.min(104, Math.max(46, statusText.length * 5.4 + 12));
   const statusBadgeY =
     targetY < sourceY ? STATUS_BADGE_BELOW_Y : STATUS_BADGE_ABOVE_Y;
-  const sharedStatuses = data?.sharedStatuses ?? [];
-  const sharedGradientId = `topology-shared-${props.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-  const sharedTrunkEndX =
-    routeCenterX === undefined ? undefined : routeCenterX - EDGE_BEND_RADIUS;
+  const { strokeDasharray: _strokeDasharray, ...edgeStyle } = props.style ?? {};
   return (
     <>
-      <BaseEdge
-        path={edgePath}
-        markerEnd={markerEnd}
+      <path
+        className="topology-edge-conductor"
+        d={geometry.sourcePath}
+        fill="none"
+        stroke={color}
+        strokeWidth={CONDUCTOR_WIDTH}
+        strokeLinecap="butt"
         style={{
-          ...props.style,
+          ...edgeStyle,
           stroke: color,
-          strokeDasharray: edgeDashes[status],
-          strokeWidth: CABLE_STROKE_WIDTH,
+          strokeWidth: CONDUCTOR_WIDTH,
         }}
       />
-      {sharedStatuses.length > 1 && sharedTrunkEndX !== undefined ? (
+      <path
+        className="topology-edge-conductor"
+        d={geometry.targetStubPath}
+        fill="none"
+        stroke={color}
+        strokeWidth={CONDUCTOR_WIDTH}
+        strokeLinecap="butt"
+        style={{
+          ...edgeStyle,
+          stroke: color,
+          strokeWidth: CONDUCTOR_WIDTH,
+        }}
+      />
+      {data?.renderSharedTrunk === true && geometry.sharedTrunkPath !== undefined ? (
         <>
-          <defs>
-            <linearGradient
-              id={sharedGradientId}
-              className="topology-edge-shared-gradient"
-              gradientUnits="userSpaceOnUse"
-              x1={sourceX}
-              y1={sourceY}
-              x2={sharedTrunkEndX}
-              y2={sourceY}
-            >
-              {sharedStatuses.map((sharedStatus, index) => (
-                <stop
-                  key={sharedStatus}
-                  offset={`${(index / (sharedStatuses.length - 1)) * 100}%`}
-                  stopColor={edgeColors[sharedStatus]}
-                />
-              ))}
-            </linearGradient>
-          </defs>
           <path
             className="topology-edge-shared-trunk"
-            d={`M ${sourceX} ${sourceY} H ${sharedTrunkEndX}`}
+            d={geometry.sharedTrunkPath}
             fill="none"
-            stroke={`url(#${sharedGradientId})`}
-            style={{
-              opacity: props.style?.opacity,
-              strokeWidth: CABLE_STROKE_WIDTH,
-            }}
+            stroke={edgeColors.healthy}
+            strokeWidth={CONDUCTOR_WIDTH}
+            strokeLinecap="butt"
+            style={{ opacity: props.style?.opacity }}
           />
+          {sharedStatuses.map((sharedStatus) => {
+            const offset = sharedLaneOffsets[sharedStatus];
+            if (offset === undefined) return null;
+            return (
+              <path
+                key={sharedStatus}
+                className="topology-edge-shared-trunk"
+                d={geometry.sharedTrunkPath}
+                fill="none"
+                stroke={edgeColors[sharedStatus]}
+                strokeWidth={1.5}
+                strokeLinecap="butt"
+                transform={`translate(0 ${offset})`}
+                style={{ opacity: props.style?.opacity }}
+              />
+            );
+          })}
         </>
       ) : null}
-      <g
-        className="topology-edge-contact-route-occlusion"
-        aria-hidden="true"
-        transform={`translate(${contactX} ${contactY})`}
-        pointerEvents="none"
-      >
-        <rect
-          className="topology-edge-contact-route-cover"
-          x={-CONTACT_HALF_LENGTH}
-          y={-3}
-          width={CONTACT_HALF_LENGTH * 2}
-          height={6}
-          fill="var(--color-surface)"
-        />
-      </g>
       <g
         className="topology-edge-contact"
         data-state={contactStates[status]}
@@ -229,7 +205,8 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
           diagnostic?.code,
           canOpenIncident,
         )}
-        transform={`translate(${contactX} ${contactY})`}
+        data-offset={contactOffset}
+        transform={`translate(${geometry.contactX} ${geometry.contactY})`}
         style={{ opacity: props.style?.opacity }}
       >
         <title>

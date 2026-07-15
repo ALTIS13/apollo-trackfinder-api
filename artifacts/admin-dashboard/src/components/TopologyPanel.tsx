@@ -47,9 +47,14 @@ const statusOrder: HealthStatus[] = [
   "unknown",
 ];
 
-export function getSharedSourceGradients(
+export interface SharedSourceRoute {
+  statuses: HealthStatus[];
+  renderTrunk: boolean;
+}
+
+export function getSharedSourceRoutes(
   edges: ServiceEdge[],
-): Map<string, HealthStatus[]> {
+): Map<string, SharedSourceRoute> {
   const edgesBySource = new Map<string, ServiceEdge[]>();
   edges.forEach((edge) => {
     const sourceEdges = edgesBySource.get(edge.source) ?? [];
@@ -57,16 +62,49 @@ export function getSharedSourceGradients(
     edgesBySource.set(edge.source, sourceEdges);
   });
 
-  const gradients = new Map<string, HealthStatus[]>();
+  const routes = new Map<string, SharedSourceRoute>();
   edgesBySource.forEach((sourceEdges) => {
+    if (sourceEdges.length < 2) return;
     const statuses = statusOrder.filter((status) =>
       sourceEdges.some((edge) => edge.status === status),
     );
-    if (statuses.length < 2) return;
-    const gradientOwner = sourceEdges.at(-1);
-    if (gradientOwner !== undefined) gradients.set(gradientOwner.id, statuses);
+    sourceEdges.forEach((edge, index) => {
+      routes.set(edge.id, {
+        statuses,
+        renderTrunk: index === sourceEdges.length - 1,
+      });
+    });
   });
-  return gradients;
+  return routes;
+}
+
+function getTerminalStatuses(edges: ServiceEdge[]) {
+  const byService = new Map<
+    string,
+    { source: Set<HealthStatus>; target: Set<HealthStatus> }
+  >();
+  const getEntry = (serviceId: string) => {
+    const existing = byService.get(serviceId);
+    if (existing !== undefined) return existing;
+    const entry = { source: new Set<HealthStatus>(), target: new Set<HealthStatus>() };
+    byService.set(serviceId, entry);
+    return entry;
+  };
+
+  edges.forEach((edge) => {
+    getEntry(edge.source).source.add(edge.status);
+    getEntry(edge.target).target.add(edge.status);
+  });
+
+  return new Map(
+    Array.from(byService, ([serviceId, statuses]) => [
+      serviceId,
+      {
+        sourceStatuses: statusOrder.filter((status) => statuses.source.has(status)),
+        targetStatuses: statusOrder.filter((status) => statuses.target.has(status)),
+      },
+    ]),
+  );
 }
 
 export function formatTrafficLabel(requestsPerMinute: number): string {
@@ -170,8 +208,12 @@ function TopologyCanvas({
     () => new Map(snapshot.incidents.map((incident) => [incident.id, incident])),
     [snapshot.incidents],
   );
-  const sharedSourceGradients = useMemo(
-    () => getSharedSourceGradients(snapshot.edges),
+  const sharedSourceRoutes = useMemo(
+    () => getSharedSourceRoutes(snapshot.edges),
+    [snapshot.edges],
+  );
+  const terminalStatuses = useMemo(
+    () => getTerminalStatuses(snapshot.edges),
     [snapshot.edges],
   );
   const nodes = useMemo<ServiceFlowNode[]>(() => {
@@ -199,6 +241,10 @@ function TopologyCanvas({
         data: {
           module,
           motionEnabled,
+          sourceStatuses:
+            terminalStatuses.get(module.id)?.sourceStatuses ?? [module.status],
+          targetStatuses:
+            terminalStatuses.get(module.id)?.targetStatuses ?? [module.status],
         },
       };
     });
@@ -208,6 +254,7 @@ function TopologyCanvas({
     motionEnabled,
     selectedServiceId,
     snapshot.modules,
+    terminalStatuses,
   ]);
   const edges = useMemo<TopologyFlowEdge[]>(
     () =>
@@ -258,7 +305,8 @@ function TopologyCanvas({
                     message: linkedIncident.diagnostic.message,
                   },
             actionable: canOpenIncident,
-            sharedStatuses: sharedSourceGradients.get(edge.id),
+            sharedStatuses: sharedSourceRoutes.get(edge.id)?.statuses,
+            renderSharedTrunk: sharedSourceRoutes.get(edge.id)?.renderTrunk,
             motionEnabled:
               edge.requestsPerMinute > 0 &&
               motionEnabled &&
@@ -281,7 +329,7 @@ function TopologyCanvas({
       motionEnabled,
       onOpenIncident,
       selectedServiceId,
-      sharedSourceGradients,
+      sharedSourceRoutes,
       snapshot.edges,
     ],
   );

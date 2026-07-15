@@ -21,6 +21,7 @@ interface RenderEdgeOptions {
   };
   style?: CSSProperties;
   sharedStatuses?: HealthStatus[];
+  renderSharedTrunk?: boolean;
 }
 
 function renderEdge({
@@ -32,6 +33,7 @@ function renderEdge({
   diagnostic,
   style,
   sharedStatuses,
+  renderSharedTrunk,
 }: RenderEdgeOptions = {}) {
   return render(
     <svg>
@@ -54,6 +56,7 @@ function renderEdge({
           actionable: diagnostic !== undefined,
           diagnostic,
           sharedStatuses,
+          renderSharedTrunk,
         }}
         label="240/мин"
         style={style}
@@ -63,15 +66,40 @@ function renderEdge({
 }
 
 describe("FlowingEdge", () => {
-  it("merges caller style into the warning path", () => {
+  it("merges caller style into the warning conductor", () => {
     const { container } = renderEdge({
       status: "warning",
       style: { opacity: 0.28 },
     });
-    const path = container.querySelector(".react-flow__edge-path");
+    const path = container.querySelector(".topology-edge-conductor");
 
     expect(path).toHaveStyle({ opacity: "0.28" });
-    expect(path).toHaveStyle({ strokeDasharray: "8 6" });
+    expect(path?.getAttribute("style")).not.toContain("stroke-dasharray");
+  });
+
+  it.each([
+    ["healthy", "#22c55e", 0],
+    ["warning", "#f59e0b", 3],
+    ["degraded", "#ef4444", 7],
+  ] as const)("renders %s as an opaque conductor", (status, color, offset) => {
+    const { container } = renderEdge({ status });
+    const segments = container.querySelectorAll(".topology-edge-conductor");
+
+    expect(segments).toHaveLength(2);
+    segments.forEach((segment) => {
+      expect(segment).toHaveStyle({ stroke: color, strokeWidth: "6" });
+      expect(segment.getAttribute("style")).not.toContain("stroke-dasharray");
+    });
+    container.querySelectorAll(".topology-edge-contact-rail").forEach((rail) =>
+      expect(rail).toHaveStyle({ fill: color }),
+    );
+    expect(
+      container.querySelector(".topology-edge-contact-route-cover"),
+    ).not.toBeInTheDocument();
+    expect(container.querySelector(".topology-edge-contact")).toHaveAttribute(
+      "data-offset",
+      String(offset),
+    );
   });
 
   it.each([
@@ -82,7 +110,7 @@ describe("FlowingEdge", () => {
   ] as const)("renders %s as a %s two-part contact", (status, state) => {
     const { container, getByText } = renderEdge({ status });
     const contact = container.querySelector(".topology-edge-contact");
-    const path = container.querySelector(".react-flow__edge-path");
+    const paths = container.querySelectorAll(".topology-edge-conductor");
 
     expect(contact).toHaveAttribute("data-state", state);
     expect(container.querySelectorAll(".topology-edge-plug-half")).toHaveLength(2);
@@ -95,75 +123,90 @@ describe("FlowingEdge", () => {
     expect(
       container.querySelector(".topology-edge-contact-male"),
     ).toHaveAttribute("data-contact-kind", "male");
-    const routeCover = container.querySelector(".topology-edge-contact-route-cover");
-    expect(routeCover).toHaveAttribute("x", "-16");
-    expect(routeCover).toHaveAttribute("width", "32");
     expect(container.querySelector(".topology-edge-contact-female .topology-edge-contact-rail"))
       .toHaveAttribute("d", expect.stringContaining("M -16 -2.25"));
     expect(container.querySelector(".topology-edge-contact-male .topology-edge-contact-rail"))
       .toHaveAttribute("d", expect.stringContaining("M 16 -2.25"));
-    expect(path?.getAttribute("style")).not.toContain("mask");
-    expect(path?.getAttribute("d")).toMatch(/L120 0$/);
+    expect(paths).toHaveLength(2);
+    expect(paths[1]).toHaveAttribute("d", "M 108 0 H 120");
     expect(getByText("240/мин")).toBeInTheDocument();
   });
 
-  it("renders a healthy contact as one solid interlocked coupling", () => {
-    const { container } = renderEdge({ status: "healthy" });
+  it("renders every contact state as a solid interlocked coupling", () => {
+    const { container } = renderEdge({ status: "degraded" });
     const rails = container.querySelectorAll(".topology-edge-contact-rail");
 
     expect(rails).toHaveLength(2);
     rails.forEach((rail) => {
-      expect(rail).toHaveStyle({ fill: "#22c55e" });
+      expect(rail).toHaveStyle({ fill: "#ef4444" });
     });
   });
 
-  it.each(["warning", "degraded", "unknown"] as const)(
-    "keeps the intentional gap visible for a %s contact",
-    (status) => {
+  it.each([
+    [3, "warning"],
+    [7, "degraded"],
+  ] as const)(
+    "keeps the intentional %s-unit gap visible for a %s contact",
+    (offset, status) => {
       const { container } = renderEdge({ status });
 
-      container.querySelectorAll(".topology-edge-contact-rail").forEach((rail) => {
-        expect(rail).not.toHaveAttribute("style", expect.stringContaining("fill"));
-      });
+      expect(container.querySelector(".topology-edge-contact")).toHaveAttribute(
+        "data-offset",
+        String(offset),
+      );
     },
   );
 
   it("keeps both outer contact ends on the final horizontal segment of a bent edge", () => {
     const { container } = renderEdge({ sourceY: 0, targetY: 80 });
     const contact = container.querySelector(".topology-edge-contact");
-    const path = container.querySelector(".react-flow__edge-path");
-    const routeCover = container.querySelector(".topology-edge-contact-route-cover");
+    const sourcePath = container.querySelector(".topology-edge-conductor");
+    const targetStub = container.querySelectorAll(".topology-edge-conductor")[1];
 
     expect(contact).toHaveAttribute("transform", "translate(92 80)");
-    expect(path).toHaveAttribute(
-      "d",
-      expect.stringContaining("Q 68.5,80 76,80"),
-    );
-    expect(routeCover).toHaveAttribute("x", "-16");
-    expect(routeCover).toHaveAttribute("width", "32");
+    expect(sourcePath?.getAttribute("d")).toMatch(/L76 80$/);
+    expect(targetStub).toHaveAttribute("d", "M 108 80 H 120");
   });
 
-  it("covers coincident source routes with one continuous status gradient", () => {
+  it("renders an opaque shared source trunk once with fixed status lanes", () => {
+    const { container } = renderEdge({
+      sourceY: 0,
+      targetY: 80,
+      sharedStatuses: ["healthy", "warning", "degraded"],
+      renderSharedTrunk: true,
+    });
+    const trunk = container.querySelectorAll(".topology-edge-shared-trunk");
+
+    expect(container.querySelector("linearGradient")).not.toBeInTheDocument();
+    expect(trunk).toHaveLength(3);
+    trunk.forEach((lane) => {
+      expect(lane).toHaveAttribute("d", "M 0 0 H 24");
+      expect(lane).not.toHaveAttribute("stroke-dasharray");
+    });
+    expect(trunk[0]).toHaveAttribute("stroke", "#22c55e");
+    expect(trunk[0]).toHaveAttribute("stroke-width", "6");
+    expect(trunk[1]).toHaveAttribute("stroke", "#f59e0b");
+    expect(trunk[1]).toHaveAttribute("stroke-width", "1.5");
+    expect(trunk[1]).toHaveAttribute("transform", "translate(0 -1.5)");
+    expect(trunk[2]).toHaveAttribute("stroke", "#ef4444");
+    expect(trunk[2]).toHaveAttribute("stroke-width", "1.5");
+    expect(trunk[2]).toHaveAttribute("transform", "translate(0 1.5)");
+  });
+
+  it("starts every grouped branch after its shared source trunk", () => {
     const { container } = renderEdge({
       sourceY: 0,
       targetY: 80,
       sharedStatuses: ["healthy", "warning", "degraded"],
     });
-    const gradient = container.querySelector(
-      "linearGradient.topology-edge-shared-gradient",
-    );
-    const trunk = container.querySelector(".topology-edge-shared-trunk");
 
-    expect(gradient).toBeInTheDocument();
-    expect(gradient?.querySelectorAll("stop")).toHaveLength(3);
+    expect(container.querySelector(".topology-edge-conductor")).toHaveAttribute(
+      "d",
+      expect.stringMatching(/^M24 0/),
+    );
     expect(
-      Array.from(gradient?.querySelectorAll("stop") ?? []).map((stop) =>
-        stop.getAttribute("stop-color"),
-      ),
-    ).toEqual(["#22c55e", "#f59e0b", "#ef4444"]);
-    expect(trunk).toHaveAttribute("d", "M 0 0 H 61");
-    expect(trunk).toHaveStyle({ strokeWidth: "4.5" });
-    expect(trunk?.getAttribute("style")).not.toContain("stroke-dasharray");
+      container.querySelector(".topology-edge-shared-trunk"),
+    ).not.toBeInTheDocument();
   });
 
   it.each([
@@ -185,48 +228,40 @@ describe("FlowingEdge", () => {
     },
   );
 
-  it("keeps the route visible while the contact body occludes its center span", () => {
+  it("splits the route around the contact body without an occlusion cover", () => {
     const { container } = renderEdge();
-    const path = container.querySelector(".react-flow__edge-path");
-    const routeCover = container.querySelector(".topology-edge-contact-route-cover");
+    const paths = container.querySelectorAll(".topology-edge-conductor");
 
     expect(container.querySelector("mask")).not.toBeInTheDocument();
-    expect(path?.getAttribute("style")).not.toContain("mask");
-    expect(routeCover).toHaveAttribute("x", "-16");
-    expect(routeCover).toHaveAttribute("y", "-3");
-    expect(routeCover).toHaveAttribute("width", "32");
-    expect(routeCover).toHaveAttribute("height", "6");
+    expect(paths).toHaveLength(2);
+    expect(paths[0].getAttribute("d")).toMatch(/L76 0$/);
+    expect(paths[1]).toHaveAttribute("d", "M 108 0 H 120");
   });
 
-  it("matches the cable stroke to the straight contact body height", () => {
+  it("matches conductor stroke to the straight contact body height", () => {
     const { container } = renderEdge();
-    const path = container.querySelector(".react-flow__edge-path");
+    const paths = container.querySelectorAll(".topology-edge-conductor");
     const rails = container.querySelectorAll(".topology-edge-contact-rail");
 
-    expect(path).toHaveStyle({ strokeWidth: "4.5" });
+    paths.forEach((path) => expect(path).toHaveStyle({ strokeWidth: "6" }));
     rails.forEach((rail) => {
       expect(rail).toHaveAttribute("d", expect.stringContaining("-2.25"));
       expect(rail).toHaveAttribute("d", expect.stringContaining("2.25"));
     });
   });
 
-  it("keeps the route cover opaque while dimming the edge visuals", () => {
+  it("dims the split conductors and contact together", () => {
     const { container } = renderEdge({
       status: "degraded",
       style: { opacity: 0.28 },
     });
     const contact = container.querySelector<SVGElement>(".topology-edge-contact");
-    const routeCover = container.querySelector<SVGElement>(
-      ".topology-edge-contact-route-cover",
-    );
-    const routeOcclusion = container.querySelector<SVGElement>(
-      ".topology-edge-contact-route-occlusion",
+    const paths = container.querySelectorAll<SVGElement>(
+      ".topology-edge-conductor",
     );
 
     expect(contact).toHaveStyle({ opacity: "0.28" });
-    expect(contact).not.toContainElement(routeCover);
-    expect(routeOcclusion).toContainElement(routeCover);
-    expect(routeOcclusion).not.toHaveAttribute("style");
+    paths.forEach((path) => expect(path).toHaveStyle({ opacity: "0.28" }));
   });
 
   it("shows warning evidence and flicker only while motion is enabled", () => {
