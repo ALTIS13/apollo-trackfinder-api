@@ -147,12 +147,23 @@ function buildRoundedPath(points: RoutePoint[]): string {
   return `${path} L${last.x} ${last.y}`;
 }
 
-function buildNormalRoute(source: RoutePoint, target: RoutePoint): RoutePoint[] {
+function buildNormalRoute(
+  source: RoutePoint,
+  target: RoutePoint,
+  divergeAtSource: boolean,
+): RoutePoint[] {
   if (source.y === target.y) return [source, target];
   if (source.x <= target.x) {
+    if (divergeAtSource) {
+      return [source, { x: source.x, y: target.y }, target];
+    }
+    const minimumTargetApproach =
+      CONTACT_BEND_CLEARANCE +
+      CONTACT_HALF_LENGTH * 2 +
+      CONTACT_TERMINAL_CLEARANCE;
     const bendX = Math.min(
       source.x + CONTACT_TERMINAL_CLEARANCE,
-      target.x - CONTACT_TERMINAL_CLEARANCE,
+      Math.max(source.x, target.x - minimumTargetApproach),
     );
     return [source, { x: bendX, y: source.y }, { x: bendX, y: target.y }, target];
   }
@@ -180,7 +191,9 @@ export function buildConnectorGeometry(input: ConnectorGeometryInput): Connector
   const branchSourceX = input.sourceX + sharedBranchLength;
   const source = { x: branchSourceX, y: input.sourceY };
   const target = { x: input.targetX, y: input.targetY };
-  let routePoints = collapseRoutePoints(buildNormalRoute(source, target));
+  let routePoints = collapseRoutePoints(
+    buildNormalRoute(source, target, input.sharedBranchLength !== undefined),
+  );
   let contactSegment = findContactSegment(routePoints);
   const usedDetour = contactSegment === undefined;
 

@@ -4,8 +4,8 @@ import {
   type EdgeProps,
 } from "@xyflow/react";
 import { motion } from "framer-motion";
-import { useId } from "react";
 import { buildConnectorGeometry } from "../lib/topology-connector-geometry";
+import { CONNECTOR_VISUAL_METRICS } from "../lib/topology-evidence-layout";
 import { buildStatusGradientStops } from "../lib/topology-status-gradient";
 import type { SharedStatusBand } from "../lib/topology-shared-routes";
 import type { HealthStatus } from "../types/dashboard";
@@ -18,7 +18,7 @@ const edgeColors: Record<HealthStatus, string> = {
 };
 
 const ROUTE_COLOR = "#596273";
-const ROUTE_WIDTH = 1.75;
+const ROUTE_WIDTH = CONNECTOR_VISUAL_METRICS.routeWidth;
 const STATUS_LANE_WIDTH = 1;
 
 const contactStates = {
@@ -64,6 +64,13 @@ function getLabelText(label: EdgeProps<TopologyFlowEdge>["label"]) {
   return typeof label === "string" || typeof label === "number"
     ? String(label)
     : undefined;
+}
+
+function getGradientId(edgeId: string): string {
+  const encodedId = edgeId.replace(/[^a-zA-Z0-9_-]/g, (character) =>
+    `_${character.codePointAt(0)!.toString(16)}_`,
+  );
+  return `topology-gradient-${encodedId}`;
 }
 
 export function getEvidenceLabelText(status: HealthStatus, code?: string) {
@@ -116,7 +123,7 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
   const status = data?.status ?? "unknown";
   const sharedStatusBands = data?.sharedStatusBands ?? [];
   const gradientStops = buildStatusGradientStops(sharedStatusBands);
-  const gradientId = `${useId()}-${props.id}`.replace(/[^a-zA-Z0-9_-]/g, "-");
+  const gradientId = getGradientId(props.id);
   const geometry = buildConnectorGeometry({
     sourceX,
     sourceY,
@@ -265,10 +272,13 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
         </title>
         <rect
           className="topology-edge-contact-hitbox"
-          x={-34}
-          y={-30}
-          width={68}
-          height={54}
+          x={-CONNECTOR_VISUAL_METRICS.contactHitHalfWidth}
+          y={-CONNECTOR_VISUAL_METRICS.contactHitTop}
+          width={CONNECTOR_VISUAL_METRICS.contactHitHalfWidth * 2}
+          height={
+            CONNECTOR_VISUAL_METRICS.contactHitTop +
+            CONNECTOR_VISUAL_METRICS.contactHitBottom
+          }
           rx={6}
         />
 
@@ -353,7 +363,11 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
         )}
 
         {labelText === undefined ? null : (
-          <text className="topology-edge-traffic" x={0} y={19}>
+          <text
+            className="topology-edge-traffic"
+            x={0}
+            y={CONNECTOR_VISUAL_METRICS.trafficLabelCenterY}
+          >
             {labelText}
           </text>
         )}

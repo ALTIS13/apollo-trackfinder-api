@@ -26,6 +26,7 @@ import { buildConnectorGeometry } from "../lib/topology-connector-geometry";
 import { getSharedSourceRoutes } from "../lib/topology-shared-routes";
 import {
   assignEvidenceLabelLanes,
+  getConnectorVisualRects,
   getEvidenceLabelRect,
   getTopologyVisualBounds,
   type EvidenceAnchor,
@@ -212,6 +213,7 @@ function TopologyCanvas({
   const documentVisible = useDocumentVisible();
   const { fitBounds, getNode, getZoom, setCenter } = useReactFlow();
   const didInitialFit = useRef(false);
+  const freelyMovedNodeIds = useRef(new Set<string>());
   const motionEnabled = isDashboardMotionEnabled(
     documentVisible,
     reducedMotion,
@@ -268,6 +270,31 @@ function TopologyCanvas({
     () => getTerminalStatuses(snapshot.edges),
     [snapshot.edges],
   );
+  const connectorGeometries = useMemo(() => {
+    const geometries = new Map<
+      string,
+      ReturnType<typeof buildConnectorGeometry>
+    >();
+    snapshot.edges.forEach((edge) => {
+      const source = currentNodePositions.get(edge.source);
+      const target = currentNodePositions.get(edge.target);
+      if (source === undefined || target === undefined) return;
+      geometries.set(
+        edge.id,
+        buildConnectorGeometry({
+          sourceX: source.x + source.width,
+          sourceY: source.y + source.height / 2,
+          sourcePosition: Position.Right,
+          targetX: target.x,
+          targetY: target.y + target.height / 2,
+          targetPosition: Position.Left,
+          sharedBranchLength:
+            sharedSourceRoutes.get(edge.id)?.sharedBranchLength,
+        }),
+      );
+    });
+    return geometries;
+  }, [currentNodePositions, sharedSourceRoutes, snapshot.edges]);
   const evidenceLayout = useMemo(() => {
     const moduleRects = Array.from(currentNodePositions.values(), (node) => ({
       x: node.x,
@@ -279,9 +306,8 @@ function TopologyCanvas({
 
     snapshot.edges.forEach((edge) => {
       if (edge.status === "healthy") return;
-      const source = currentNodePositions.get(edge.source);
-      const target = currentNodePositions.get(edge.target);
-      if (source === undefined || target === undefined) return;
+      const geometry = connectorGeometries.get(edge.id);
+      if (geometry === undefined) return;
       const incident =
         edge.incidentId === undefined ? undefined : incidentsById.get(edge.incidentId);
       const diagnosticCode =
@@ -292,15 +318,6 @@ function TopologyCanvas({
           : undefined;
       const statusText = getEvidenceLabelText(edge.status, diagnosticCode);
       if (statusText === undefined) return;
-      const geometry = buildConnectorGeometry({
-        sourceX: source.x + source.width,
-        sourceY: source.y + source.height / 2,
-        sourcePosition: Position.Right,
-        targetX: target.x,
-        targetY: target.y + target.height / 2,
-        targetPosition: Position.Left,
-        sharedBranchLength: sharedSourceRoutes.get(edge.id)?.sharedBranchLength,
-      });
       anchors.push({
         id: edge.id,
         x: geometry.contactX,
@@ -323,11 +340,24 @@ function TopologyCanvas({
         laneGap: EVIDENCE_LABEL_LANE_GAP,
       }),
     );
+    const connectorRects = snapshot.edges.flatMap((edge) => {
+      const geometry = connectorGeometries.get(edge.id);
+      return geometry === undefined
+        ? []
+        : getConnectorVisualRects(
+            geometry,
+            formatTrafficLabel(edge.requestsPerMinute),
+          );
+    });
     return {
       lanes,
-      topologyVisualBounds: getTopologyVisualBounds(moduleRects, labelRects),
+      topologyVisualBounds: getTopologyVisualBounds(
+        moduleRects,
+        connectorRects,
+        labelRects,
+      ),
     };
-  }, [currentNodePositions, incidentsById, sharedSourceRoutes, snapshot.edges]);
+  }, [connectorGeometries, currentNodePositions, incidentsById, snapshot.edges]);
 
   useEffect(() => {
     setPositionOverrides((overrides) =>
@@ -515,6 +545,11 @@ function TopologyCanvas({
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<ServiceFlowNode>[]) => {
+      changes.forEach((change) => {
+        if (change.type !== "position" || change.position === undefined) return;
+        if (alignmentMode === "free") freelyMovedNodeIds.current.add(change.id);
+        else freelyMovedNodeIds.current.delete(change.id);
+      });
       const normalizedChanges = changes.map((change) => {
         if (change.type !== "position" || change.position === undefined)
           return change;
@@ -588,10 +623,13 @@ function TopologyCanvas({
         zoom: getZoom(),
         precision,
       });
-      const gridPhase = {
-        x: moving.x % TOPOLOGY_GRID_SIZE,
-        y: moving.y % TOPOLOGY_GRID_SIZE,
-      };
+      const preserveGeneratedPhase = !freelyMovedNodeIds.current.has(nodeId);
+      const gridPhase = preserveGeneratedPhase
+        ? {
+            x: moving.x % TOPOLOGY_GRID_SIZE,
+            y: moving.y % TOPOLOGY_GRID_SIZE,
+          }
+        : { x: 0, y: 0 };
       const aligned = alignTopologyPosition({
         nodeId,
         position: {
@@ -619,6 +657,7 @@ function TopologyCanvas({
             x: aligned.position.x + gridPhase.x,
             y: aligned.position.y + gridPhase.y,
           };
+      if (!precision) freelyMovedNodeIds.current.delete(nodeId);
       setAlignmentGuides([]);
       setPositionOverrides((overrides) =>
         applyPositionChanges(overrides, [
@@ -675,6 +714,7 @@ function TopologyCanvas({
           onResetLayout={() => {
             setPositionOverrides(new Map());
             setAlignmentGuides([]);
+            freelyMovedNodeIds.current.clear();
           }}
         />
       </ReactFlow>

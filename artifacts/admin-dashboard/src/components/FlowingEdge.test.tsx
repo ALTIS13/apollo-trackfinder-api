@@ -458,6 +458,128 @@ describe("FlowingEdge", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("gives default grouped branches distinct solid lanes after the shared gradient", () => {
+    const sharedData = {
+      motionEnabled: false,
+      sharedStatusBands: [
+        { status: "healthy" as const, count: 1 },
+        { status: "degraded" as const, count: 1 },
+        { status: "warning" as const, count: 1 },
+      ],
+      sharedBranchLength: 24,
+    };
+    const targets = [
+      { id: "account", y: 62, status: "healthy" as const },
+      { id: "download", y: 194, status: "degraded" as const },
+      { id: "search", y: 326, status: "warning" as const },
+    ];
+    const { container } = render(
+      <svg>
+        {targets.map((target) => (
+          <FlowingEdge
+            key={target.id}
+            id={`core-${target.id}`}
+            source="core"
+            target={target.id}
+            sourceX={538.5}
+            sourceY={194}
+            targetX={665.5}
+            targetY={target.y}
+            sourcePosition={Position.Right}
+            targetPosition={Position.Left}
+            selected={false}
+            selectable={false}
+            deletable={false}
+            data={{
+              ...sharedData,
+              status: target.status,
+              renderSharedTrunk: target.id === "search",
+            }}
+            label="240/мин"
+          />
+        ))}
+      </svg>,
+    );
+    const sourceLanes = Array.from(
+      container.querySelectorAll(
+        '.topology-edge-status-lane:not(.topology-edge-shared-trunk)',
+      ),
+    ).filter((lane) => lane.getAttribute("d")?.startsWith("M562.5 194"));
+
+    expect(sourceLanes).toHaveLength(3);
+    expect(sourceLanes.map((lane) => lane.getAttribute("d"))).toEqual([
+      expect.stringMatching(/^M562\.5 194 L562\.5 /),
+      expect.stringMatching(/^M562\.5 194 L/),
+      expect.stringMatching(/^M562\.5 194 L562\.5 /),
+    ]);
+    expect(
+      sourceLanes.filter((lane) => lane.getAttribute("d")?.includes("590.5 194")),
+    ).toHaveLength(0);
+    expect(
+      container.querySelectorAll(
+        ".topology-edge-shared-trunk.topology-edge-status-lane",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("keeps gradient identity and semantic stops stable across reordered rerenders", () => {
+    const bands = [
+      { status: "healthy" as const, count: 1 },
+      { status: "warning" as const, count: 1 },
+    ];
+    const edge = (id: string, y: number) => (
+      <FlowingEdge
+        key={id}
+        id={id}
+        source="source"
+        target="target"
+        sourceX={0}
+        sourceY={y}
+        targetX={120}
+        targetY={y}
+        sourcePosition={Position.Right}
+        targetPosition={Position.Left}
+        selected={false}
+        selectable={false}
+        deletable={false}
+        data={{
+          status: "healthy",
+          motionEnabled: false,
+          sharedStatusBands: bands,
+          sharedBranchLength: 24,
+          renderSharedTrunk: true,
+        }}
+        label="1/мин"
+      />
+    );
+    const view = render(<svg>{[edge("stable-owner", 0), edge("unrelated", 80)]}</svg>);
+    const readGradient = () => {
+      const gradient = view.container.querySelector(
+        'linearGradient[id$="stable-owner"]',
+      );
+      return {
+        id: gradient?.id,
+        stops: Array.from(gradient?.querySelectorAll("stop") ?? [], (stop) => [
+          stop.getAttribute("offset"),
+          stop.getAttribute("stop-color"),
+          stop.getAttribute("stop-opacity"),
+        ]),
+      };
+    };
+    const initial = readGradient();
+
+    view.rerender(<svg>{[edge("unrelated", 80), edge("stable-owner", 0)]}</svg>);
+
+    expect(initial.id).toBe("topology-gradient-stable-owner");
+    expect(readGradient()).toEqual(initial);
+    expect(initial.stops.map((stop) => stop[1])).toEqual([
+      "#22c55e",
+      "#22c55e",
+      "#f59e0b",
+      "#f59e0b",
+    ]);
+  });
+
   it.each([
     { sourceY: 0, targetY: 80, evidenceLane: 0, badgeY: "-36", textY: "-29" },
     { sourceY: 0, targetY: 0, evidenceLane: 1, badgeY: "-54", textY: "-47" },

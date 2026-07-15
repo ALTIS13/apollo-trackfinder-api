@@ -241,6 +241,64 @@ describe("TopologyPanel", () => {
     expect(manualBounds.x + manualBounds.width).toBe(1590);
     expect(flowApi.fitView).not.toHaveBeenCalled();
   });
+
+  it("fits an updated reverse route and its below-plug traffic label", async () => {
+    const snapshot = {
+      ...demoSnapshot,
+      modules: demoSnapshot.modules.filter((module) =>
+        ["public-web", "core-api"].includes(module.id),
+      ),
+      edges: demoSnapshot.edges.filter(
+        (edge) => edge.id === "public-web-core-api",
+      ),
+      incidents: [],
+    };
+    render(<TopologyPanel snapshot={snapshot} onSelectService={vi.fn()} />);
+
+    await waitFor(() => expect(flowApi.fitBounds).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        {
+          type: "position",
+          id: "core-api",
+          position: { x: -300, y: 200 },
+        },
+      ]);
+    });
+    await waitFor(() =>
+      expect(
+        getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position,
+      ).toEqual({ x: -300, y: 200 }),
+    );
+    const source = getReactFlowProps().nodes.find(
+      (node) => node.id === "public-web",
+    )!;
+    const target = getReactFlowProps().nodes.find(
+      (node) => node.id === "core-api",
+    )!;
+    const geometry = buildConnectorGeometry({
+      sourceX: source.position.x + (source.width ?? 190),
+      sourceY: source.position.y + (source.height ?? 76) / 2,
+      sourcePosition: Position.Right,
+      targetX: target.position.x,
+      targetY: target.position.y + (target.height ?? 76) / 2,
+      targetPosition: Position.Left,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Вписать топологию" }));
+
+    const bounds = flowApi.fitBounds.mock.calls[1]?.[0] as {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    };
+    expect(bounds.x + bounds.width).toBeGreaterThanOrEqual(
+      Math.max(...geometry.routePoints.map((point) => point.x)),
+    );
+    expect(bounds.y + bounds.height).toBeGreaterThan(geometry.contactY + 24);
+  });
   it("assigns ordered status bands to every shared source edge and a deterministic trunk owner", () => {
     expect(
       Array.from(
@@ -584,6 +642,40 @@ describe("TopologyPanel", () => {
       )!.position;
       expect(nextPosition.x - updatedPosition.x).toBeCloseTo(1 / 0.8, 6);
     });
+  });
+
+  it("snaps the first aligned arrow move after a free off-grid move", async () => {
+    render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
+
+    const node = await screen.findByTestId("rf__node-core-api");
+    const initialY = getReactFlowProps().nodes.find(
+      (item) => item.id === "core-api",
+    )!.position.y;
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        { type: "position", id: "core-api", position: { x: 238, y: initialY } },
+      ]);
+    });
+    await waitFor(() =>
+      expect(
+        getReactFlowProps().nodes.find((item) => item.id === "core-api")!.position.x,
+      ).toBe(238),
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "Выровнять" }));
+    expect(
+      getReactFlowProps().nodes.find((item) => item.id === "core-api")!.position.x,
+    ).toBe(238);
+
+    node.focus();
+    fireEvent.keyDown(node, { key: "ArrowRight" });
+
+    await waitFor(() =>
+      expect(
+        getReactFlowProps().nodes.find((item) => item.id === "core-api")!.position.x,
+      ).toBe(264),
+    );
+    expect(264 % 24).toBe(0);
   });
 
   it("clears alignment guides when changing mode or resetting layout", async () => {

@@ -327,6 +327,49 @@ describe("buildConnectorGeometry", () => {
     expect(geometry.routePoints).toContainEqual({ x: 171, y: 64 });
   });
 
+  it("keeps the default grouped Core to Search route inside its endpoint corridor", () => {
+    const geometry = buildConnectorGeometry(
+      connectorInput({
+        sourceX: 538.5,
+        sourceY: 194,
+        targetX: 665.5,
+        targetY: 326,
+        sharedBranchLength: 24,
+      }),
+    );
+
+    expectCanonicalContact(geometry);
+    expect(geometry.usedDetour).toBe(false);
+    expect(geometry.routePoints).toEqual([
+      { x: 562.5, y: 194 },
+      { x: 562.5, y: 326 },
+      { x: 665.5, y: 326 },
+    ]);
+    geometry.routePoints.forEach((point) => {
+      expect(point.x).toBeGreaterThanOrEqual(538.5);
+      expect(point.x).toBeLessThanOrEqual(665.5);
+    });
+  });
+
+  it("diverges grouped off-row branches at a zero-clearance branch point", () => {
+    const upward = buildConnectorGeometry(
+      connectorInput({ targetY: -80, sharedBranchLength: 0 }),
+    );
+    const downward = buildConnectorGeometry(
+      connectorInput({ targetY: 80, sharedBranchLength: 0 }),
+    );
+
+    [upward, downward].forEach(expectCanonicalContact);
+    expect(upward.routePoints.slice(0, 2)).toEqual([
+      { x: 0, y: 0 },
+      { x: 0, y: -80 },
+    ]);
+    expect(downward.routePoints.slice(0, 2)).toEqual([
+      { x: 0, y: 0 },
+      { x: 0, y: 80 },
+    ]);
+  });
+
   it("preserves the shared trunk while branching from its shortened endpoint", () => {
     const geometry = buildConnectorGeometry(
       connectorInput({ sharedBranchLength: 24 }),

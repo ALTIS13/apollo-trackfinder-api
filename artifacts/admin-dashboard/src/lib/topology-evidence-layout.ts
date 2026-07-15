@@ -1,3 +1,5 @@
+import type { ConnectorGeometry } from "./topology-connector-geometry";
+
 export interface EvidenceAnchor {
   id: string;
   x: number;
@@ -16,6 +18,57 @@ export interface EvidenceLabelMetrics {
   labelHeight: number;
   baseOffset: number;
   laneGap: number;
+}
+
+export const CONNECTOR_VISUAL_METRICS = {
+  routeWidth: 1.75,
+  contactHitHalfWidth: 34,
+  contactHitTop: 30,
+  contactHitBottom: 24,
+  trafficLabelCenterY: 19,
+  trafficLabelFontSize: 9,
+  trafficLabelHeight: 11,
+} as const;
+
+export function getConnectorVisualRects(
+  geometry: ConnectorGeometry,
+  trafficLabel: string,
+): EvidenceObstacle[] {
+  const routeHalfWidth = CONNECTOR_VISUAL_METRICS.routeWidth / 2;
+  const minRouteX = Math.min(...geometry.routePoints.map((point) => point.x));
+  const minRouteY = Math.min(...geometry.routePoints.map((point) => point.y));
+  const maxRouteX = Math.max(...geometry.routePoints.map((point) => point.x));
+  const maxRouteY = Math.max(...geometry.routePoints.map((point) => point.y));
+  const trafficWidth = Math.max(
+    1,
+    trafficLabel.length * CONNECTOR_VISUAL_METRICS.trafficLabelFontSize,
+  );
+
+  return [
+    {
+      x: minRouteX - routeHalfWidth,
+      y: minRouteY - routeHalfWidth,
+      width: maxRouteX - minRouteX + routeHalfWidth * 2,
+      height: maxRouteY - minRouteY + routeHalfWidth * 2,
+    },
+    {
+      x: geometry.contactX - CONNECTOR_VISUAL_METRICS.contactHitHalfWidth,
+      y: geometry.contactY - CONNECTOR_VISUAL_METRICS.contactHitTop,
+      width: CONNECTOR_VISUAL_METRICS.contactHitHalfWidth * 2,
+      height:
+        CONNECTOR_VISUAL_METRICS.contactHitTop +
+        CONNECTOR_VISUAL_METRICS.contactHitBottom,
+    },
+    {
+      x: geometry.contactX - trafficWidth / 2,
+      y:
+        geometry.contactY +
+        CONNECTOR_VISUAL_METRICS.trafficLabelCenterY -
+        CONNECTOR_VISUAL_METRICS.trafficLabelHeight / 2,
+      width: trafficWidth,
+      height: CONNECTOR_VISUAL_METRICS.trafficLabelHeight,
+    },
+  ];
 }
 
 function intersects(a: EvidenceObstacle, b: EvidenceObstacle): boolean {
@@ -79,10 +132,9 @@ export function assignEvidenceLabelLanes(input: {
 }
 
 export function getTopologyVisualBounds(
-  moduleRects: readonly EvidenceObstacle[],
-  labelRects: readonly EvidenceObstacle[],
+  ...rectangleGroups: readonly (readonly EvidenceObstacle[])[]
 ): EvidenceObstacle | undefined {
-  const rectangles = [...moduleRects, ...labelRects];
+  const rectangles = rectangleGroups.flat();
   if (rectangles.length === 0) return undefined;
 
   const minX = Math.min(...rectangles.map((rect) => rect.x));
