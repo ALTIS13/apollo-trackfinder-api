@@ -176,7 +176,7 @@ const body = Buffer.from(JSON.stringify({
 }));
 ```
 
-Assert: valid acceptance; exact body changes break signature; one key cannot report the other module; unknown module follows unauthorized result; missing/wrong/malformed signatures; timestamps outside +/-60 seconds; nonce replay; 129 nonces remain bounded; equal timestamp with unique nonce succeeds; lower signed timestamp after a newer acceptance returns `stale`; strict payload rejects unknown fields/non-finite/negative/over-one-million RPM; fresh status through 90 seconds; status `unknown` and RPM `0` after 90 seconds; historical version/deployment/receipt time remain; empty service after restart has managed `unknown` entries with no receipt time; config rejects non-object JSON, unknown IDs, over 128 entries, and secrets outside 32-512 characters.
+Assert: valid acceptance; exact body changes break signature; one key cannot report the other module; unknown module follows unauthorized result; missing/wrong/malformed signatures; timestamps outside +/-60 seconds; nonce replay; the 129th still-active unique nonce is rejected without evicting any replay record; equal timestamp with unique nonce succeeds; lower signed timestamp after a newer acceptance returns `stale`; strict payload rejects unknown fields/non-finite/negative/over-one-million RPM; fresh status through 90 seconds; status `unknown` and RPM `0` after 90 seconds; historical version/deployment/receipt time remain; empty service after restart has managed `unknown` entries with no receipt time; config rejects non-object JSON, unknown IDs, over 128 entries, and secrets outside 32-512 characters.
 
 - [ ] **Step 2: Run the new test and verify RED**
 
@@ -238,7 +238,7 @@ export type ModuleHeartbeatIngestResult =
   | { kind: "stale" };
 ```
 
-Authenticate against the configured secret or a process-local dummy secret, compare equal-length digests with `timingSafeEqual`, validate timestamp/nonce/body, then mutate state only for accepted input. `snapshot()` returns every configured module with `managed: true`; missing or expired entries return `unknown`, while expired entries preserve version/deployment/`lastHeartbeatAt` and reset RPM to `0`.
+Authenticate against the configured secret or a process-local dummy secret, compare equal-length digests with `timingSafeEqual`, validate timestamp/nonce/body, then mutate state only for accepted input. Prune nonce records older than five minutes before checking capacity; while 128 live nonce records remain, reject additional unique nonces without eviction so a replay cannot become valid through cache pressure. `snapshot()` returns every configured module with `managed: true`; missing or expired entries return `unknown`, while expired entries preserve version/deployment/`lastHeartbeatAt` and reset RPM to `0`.
 
 - [ ] **Step 5: Run GREEN verification**
 
