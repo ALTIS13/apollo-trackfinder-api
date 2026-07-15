@@ -174,7 +174,10 @@ export class ModuleHeartbeatService {
     );
     this.now = options.now ?? Date.now;
     this.monotonicNow =
-      options.monotonicNow ?? performance.now.bind(performance);
+      options.monotonicNow ??
+      (options.now === undefined
+        ? performance.now.bind(performance)
+        : options.now);
   }
 
   ingest(input: ModuleHeartbeatIngestInput): ModuleHeartbeatIngestResult {
@@ -257,7 +260,12 @@ export class ModuleHeartbeatService {
     return { kind: "accepted", receivedAt: new Date(receivedAt).toISOString() };
   }
 
-  snapshot(at = this.monotonicNow()): ModuleHeartbeatObservation[] {
+  snapshot(): ModuleHeartbeatObservation[];
+  snapshot(atWallTime: number): ModuleHeartbeatObservation[];
+  snapshot(atWallTime?: number): ModuleHeartbeatObservation[] {
+    const useWallTime = atWallTime !== undefined;
+    const at = atWallTime ?? this.monotonicNow();
+
     return Array.from(this.keys.keys(), (moduleId) => {
       const heartbeat = this.heartbeats.get(moduleId);
       if (heartbeat === undefined) {
@@ -270,8 +278,10 @@ export class ModuleHeartbeatService {
         };
       }
 
-      const fresh =
-        at - heartbeat.receivedMonotonicAt <= HEARTBEAT_FRESHNESS_MS;
+      const receivedAt = useWallTime
+        ? heartbeat.receivedAt
+        : heartbeat.receivedMonotonicAt;
+      const fresh = at - receivedAt <= HEARTBEAT_FRESHNESS_MS;
       return {
         moduleId,
         managed: true,

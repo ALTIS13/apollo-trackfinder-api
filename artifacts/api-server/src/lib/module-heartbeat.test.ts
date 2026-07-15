@@ -544,6 +544,57 @@ describe("ModuleHeartbeatService", () => {
     });
   });
 
+  it("uses an injected wall clock as the elapsed fallback when monotonic time is omitted", () => {
+    let now = INITIAL_NOW;
+    const service = new ModuleHeartbeatService({
+      keys: new Map([["search-media", SEARCH_MEDIA_SECRET]]),
+      now: () => now,
+    });
+
+    expect(service.ingest(createHeartbeatInput())).toMatchObject({
+      kind: "accepted",
+    });
+    now += 90_001;
+
+    expect(service.snapshot()).toEqual([
+      expect.objectContaining({
+        moduleId: "search-media",
+        status: "unknown",
+        requestsPerMinute: 0,
+      }),
+    ]);
+  });
+
+  it("treats an explicit snapshot time as wall-clock milliseconds", () => {
+    const { service } = createService();
+
+    expect(service.ingest(createHeartbeatInput())).toMatchObject({
+      kind: "accepted",
+    });
+    expect(service.snapshot(INITIAL_NOW)).toEqual([
+      expect.objectContaining({
+        moduleId: "search-media",
+        status: "healthy",
+        requestsPerMinute: 42,
+      }),
+      expect.objectContaining({
+        moduleId: "account-integrations",
+        status: "unknown",
+      }),
+    ]);
+    expect(service.snapshot(INITIAL_NOW + 90_001)).toEqual([
+      expect.objectContaining({
+        moduleId: "search-media",
+        status: "unknown",
+        requestsPerMinute: 0,
+      }),
+      expect.objectContaining({
+        moduleId: "account-integrations",
+        status: "unknown",
+      }),
+    ]);
+  });
+
   it("expires freshness by monotonic elapsed time when wall time moves backward", () => {
     const state = createService();
 
