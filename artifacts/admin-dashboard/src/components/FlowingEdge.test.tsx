@@ -151,7 +151,8 @@ describe("FlowingEdge", () => {
     expect(container.querySelector(".topology-edge-contact-male .topology-edge-contact-rail"))
       .toHaveAttribute("d", expect.stringContaining("M 16 -3"));
     expect(paths).toHaveLength(2);
-    expect(paths[1]).toHaveAttribute("d", "M 108 0 H 120");
+    expect(paths[0]).toHaveAttribute("d", expect.stringContaining("44"));
+    expect(paths[1]).toHaveAttribute("d", "M76 0 L120 0");
     expect(getByText("240/мин")).toBeInTheDocument();
   });
 
@@ -256,15 +257,15 @@ describe("FlowingEdge", () => {
     },
   );
 
-  it("keeps both outer contact ends on the final horizontal segment of a bent edge", () => {
+  it("paints the canonical target route after an off-row contact", () => {
     const { container } = renderEdge({ sourceY: 0, targetY: 80 });
     const contact = container.querySelector(".topology-edge-contact");
     const sourcePath = container.querySelector(".topology-edge-conductor");
-    const targetStub = container.querySelectorAll(".topology-edge-conductor")[1];
+    const targetPath = container.querySelectorAll(".topology-edge-conductor")[1];
 
-    expect(contact).toHaveAttribute("transform", "translate(92 80)");
-    expect(sourcePath?.getAttribute("d")).toMatch(/L76 80$/);
-    expect(targetStub).toHaveAttribute("d", "M 108 80 H 120");
+    expect(contact).toHaveAttribute("transform", "translate(72 80)");
+    expect(sourcePath?.getAttribute("d")).toMatch(/56 80/);
+    expect(targetPath).toHaveAttribute("d", "M88 80 L120 80");
   });
 
   it("renders an opaque shared source trunk once with fixed status lanes", () => {
@@ -415,8 +416,8 @@ describe("FlowingEdge", () => {
 
     expect(container.querySelector("mask")).not.toBeInTheDocument();
     expect(paths).toHaveLength(2);
-    expect(paths[0].getAttribute("d")).toMatch(/L76 0$/);
-    expect(paths[1]).toHaveAttribute("d", "M 108 0 H 120");
+    expect(paths[0].getAttribute("d")).toMatch(/L44 0$/);
+    expect(paths[1]).toHaveAttribute("d", "M76 0 L120 0");
   });
 
   it("keeps the plug body thicker than its route and status lane", () => {

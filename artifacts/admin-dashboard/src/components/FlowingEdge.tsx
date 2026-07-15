@@ -182,7 +182,7 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
       />
       <path
         className="topology-edge-conductor topology-edge-conductor-base"
-        d={geometry.targetStubPath}
+        d={geometry.targetPath}
         fill="none"
         stroke={ROUTE_COLOR}
         strokeWidth={ROUTE_WIDTH}
@@ -195,7 +195,7 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
       />
       <path
         className="topology-edge-status-lane"
-        d={geometry.targetStubPath}
+        d={geometry.targetPath}
         fill="none"
         stroke={color}
         strokeWidth={STATUS_LANE_WIDTH}

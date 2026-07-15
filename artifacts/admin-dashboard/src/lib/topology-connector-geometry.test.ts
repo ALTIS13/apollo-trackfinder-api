@@ -2,112 +2,135 @@ import { describe, expect, it } from "vitest";
 import { Position } from "@xyflow/react";
 import {
   buildConnectorGeometry,
-  CONDUCTOR_WIDTH,
+  CONTACT_BEND_CLEARANCE,
+  CONTACT_TERMINAL_CLEARANCE,
+  type ConnectorGeometry,
   type ConnectorGeometryInput,
 } from "./topology-connector-geometry";
 
-function getPathXCoordinates(path: string): number[] {
-  const commandCoordinateCounts: Record<string, number> = {
-    M: 2,
-    L: 2,
-    H: 1,
-    V: 1,
-    Q: 4,
-    C: 6,
-    S: 4,
-    T: 2,
-    A: 7,
-  };
-  const commandXOffsets: Record<string, number[]> = {
-    M: [0],
-    L: [0],
-    H: [0],
-    V: [],
-    Q: [0, 2],
-    C: [0, 2, 4],
-    S: [0, 2],
-    T: [0],
-    A: [5],
-  };
+function selectedSegment(geometry: ConnectorGeometry) {
+  const start = geometry.routePoints[geometry.contactSegmentIndex];
+  const end = geometry.routePoints[geometry.contactSegmentIndex + 1];
 
-  // Inspect every absolute command so a smooth-step control point cannot backtrack.
-  return Array.from(path.matchAll(/([A-Z])([^A-Z]*)/g)).flatMap(
-    ([, command, coordinateText]) => {
-      const coordinateCount = commandCoordinateCounts[command];
-      const xOffsets = commandXOffsets[command];
-      if (coordinateCount === undefined || xOffsets === undefined) return [];
-      const values = Array.from(
-        coordinateText.matchAll(/-?(?:\d+\.?\d*|\.\d+)/g),
-        ([value]) => Number(value),
-      );
-      const xCoordinates: number[] = [];
+  if (start === undefined || end === undefined) {
+    throw new Error("Expected the selected route segment to exist");
+  }
 
-      for (let start = 0; start < values.length; start += coordinateCount) {
-        xOffsets.forEach((offset) => {
-          const x = values[start + offset];
-          if (x !== undefined) xCoordinates.push(x);
-        });
-      }
-      return xCoordinates;
-    },
-  );
+  return { start, end };
 }
 
-function expectPathToStayWithinHorizontalBounds(
-  path: string,
-  firstX: number,
-  secondX: number,
-) {
-  const minimumX = Math.min(firstX, secondX);
-  const maximumX = Math.max(firstX, secondX);
-  const xCoordinates = getPathXCoordinates(path);
+function expectCanonicalContact(geometry: ConnectorGeometry) {
+  const { start, end } = selectedSegment(geometry);
+  const lastPointIndex = geometry.routePoints.length - 1;
+  const startClearance =
+    geometry.contactSegmentIndex === 0
+      ? CONTACT_TERMINAL_CLEARANCE
+      : CONTACT_BEND_CLEARANCE;
+  const endClearance =
+    geometry.contactSegmentIndex + 1 === lastPointIndex
+      ? CONTACT_TERMINAL_CLEARANCE
+      : CONTACT_BEND_CLEARANCE;
 
-  expect(xCoordinates).not.toHaveLength(0);
-  xCoordinates.forEach((x) => {
-    expect(x).toBeGreaterThanOrEqual(minimumX);
-    expect(x).toBeLessThanOrEqual(maximumX);
-  });
-}
-
-function getVerticalLineSegmentXs(path: string): number[] {
-  const points = Array.from(
-    path.matchAll(/(?:M|L)(-?(?:\d+\.?\d*|\.\d+))\s+(-?(?:\d+\.?\d*|\.\d+))/g),
-    ([, x, y]) => ({ x: Number(x), y: Number(y) }),
+  expect(end.x).toBeGreaterThan(start.x);
+  expect(start.y).toBe(end.y);
+  expect(geometry.contactX).toBeGreaterThanOrEqual(start.x + startClearance);
+  expect(geometry.contactX).toBeLessThanOrEqual(end.x - endClearance);
+  expect(geometry.routePoints[geometry.contactSegmentIndex].y).toBe(
+    geometry.contactY,
   );
+  expect(geometry.femaleOuterX).toBe(geometry.contactX - 16);
+  expect(geometry.maleOuterX).toBe(geometry.contactX + 16);
+  expect(geometry.sourcePath).toMatch(new RegExp(`${geometry.femaleOuterX}`));
+  expect(geometry.targetPath).toMatch(new RegExp(`${geometry.maleOuterX}`));
 
-  return points.slice(1).flatMap((point, index) => {
-    const previousPoint = points[index];
-    return point.x === previousPoint.x && point.y !== previousPoint.y
-      ? [point.x]
-      : [];
+  geometry.routePoints.slice(1, -1).forEach((point, index) => {
+    const previous = geometry.routePoints[index];
+    const next = geometry.routePoints[index + 2];
+    expect(
+      (previous.x === point.x && point.x === next.x) ||
+        (previous.y === point.y && point.y === next.y),
+    ).toBe(false);
   });
 }
 
 describe("buildConnectorGeometry", () => {
-  it("calculates horizontal connector contact and stubs", () => {
+  it.each([
+    {
+      name: "same-row route",
+      input: {
+        sourceX: 0,
+        sourceY: 0,
+        sourcePosition: Position.Right,
+        targetX: 160,
+        targetY: 0,
+        targetPosition: Position.Left,
+      },
+    },
+    {
+      name: "different-row route",
+      input: {
+        sourceX: 0,
+        sourceY: 0,
+        sourcePosition: Position.Right,
+        targetX: 160,
+        targetY: 80,
+        targetPosition: Position.Left,
+      },
+    },
+    {
+      name: "shortened shared trunk route",
+      input: {
+        sourceX: 0,
+        sourceY: 0,
+        sourcePosition: Position.Right,
+        targetX: 160,
+        targetY: 80,
+        targetPosition: Position.Left,
+        sharedBranchLength: 24,
+      },
+    },
+    {
+      name: "target-left-of-source route",
+      input: {
+        sourceX: 120,
+        sourceY: 0,
+        sourcePosition: Position.Right,
+        targetX: 0,
+        targetY: 80,
+        targetPosition: Position.Left,
+      },
+    },
+  ] satisfies { name: string; input: ConnectorGeometryInput }[])(
+    "centers the plug on an eligible straight segment for $name",
+    ({ input }) => {
+      const geometry = buildConnectorGeometry(input);
+
+      expectCanonicalContact(geometry);
+      expect(geometry.usedDetour).toBe(false);
+    },
+  );
+
+  it("uses the lower deterministic detour when no normal segment fits the plug", () => {
     const geometry = buildConnectorGeometry({
       sourceX: 0,
       sourceY: 0,
       sourcePosition: Position.Right,
-      targetX: 120,
-      targetY: 80,
+      targetX: 59,
+      targetY: 0,
       targetPosition: Position.Left,
     });
 
-    expect(geometry.contactX).toBe(92);
-    expect(geometry.femaleOuterX).toBe(76);
-    expect(geometry.maleOuterX).toBe(108);
-    expect(geometry.sourcePath).toContain("Q");
-    expect(geometry.sourcePath).toMatch(/L76 80$/);
-    expect(geometry.targetStubPath).toBe("M 108 80 H 120");
+    expectCanonicalContact(geometry);
+    expect(geometry.usedDetour).toBe(true);
+    expect(geometry.routePoints).toContainEqual({ x: 171, y: 64 });
   });
 
-  it("starts grouped connectors after their shared source trunk", () => {
+  it("preserves the shared trunk while branching from its shortened endpoint", () => {
     const geometry = buildConnectorGeometry({
       sourceX: 0,
       sourceY: 0,
       sourcePosition: Position.Right,
-      targetX: 120,
+      targetX: 160,
       targetY: 80,
       targetPosition: Position.Left,
       sharedBranchLength: 24,
@@ -116,179 +139,5 @@ describe("buildConnectorGeometry", () => {
     expect(geometry.sharedTrunkPath).toBe("M 0 0 H 24");
     expect(geometry.branchSourceX).toBe(24);
     expect(geometry.sourcePath).toMatch(/^M24 0/);
-  });
-
-  it("uses a shortened group branch origin for a short-clearance trunk owner and sibling", () => {
-    const trunkOwnerInput: ConnectorGeometryInput = {
-      sourceX: 0,
-      sourceY: 0,
-      sourcePosition: Position.Right,
-      targetX: 52.5,
-      targetY: 80,
-      targetPosition: Position.Left,
-      sharedBranchLength: 1,
-    };
-    const trunkOwner = buildConnectorGeometry(trunkOwnerInput);
-    const sibling = buildConnectorGeometry({
-      ...trunkOwnerInput,
-      targetX: 120,
-    });
-
-    expect([trunkOwner.branchSourceX, sibling.branchSourceX]).toEqual([1, 1]);
-    expect([trunkOwner.sharedTrunkPath, sibling.sharedTrunkPath]).toEqual([
-      "M 0 0 H 1",
-      "M 0 0 H 1",
-    ]);
-  });
-
-  it("starts every group branch at source when no shared clearance fits", () => {
-    const trunkOwner = buildConnectorGeometry({
-      sourceX: 0,
-      sourceY: 0,
-      sourcePosition: Position.Right,
-      targetX: 70,
-      targetY: 80,
-      targetPosition: Position.Left,
-      sharedBranchLength: 0,
-    });
-    const sibling = buildConnectorGeometry({
-      sourceX: 0,
-      sourceY: 0,
-      sourcePosition: Position.Right,
-      targetX: 120,
-      targetY: 80,
-      targetPosition: Position.Left,
-      sharedBranchLength: 0,
-    });
-
-    expect([trunkOwner.branchSourceX, sibling.branchSourceX]).toEqual([0, 0]);
-    expect([trunkOwner.sharedTrunkPath, sibling.sharedTrunkPath]).toEqual([
-      undefined,
-      undefined,
-    ]);
-    expect(trunkOwner.sourcePath).toMatch(/^M0 0/);
-    expect(sibling.sourcePath).toMatch(/^M0 0/);
-  });
-
-  it("keeps a shortened same-row degraded branch within its female outer edge", () => {
-    const geometry = buildConnectorGeometry({
-      sourceX: 488,
-      sourceY: 140,
-      sourcePosition: Position.Right,
-      targetX: 551.642,
-      targetY: 140,
-      targetPosition: Position.Left,
-      sharedBranchLength: 17.142,
-    });
-
-    expect(geometry.branchSourceX).toBeCloseTo(505.142, 3);
-    expect(geometry.femaleOuterX).toBeCloseTo(507.642, 3);
-    expectPathToStayWithinHorizontalBounds(
-      geometry.sourcePath,
-      geometry.branchSourceX,
-      geometry.femaleOuterX,
-    );
-  });
-
-  it("keeps a one-unit off-row short branch within its female outer edge", () => {
-    const geometry = buildConnectorGeometry({
-      sourceX: 488,
-      sourceY: 140,
-      sourcePosition: Position.Right,
-      targetX: 551.642,
-      targetY: 141,
-      targetPosition: Position.Left,
-      sharedBranchLength: 17.142,
-    });
-
-    expect(geometry.branchSourceX).toBeCloseTo(505.142, 3);
-    expect(geometry.femaleOuterX).toBeCloseTo(507.642, 3);
-    expectPathToStayWithinHorizontalBounds(
-      geometry.sourcePath,
-      geometry.branchSourceX,
-      geometry.femaleOuterX,
-    );
-  });
-
-  it("keeps a one-unit off-row short vertical stroke outside the female socket", () => {
-    const geometry = buildConnectorGeometry({
-      sourceX: 488,
-      sourceY: 140,
-      sourcePosition: Position.Right,
-      targetX: 551.642,
-      targetY: 141,
-      targetPosition: Position.Left,
-      sharedBranchLength: 17.142,
-    });
-    const verticalSegmentXs = getVerticalLineSegmentXs(geometry.sourcePath);
-
-    expect(verticalSegmentXs).toHaveLength(1);
-    verticalSegmentXs.forEach((verticalX) => {
-      expect(verticalX + CONDUCTOR_WIDTH / 2).toBeLessThanOrEqual(
-        geometry.femaleOuterX + CONDUCTOR_WIDTH / 2,
-      );
-    });
-  });
-
-  it("keeps a zero-clearance crossed target bounded without a shared trunk", () => {
-    const geometry = buildConnectorGeometry({
-      sourceX: 488,
-      sourceY: 140,
-      sourcePosition: Position.Right,
-      targetX: 529.5,
-      targetY: 140,
-      targetPosition: Position.Left,
-      sharedBranchLength: 0,
-    });
-
-    expect(geometry.branchSourceX).toBe(488);
-    expect(geometry.femaleOuterX).toBe(485.5);
-    expect(geometry.sharedTrunkPath).toBeUndefined();
-    expectPathToStayWithinHorizontalBounds(
-      geometry.sourcePath,
-      geometry.branchSourceX,
-      geometry.femaleOuterX,
-    );
-  });
-
-  it("keeps a crossed off-row target bounded without a shared trunk", () => {
-    const geometry = buildConnectorGeometry({
-      sourceX: 488,
-      sourceY: 140,
-      sourcePosition: Position.Right,
-      targetX: 529.5,
-      targetY: 141,
-      targetPosition: Position.Left,
-      sharedBranchLength: 0,
-    });
-
-    expect(geometry.branchSourceX).toBe(488);
-    expect(geometry.femaleOuterX).toBe(485.5);
-    expect(geometry.sharedTrunkPath).toBeUndefined();
-    expectPathToStayWithinHorizontalBounds(
-      geometry.sourcePath,
-      geometry.branchSourceX,
-      geometry.femaleOuterX,
-    );
-  });
-
-  it("keeps a crossed off-row vertical stroke outside the female socket", () => {
-    const geometry = buildConnectorGeometry({
-      sourceX: 488,
-      sourceY: 140,
-      sourcePosition: Position.Right,
-      targetX: 529.5,
-      targetY: 141,
-      targetPosition: Position.Left,
-      sharedBranchLength: 0,
-    });
-    const verticalSegmentXs = getVerticalLineSegmentXs(geometry.sourcePath);
-
-    expect(verticalSegmentXs).toHaveLength(1);
-    verticalSegmentXs.forEach((verticalX) => {
-      expect(verticalX + CONDUCTOR_WIDTH / 2).toBeLessThanOrEqual(
-        geometry.femaleOuterX + CONDUCTOR_WIDTH / 2,
-      );
-    });
   });
 });
