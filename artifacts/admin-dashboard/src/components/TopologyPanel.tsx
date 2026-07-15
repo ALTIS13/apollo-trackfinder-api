@@ -19,7 +19,11 @@ import {
 } from "react";
 import { getServiceNeighborhood } from "../lib/dashboard-model";
 import { layoutTopology } from "../lib/topology-layout";
-import type { DashboardSnapshot, HealthStatus } from "../types/dashboard";
+import type {
+  DashboardSnapshot,
+  HealthStatus,
+  ServiceEdge,
+} from "../types/dashboard";
 import {
   FlowingEdge,
   getEdgeAccessibleLabel,
@@ -35,6 +39,35 @@ const statusLabels: Record<HealthStatus, string> = {
   degraded: "Деградация",
   unknown: "Нет данных",
 };
+
+const statusOrder: HealthStatus[] = [
+  "healthy",
+  "warning",
+  "degraded",
+  "unknown",
+];
+
+export function getSharedSourceGradients(
+  edges: ServiceEdge[],
+): Map<string, HealthStatus[]> {
+  const edgesBySource = new Map<string, ServiceEdge[]>();
+  edges.forEach((edge) => {
+    const sourceEdges = edgesBySource.get(edge.source) ?? [];
+    sourceEdges.push(edge);
+    edgesBySource.set(edge.source, sourceEdges);
+  });
+
+  const gradients = new Map<string, HealthStatus[]>();
+  edgesBySource.forEach((sourceEdges) => {
+    const statuses = statusOrder.filter((status) =>
+      sourceEdges.some((edge) => edge.status === status),
+    );
+    if (statuses.length < 2) return;
+    const gradientOwner = sourceEdges.at(-1);
+    if (gradientOwner !== undefined) gradients.set(gradientOwner.id, statuses);
+  });
+  return gradients;
+}
 
 export function formatTrafficLabel(requestsPerMinute: number): string {
   return `${requestsPerMinute}/мин`;
@@ -137,6 +170,10 @@ function TopologyCanvas({
     () => new Map(snapshot.incidents.map((incident) => [incident.id, incident])),
     [snapshot.incidents],
   );
+  const sharedSourceGradients = useMemo(
+    () => getSharedSourceGradients(snapshot.edges),
+    [snapshot.edges],
+  );
   const nodes = useMemo<ServiceFlowNode[]>(() => {
     const positions = new Map(layout.nodes.map((node) => [node.id, node]));
     return snapshot.modules.map((module) => {
@@ -221,6 +258,7 @@ function TopologyCanvas({
                     message: linkedIncident.diagnostic.message,
                   },
             actionable: canOpenIncident,
+            sharedStatuses: sharedSourceGradients.get(edge.id),
             motionEnabled:
               edge.requestsPerMinute > 0 &&
               motionEnabled &&
@@ -243,6 +281,7 @@ function TopologyCanvas({
       motionEnabled,
       onOpenIncident,
       selectedServiceId,
+      sharedSourceGradients,
       snapshot.edges,
     ],
   );

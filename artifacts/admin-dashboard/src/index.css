@@ -684,6 +684,12 @@ svg {
   pointer-events: none;
 }
 
+.topology-edge-shared-trunk {
+  pointer-events: none;
+  stroke-linecap: butt;
+  stroke-linejoin: round;
+}
+
 .topology-edge-contact[data-actionable="true"] {
   cursor: pointer;
   pointer-events: all;

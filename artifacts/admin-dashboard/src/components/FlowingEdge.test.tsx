@@ -20,6 +20,7 @@ interface RenderEdgeOptions {
     message: string;
   };
   style?: CSSProperties;
+  sharedStatuses?: HealthStatus[];
 }
 
 function renderEdge({
@@ -30,6 +31,7 @@ function renderEdge({
   targetY = 0,
   diagnostic,
   style,
+  sharedStatuses,
 }: RenderEdgeOptions = {}) {
   return render(
     <svg>
@@ -51,6 +53,7 @@ function renderEdge({
           motionEnabled,
           actionable: diagnostic !== undefined,
           diagnostic,
+          sharedStatuses,
         }}
         label="240/мин"
         style={style}
@@ -128,12 +131,59 @@ describe("FlowingEdge", () => {
   it("keeps both outer contact ends on the final horizontal segment of a bent edge", () => {
     const { container } = renderEdge({ sourceY: 0, targetY: 80 });
     const contact = container.querySelector(".topology-edge-contact");
+    const path = container.querySelector(".react-flow__edge-path");
     const routeCover = container.querySelector(".topology-edge-contact-route-cover");
 
     expect(contact).toHaveAttribute("transform", "translate(92 80)");
+    expect(path).toHaveAttribute(
+      "d",
+      expect.stringContaining("Q 68.5,80 76,80"),
+    );
     expect(routeCover).toHaveAttribute("x", "-16");
     expect(routeCover).toHaveAttribute("width", "32");
   });
+
+  it("covers coincident source routes with one continuous status gradient", () => {
+    const { container } = renderEdge({
+      sourceY: 0,
+      targetY: 80,
+      sharedStatuses: ["healthy", "warning", "degraded"],
+    });
+    const gradient = container.querySelector(
+      "linearGradient.topology-edge-shared-gradient",
+    );
+    const trunk = container.querySelector(".topology-edge-shared-trunk");
+
+    expect(gradient).toBeInTheDocument();
+    expect(gradient?.querySelectorAll("stop")).toHaveLength(3);
+    expect(
+      Array.from(gradient?.querySelectorAll("stop") ?? []).map((stop) =>
+        stop.getAttribute("stop-color"),
+      ),
+    ).toEqual(["#22c55e", "#f59e0b", "#ef4444"]);
+    expect(trunk).toHaveAttribute("d", "M 0 0 H 61");
+    expect(trunk).toHaveStyle({ strokeWidth: "4.5" });
+    expect(trunk?.getAttribute("style")).not.toContain("stroke-dasharray");
+  });
+
+  it.each([
+    { sourceY: 0, targetY: 80, badgeY: "-58", textY: "-51" },
+    { sourceY: 0, targetY: 0, badgeY: "-58", textY: "-51" },
+    { sourceY: 80, targetY: 0, badgeY: "44", textY: "51" },
+  ])(
+    "places status evidence in the free row channel for $sourceY -> $targetY",
+    ({ sourceY, targetY, badgeY, textY }) => {
+      const { container } = renderEdge({
+        sourceY,
+        targetY,
+        status: "degraded",
+      });
+      const status = container.querySelector(".topology-edge-contact-status");
+
+      expect(status?.querySelector("rect")).toHaveAttribute("y", badgeY);
+      expect(status?.querySelector("text")).toHaveAttribute("y", textY);
+    },
+  );
 
   it("keeps the route visible while the contact body occludes its center span", () => {
     const { container } = renderEdge();

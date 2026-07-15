@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { demoSnapshot } from "../data/demo-snapshot";
 import {
   layoutTopology,
+  NODE_HEIGHT,
   NODE_WIDTH,
+  TOPOLOGY_NODE_SEPARATION,
   TOPOLOGY_RANK_SEPARATION,
 } from "./topology-layout";
 
@@ -17,6 +19,11 @@ describe("layoutTopology", () => {
       NODE_WIDTH + TOPOLOGY_RANK_SEPARATION,
     );
     expect(TOPOLOGY_RANK_SEPARATION).toBe(84);
+    expect(
+      byId.get("download-worker")!.y -
+        byId.get("account-integrations")!.y,
+    ).toBe(NODE_HEIGHT + TOPOLOGY_NODE_SEPARATION);
+    expect(TOPOLOGY_NODE_SEPARATION).toBe(40);
     expect(layout.nodes.every((node) => node.width === 190 && node.height === 76)).toBe(true);
   });
 

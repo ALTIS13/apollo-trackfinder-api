@@ -22,7 +22,11 @@ vi.mock("framer-motion", async (importOriginal) => ({
   useReducedMotion: () => motionPreference.reduced,
 }));
 
-import { isDashboardMotionEnabled, TopologyPanel } from "./TopologyPanel";
+import {
+  getSharedSourceGradients,
+  isDashboardMotionEnabled,
+  TopologyPanel,
+} from "./TopologyPanel";
 
 beforeAll(() => {
   vi.stubGlobal("DOMMatrixReadOnly", class DOMMatrixReadOnly { m22 = 1; });
@@ -50,6 +54,17 @@ afterEach(() => {
 });
 
 describe("TopologyPanel", () => {
+  it("assigns one ordered status gradient to the last edge sharing a source", () => {
+    expect(
+      Array.from(getSharedSourceGradients(demoSnapshot.edges).entries()),
+    ).toEqual([
+      [
+        "core-api-download-worker",
+        ["healthy", "warning", "degraded"],
+      ],
+    ]);
+  });
+
   it("centers an incident-selected node with zero-duration reduced motion", async () => {
     motionPreference.reduced = true;
     flowApi.getNode.mockReturnValue({ position: { x: 100, y: 200 }, width: 190, height: 76 });

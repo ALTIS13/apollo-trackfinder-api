@@ -4,6 +4,7 @@ import type { ServiceEdge, ServiceModule } from "../types/dashboard";
 export const NODE_WIDTH = 190;
 export const NODE_HEIGHT = 76;
 export const TOPOLOGY_RANK_SEPARATION = 84;
+export const TOPOLOGY_NODE_SEPARATION = 40;
 
 export interface LayoutNode {
   id: string;
@@ -36,7 +37,7 @@ export function layoutTopology(modules: ServiceModule[], edges: ServiceEdge[]): 
   graph.setGraph({
     rankdir: "LR",
     ranksep: TOPOLOGY_RANK_SEPARATION,
-    nodesep: 34,
+    nodesep: TOPOLOGY_NODE_SEPARATION,
     marginx: 24,
     marginy: 24,
   });
