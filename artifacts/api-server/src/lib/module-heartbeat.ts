@@ -260,8 +260,6 @@ export class ModuleHeartbeatService {
     return { kind: "accepted", receivedAt: new Date(receivedAt).toISOString() };
   }
 
-  snapshot(): ModuleHeartbeatObservation[];
-  snapshot(atWallTime: number): ModuleHeartbeatObservation[];
   snapshot(atWallTime?: number): ModuleHeartbeatObservation[] {
     const useWallTime = atWallTime !== undefined;
     const at = atWallTime ?? this.monotonicNow();

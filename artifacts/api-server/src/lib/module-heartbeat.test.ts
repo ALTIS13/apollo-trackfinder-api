@@ -595,6 +595,31 @@ describe("ModuleHeartbeatService", () => {
     ]);
   });
 
+  it("accepts optional or undefined snapshot times as monotonic snapshots", () => {
+    const state = createService();
+    const optionalWallTime = ((value?: number) => value)();
+    const searchMediaStatuses = () =>
+      [
+        state.service.snapshot(),
+        state.service.snapshot(undefined),
+        state.service.snapshot(optionalWallTime),
+      ].map(
+        (snapshot) =>
+          snapshot.find(
+            (observation) => observation.moduleId === "search-media",
+          )?.status,
+      );
+
+    expect(state.service.ingest(createHeartbeatInput())).toMatchObject({
+      kind: "accepted",
+    });
+    state.wallNow += 90_001;
+    expect(searchMediaStatuses()).toEqual(["healthy", "healthy", "healthy"]);
+
+    state.monotonicNow += 90_001;
+    expect(searchMediaStatuses()).toEqual(["unknown", "unknown", "unknown"]);
+  });
+
   it("expires freshness by monotonic elapsed time when wall time moves backward", () => {
     const state = createService();
 
