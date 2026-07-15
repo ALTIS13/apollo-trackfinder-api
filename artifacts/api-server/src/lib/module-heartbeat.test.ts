@@ -411,6 +411,25 @@ describe("ModuleHeartbeatService", () => {
     ).toEqual({ kind: "stale" });
   });
 
+  it("prioritizes a replayed nonce over stale timestamp ordering", () => {
+    const { service } = createService();
+    const first = createHeartbeatInput({
+      timestamp: INITIAL_TIMESTAMP,
+      nonce: nonceFor("first-overlap"),
+    });
+
+    expect(service.ingest(first)).toMatchObject({ kind: "accepted" });
+    expect(
+      service.ingest(
+        createHeartbeatInput({
+          timestamp: timestampFor(INITIAL_NOW + 1_000),
+          nonce: nonceFor("newer-overlap"),
+        }),
+      ),
+    ).toMatchObject({ kind: "accepted" });
+    expect(service.ingest(first)).toEqual({ kind: "unauthorized" });
+  });
+
   it.each([
     [
       "unknown field",

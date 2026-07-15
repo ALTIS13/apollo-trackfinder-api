@@ -200,14 +200,6 @@ export class ModuleHeartbeatService {
       return { kind: "unauthorized" };
     }
 
-    const previousHeartbeat = this.heartbeats.get(moduleId);
-    if (
-      previousHeartbeat !== undefined &&
-      signedAt < previousHeartbeat.signedAt
-    ) {
-      return { kind: "stale" };
-    }
-
     const liveNonces = new Map(
       Array.from(this.nonces.get(moduleId) ?? []).filter(
         ([, recordedAt]) => receivedAt - recordedAt <= NONCE_TTL_MS,
@@ -215,6 +207,14 @@ export class ModuleHeartbeatService {
     );
     if (liveNonces.has(nonce) || liveNonces.size >= MAX_NONCES) {
       return { kind: "unauthorized" };
+    }
+
+    const previousHeartbeat = this.heartbeats.get(moduleId);
+    if (
+      previousHeartbeat !== undefined &&
+      signedAt < previousHeartbeat.signedAt
+    ) {
+      return { kind: "stale" };
     }
 
     let parsedBody: unknown;
