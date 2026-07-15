@@ -33,16 +33,22 @@ export function buildConnectorGeometry(input: ConnectorGeometryInput): Connector
   const maleOuterX = contactX + CONTACT_HALF_LENGTH;
   const sharedBranchLength = Math.max(0, input.sharedBranchLength ?? 0);
   const branchSourceX = input.sourceX + sharedBranchLength;
-  const [sourcePath] = getSmoothStepPath({
-    sourceX: branchSourceX,
-    sourceY: input.sourceY,
-    sourcePosition: input.sourcePosition,
-    targetX: femaleOuterX,
-    targetY: input.targetY,
-    targetPosition: input.targetPosition,
-    borderRadius: CONNECTOR_BEND_RADIUS,
-    offset: TARGET_STUB_LENGTH,
-  });
+  const isSameRowRightToLeft =
+    input.sourceY === input.targetY &&
+    input.sourcePosition === Position.Right &&
+    input.targetPosition === Position.Left;
+  const sourcePath = isSameRowRightToLeft
+    ? `M${branchSourceX} ${input.sourceY} L${femaleOuterX} ${input.targetY}`
+    : getSmoothStepPath({
+        sourceX: branchSourceX,
+        sourceY: input.sourceY,
+        sourcePosition: input.sourcePosition,
+        targetX: femaleOuterX,
+        targetY: input.targetY,
+        targetPosition: input.targetPosition,
+        borderRadius: CONNECTOR_BEND_RADIUS,
+        offset: TARGET_STUB_LENGTH,
+      })[0];
 
   return {
     sourcePath,
