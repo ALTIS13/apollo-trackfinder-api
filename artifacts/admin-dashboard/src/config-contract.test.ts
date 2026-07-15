@@ -212,16 +212,16 @@ describe("admin dashboard delivery contracts", () => {
     expect(topologyPanel).not.toContain("MarkerType.ArrowClosed");
   });
 
-  it("hides routing handles behind fixed module-status terminals", () => {
+  it("hides routing handles behind compact borderless status terminals", () => {
     expect(dashboardCss).toMatch(/\.react-flow__handle\s*{[^}]*opacity:\s*0/s);
     expect(dashboardCss).toMatch(
+      /\.service-node-terminal\s*{[^}]*width:\s*7px;[^}]*height:\s*6px;[^}]*border:\s*0/s,
+    );
+    expect(dashboardCss).not.toMatch(
       /\.service-node-terminal\s*{[^}]*width:\s*6px;[^}]*height:\s*16px/s,
     );
-    expect(dashboardCss).toMatch(
-      /\.service-node-terminal\s*{[^}]*border-block:\s*1px solid var\(--color-surface\)/s,
-    );
-    expect(dashboardCss).toMatch(
-      /\.service-node-terminal\s*{[^}]*border-inline:\s*0/s,
+    expect(dashboardCss).not.toMatch(
+      /\.service-node-terminal\s*{[^}]*border-block:/s,
     );
     expect(dashboardCss).toMatch(
       /\.service-node-terminal\s*{[^}]*box-shadow:\s*none/s,
