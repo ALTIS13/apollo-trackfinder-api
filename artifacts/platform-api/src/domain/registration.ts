@@ -44,7 +44,7 @@ const accountMutationInputSchema = z
   })
   .strict();
 
-const rawVerificationTokenSchema = z.string().trim().min(1);
+const rawVerificationTokenSchema = z.string().min(1);
 
 export interface RequestContext {
   readonly correlationId: string;
@@ -185,8 +185,6 @@ export class RegistrationService {
     try {
       const passwordHash = await hashPassword(parsedInput.data.password);
       const verificationToken = issueOpaqueToken();
-      const now = this.clock();
-      const expiresAt = new Date(now.getTime() + VERIFICATION_TOKEN_TTL_MS);
 
       const account = await this.transaction(this.pool, async (client) => {
         const settings = await this.repository.lockRegistrationSettings(client);
@@ -199,6 +197,8 @@ export class RegistrationService {
         if (settings.mode === "invite_only") {
           throw platformDomainError("invitation_not_available");
         }
+        const now = this.clock();
+        const expiresAt = new Date(now.getTime() + VERIFICATION_TOKEN_TTL_MS);
 
         const created = await this.repository.createAccount(client, {
           normalizedEmail,
@@ -249,17 +249,12 @@ export class RegistrationService {
 
     try {
       const tokenDigest = digestOpaqueToken(parsedToken.data);
-      const now = this.clock();
       return await this.transaction(this.pool, async (client) => {
         const token = await this.repository.lockVerificationTokenByDigest(
           client,
           tokenDigest,
         );
-        if (
-          token === null ||
-          token.consumedAt !== null ||
-          token.expiresAt.getTime() <= now.getTime()
-        ) {
+        if (token === null || token.consumedAt !== null) {
           throwRegistrationUnavailable();
         }
 
@@ -268,7 +263,12 @@ export class RegistrationService {
           client,
           token.accountId,
         );
-        if (account === null || account.status !== "pending") {
+        const now = this.clock();
+        if (
+          token.expiresAt.getTime() <= now.getTime() ||
+          account === null ||
+          account.status !== "pending"
+        ) {
           throwRegistrationUnavailable();
         }
         const consumed = await this.repository.consumeVerificationToken(
@@ -319,7 +319,6 @@ export class RegistrationService {
     const parsedOperator = requireOperatorContext(operator);
 
     try {
-      const now = this.clock();
       return await this.transaction(this.pool, async (client) => {
         await setAccountContext(client, parsedInput.accountId);
         const account = await this.repository.lockAccountById(
@@ -337,6 +336,7 @@ export class RegistrationService {
           client,
           account.id,
         );
+        const now = this.clock();
         const hasLiveEntitlement = entitlements.some(
           (entitlement) =>
             entitlement.revokedAt === null &&
@@ -382,7 +382,6 @@ export class RegistrationService {
     const parsedOperator = requireOperatorContext(operator);
 
     try {
-      const now = this.clock();
       return await this.transaction(this.pool, async (client) => {
         await setAccountContext(client, parsedInput.accountId);
         const account = await this.repository.lockAccountById(
@@ -395,6 +394,7 @@ export class RegistrationService {
         ) {
           throwRegistrationUnavailable();
         }
+        const now = this.clock();
         const suspended = await this.repository.updateAccountStatus(client, {
           accountId: account.id,
           status: "suspended",

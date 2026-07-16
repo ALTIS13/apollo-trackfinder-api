@@ -24,6 +24,7 @@ import type {
 import { digestOpaqueToken } from "./security.js";
 
 const NOW = new Date("2026-07-16T10:00:00.000Z");
+const BEFORE_NOW = new Date("2026-07-16T09:59:59.000Z");
 const CREATED_AT = new Date("2026-07-15T10:00:00.000Z");
 const SETTINGS_ID = "00000000-0000-4000-8000-000000000001";
 const TARGET_ACCOUNT_ID = "00000000-0000-4000-8000-000000000002";
@@ -57,6 +58,8 @@ interface StatefulData {
   sessions: AuthSession[];
   audits: AuditEvent[];
 }
+
+type AsyncHook = () => void | Promise<void>;
 
 function uuid(sequence: number): string {
   return `00000000-0000-4000-8000-${sequence.toString().padStart(12, "0")}`;
@@ -145,15 +148,33 @@ class StatefulRegistrationHarness implements PlatformRepository {
   state: StatefulData;
   transactionCount = 0;
   readonly operations: string[] = [];
+  readonly timeline: string[] = [];
   readonly accountContexts: string[] = [];
+  lastTransactionStartedAt: Date | null = null;
   failAudit = false;
   failOperation: { readonly name: string; readonly error: unknown } | null =
     null;
+  onTransactionBegin: AsyncHook | null = null;
+  onVerificationTokenLock: AsyncHook | null = null;
+  onAccountLock: AsyncHook | null = null;
+  onEntitlementRead: AsyncHook | null = null;
 
   private currentAccountId: string | null = null;
+  private currentTransactionStartedAt: Date | null = null;
+  private clockTime = new Date(NOW);
 
   constructor(mode: RegistrationMode = "open_approval") {
     this.state = initialState(mode);
+  }
+
+  readonly clock = (): Date => {
+    const current = new Date(this.clockTime);
+    this.timeline.push(`clock:${current.toISOString()}`);
+    return current;
+  };
+
+  setClock(value: Date): void {
+    this.clockTime = new Date(value);
   }
 
   readonly transaction: PlatformTransaction = async <T>(
@@ -163,6 +184,10 @@ class StatefulRegistrationHarness implements PlatformRepository {
     this.transactionCount += 1;
     const snapshot = structuredClone(this.state);
     this.currentAccountId = null;
+    await this.onTransactionBegin?.();
+    this.currentTransactionStartedAt = new Date(this.clockTime);
+    this.lastTransactionStartedAt = new Date(this.clockTime);
+    this.timeline.push("BEGIN");
     const client = {
       query: async (sql: string, values?: readonly unknown[]) => {
         if (!sql.includes("set_config('app.account_id'")) {
@@ -175,6 +200,7 @@ class StatefulRegistrationHarness implements PlatformRepository {
         this.currentAccountId = accountId;
         this.accountContexts.push(accountId);
         this.operations.push(`setAccountContext:${accountId}`);
+        this.timeline.push(`setAccountContext:${accountId}`);
         return { rows: [], rowCount: 1 };
       },
     } as unknown as PoolClient;
@@ -186,11 +212,13 @@ class StatefulRegistrationHarness implements PlatformRepository {
       throw error;
     } finally {
       this.currentAccountId = null;
+      this.currentTransactionStartedAt = null;
     }
   };
 
   private record(name: string): void {
     this.operations.push(name);
+    this.timeline.push(name);
     if (this.failOperation?.name === name) {
       throw this.failOperation.error;
     }
@@ -281,6 +309,7 @@ class StatefulRegistrationHarness implements PlatformRepository {
     accountId,
   ) => {
     this.requireAccountContext(accountId, "lockAccountById");
+    await this.onAccountLock?.();
     return (
       this.state.accounts.find((account) => account.id === accountId) ?? null
     );
@@ -339,6 +368,13 @@ class StatefulRegistrationHarness implements PlatformRepository {
     input,
   ) => {
     this.requireAccountContext(input.accountId, "createCredential");
+    if (
+      this.currentTransactionStartedAt === null ||
+      input.passwordChangedAt.getTime() <
+        this.currentTransactionStartedAt.getTime()
+    ) {
+      throw new Error("passwordChangedAt predates the transaction start");
+    }
     const credential: Credential = {
       accountId: input.accountId,
       passwordHash: input.passwordHash,
@@ -374,6 +410,7 @@ class StatefulRegistrationHarness implements PlatformRepository {
   lockVerificationTokenByDigest: PlatformRepository["lockVerificationTokenByDigest"] =
     async (_client, tokenDigest) => {
       this.record("lockVerificationTokenByDigest");
+      await this.onVerificationTokenLock?.();
       return (
         this.state.verificationTokens.find(
           (token) => token.digest === tokenDigest,
@@ -424,6 +461,7 @@ class StatefulRegistrationHarness implements PlatformRepository {
   listAccountEntitlements: PlatformRepository["listAccountEntitlements"] =
     async (_client, accountId) => {
       this.requireAccountContext(accountId, "listAccountEntitlements");
+      await this.onEntitlementRead?.();
       return this.state.entitlements.filter(
         (entitlement) => entitlement.accountId === accountId,
       );
@@ -497,7 +535,7 @@ function createHarness(mode: RegistrationMode = "open_approval") {
   const service = new RegistrationService(
     FAKE_POOL,
     harness,
-    () => new Date(NOW),
+    harness.clock,
     harness.transaction,
   );
   return { harness, service };
@@ -674,6 +712,35 @@ describe("RegistrationService registration modes", () => {
     20_000,
   );
 
+  test("derives credential and verification timestamps after the transaction begins", async () => {
+    const { harness, service } = createHarness();
+    harness.setClock(BEFORE_NOW);
+    harness.onTransactionBegin = () => harness.setClock(NOW);
+
+    const result = await service.register(
+      {
+        email: "new@example.com",
+        displayName: "New Account",
+        password: "password",
+      },
+      REQUEST_CONTEXT,
+    );
+
+    expect(harness.lastTransactionStartedAt).toEqual(NOW);
+    expect(harness.state.credentials[0]?.passwordChangedAt).toEqual(NOW);
+    expect(harness.state.verificationTokens[0]?.expiresAt).toEqual(
+      new Date("2026-07-17T10:00:00.000Z"),
+    );
+    expect(harness.state.verificationTokens[0]?.digest).toBe(
+      digestOpaqueToken(result.verificationToken),
+    );
+    expect(harness.timeline.slice(0, 3)).toEqual([
+      "BEGIN",
+      "lockRegistrationSettings",
+      `clock:${NOW.toISOString()}`,
+    ]);
+  }, 20_000);
+
   test("changes only registration settings and records complete operator audit", async () => {
     const { harness, service } = createHarness("closed");
     const account = seedAccount(harness, "active");
@@ -822,6 +889,88 @@ describe("RegistrationService email verification", () => {
     });
   });
 
+  test("digests the exact opaque token so whitespace decoration is rejected", async () => {
+    const { harness, service } = createHarness();
+    seedAccount(harness);
+    seedVerificationToken(harness);
+    const before = structuredClone(harness.state);
+
+    const error = await captureError(
+      service.consumeVerificationToken(
+        ` ${RAW_VERIFICATION_TOKEN} `,
+        REQUEST_CONTEXT,
+      ),
+    );
+
+    expectDomainError(error, "registration_not_available");
+    expect(harness.state).toEqual(before);
+    expect(harness.transactionCount).toBe(1);
+  });
+
+  test("uses the post-lock decision time for verification writes and audit", async () => {
+    const { harness, service } = createHarness();
+    harness.setClock(BEFORE_NOW);
+    seedAccount(harness);
+    seedVerificationToken(harness);
+    harness.onAccountLock = () => harness.setClock(NOW);
+
+    const verified = await service.consumeVerificationToken(
+      RAW_VERIFICATION_TOKEN,
+      REQUEST_CONTEXT,
+    );
+
+    expect(verified.emailVerifiedAt).toEqual(NOW);
+    expect(harness.state.verificationTokens[0]?.consumedAt).toEqual(NOW);
+    expect(harness.state.audits[0]?.newValue).toEqual({
+      status: "pending",
+      emailVerifiedAt: NOW.toISOString(),
+    });
+    expect(
+      harness.timeline.findIndex((event) => event.startsWith("clock:")),
+    ).toBeGreaterThan(harness.timeline.indexOf("lockAccountById"));
+  });
+
+  test.each([
+    [
+      "verification-token lock",
+      (harness: StatefulRegistrationHarness) => {
+        harness.onVerificationTokenLock = () => harness.setClock(NOW);
+      },
+    ],
+    [
+      "account lock",
+      (harness: StatefulRegistrationHarness) => {
+        harness.onAccountLock = () => harness.setClock(NOW);
+      },
+    ],
+  ])(
+    "rejects a token expiring while waiting for the %s",
+    async (_name, arrangeDelay) => {
+      const { harness, service } = createHarness();
+      harness.setClock(BEFORE_NOW);
+      seedAccount(harness);
+      seedVerificationToken(harness, RAW_VERIFICATION_TOKEN, {
+        expiresAt: NOW,
+      });
+      arrangeDelay(harness);
+      const before = structuredClone(harness.state);
+
+      const error = await captureError(
+        service.consumeVerificationToken(
+          RAW_VERIFICATION_TOKEN,
+          REQUEST_CONTEXT,
+        ),
+      );
+
+      expectDomainError(error, "registration_not_available");
+      expect(harness.state).toEqual(before);
+      expect(harness.transactionCount).toBe(1);
+      expect(
+        harness.timeline.findIndex((event) => event.startsWith("clock:")),
+      ).toBeGreaterThan(harness.timeline.indexOf("lockAccountById"));
+    },
+  );
+
   test.each([
     ["missing", null, null],
     ["consumed", new Date("2026-07-16T09:00:00.000Z"), null],
@@ -901,6 +1050,67 @@ describe("RegistrationService activation and suspension", () => {
       });
     },
   );
+
+  test.each([
+    [
+      "account lock",
+      (harness: StatefulRegistrationHarness) => {
+        harness.onAccountLock = () => harness.setClock(NOW);
+      },
+    ],
+    [
+      "entitlement read",
+      (harness: StatefulRegistrationHarness) => {
+        harness.onEntitlementRead = () => harness.setClock(NOW);
+      },
+    ],
+  ])(
+    "rejects an entitlement expiring while waiting for the %s",
+    async (_name, arrangeDelay) => {
+      const { harness, service } = createHarness();
+      harness.setClock(BEFORE_NOW);
+      seedAccount(harness, "pending", { emailVerifiedAt: CREATED_AT });
+      harness.state.entitlements.push(makeEntitlement({ expiresAt: NOW }));
+      arrangeDelay(harness);
+      const before = structuredClone(harness.state);
+
+      const error = await captureError(
+        service.activateAccount(
+          { accountId: TARGET_ACCOUNT_ID, reason: "Approved for beta" },
+          OPERATOR_CONTEXT,
+        ),
+      );
+
+      expectDomainError(error, "registration_not_available");
+      expect(harness.state).toEqual(before);
+      expect(harness.transactionCount).toBe(1);
+      expect(
+        harness.timeline.findIndex((event) => event.startsWith("clock:")),
+      ).toBeGreaterThan(harness.timeline.indexOf("listAccountEntitlements"));
+    },
+  );
+
+  test("uses the post-read decision time for activation writes and audit", async () => {
+    const { harness, service } = createHarness();
+    harness.setClock(BEFORE_NOW);
+    seedAccount(harness, "pending", { emailVerifiedAt: CREATED_AT });
+    harness.state.entitlements.push(makeEntitlement());
+    harness.onEntitlementRead = () => harness.setClock(NOW);
+
+    const activated = await service.activateAccount(
+      { accountId: TARGET_ACCOUNT_ID, reason: "Approved for beta" },
+      OPERATOR_CONTEXT,
+    );
+
+    expect(activated.activatedAt).toEqual(NOW);
+    expect(harness.state.audits[0]?.newValue).toEqual({
+      status: "active",
+      activatedAt: NOW.toISOString(),
+    });
+    expect(
+      harness.timeline.findIndex((event) => event.startsWith("clock:")),
+    ).toBeGreaterThan(harness.timeline.indexOf("listAccountEntitlements"));
+  });
 
   test.each([
     ["unverified", null, [makeEntitlement()]],
@@ -1007,6 +1217,30 @@ describe("RegistrationService activation and suspension", () => {
     },
   );
 
+  test("uses the post-lock decision time for suspension and session revocation", async () => {
+    const { harness, service } = createHarness();
+    harness.setClock(BEFORE_NOW);
+    seedAccount(harness, "active");
+    harness.state.sessions.push(makeSession(1));
+    harness.onAccountLock = () => harness.setClock(NOW);
+
+    const suspended = await service.suspendAccount(
+      { accountId: TARGET_ACCOUNT_ID, reason: "Security review" },
+      OPERATOR_CONTEXT,
+    );
+
+    expect(suspended.suspendedAt).toEqual(NOW);
+    expect(harness.state.sessions[0]?.revokedAt).toEqual(NOW);
+    expect(harness.state.audits[0]?.newValue).toEqual({
+      status: "suspended",
+      suspendedAt: NOW.toISOString(),
+      revokedSessionCount: 1,
+    });
+    expect(
+      harness.timeline.findIndex((event) => event.startsWith("clock:")),
+    ).toBeGreaterThan(harness.timeline.indexOf("lockAccountById"));
+  });
+
   test.each(["suspended", "deleted"] as const)(
     "does not mutate sessions when suspension target is already %s",
     async (status) => {
@@ -1105,6 +1339,7 @@ describe("RegistrationService validation and transaction rollback", () => {
   test.each([
     [
       "registration",
+      (_harness: StatefulRegistrationHarness) => undefined,
       (service: RegistrationService) =>
         service.register(
           {
@@ -1117,6 +1352,10 @@ describe("RegistrationService validation and transaction rollback", () => {
     ],
     [
       "verification",
+      (harness: StatefulRegistrationHarness) => {
+        seedAccount(harness);
+        seedVerificationToken(harness);
+      },
       (service: RegistrationService) =>
         service.consumeVerificationToken(
           RAW_VERIFICATION_TOKEN,
@@ -1125,6 +1364,10 @@ describe("RegistrationService validation and transaction rollback", () => {
     ],
     [
       "activation",
+      (harness: StatefulRegistrationHarness) => {
+        seedAccount(harness, "pending", { emailVerifiedAt: CREATED_AT });
+        harness.state.entitlements.push(makeEntitlement());
+      },
       (service: RegistrationService) =>
         service.activateAccount(
           { accountId: TARGET_ACCOUNT_ID, reason: "Approve" },
@@ -1133,6 +1376,9 @@ describe("RegistrationService validation and transaction rollback", () => {
     ],
     [
       "suspension",
+      (harness: StatefulRegistrationHarness) => {
+        seedAccount(harness, "active");
+      },
       (service: RegistrationService) =>
         service.suspendAccount(
           { accountId: TARGET_ACCOUNT_ID, reason: "Suspend" },
@@ -1141,8 +1387,10 @@ describe("RegistrationService validation and transaction rollback", () => {
     ],
   ])(
     "maps %s clock failures to a frozen policy error",
-    async (_name, invoke) => {
+    async (_name, arrange, invoke) => {
       const harness = new StatefulRegistrationHarness();
+      arrange(harness);
+      const before = structuredClone(harness.state);
       const service = new RegistrationService(
         FAKE_POOL,
         harness,
@@ -1158,7 +1406,8 @@ describe("RegistrationService validation and transaction rollback", () => {
         await captureError(invoke(service)),
         "policy_unavailable",
       );
-      expect(harness.transactionCount).toBe(0);
+      expect(harness.state).toEqual(before);
+      expect(harness.transactionCount).toBe(1);
     },
     20_000,
   );
