@@ -160,25 +160,46 @@ function isLocalDockerEndpoint(value) {
   return normalized.startsWith("npipe://") || normalized.startsWith("unix://");
 }
 
-async function assertLocalDockerTarget(environment) {
-  const dockerHost = (environment.DOCKER_HOST ?? "").trim();
-  if (dockerHost.length > 0) {
-    assert(
-      isLocalDockerEndpoint(dockerHost),
-      "Platform smoke requires a local Docker socket",
+export function canonicalizeDockerSelectors(environment) {
+  const canonicalEnvironment = { ...environment };
+  const readSelector = (name) => {
+    const entries = Object.entries(canonicalEnvironment).filter(
+      ([key]) => key.toUpperCase() === name,
     );
-    return;
-  }
+    const values = new Set(
+      entries.map(([, value]) => String(value ?? "").trim()),
+    );
+    if (values.size > 1) {
+      throw new Error("Conflicting Docker selector environment");
+    }
+    for (const [key] of entries) delete canonicalEnvironment[key];
+    return values.values().next().value ?? "";
+  };
 
-  const context = (environment.DOCKER_CONTEXT ?? "").trim();
-  const args = ["context", "inspect"];
-  if (context.length > 0) args.push(context);
-  args.push("--format", "{{json .Endpoints.docker.Host}}");
-  const { stdout } = await execFileAsync("docker", args, {
-    cwd: repositoryRoot,
-    env: environment,
-    maxBuffer: 1024 * 1024,
-  });
+  const context = readSelector("DOCKER_CONTEXT");
+  const host = readSelector("DOCKER_HOST");
+  if (context.length > 0) canonicalEnvironment.DOCKER_CONTEXT = context;
+  else if (host.length > 0) canonicalEnvironment.DOCKER_HOST = host;
+
+  return { context, environment: canonicalEnvironment, host };
+}
+
+async function inspectDockerContext(environment, context) {
+  const { stdout } = await execFileAsync(
+    "docker",
+    [
+      "context",
+      "inspect",
+      context,
+      "--format",
+      "{{json .Endpoints.docker.Host}}",
+    ],
+    {
+      cwd: repositoryRoot,
+      env: environment,
+      maxBuffer: 1024 * 1024,
+    },
+  );
   let endpoint;
   try {
     endpoint = JSON.parse(stdout.trim());
@@ -189,6 +210,36 @@ async function assertLocalDockerTarget(environment) {
     typeof endpoint === "string" && isLocalDockerEndpoint(endpoint),
     "Platform smoke requires a local Docker socket",
   );
+}
+
+async function resolveLocalDockerEnvironment(environment) {
+  const selectors = canonicalizeDockerSelectors(environment);
+  if (selectors.context.length > 0) {
+    await inspectDockerContext(selectors.environment, selectors.context);
+    return selectors.environment;
+  }
+
+  if (selectors.host.length > 0) {
+    assert(
+      isLocalDockerEndpoint(selectors.host),
+      "Platform smoke requires a local Docker socket",
+    );
+    return selectors.environment;
+  }
+
+  const { stdout } = await execFileAsync("docker", ["context", "show"], {
+    cwd: repositoryRoot,
+    env: selectors.environment,
+    maxBuffer: 1024 * 1024,
+  });
+  const context = stdout.trim();
+  assert(context.length > 0, "Platform smoke requires a Docker context");
+  const resolvedEnvironment = {
+    ...selectors.environment,
+    DOCKER_CONTEXT: context,
+  };
+  await inspectDockerContext(resolvedEnvironment, context);
+  return resolvedEnvironment;
 }
 
 async function compose(environment, args, options = {}) {
@@ -530,9 +581,9 @@ async function runSmoke(environment) {
 }
 
 async function main() {
-  const environment = configuredEnvironment();
+  const configured = configuredEnvironment();
   smokeStage = "docker-context";
-  await assertLocalDockerTarget(environment);
+  const environment = await resolveLocalDockerEnvironment(configured);
   const ownedSecretDirectory = await prepareSecretDirectory(environment);
   const secrets = [
     environment.PLATFORM_POSTGRES_ADMIN_PASSWORD,
@@ -547,9 +598,9 @@ async function main() {
 
   try {
     smokeStage = "compose-config";
-    const configured = await compose(environment, ["config"]);
+    const rendered = await compose(environment, ["config"]);
     assertSecretFree(
-      `${configured.stdout}\n${configured.stderr}`,
+      `${rendered.stdout}\n${rendered.stderr}`,
       secrets,
       "Compose config",
     );

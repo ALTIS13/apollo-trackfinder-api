@@ -92,6 +92,8 @@ async function renderedCompose(): Promise<Record<string, unknown>> {
 type FakeDockerRecord = {
   args: string[];
   command: string;
+  dockerContext: string;
+  dockerHost: string;
   effectiveProject: string;
   inheritedCredentials: boolean;
   inheritedDatabaseUrls: boolean;
@@ -151,6 +153,10 @@ const env = process.env;
 const projectIndex = args.indexOf("-p");
 const effectiveProject = projectIndex === -1 ? env.COMPOSE_PROJECT_NAME ?? "" : args[projectIndex + 1] ?? "";
 const command = args[0] === "context" ? "context" : ["config", "ps", "up", "down"].find((value) => args.includes(value)) ?? "other";
+function environmentValue(name) {
+  const entry = Object.entries(env).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return entry?.[1] ?? "";
+}
 function urlShape(name) {
   try {
     const value = new URL(env[name]);
@@ -162,6 +168,8 @@ function urlShape(name) {
 const record = {
   args,
   command,
+  dockerContext: environmentValue("DOCKER_CONTEXT"),
+  dockerHost: environmentValue("DOCKER_HOST"),
   effectiveProject,
   inheritedCredentials: [
     ["PLATFORM_POSTGRES_ADMIN_PASSWORD", "HOSTILE_POSTGRES_ADMIN_PASSWORD"],
@@ -179,7 +187,14 @@ const record = {
 };
 fs.appendFileSync(env.FAKE_DOCKER_LOG, JSON.stringify(record) + "\n");
 if (command === "context") {
-  process.stdout.write(JSON.stringify("npipe:////./pipe/docker_engine"));
+  if (args.includes("show")) {
+    process.stdout.write("local-context");
+  } else {
+    const endpoint = args.includes("remote-context")
+      ? "tcp://remote.example:2375"
+      : "npipe:////./pipe/docker_engine";
+    process.stdout.write(JSON.stringify(endpoint));
+  }
   process.exit(0);
 }
 if (command === "config") {
@@ -216,8 +231,6 @@ process.exit(0);
     ...process.env,
     ...hostile,
     COMPOSE_PROJECT_NAME: hostile.HOSTILE_PROJECT_NAME,
-    DOCKER_CONTEXT: "",
-    DOCKER_HOST: "",
     FAKE_DOCKER_LOG: logPath,
     FAKE_EXISTING_PROJECT_SENTINEL: sentinelPath,
     NODE_OPTIONS: `--require=${hookPath}`,
@@ -230,8 +243,23 @@ process.exit(0);
     PLATFORM_RUNTIME_PASSWORD: hostile.HOSTILE_RUNTIME_PASSWORD,
     PLATFORM_SECRET_DIRECTORY: hostile.HOSTILE_SECRET_DIRECTORY,
     PLATFORM_SMOKE_SESSION_TOKEN: hostile.HOSTILE_SESSION_TOKEN,
-    ...environmentOverrides,
   };
+  for (const selector of ["docker_context", "docker_host"]) {
+    for (const name of Object.keys(environment)) {
+      if (name.toLowerCase() === selector) delete environment[name];
+    }
+  }
+  environment.DOCKER_CONTEXT = "";
+  environment.DOCKER_HOST = "";
+  for (const [name, value] of Object.entries(environmentOverrides)) {
+    const normalized = name.toLowerCase();
+    if (normalized === "docker_context" || normalized === "docker_host") {
+      for (const current of Object.keys(environment)) {
+        if (current.toLowerCase() === normalized) delete environment[current];
+      }
+    }
+    environment[name] = value;
+  }
   for (const name of Object.keys(environment)) {
     if (name.toLowerCase() === "path") delete environment[name];
   }
@@ -275,9 +303,24 @@ function service(
 describe("platform container contract", () => {
   test("isolates every smoke lifecycle from a hostile inherited Compose project", async () => {
     const { records, sentinelExists } = await runSmokeWithFakeDocker();
+    const contextRecords = records.filter(
+      ({ command }) => command === "context",
+    );
     const composeRecords = records.filter(({ args }) => args[0] === "compose");
 
     expect(sentinelExists).toBe(true);
+    expect(contextRecords.map(({ args }) => args.slice(1, 4))).toEqual([
+      ["show"],
+      ["inspect", "local-context", "--format"],
+    ]);
+    expect(contextRecords[0]).toMatchObject({
+      dockerContext: "",
+      dockerHost: "",
+    });
+    expect(contextRecords[1]).toMatchObject({
+      dockerContext: "local-context",
+      dockerHost: "",
+    });
     expect(composeRecords.map(({ command }) => command)).toEqual([
       "config",
       "up",
@@ -293,6 +336,8 @@ describe("platform container contract", () => {
     for (const record of composeRecords) {
       expect(record.args).toContain("-p");
       expect(record.args[record.args.indexOf("-p") + 1]).toBe(project);
+      expect(record.dockerContext).toBe("local-context");
+      expect(record.dockerHost).toBe("");
     }
   });
 
@@ -325,6 +370,66 @@ describe("platform container contract", () => {
 
     expect(records).toEqual([]);
     expect(sentinelExists).toBe(true);
+  });
+
+  test("gives a remote Docker context precedence over a local Docker host", async () => {
+    const { records, sentinelExists } = await runSmokeWithFakeDocker({
+      DOCKER_CONTEXT: "remote-context",
+      DOCKER_HOST: "npipe:////./pipe/docker_engine",
+    });
+
+    expect(records.map(({ command }) => command)).toEqual(["context"]);
+    expect(records[0]).toMatchObject({
+      dockerContext: "remote-context",
+      dockerHost: "",
+    });
+    expect(records.some(({ args }) => args[0] === "compose")).toBe(false);
+    expect(sentinelExists).toBe(true);
+  });
+
+  test("recognizes a mixed-case remote Docker context before mutation", async () => {
+    const { records, sentinelExists } = await runSmokeWithFakeDocker({
+      Docker_Context: "remote-context",
+      Docker_Host: "npipe:////./pipe/docker_engine",
+    });
+
+    expect(records.map(({ command }) => command)).toEqual(["context"]);
+    expect(records[0]).toMatchObject({
+      dockerContext: "remote-context",
+      dockerHost: "",
+    });
+    expect(records.some(({ args }) => args[0] === "compose")).toBe(false);
+    expect(sentinelExists).toBe(true);
+  });
+
+  test("rejects conflicting case-insensitive Docker selector keys", async () => {
+    const runner = String.raw`
+const module = await import(process.env.SMOKE_MODULE_URL);
+try {
+  module.canonicalizeDockerSelectors({
+    DOCKER_CONTEXT: "local-context",
+    Docker_Context: "remote-context",
+  });
+  process.exitCode = 2;
+} catch (error) {
+  process.stdout.write(error.message);
+}
+`;
+    const { stdout, stderr } = await execFileAsync(
+      process.execPath,
+      ["--input-type=module", "-e", runner],
+      {
+        cwd: repositoryRoot,
+        env: {
+          ...process.env,
+          SMOKE_MODULE_URL: new URL("../scripts/smoke.mjs", import.meta.url)
+            .href,
+        },
+      },
+    );
+
+    expect(stderr).toBe("");
+    expect(stdout).toBe("Conflicting Docker selector environment");
   });
 
   test("uses a Debian/glibc multi-stage image with immutable runtime assets", async () => {
@@ -538,10 +643,31 @@ process.stdout.write(JSON.stringify(messages));
       await rm(directory, { force: true, recursive: true });
     }
   });
+
+  test("scopes every live Compose helper to one explicit project base", async () => {
+    const source = await readFile(
+      new URL("./e2e.test.ts", import.meta.url),
+      "utf8",
+    );
+    const liveSection = source.slice(source.lastIndexOf("const liveBaseUrl ="));
+
+    expect(liveSection).toContain("const liveComposeBaseArgs = [");
+    expect(liveSection).toContain('"-p",\n  liveProject ?? "",');
+    expect(liveSection).not.toContain("const baseArgs =");
+    expect(liveSection.match(/"compose"/g)).toHaveLength(1);
+    expect(liveSection.match(/\.\.\.liveComposeBaseArgs/g)).toHaveLength(4);
+  });
 });
 
 const liveBaseUrl = process.env.PLATFORM_E2E_BASE_URL;
 const liveProject = process.env.COMPOSE_PROJECT_NAME;
+const liveComposeBaseArgs = [
+  "compose",
+  "-f",
+  composeFile,
+  "-p",
+  liveProject ?? "",
+];
 const describeLive = liveBaseUrl && liveProject ? describe : describe.skip;
 
 describeLive("running platform container", () => {
@@ -555,10 +681,9 @@ describeLive("running platform container", () => {
   });
 
   test("runs read-only as 10001 with native Argon2 available", async () => {
-    const baseArgs = ["compose", "-f", composeFile];
     const { stdout: containerId } = await execFileAsync(
       "docker",
-      [...baseArgs, "ps", "-q", "platform-api"],
+      [...liveComposeBaseArgs, "ps", "-q", "platform-api"],
       { cwd: repositoryRoot, env: process.env },
     );
     const { stdout: inspected } = await execFileAsync(
@@ -576,7 +701,7 @@ describeLive("running platform container", () => {
     const { stdout: ownership } = await execFileAsync(
       "docker",
       [
-        ...baseArgs,
+        ...liveComposeBaseArgs,
         "exec",
         "-T",
         "platform-api",
@@ -596,7 +721,7 @@ describeLive("running platform container", () => {
     const { stdout: argon } = await execFileAsync(
       "docker",
       [
-        ...baseArgs,
+        ...liveComposeBaseArgs,
         "exec",
         "-T",
         "platform-api",
@@ -619,9 +744,7 @@ describeLive("running platform container", () => {
     const { stdout } = await execFileAsync(
       "docker",
       [
-        "compose",
-        "-f",
-        composeFile,
+        ...liveComposeBaseArgs,
         "exec",
         "-T",
         "platform-postgres",
