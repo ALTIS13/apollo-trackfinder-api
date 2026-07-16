@@ -16,6 +16,10 @@ import { RegistrationService } from "./domain/registration.js";
 import { createPlatformLogger } from "./logger.js";
 import { RedisRateLimitStore, SharedRateLimiter } from "./http/rate-limit.js";
 import { createMigrationReadinessProbe } from "./readiness.js";
+import {
+  RedisConnectionReadiness,
+  combineRuntimeReadiness,
+} from "./runtime-readiness.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -70,15 +74,19 @@ async function start(): Promise<void> {
   const logger = createPlatformLogger();
   const pool = createPlatformPool(requiredEnvironment("DATABASE_URL"));
   const redis = new Redis(requiredEnvironment("APOLLO_REDIS_URL"), {
+    connectTimeout: 2_000,
     enableOfflineQueue: false,
     lazyConnect: true,
     maxRetriesPerRequest: 1,
+    retryStrategy: (attempt) => Math.min(attempt * 200, 2_000),
   });
   const repository = new PostgresPlatformRepository();
   const clock = () => new Date();
-  const readiness = createMigrationReadinessProbe(
-    pool,
-    PLATFORM_MIGRATION_MANIFEST,
+  const redisReadiness = new RedisConnectionReadiness(redis, logger);
+  redisReadiness.start();
+  const readiness = combineRuntimeReadiness(
+    redisReadiness,
+    createMigrationReadinessProbe(pool, PLATFORM_MIGRATION_MANIFEST),
   );
   const app = createPlatformApp({
     registration: new RegistrationService(pool, repository, clock),
@@ -109,7 +117,7 @@ async function start(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     server.close(() => {
-      redis.disconnect();
+      redisReadiness.stop();
       void pool.end().finally(() => process.exit(0));
     });
   };
