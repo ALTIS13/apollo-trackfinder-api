@@ -1,5 +1,7 @@
 create schema if not exists apollo_platform;
 revoke all on schema apollo_platform from public;
+alter default privileges for role apollo_platform_migrator
+  revoke execute on functions from public;
 
 create table apollo_platform.accounts (
   id uuid primary key default gen_random_uuid(),
@@ -52,7 +54,10 @@ create table apollo_platform.email_verification_tokens (
     check (btrim(token_digest) <> ''),
   constraint email_verification_tokens_expiry_check check (expires_at > created_at),
   constraint email_verification_tokens_consumed_check
-    check (consumed_at is null or consumed_at >= created_at)
+    check (
+      consumed_at is null
+      or (consumed_at >= created_at and consumed_at <= expires_at)
+    )
 );
 
 create index email_verification_tokens_account_id_idx
@@ -69,7 +74,10 @@ create table apollo_platform.password_reset_tokens (
   constraint password_reset_tokens_digest_check check (btrim(token_digest) <> ''),
   constraint password_reset_tokens_expiry_check check (expires_at > created_at),
   constraint password_reset_tokens_consumed_check
-    check (consumed_at is null or consumed_at >= created_at)
+    check (
+      consumed_at is null
+      or (consumed_at >= created_at and consumed_at <= expires_at)
+    )
 );
 
 create index password_reset_tokens_account_id_idx
@@ -144,7 +152,10 @@ create table apollo_platform.authorization_codes (
   constraint authorization_codes_nonce_check check (btrim(nonce) <> ''),
   constraint authorization_codes_expiry_check check (expires_at > created_at),
   constraint authorization_codes_consumed_check
-    check (consumed_at is null or consumed_at >= created_at)
+    check (
+      consumed_at is null
+      or (consumed_at >= created_at and consumed_at <= expires_at)
+    )
 );
 
 create index authorization_codes_account_id_idx
@@ -395,9 +406,17 @@ create trigger project_releases_immutable
 before update or delete on apollo_platform.project_releases
 for each row execute function apollo_platform.reject_immutable_change();
 
+create trigger project_releases_truncate_immutable
+before truncate on apollo_platform.project_releases
+for each statement execute function apollo_platform.reject_immutable_change();
+
 create trigger audit_events_immutable
 before update or delete on apollo_platform.audit_events
 for each row execute function apollo_platform.reject_immutable_change();
+
+create trigger audit_events_truncate_immutable
+before truncate on apollo_platform.audit_events
+for each statement execute function apollo_platform.reject_immutable_change();
 
 insert into apollo_platform.registration_settings (mode, revision)
 values ('closed', 1);

@@ -127,6 +127,27 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
     ).resolves.toEqual(SEEDED_MODULE_KEYS);
   });
 
+  test("revokes default PUBLIC execute for future migrator functions", async () => {
+    await expect(
+      scalar(
+        migrator,
+        `
+          select count(*)::text as value
+          from pg_default_acl d
+          where d.defaclrole = 'apollo_platform_migrator'::regrole
+            and d.defaclnamespace = 0
+            and d.defaclobjtype = 'f'
+            and not exists (
+              select 1
+              from aclexplode(d.defaclacl) acl
+              where acl.grantee = 0
+                and acl.privilege_type = 'EXECUTE'
+            )
+        `,
+      ),
+    ).resolves.toBe("1");
+  });
+
   test("enforces normalized unique keys, bounded invitation use, and digest-only secrets", async () => {
     await withPlatformTransaction(migrator, async (client) => {
       await setAccountContext(client, firstAccountId);
@@ -231,6 +252,48 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
     ).resolves.toBe("0");
   });
 
+  test.each([
+    [
+      "email verification token",
+      `
+        insert into apollo_platform.email_verification_tokens
+          (account_id, token_digest, expires_at, consumed_at)
+        values
+          ($1, 'sha256:verification-after-expiry',
+           now() + interval '1 hour', now() + interval '2 hours')
+      `,
+    ],
+    [
+      "password reset token",
+      `
+        insert into apollo_platform.password_reset_tokens
+          (account_id, token_digest, expires_at, consumed_at)
+        values
+          ($1, 'sha256:reset-after-expiry',
+           now() + interval '1 hour', now() + interval '2 hours')
+      `,
+    ],
+    [
+      "authorization code",
+      `
+        insert into apollo_platform.authorization_codes
+          (account_id, code_digest, client_id, redirect_uri, pkce_challenge,
+           nonce, expires_at, consumed_at)
+        values
+          ($1, 'sha256:code-after-expiry', 'test-client',
+           'https://client.example/callback', 'test-pkce-challenge', 'test-nonce',
+           now() + interval '1 hour', now() + interval '2 hours')
+      `,
+    ],
+  ])("rejects a consumed %s after expiry", async (_name, sql) => {
+    await expect(
+      withPlatformTransaction(migrator, async (client) => {
+        await setAccountContext(client, firstAccountId);
+        await client.query(sql, [firstAccountId]);
+      }),
+    ).rejects.toMatchObject({ code: "23514" });
+  });
+
   test("default-denies account rows and gives runtime no ownership or bypass", async () => {
     await expect(
       scalar(
@@ -323,6 +386,54 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
     ).rejects.toBeDefined();
   });
 
+  test("blocks runtime cross-account inserts with RLS WITH CHECK", async () => {
+    await expect(
+      withPlatformTransaction(runtime, async (client) => {
+        await setAccountContext(client, firstAccountId);
+        await client.query(
+          `
+            insert into apollo_platform.auth_sessions
+              (account_id, session_digest, audience, expires_at)
+            values
+              ($1, 'sha256:cross-account-insert', 'product',
+               now() + interval '1 hour')
+          `,
+          [secondAccountId],
+        );
+      }),
+    ).rejects.toMatchObject({ code: "42501" });
+  });
+
+  test("blocks runtime account-id changes with RLS WITH CHECK", async () => {
+    await withPlatformTransaction(runtime, async (client) => {
+      await setAccountContext(client, firstAccountId);
+      await client.query(
+        `
+          insert into apollo_platform.auth_sessions
+            (account_id, session_digest, audience, expires_at)
+          values
+            ($1, 'sha256:account-id-update', 'product',
+             now() + interval '1 hour')
+        `,
+        [firstAccountId],
+      );
+    });
+
+    await expect(
+      withPlatformTransaction(runtime, async (client) => {
+        await setAccountContext(client, firstAccountId);
+        await client.query(
+          `
+            update apollo_platform.auth_sessions
+            set account_id = $1
+            where session_digest = 'sha256:account-id-update'
+          `,
+          [secondAccountId],
+        );
+      }),
+    ).rejects.toMatchObject({ code: "42501" });
+  });
+
   test("keeps registration revisions increasing and audit/release evidence immutable", async () => {
     await expect(
       migrator.query(
@@ -384,5 +495,17 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
         [release.rows[0]!.id],
       ),
     ).rejects.toBeDefined();
+  });
+
+  test("rejects truncating audit evidence as the migrator", async () => {
+    await expect(
+      migrator.query("truncate table apollo_platform.audit_events"),
+    ).rejects.toMatchObject({ code: "55000" });
+  });
+
+  test("rejects truncating release evidence as the migrator", async () => {
+    await expect(
+      migrator.query("truncate table apollo_platform.project_releases cascade"),
+    ).rejects.toMatchObject({ code: "55000" });
   });
 });

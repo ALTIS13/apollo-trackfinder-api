@@ -18,12 +18,19 @@ type RecordedQuery = {
 };
 
 class MigrationClientDouble {
+  readonly events: string[] = [];
   readonly history = new Map<string, string>();
   readonly queries: RecordedQuery[] = [];
+  failure?: { error: Error; text: string };
   releaseCount = 0;
 
   async query(text: string, values?: readonly unknown[]): Promise<QueryResult> {
+    this.events.push(text);
     this.queries.push({ text, values });
+
+    if (this.failure?.text === text) {
+      throw this.failure.error;
+    }
 
     if (text.includes("select name, checksum")) {
       return {
@@ -41,6 +48,7 @@ class MigrationClientDouble {
   }
 
   release(): void {
+    this.events.push("release");
     this.releaseCount += 1;
   }
 }
@@ -183,6 +191,35 @@ describe("runPlatformMigrations", () => {
     ).toEqual([]);
     expect(pool.client.queries.at(-1)?.text).toContain("pg_advisory_unlock");
     expect(pool.client.releaseCount).toBe(2);
+  });
+
+  test("rolls back failed SQL without history and unlocks before release", async () => {
+    const migrationSql = "select 'broken migration';";
+    const directory = await fixtureDirectory({
+      "0001_broken.sql": migrationSql,
+    });
+    const pool = new MigrationPoolDouble();
+    const failure = new Error("migration SQL failed");
+    pool.client.failure = { error: failure, text: migrationSql };
+
+    await expect(runPlatformMigrations(asPool(pool), directory)).rejects.toBe(
+      failure,
+    );
+
+    expect(pool.client.history).toEqual(new Map());
+    expect(
+      pool.client.queries.some(({ text }) =>
+        text.includes("insert into apollo_platform.schema_migrations"),
+      ),
+    ).toBe(false);
+    expect(pool.client.queries.some(({ text }) => text === "COMMIT")).toBe(
+      false,
+    );
+    expect(pool.client.events.slice(-3)).toEqual([
+      "ROLLBACK",
+      "select pg_advisory_unlock(hashtext($1))",
+      "release",
+    ]);
   });
 });
 
