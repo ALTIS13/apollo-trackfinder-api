@@ -1,6 +1,11 @@
 import { createServer } from "node:http";
 
-import { createPlatformPool } from "@workspace/platform-db";
+import Redis from "ioredis";
+
+import {
+  PLATFORM_MIGRATION_MANIFEST,
+  createPlatformPool,
+} from "@workspace/platform-db";
 
 import { createPlatformApp } from "./app.js";
 import { EntitlementService } from "./domain/entitlements.js";
@@ -9,6 +14,8 @@ import { OperatorSessionService } from "./domain/operator-sessions.js";
 import { PostgresPlatformRepository } from "./domain/postgres-repository.js";
 import { RegistrationService } from "./domain/registration.js";
 import { createPlatformLogger } from "./logger.js";
+import { RedisRateLimitStore, SharedRateLimiter } from "./http/rate-limit.js";
+import { createMigrationReadinessProbe } from "./readiness.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -42,6 +49,15 @@ function configuredPort(): number {
   return port;
 }
 
+function configuredTrustProxyHops(): number {
+  const value = process.env.APOLLO_TRUST_PROXY_HOPS ?? "0";
+  const hops = Number(value);
+  if (!Number.isInteger(hops) || hops < 0 || hops > 2) {
+    throw new Error("APOLLO_TRUST_PROXY_HOPS must be an integer from 0 to 2");
+  }
+  return hops;
+}
+
 async function start(): Promise<void> {
   const nodeEnv = process.env.NODE_ENV ?? "development";
   const echoRequested = process.env.APOLLO_DEVELOPMENT_TOKEN_ECHO === "true";
@@ -53,22 +69,17 @@ async function start(): Promise<void> {
 
   const logger = createPlatformLogger();
   const pool = createPlatformPool(requiredEnvironment("DATABASE_URL"));
+  const redis = new Redis(requiredEnvironment("APOLLO_REDIS_URL"), {
+    enableOfflineQueue: false,
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
   const repository = new PostgresPlatformRepository();
   const clock = () => new Date();
-  const readiness = async (): Promise<boolean> => {
-    try {
-      const result = await pool.query<{
-        readonly migrations: string | null;
-        readonly settings: string | null;
-      }>(
-        "select to_regclass('apollo_platform.schema_migrations')::text as migrations, to_regclass('apollo_platform.registration_settings')::text as settings",
-      );
-      const row = result.rows[0];
-      return row?.migrations !== null && row?.settings !== null;
-    } catch {
-      return false;
-    }
-  };
+  const readiness = createMigrationReadinessProbe(
+    pool,
+    PLATFORM_MIGRATION_MANIFEST,
+  );
   const app = createPlatformApp({
     registration: new RegistrationService(pool, repository, clock),
     invitations: new InvitationService(pool, repository, clock),
@@ -80,27 +91,32 @@ async function start(): Promise<void> {
     ),
     entitlements: new EntitlementService(pool, repository, clock),
     readiness,
+    rateLimiter: new SharedRateLimiter(new RedisRateLimitStore(redis), {
+      limit: 10,
+      windowMs: 60_000,
+    }),
     allowedOrigins: configuredOrigins(
       requiredEnvironment("APOLLO_ALLOWED_ORIGINS"),
     ),
     developmentTokenEcho: nodeEnv !== "production" && echoRequested,
     logger,
+    trustProxyHops: configuredTrustProxyHops(),
   });
   const server = createServer(app);
+  const port = configuredPort();
   let shuttingDown = false;
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
     server.close(() => {
+      redis.disconnect();
       void pool.end().finally(() => process.exit(0));
     });
   };
 
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
-  server.listen(configuredPort(), () =>
-    logger.info({ port: configuredPort() }, "listening"),
-  );
+  server.listen(port, () => logger.info({ port }, "listening"));
 }
 
 void start().catch((error: unknown) => {

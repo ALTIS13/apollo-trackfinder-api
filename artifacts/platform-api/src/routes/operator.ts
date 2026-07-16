@@ -14,7 +14,12 @@ import type { EntitlementService } from "../domain/entitlements.js";
 import type { InvitationService } from "../domain/invitations.js";
 import type { OperatorSessionService } from "../domain/operator-sessions.js";
 import type { RegistrationService } from "../domain/registration.js";
-import { validationError, forbiddenError } from "../http/errors.js";
+import {
+  forbiddenError,
+  rateLimitedError,
+  validationError,
+} from "../http/errors.js";
+import type { RateLimiter } from "../http/rate-limit.js";
 import {
   ADMIN_SESSION_COOKIE,
   clearAdminCookies,
@@ -27,6 +32,12 @@ import { publicAccount } from "./public-registration.js";
 
 const uuidSchema = z.string().uuid();
 const reasonSchema = z.object({ reason: z.string().trim().min(1) }).strict();
+const entitlementBodySchema = z
+  .object({
+    expiresAt: z.string().datetime({ offset: true }).optional(),
+    reason: z.string().trim().min(1),
+  })
+  .strict();
 const bootstrapSchema = z
   .object({
     bootstrapToken: z.string().min(1),
@@ -52,6 +63,7 @@ export interface OperatorRouteDependencies {
     "bootstrap" | "login" | "authenticate" | "revoke"
   >;
   readonly entitlements: Pick<EntitlementService, "grant" | "revoke">;
+  readonly rateLimiter: RateLimiter;
   readonly allowedOrigins: readonly string[];
 }
 
@@ -81,6 +93,16 @@ function requireModuleKey(value: string | string[]): string {
   const parsed = moduleKeySchema.safeParse(value);
   if (!parsed.success) throw validationError();
   return parsed.data;
+}
+
+async function enforceRateLimit(
+  rateLimiter: RateLimiter,
+  bucket: string,
+  ip: string,
+  identity: string,
+): Promise<void> {
+  const result = await rateLimiter.consume({ bucket, ip, identity });
+  if (!result.allowed) throw rateLimitedError(result.retryAfterSeconds);
 }
 
 function invitationProjection(invitation: {
@@ -183,11 +205,19 @@ export function registerOperatorRoutes(
           .strict(),
         request.body,
       );
+      const email = input.email;
+      if (typeof email !== "string") throw validationError();
+      await enforceRateLimit(
+        dependencies.rateLimiter,
+        "login",
+        request.ip ?? "unavailable",
+        email,
+      );
       const result = await dependencies.operatorSessions.login(input, {
         correlationId: String(response.locals.requestId),
       });
-      secureAdminCookies(response, result.rawToken);
-      response.status(204).end();
+      const csrfToken = secureAdminCookies(response, result.rawToken);
+      response.status(200).json({ csrfToken });
     } catch (error) {
       next(error);
     }
@@ -287,11 +317,12 @@ export function registerOperatorRoutes(
     dependencies,
     "PUT /v1/operator/accounts/:id/entitlements/:moduleKey",
     async (request, response) => {
+      const body = parseBody(entitlementBodySchema, request.body);
       const result = await dependencies.entitlements.grant(
         parseBody(changeEntitlementRequestSchema, {
-          ...request.body,
           accountId: requirePathId(request.params.id),
           moduleKey: requireModuleKey(request.params.moduleKey),
+          ...body,
         }),
         operatorContext(response),
       );

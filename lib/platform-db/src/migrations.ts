@@ -20,6 +20,25 @@ export interface MigrationResult {
   alreadyApplied: string[];
 }
 
+export interface MigrationManifestEntry {
+  readonly name: string;
+  readonly checksum: string;
+}
+
+export const PLATFORM_MIGRATION_MANIFEST: readonly MigrationManifestEntry[] =
+  Object.freeze([
+    {
+      name: "0001_platform_identity.sql",
+      checksum:
+        "bf4295282bc99ac2f1125a7c2dd47543103b7ab2de6a9b414ef3ee14587c538a",
+    },
+    {
+      name: "0002_operator_bootstrap_guard.sql",
+      checksum:
+        "687faecc390f2369b09c414e5ee771a594af3ef05cc02a498a191a29df800217",
+    },
+  ]);
+
 export async function runPlatformMigrations(
   pool: Pool,
   directory = DEFAULT_MIGRATION_DIRECTORY,

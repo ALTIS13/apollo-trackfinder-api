@@ -1,4 +1,4 @@
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 
 import { PROTECTED_PLATFORM_ROUTES } from "@workspace/platform-contract";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -117,6 +117,9 @@ function createDependencies(
       revoke: vi.fn().mockResolvedValue({ ...entitlement, revokedAt: now }),
     },
     readiness: vi.fn().mockResolvedValue(true),
+    rateLimiter: {
+      consume: vi.fn().mockResolvedValue({ allowed: true }),
+    },
     allowedOrigins: [origin],
     bootstrapSecret: "bootstrap-secret",
     logger: {
@@ -136,10 +139,48 @@ async function startApp(dependencies = createDependencies()) {
   }
   return {
     dependencies,
+    port: address.port,
     request: (path: string, init?: RequestInit) =>
       fetch(`http://127.0.0.1:${address.port}${path}`, init),
     server,
   };
+}
+
+async function rawAppRequest(
+  path: string,
+  options: {
+    readonly method: string;
+    readonly headers?: Record<string, string>;
+    readonly body?: string;
+  },
+) {
+  const app = await startApp();
+  servers.push(app.server);
+  return new Promise<{ readonly status: number; readonly body: string }>(
+    (resolve, reject) => {
+      const request = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: app.port,
+          path,
+          method: options.method,
+          headers: options.headers,
+        },
+        (response) => {
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk: string) => {
+            body += chunk;
+          });
+          response.on("end", () =>
+            resolve({ status: response.statusCode ?? 0, body }),
+          );
+        },
+      );
+      request.on("error", reject);
+      request.end(options.body);
+    },
+  );
 }
 
 const servers: Server[] = [];
@@ -174,7 +215,7 @@ function json(body: unknown, headers: Record<string, string> = {}) {
 function adminHeaders(csrf = "csrf-token") {
   return {
     origin,
-    cookie: `__Host-apollo_admin=admin-session-secret; apollo_admin_csrf=${csrf}`,
+    cookie: `__Host-apollo_admin=admin-session-secret; __Host-apollo_admin_csrf=${csrf}`,
     "x-csrf-token": csrf,
   };
 }
@@ -264,7 +305,7 @@ describe("platform HTTP API", () => {
     });
   });
 
-  it("requires JSON and rejects oversized or non-strict public request bodies", async () => {
+  it("requires JSON for every body-bearing request while allowing empty logout", async () => {
     const { response: noJson } = await appRequest("/v1/registrations", {
       method: "POST",
       body: "not json",
@@ -291,6 +332,22 @@ describe("platform HTTP API", () => {
       ...json({ value: "a".repeat(65 * 1024) }),
     });
     expect(tooLarge.status).toBe(413);
+
+    const getWithTextBody = await rawAppRequest("/v1/registration", {
+      method: "GET",
+      headers: { "content-length": "8" },
+      body: "not json",
+    });
+    expect(getWithTextBody.status).toBe(400);
+
+    const { response: emptyLogout } = await appRequest(
+      "/v1/operator/sessions/current",
+      {
+        method: "DELETE",
+        headers: { ...adminHeaders(), "content-length": "0" },
+      },
+    );
+    expect(emptyLogout.status).toBe(204);
   });
 
   it("dispatches open registration and invitation redemption through injected services", async () => {
@@ -376,7 +433,7 @@ describe("platform HTTP API", () => {
     expect(rejected.headers.get("access-control-allow-origin")).toBeNull();
   });
 
-  it("uses secure host-only admin cookies and exact Origin protection for login", async () => {
+  it("returns a CORS-readable CSRF token with secure host-only login cookies", async () => {
     const { response: rejected } = await appRequest("/v1/operator/sessions", {
       method: "POST",
       ...json({ email: "operator@example.test", password: "password" }),
@@ -390,7 +447,10 @@ describe("platform HTTP API", () => {
         { origin },
       ),
     });
-    expect(response.status).toBe(204);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { csrfToken: string };
+    expect(body).toEqual({ csrfToken: expect.any(String) });
+    expect(JSON.stringify(body)).not.toContain("admin-session-secret");
     const cookies = response.headers.getSetCookie();
     expect(cookies).toEqual(
       expect.arrayContaining([
@@ -398,9 +458,12 @@ describe("platform HTTP API", () => {
           /^__Host-apollo_admin=admin-session-secret; Path=\/; HttpOnly; Secure; SameSite=Lax$/,
         ),
         expect.stringMatching(
-          /^apollo_admin_csrf=[^;]+; Path=\/; Secure; SameSite=Lax$/,
+          /^__Host-apollo_admin_csrf=[^;]+; Path=\/; Secure; SameSite=Lax$/,
         ),
       ]),
+    );
+    expect(cookies.join(";")).toContain(
+      `__Host-apollo_admin_csrf=${body.csrfToken};`,
     );
     expect(cookies.join(";")).not.toContain("Domain=");
   });
@@ -488,6 +551,82 @@ describe("platform HTTP API", () => {
     );
     expect(malformedId.status).toBe(400);
     expect(valid.entitlements.grant).not.toHaveBeenCalled();
+
+    const { response: conflictingEntitlement } = await appRequest(
+      `/v1/operator/accounts/${accountId}/entitlements/tf.search`,
+      {
+        method: "PUT",
+        ...json(
+          {
+            accountId: "77777777-7777-4777-8777-777777777777",
+            moduleKey: "tf.integrations",
+            reason: "Grant",
+          },
+          adminHeaders(),
+        ),
+      },
+      valid,
+    );
+    expect(conflictingEntitlement.status).toBe(400);
+    expect(valid.entitlements.grant).not.toHaveBeenCalled();
+  });
+
+  it("fails closed with a stable error when the shared limiter denies a login", async () => {
+    const rateLimiter = {
+      consume: vi
+        .fn()
+        .mockResolvedValue({ allowed: false, retryAfterSeconds: 30 }),
+    };
+    const { response, dependencies } = await appRequest(
+      "/v1/operator/sessions",
+      {
+        method: "POST",
+        ...json(
+          { email: "operator@example.test", password: "password" },
+          { origin },
+        ),
+      },
+      createDependencies({ rateLimiter }),
+    );
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("30");
+    expect(await response.json()).toEqual({
+      error: "rate_limited",
+      requestId: expect.any(String),
+    });
+    expect(dependencies.operatorSessions.login).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the shared limiter store is unavailable", async () => {
+    const rateLimiter = {
+      consume: vi.fn().mockRejectedValue(new Error("redis unavailable")),
+    };
+    const { response, dependencies } = await appRequest(
+      "/v1/operator/sessions",
+      {
+        method: "POST",
+        ...json(
+          { email: "operator@example.test", password: "password" },
+          { origin },
+        ),
+      },
+      createDependencies({ rateLimiter }),
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "policy_unavailable",
+      requestId: expect.any(String),
+    });
+    expect(dependencies.operatorSessions.login).not.toHaveBeenCalled();
+  });
+
+  it("uses an explicit fixed trust-proxy hop count", () => {
+    expect(createPlatformApp(createDependencies()).get("trust proxy")).toBe(0);
+    expect(
+      createPlatformApp(createDependencies({ trustProxyHops: 1 })).get(
+        "trust proxy",
+      ),
+    ).toBe(1);
   });
 
   it("does not emit request body, query, cookie, authorization, or secret fields in logs", async () => {

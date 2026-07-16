@@ -6,6 +6,7 @@ export class HttpError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
+    readonly retryAfterSeconds?: number,
   ) {
     super(code);
   }
@@ -17,6 +18,10 @@ export function validationError(): HttpError {
 
 export function forbiddenError(): HttpError {
   return new HttpError(403, "module_access_denied");
+}
+
+export function rateLimitedError(retryAfterSeconds?: number): HttpError {
+  return new HttpError(429, "rate_limited", retryAfterSeconds);
 }
 
 function domainStatus(code: PlatformDomainError["code"]): number {
@@ -49,6 +54,9 @@ export const platformErrorHandler: ErrorRequestHandler = (
   } else if (error instanceof HttpError) {
     status = error.status;
     code = error.code;
+    if (error.retryAfterSeconds !== undefined) {
+      response.setHeader("Retry-After", String(error.retryAfterSeconds));
+    }
   } else if (
     typeof error === "object" &&
     error !== null &&

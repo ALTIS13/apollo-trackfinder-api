@@ -7,7 +7,7 @@ import type { AuthenticatedOperator } from "../domain/operator-sessions.js";
 import { forbiddenError } from "./errors.js";
 
 export const ADMIN_SESSION_COOKIE = "__Host-apollo_admin";
-export const ADMIN_CSRF_COOKIE = "apollo_admin_csrf";
+export const ADMIN_CSRF_COOKIE = "__Host-apollo_admin_csrf";
 
 export interface OperatorAuthenticationService {
   authenticate(rawToken: string): Promise<AuthenticatedOperator>;
@@ -45,19 +45,21 @@ function hasMatchingCsrfToken(request: Request): boolean {
 export function secureAdminCookies(
   response: Response,
   sessionToken: string,
-): void {
+): string {
   response.cookie(ADMIN_SESSION_COOKIE, sessionToken, {
     httpOnly: true,
     path: "/",
     sameSite: "lax",
     secure: true,
   });
-  response.cookie(ADMIN_CSRF_COOKIE, randomUUID(), {
+  const csrfToken = randomUUID();
+  response.cookie(ADMIN_CSRF_COOKIE, csrfToken, {
     httpOnly: false,
     path: "/",
     sameSite: "lax",
     secure: true,
   });
+  return csrfToken;
 }
 
 export function clearAdminCookies(response: Response): void {

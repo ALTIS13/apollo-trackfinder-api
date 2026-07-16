@@ -9,6 +9,7 @@ import type { InvitationService } from "./domain/invitations.js";
 import type { OperatorSessionService } from "./domain/operator-sessions.js";
 import type { RegistrationService } from "./domain/registration.js";
 import { platformErrorHandler, validationError } from "./http/errors.js";
+import type { RateLimiter } from "./http/rate-limit.js";
 import { type PlatformLogger } from "./logger.js";
 import {
   REGISTERED_PROTECTED_PLATFORM_ROUTES,
@@ -35,7 +36,9 @@ export interface PlatformApiDependencies {
   >;
   readonly entitlements: Pick<EntitlementService, "grant" | "revoke">;
   readonly readiness: () => Promise<boolean>;
+  readonly rateLimiter: RateLimiter;
   readonly allowedOrigins: readonly string[];
+  readonly trustProxyHops?: number;
   readonly developmentTokenEcho?: boolean;
   readonly bootstrapSecret?: string;
   readonly logger: PlatformLogger;
@@ -59,11 +62,11 @@ function requestIdMiddleware(): RequestHandler {
 function jsonContentTypeMiddleware(): RequestHandler {
   return (request, _response, next) => {
     const requiresJson = ["POST", "PATCH", "PUT"].includes(request.method);
-    const hasDeleteBody =
-      request.method === "DELETE" &&
-      (request.get("content-length") !== undefined ||
-        request.get("transfer-encoding") !== undefined);
-    if (!requiresJson && !hasDeleteBody) return next();
+    const contentLength = Number(request.get("content-length") ?? "0");
+    const hasBody =
+      request.get("transfer-encoding") !== undefined ||
+      (Number.isFinite(contentLength) && contentLength > 0);
+    if (!requiresJson && !hasBody) return next();
     const contentType = request.get("content-type");
     if (
       contentType === undefined ||
@@ -101,6 +104,11 @@ function corsMiddleware(allowedOrigins: readonly string[]): RequestHandler {
 
 export function createPlatformApp(dependencies: PlatformApiDependencies) {
   const app = express();
+  const trustProxyHops = dependencies.trustProxyHops ?? 0;
+  if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0) {
+    throw new Error("trustProxyHops must be a non-negative integer");
+  }
+  app.set("trust proxy", trustProxyHops);
   app.locals.logger = dependencies.logger;
   app.disable("x-powered-by");
   app.use(requestIdMiddleware());
@@ -147,6 +155,7 @@ export function createPlatformApp(dependencies: PlatformApiDependencies) {
   registerPublicRegistrationRoutes(app, {
     registration: dependencies.registration,
     invitations: dependencies.invitations,
+    rateLimiter: dependencies.rateLimiter,
     developmentTokenEcho: dependencies.developmentTokenEcho === true,
   });
   registerOperatorRoutes(app, dependencies);

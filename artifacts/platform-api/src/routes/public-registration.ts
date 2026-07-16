@@ -3,7 +3,8 @@ import type { Router } from "express";
 
 import { createRegistrationRequestSchema } from "@workspace/platform-contract";
 
-import { validationError } from "../http/errors.js";
+import { rateLimitedError, validationError } from "../http/errors.js";
+import type { RateLimiter } from "../http/rate-limit.js";
 import type { InvitationService } from "../domain/invitations.js";
 import type { RegistrationService } from "../domain/registration.js";
 
@@ -17,6 +18,7 @@ export interface PublicRegistrationDependencies {
     "getStatus" | "register" | "consumeVerificationToken"
   >;
   readonly invitations: Pick<InvitationService, "redeem">;
+  readonly rateLimiter: RateLimiter;
   readonly developmentTokenEcho: boolean;
 }
 
@@ -50,6 +52,16 @@ function publicAccount(account: {
   };
 }
 
+async function enforceRateLimit(
+  rateLimiter: RateLimiter,
+  bucket: string,
+  ip: string,
+  identity: string,
+): Promise<void> {
+  const result = await rateLimiter.consume({ bucket, ip, identity });
+  if (!result.allowed) throw rateLimitedError(result.retryAfterSeconds);
+}
+
 export function registerPublicRegistrationRoutes(
   router: Router,
   dependencies: PublicRegistrationDependencies,
@@ -65,6 +77,16 @@ export function registerPublicRegistrationRoutes(
   router.post("/v1/registrations", async (request, response, next) => {
     try {
       const input = parseBody(createRegistrationRequestSchema, request.body);
+      const email = input.email;
+      if (typeof email !== "string") throw validationError();
+      await enforceRateLimit(
+        dependencies.rateLimiter,
+        input.invitationToken === undefined
+          ? "registration"
+          : "invitation-redemption",
+        request.ip ?? "unavailable",
+        email,
+      );
       const context = { correlationId: String(response.locals.requestId) };
       const { invitationToken, ...registrationInput } = input;
       const result =
@@ -91,11 +113,18 @@ export function registerPublicRegistrationRoutes(
     async (request, response, next) => {
       try {
         const input = parseBody(consumeVerificationSchema, request.body);
+        const token = input.token;
+        if (typeof token !== "string") throw validationError();
+        await enforceRateLimit(
+          dependencies.rateLimiter,
+          "verification",
+          request.ip ?? "unavailable",
+          token,
+        );
         const account =
-          await dependencies.registration.consumeVerificationToken(
-            input.token,
-            { correlationId: String(response.locals.requestId) },
-          );
+          await dependencies.registration.consumeVerificationToken(token, {
+            correlationId: String(response.locals.requestId),
+          });
         response.json({ account: publicAccount(account) });
       } catch (error) {
         next(error);

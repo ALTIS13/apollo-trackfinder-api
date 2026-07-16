@@ -609,6 +609,9 @@ importers:
       express:
         specifier: ^5.2.1
         version: 5.2.1
+      ioredis:
+        specifier: ^5.10.1
+        version: 5.10.1
       pg:
         specifier: ^8.20.0
         version: 8.20.0

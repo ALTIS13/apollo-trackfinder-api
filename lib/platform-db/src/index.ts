@@ -1,6 +1,11 @@
 import { Pool, type PoolClient } from "pg";
 
-export { runPlatformMigrations, type MigrationResult } from "./migrations.js";
+export {
+  PLATFORM_MIGRATION_MANIFEST,
+  runPlatformMigrations,
+  type MigrationManifestEntry,
+  type MigrationResult,
+} from "./migrations.js";
 
 export function createPlatformPool(connectionString: string): Pool {
   return new Pool({ connectionString });
