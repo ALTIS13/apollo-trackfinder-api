@@ -17,7 +17,9 @@ interface RecordedQuery {
 class RecordingClient {
   readonly queries: RecordedQuery[] = [];
 
-  constructor(private readonly resultRows: readonly (readonly unknown[])[] = []) {}
+  constructor(
+    private readonly resultRows: readonly (readonly unknown[])[] = [],
+  ) {}
 
   async query(text: string, values: readonly unknown[] = []) {
     const rows = this.resultRows[this.queries.length] ?? [];
@@ -101,6 +103,70 @@ const sessionRow = {
   last_seen_at: now,
 };
 
+const credentialRow = {
+  account_id: accountId,
+  password_hash: "$argon2id$v=19$m=65536,t=3,p=4$hash",
+  password_changed_at: now,
+  created_at: now,
+  updated_at: now,
+};
+
+const invitationGrantRow = {
+  invitation_id: invitationId,
+  module_id: moduleId,
+  module_key: "tf.search",
+};
+
+const moduleRow = {
+  id: moduleId,
+  module_key: "tf.search",
+  product: "trackfinder",
+  display_name: "Search",
+  state: "active",
+  description: "Search and playback metadata",
+  created_at: now,
+  updated_at: now,
+};
+
+const entitlementRow = {
+  id: "10000000-0000-4000-8000-000000000009",
+  account_id: accountId,
+  module_id: moduleId,
+  module_key: "tf.search",
+  expires_at: later,
+  revoked_at: null,
+  source: "invitation",
+  granted_by_account_id: actorAccountId,
+  reason: "module grant",
+  created_at: now,
+  updated_at: now,
+};
+
+const auditRow = {
+  id: "10000000-0000-4000-8000-000000000010",
+  actor_account_id: actorAccountId,
+  target_type: "account",
+  target_id: accountId,
+  action: "account.created",
+  correlation_id: correlationId,
+  reason: "registration approved",
+  previous_value: null,
+  new_value: { status: "active" },
+  occurred_at: now,
+};
+
+function expectQuery(
+  client: RecordingClient,
+  index: number,
+  sql: RegExp,
+  values: readonly unknown[],
+): void {
+  const query = client.queries[index];
+  expect(query, `query ${index}`).toBeDefined();
+  expect(query!.text).toMatch(sql);
+  expect(query!.values).toEqual(values);
+}
+
 describe("PostgresPlatformRepository", () => {
   it("implements the complete transaction-scoped repository boundary", () => {
     const repository: PlatformRepository = new PostgresPlatformRepository();
@@ -146,44 +212,51 @@ describe("PostgresPlatformRepository", () => {
   it("passes every caller value separately from SQL text", async () => {
     const client = new RecordingClient([
       [registrationRow],
+      [],
       [accountRow],
-      [{
-        account_id: accountId,
-        password_hash: "$argon2id$v=19$m=65536,t=3,p=4$hash",
-        password_changed_at: now,
-        created_at: now,
-        updated_at: now,
-      }],
+      [
+        {
+          account_id: accountId,
+          password_hash: "$argon2id$v=19$m=65536,t=3,p=4$hash",
+          password_changed_at: now,
+          created_at: now,
+          updated_at: now,
+        },
+      ],
       [verificationTokenRow],
       [invitationRow],
       [],
       [],
-      [{
-        id: "10000000-0000-4000-8000-000000000009",
-        account_id: accountId,
-        module_id: moduleId,
-        module_key: "tf.search",
-        expires_at: later,
-        revoked_at: null,
-        source: "invitation",
-        granted_by_account_id: actorAccountId,
-        reason: "module grant",
-        created_at: now,
-        updated_at: now,
-      }],
+      [
+        {
+          id: "10000000-0000-4000-8000-000000000009",
+          account_id: accountId,
+          module_id: moduleId,
+          module_key: "tf.search",
+          expires_at: later,
+          revoked_at: null,
+          source: "invitation",
+          granted_by_account_id: actorAccountId,
+          reason: "module grant",
+          created_at: now,
+          updated_at: now,
+        },
+      ],
       [sessionRow],
-      [{
-        id: "10000000-0000-4000-8000-000000000010",
-        actor_account_id: actorAccountId,
-        target_type: "account",
-        target_id: accountId,
-        action: "account.created",
-        correlation_id: correlationId,
-        reason: "registration approved",
-        previous_value: null,
-        new_value: { status: "active" },
-        occurred_at: now,
-      }],
+      [
+        {
+          id: "10000000-0000-4000-8000-000000000010",
+          actor_account_id: actorAccountId,
+          target_type: "account",
+          target_id: accountId,
+          action: "account.created",
+          correlation_id: correlationId,
+          reason: "registration approved",
+          previous_value: null,
+          new_value: { status: "active" },
+          occurred_at: now,
+        },
+      ],
     ]);
     const repository = new PostgresPlatformRepository();
     const passwordHash = "$argon2id$v=19$m=65536,t=3,p=4$hash";
@@ -253,6 +326,7 @@ describe("PostgresPlatformRepository", () => {
 
     expect(client.queries.map(({ values }) => values)).toEqual([
       ["invite_only", actorAccountId],
+      ["operator@example.com"],
       ["operator@example.com", "Apollo Operator"],
       [accountId, passwordHash, now],
       [accountId, verificationDigest, later],
@@ -312,6 +386,372 @@ describe("PostgresPlatformRepository", () => {
     }
   });
 
+  it("executes all 31 methods with their essential SQL and parameter behavior", async () => {
+    const passwordHash = credentialRow.password_hash;
+    const verificationDigest = "a".repeat(64);
+    const invitationDigest = "b".repeat(64);
+    const sessionDigest = "c".repeat(64);
+    const moduleIds = [moduleId];
+    const moduleKeys = ["tf.search", "tf.integrations"];
+    const newValue = { status: "active" };
+    const client = new RecordingClient([
+      [registrationRow],
+      [registrationRow],
+      [registrationRow],
+      [],
+      [accountRow],
+      [],
+      [accountRow],
+      [accountRow],
+      [accountRow],
+      [accountRow],
+      [credentialRow],
+      [credentialRow],
+      [credentialRow],
+      [verificationTokenRow],
+      [],
+      [verificationTokenRow],
+      [verificationTokenRow],
+      [invitationRow],
+      [invitationRow],
+      [],
+      [invitationGrantRow],
+      [invitationRow],
+      [invitationRow],
+      [moduleRow],
+      [entitlementRow],
+      [entitlementRow],
+      [entitlementRow],
+      [{ capability: "platform.accounts.manage" }],
+      [sessionRow],
+      [],
+      [sessionRow],
+      [sessionRow],
+      [sessionRow],
+      [{}, {}],
+      [auditRow],
+    ]);
+    const poolClient = asPoolClient(client);
+    const repository = new PostgresPlatformRepository();
+
+    await repository.getRegistrationSettings(poolClient);
+    await repository.lockRegistrationSettings(poolClient);
+    await repository.updateRegistrationSettings(poolClient, {
+      mode: "invite_only",
+      updatedByAccountId: actorAccountId,
+    });
+    await repository.findAccountByNormalizedEmail(
+      poolClient,
+      "operator@example.com",
+    );
+    await repository.createAccount(poolClient, {
+      normalizedEmail: "operator@example.com",
+      displayName: "Apollo Operator",
+    });
+    await repository.lockAccountById(poolClient, accountId);
+    await repository.updateAccountStatus(poolClient, {
+      accountId,
+      status: "suspended",
+      changedAt: later,
+    });
+    await repository.markAccountEmailVerified(poolClient, {
+      accountId,
+      verifiedAt: now,
+    });
+    await repository.createCredential(poolClient, {
+      accountId,
+      passwordHash,
+      passwordChangedAt: now,
+    });
+    await repository.findCredentialByAccountId(poolClient, accountId);
+    await repository.updateCredential(poolClient, {
+      accountId,
+      passwordHash,
+      passwordChangedAt: later,
+    });
+    await repository.createVerificationToken(poolClient, {
+      accountId,
+      tokenDigest: verificationDigest,
+      expiresAt: later,
+    });
+    await repository.lockVerificationTokenByDigest(
+      poolClient,
+      verificationDigest,
+    );
+    await repository.consumeVerificationToken(poolClient, {
+      verificationTokenId: tokenId,
+      consumedAt: now,
+    });
+    await repository.createInvitation(poolClient, {
+      tokenDigest: invitationDigest,
+      normalizedEmail: "invitee@example.com",
+      expiresAt: later,
+      usesLimit: 3,
+      createdByAccountId: actorAccountId,
+      reason: "approved access",
+    });
+    await repository.lockInvitationByDigest(poolClient, invitationDigest);
+    await repository.addInvitationGrants(poolClient, {
+      invitationId,
+      moduleIds,
+    });
+    await repository.listInvitationGrants(poolClient, invitationId);
+    await repository.incrementInvitationUse(poolClient, {
+      invitationId,
+      usedAt: now,
+    });
+    await repository.revokeInvitation(poolClient, {
+      invitationId,
+      revokedAt: later,
+    });
+    await repository.findModulesByKeys(poolClient, moduleKeys);
+    await repository.listAccountEntitlements(poolClient, accountId);
+    await repository.upsertAccountEntitlement(poolClient, {
+      accountId,
+      moduleId,
+      expiresAt: later,
+      source: "invitation",
+      grantedByAccountId: actorAccountId,
+      reason: "module grant",
+    });
+    await repository.revokeAccountEntitlement(poolClient, {
+      accountId,
+      moduleId,
+      revokedAt: later,
+      reason: "access removed",
+    });
+    await repository.listOperatorCapabilities(poolClient, accountId);
+    await repository.createSession(poolClient, {
+      accountId,
+      installationId: null,
+      sessionDigest,
+      audience: "apollo-operator",
+      expiresAt: later,
+    });
+    await repository.findSessionByDigest(poolClient, sessionDigest);
+    await repository.listSessionsForAccount(poolClient, accountId);
+    await repository.revokeSession(poolClient, {
+      sessionId,
+      revokedAt: later,
+    });
+    const revokedSessions = await repository.revokeAllSessionsForAccount(
+      poolClient,
+      { accountId, revokedAt: later },
+    );
+    await repository.insertAuditEvent(poolClient, {
+      actorAccountId,
+      targetType: "account",
+      targetId: accountId,
+      action: "account.created",
+      correlationId,
+      reason: "registration approved",
+      previousValue: null,
+      newValue,
+    });
+
+    expect(revokedSessions).toBe(2);
+    expect(client.queries).toHaveLength(35);
+    expectQuery(client, 0, /from apollo_platform\.registration_settings/i, []);
+    expectQuery(
+      client,
+      1,
+      /from apollo_platform\.registration_settings[\s\S]*for update/i,
+      [],
+    );
+    expectQuery(client, 2, /update apollo_platform\.registration_settings/i, [
+      "invite_only",
+      actorAccountId,
+    ]);
+    expectQuery(client, 3, /set_config\('app\.pre_auth_email', \$1, true\)/i, [
+      "operator@example.com",
+    ]);
+    expectQuery(
+      client,
+      4,
+      /from apollo_platform\.accounts[\s\S]*email = \$1/i,
+      ["operator@example.com"],
+    );
+    expectQuery(client, 5, /set_config\('app\.pre_auth_email', \$1, true\)/i, [
+      "operator@example.com",
+    ]);
+    expectQuery(client, 6, /insert into apollo_platform\.accounts/i, [
+      "operator@example.com",
+      "Apollo Operator",
+    ]);
+    expectQuery(
+      client,
+      7,
+      /from apollo_platform\.accounts[\s\S]*where id = \$1[\s\S]*for update/i,
+      [accountId],
+    );
+    expectQuery(client, 8, /update apollo_platform\.accounts/i, [
+      accountId,
+      "suspended",
+      later,
+    ]);
+    expectQuery(client, 9, /email_verified_at = coalesce/i, [accountId, now]);
+    expectQuery(client, 10, /insert into apollo_platform\.credentials/i, [
+      accountId,
+      passwordHash,
+      now,
+    ]);
+    expectQuery(client, 11, /from apollo_platform\.credentials/i, [accountId]);
+    expectQuery(client, 12, /update apollo_platform\.credentials/i, [
+      accountId,
+      passwordHash,
+      later,
+    ]);
+    expectQuery(
+      client,
+      13,
+      /insert into apollo_platform\.email_verification_tokens/i,
+      [accountId, verificationDigest, later],
+    );
+    expectQuery(
+      client,
+      14,
+      /set_config\('app\.verification_digest', \$1, true\)/i,
+      [verificationDigest],
+    );
+    expectQuery(
+      client,
+      15,
+      /from apollo_platform\.email_verification_tokens[\s\S]*token_digest = \$1[\s\S]*for update/i,
+      [verificationDigest],
+    );
+    expectQuery(
+      client,
+      16,
+      /update apollo_platform\.email_verification_tokens/i,
+      [tokenId, now],
+    );
+    expectQuery(client, 17, /insert into apollo_platform\.invitations/i, [
+      invitationDigest,
+      "invitee@example.com",
+      later,
+      3,
+      actorAccountId,
+      "approved access",
+    ]);
+    expectQuery(
+      client,
+      18,
+      /from apollo_platform\.invitations[\s\S]*token_digest = \$1[\s\S]*for update/i,
+      [invitationDigest],
+    );
+    expectQuery(
+      client,
+      19,
+      /insert into apollo_platform\.invitation_module_grants/i,
+      [invitationId, moduleIds],
+    );
+    expectQuery(client, 20, /from apollo_platform\.invitation_module_grants/i, [
+      invitationId,
+    ]);
+    expectQuery(client, 21, /uses_count = uses_count \+ 1/i, [
+      invitationId,
+      now,
+    ]);
+    expectQuery(client, 22, /update apollo_platform\.invitations/i, [
+      invitationId,
+      later,
+    ]);
+    expectQuery(client, 23, /from apollo_platform\.modules/i, [moduleKeys]);
+    expectQuery(
+      client,
+      24,
+      /from apollo_platform\.account_module_entitlements/i,
+      [accountId],
+    );
+    expectQuery(
+      client,
+      25,
+      /insert into apollo_platform\.account_module_entitlements/i,
+      [
+        accountId,
+        moduleId,
+        later,
+        "invitation",
+        actorAccountId,
+        "module grant",
+      ],
+    );
+    expectQuery(
+      client,
+      26,
+      /update apollo_platform\.account_module_entitlements/i,
+      [accountId, moduleId, later, "access removed"],
+    );
+    expectQuery(client, 27, /from apollo_platform\.operator_roles/i, [
+      accountId,
+    ]);
+    expectQuery(client, 28, /insert into apollo_platform\.auth_sessions/i, [
+      accountId,
+      null,
+      sessionDigest,
+      "apollo-operator",
+      later,
+    ]);
+    expectQuery(client, 29, /set_config\('app\.session_digest', \$1, true\)/i, [
+      sessionDigest,
+    ]);
+    expectQuery(
+      client,
+      30,
+      /from apollo_platform\.auth_sessions[\s\S]*session_digest = \$1/i,
+      [sessionDigest],
+    );
+    expectQuery(
+      client,
+      31,
+      /from apollo_platform\.auth_sessions[\s\S]*account_id = \$1/i,
+      [accountId],
+    );
+    expectQuery(client, 32, /update apollo_platform\.auth_sessions/i, [
+      sessionId,
+      later,
+    ]);
+    expectQuery(
+      client,
+      33,
+      /update apollo_platform\.auth_sessions[\s\S]*account_id = \$1/i,
+      [accountId, later],
+    );
+    expectQuery(client, 34, /insert into apollo_platform\.audit_events/i, [
+      actorAccountId,
+      "account",
+      accountId,
+      "account.created",
+      correlationId,
+      "registration approved",
+      null,
+      newValue,
+    ]);
+
+    const allSql = client.queries.map(({ text }) => text).join("\n");
+    for (const callerValue of [
+      actorAccountId,
+      "operator@example.com",
+      "Apollo Operator",
+      passwordHash,
+      verificationDigest,
+      invitationDigest,
+      "invitee@example.com",
+      "approved access",
+      invitationId,
+      moduleId,
+      "tf.search",
+      "tf.integrations",
+      sessionDigest,
+      "apollo-operator",
+      correlationId,
+      "account.created",
+      "registration approved",
+    ]) {
+      expect(allSql, callerValue).not.toContain(callerValue);
+    }
+  });
+
   it("uses FOR UPDATE for every lock method and maps only safe row fields", async () => {
     const hostileAccountRow = {
       ...accountRow,
@@ -322,6 +762,7 @@ describe("PostgresPlatformRepository", () => {
     const client = new RecordingClient([
       [registrationRow],
       [hostileAccountRow],
+      [],
       [verificationTokenRow],
       [invitationRow],
     ]);
@@ -343,9 +784,15 @@ describe("PostgresPlatformRepository", () => {
       "b".repeat(64),
     );
 
-    for (const query of client.queries) {
-      expect(query.text).toMatch(/\bFOR\s+UPDATE\b/i);
+    for (const queryIndex of [0, 1, 3, 4]) {
+      expect(client.queries[queryIndex]!.text).toMatch(/\bFOR\s+UPDATE\b/i);
     }
+    expectQuery(
+      client,
+      2,
+      /set_config\('app\.verification_digest', \$1, true\)/i,
+      ["a".repeat(64)],
+    );
     expect(settings).toEqual({
       id: registrationRow.id,
       mode: "invite_only",
@@ -398,17 +845,17 @@ describe("PostgresPlatformRepository", () => {
   });
 
   it.each([
-    ["23505", "conflict", "The requested resource conflicts with existing data."],
+    [
+      "23505",
+      "conflict",
+      "The requested resource conflicts with existing data.",
+    ],
     [
       "23514",
       "constraint_violation",
       "The requested operation violates a data constraint.",
     ],
-    [
-      "23503",
-      "reference_not_found",
-      "A referenced resource was not found.",
-    ],
+    ["23503", "reference_not_found", "A referenced resource was not found."],
     [
       "08006",
       "storage_unavailable",

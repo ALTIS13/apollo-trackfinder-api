@@ -454,6 +454,18 @@ create policy accounts_account_isolation on apollo_platform.accounts
   using (id = nullif(current_setting('app.account_id', true), '')::uuid)
   with check (id = nullif(current_setting('app.account_id', true), '')::uuid);
 
+create policy accounts_pre_auth_email_select on apollo_platform.accounts
+  for select to apollo_platform_runtime
+  using (
+    email = nullif(current_setting('app.pre_auth_email', true), '')
+  );
+
+create policy accounts_pre_auth_email_insert on apollo_platform.accounts
+  for insert to apollo_platform_runtime
+  with check (
+    email = nullif(current_setting('app.pre_auth_email', true), '')
+  );
+
 alter table apollo_platform.credentials enable row level security;
 alter table apollo_platform.credentials force row level security;
 create policy credentials_account_isolation on apollo_platform.credentials
@@ -471,6 +483,32 @@ create policy email_verification_tokens_account_isolation
   using (account_id = nullif(current_setting('app.account_id', true), '')::uuid)
   with check (
     account_id = nullif(current_setting('app.account_id', true), '')::uuid
+  );
+
+create policy email_verification_tokens_digest_select
+  on apollo_platform.email_verification_tokens
+  for select to apollo_platform_runtime
+  using (
+    token_digest = nullif(
+      current_setting('app.verification_digest', true),
+      ''
+    )
+  );
+
+create policy email_verification_tokens_digest_update
+  on apollo_platform.email_verification_tokens
+  for update to apollo_platform_runtime
+  using (
+    token_digest = nullif(
+      current_setting('app.verification_digest', true),
+      ''
+    )
+  )
+  with check (
+    token_digest = nullif(
+      current_setting('app.verification_digest', true),
+      ''
+    )
   );
 
 alter table apollo_platform.password_reset_tokens enable row level security;
@@ -500,6 +538,12 @@ create policy auth_sessions_account_isolation on apollo_platform.auth_sessions
   using (account_id = nullif(current_setting('app.account_id', true), '')::uuid)
   with check (
     account_id = nullif(current_setting('app.account_id', true), '')::uuid
+  );
+
+create policy auth_sessions_digest_select on apollo_platform.auth_sessions
+  for select to apollo_platform_runtime
+  using (
+    session_digest = nullif(current_setting('app.session_digest', true), '')
   );
 
 alter table apollo_platform.authorization_codes enable row level security;

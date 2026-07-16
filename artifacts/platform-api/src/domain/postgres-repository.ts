@@ -2,11 +2,7 @@ import type {
   AccountStatus,
   RegistrationMode,
 } from "@workspace/platform-contract";
-import type {
-  PoolClient,
-  QueryResult,
-  QueryResultRow,
-} from "pg";
+import type { PoolClient, QueryResult, QueryResultRow } from "pg";
 
 import type {
   Account,
@@ -52,15 +48,13 @@ export interface RepositoryError {
   readonly message: string;
 }
 
-const REPOSITORY_ERROR_MESSAGES: Readonly<
-  Record<RepositoryErrorCode, string>
-> = Object.freeze({
-  conflict: "The requested resource conflicts with existing data.",
-  constraint_violation:
-    "The requested operation violates a data constraint.",
-  reference_not_found: "A referenced resource was not found.",
-  storage_unavailable: "The storage operation could not be completed.",
-});
+const REPOSITORY_ERROR_MESSAGES: Readonly<Record<RepositoryErrorCode, string>> =
+  Object.freeze({
+    conflict: "The requested resource conflicts with existing data.",
+    constraint_violation: "The requested operation violates a data constraint.",
+    reference_not_found: "A referenced resource was not found.",
+    storage_unavailable: "The storage operation could not be completed.",
+  });
 
 export function mapRepositoryError(error: unknown): RepositoryError {
   let sqlState: string | undefined;
@@ -93,6 +87,39 @@ async function execute<Row extends QueryResultRow>(
   } catch (error) {
     throw mapRepositoryError(error);
   }
+}
+
+async function setPreAuthEmailContext(
+  client: PoolClient,
+  normalizedEmail: string,
+): Promise<void> {
+  await execute<QueryResultRow>(
+    client,
+    "select set_config('app.pre_auth_email', $1, true)",
+    [normalizedEmail],
+  );
+}
+
+async function setVerificationDigestContext(
+  client: PoolClient,
+  tokenDigest: string,
+): Promise<void> {
+  await execute<QueryResultRow>(
+    client,
+    "select set_config('app.verification_digest', $1, true)",
+    [tokenDigest],
+  );
+}
+
+async function setSessionDigestContext(
+  client: PoolClient,
+  sessionDigest: string,
+): Promise<void> {
+  await execute<QueryResultRow>(
+    client,
+    "select set_config('app.session_digest', $1, true)",
+    [sessionDigest],
+  );
 }
 
 function requireRow<Row>(rows: readonly Row[]): Row {
@@ -295,9 +322,7 @@ function mapPlatformModule(row: PlatformModuleRow): PlatformModule {
   };
 }
 
-function mapAccountEntitlement(
-  row: AccountEntitlementRow,
-): AccountEntitlement {
+function mapAccountEntitlement(row: AccountEntitlementRow): AccountEntitlement {
   return {
     id: row.id,
     accountId: row.account_id,
@@ -391,6 +416,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
     client: PoolClient,
     normalizedEmail: string,
   ): Promise<Account | null> {
+    await setPreAuthEmailContext(client, normalizedEmail);
     const result = await execute<AccountRow>(
       client,
       `select id, email, display_name, status, email_verified_at,
@@ -407,6 +433,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
     client: PoolClient,
     input: CreateAccountInput,
   ): Promise<Account> {
+    await setPreAuthEmailContext(client, input.normalizedEmail);
     const result = await execute<AccountRow>(
       client,
       `insert into apollo_platform.accounts (email, display_name)
@@ -550,6 +577,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
     client: PoolClient,
     tokenDigest: string,
   ): Promise<VerificationToken | null> {
+    await setVerificationDigestContext(client, tokenDigest);
     const result = await execute<VerificationTokenRow>(
       client,
       `select id, account_id, expires_at, consumed_at, created_at
@@ -828,6 +856,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
     client: PoolClient,
     sessionDigest: string,
   ): Promise<AuthSession | null> {
+    await setSessionDigestContext(client, sessionDigest);
     const result = await execute<SessionRow>(
       client,
       `select id, account_id, installation_id, audience, expires_at,
