@@ -5,6 +5,7 @@ import type { Pool, QueryResultRow } from "pg";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 import {
+  PLATFORM_MIGRATION_MANIFEST,
   createPlatformPool,
   runPlatformMigrations,
   setAccountContext,
@@ -93,18 +94,12 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
 
   test("installs the approved schema once with closed registration and exact seed modules", async () => {
     await expect(runPlatformMigrations(migrator)).resolves.toEqual({
-      applied: [
-        "0001_platform_identity.sql",
-        "0002_operator_bootstrap_guard.sql",
-      ],
+      applied: PLATFORM_MIGRATION_MANIFEST.map(({ name }) => name),
       alreadyApplied: [],
     });
     await expect(runPlatformMigrations(migrator)).resolves.toEqual({
       applied: [],
-      alreadyApplied: [
-        "0001_platform_identity.sql",
-        "0002_operator_bootstrap_guard.sql",
-      ],
+      alreadyApplied: PLATFORM_MIGRATION_MANIFEST.map(({ name }) => name),
     });
 
     await expect(
@@ -632,7 +627,10 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
       );
 
       await expect(runPlatformMigrations(migrator)).resolves.toEqual({
-        applied: ["0002_operator_bootstrap_guard.sql"],
+        applied: [
+          "0002_operator_bootstrap_guard.sql",
+          "0003_runtime_migration_history_read.sql",
+        ],
         alreadyApplied: ["0001_platform_identity.sql"],
       });
 

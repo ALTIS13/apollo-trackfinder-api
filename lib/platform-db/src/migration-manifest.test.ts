@@ -6,6 +6,14 @@ import { describe, expect, it } from "vitest";
 import { PLATFORM_MIGRATION_MANIFEST } from "./index.js";
 
 describe("PLATFORM_MIGRATION_MANIFEST", () => {
+  it("includes the immutable runtime migration-history grant", () => {
+    expect(PLATFORM_MIGRATION_MANIFEST.map(({ name }) => name)).toEqual([
+      "0001_platform_identity.sql",
+      "0002_operator_bootstrap_guard.sql",
+      "0003_runtime_migration_history_read.sql",
+    ]);
+  });
+
   it("matches every immutable migration file name and checksum", async () => {
     const migrationDirectory = new URL("../migrations/", import.meta.url);
     const names = (await readdir(migrationDirectory))

@@ -37,6 +37,11 @@ export const PLATFORM_MIGRATION_MANIFEST: readonly MigrationManifestEntry[] =
       checksum:
         "687faecc390f2369b09c414e5ee771a594af3ef05cc02a498a191a29df800217",
     },
+    {
+      name: "0003_runtime_migration_history_read.sql",
+      checksum:
+        "110ed2873a6c0965b30effe743ec016bad17bde58a22351736d959114c440cc9",
+    },
   ]);
 
 export async function runPlatformMigrations(

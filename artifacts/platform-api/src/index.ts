@@ -16,64 +16,17 @@ import { RegistrationService } from "./domain/registration.js";
 import { createPlatformLogger } from "./logger.js";
 import { RedisRateLimitStore, SharedRateLimiter } from "./http/rate-limit.js";
 import { createMigrationReadinessProbe } from "./readiness.js";
+import { parsePlatformRuntimeConfig } from "./runtime-config.js";
 import {
   RedisConnectionReadiness,
   combineRuntimeReadiness,
 } from "./runtime-readiness.js";
 
-function requiredEnvironment(name: string): string {
-  const value = process.env[name]?.trim();
-  if (value === undefined || value.length === 0) {
-    throw new Error(`${name} must be configured`);
-  }
-  return value;
-}
-
-function configuredOrigins(value: string): readonly string[] {
-  const origins = value
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter((origin) => origin.length > 0);
-  if (origins.length === 0)
-    throw new Error("APOLLO_ALLOWED_ORIGINS must not be empty");
-  for (const origin of origins) {
-    if (new URL(origin).origin !== origin) {
-      throw new Error("APOLLO_ALLOWED_ORIGINS entries must be exact origins");
-    }
-  }
-  return Object.freeze([...new Set(origins)]);
-}
-
-function configuredPort(): number {
-  const value = process.env.PORT ?? "3000";
-  const port = Number(value);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new Error("PORT must be a valid TCP port");
-  }
-  return port;
-}
-
-function configuredTrustProxyHops(): number {
-  const value = process.env.APOLLO_TRUST_PROXY_HOPS ?? "0";
-  const hops = Number(value);
-  if (!Number.isInteger(hops) || hops < 0 || hops > 2) {
-    throw new Error("APOLLO_TRUST_PROXY_HOPS must be an integer from 0 to 2");
-  }
-  return hops;
-}
-
 async function start(): Promise<void> {
-  const nodeEnv = process.env.NODE_ENV ?? "development";
-  const echoRequested = process.env.APOLLO_DEVELOPMENT_TOKEN_ECHO === "true";
-  if (nodeEnv === "production" && echoRequested) {
-    throw new Error(
-      "APOLLO_DEVELOPMENT_TOKEN_ECHO is prohibited in production",
-    );
-  }
-
+  const config = parsePlatformRuntimeConfig(process.env);
   const logger = createPlatformLogger();
-  const pool = createPlatformPool(requiredEnvironment("DATABASE_URL"));
-  const redis = new Redis(requiredEnvironment("APOLLO_REDIS_URL"), {
+  const pool = createPlatformPool(config.databaseUrl);
+  const redis = new Redis(config.redisUrl, {
     connectTimeout: 2_000,
     enableOfflineQueue: false,
     lazyConnect: true,
@@ -94,7 +47,7 @@ async function start(): Promise<void> {
     operatorSessions: new OperatorSessionService(
       pool,
       repository,
-      requiredEnvironment("APOLLO_OPERATOR_BOOTSTRAP_TOKEN"),
+      config.operatorBootstrapToken,
       clock,
     ),
     entitlements: new EntitlementService(pool, repository, clock),
@@ -103,15 +56,14 @@ async function start(): Promise<void> {
       limit: 10,
       windowMs: 60_000,
     }),
-    allowedOrigins: configuredOrigins(
-      requiredEnvironment("APOLLO_ALLOWED_ORIGINS"),
-    ),
-    developmentTokenEcho: nodeEnv !== "production" && echoRequested,
+    allowedOrigins: config.allowedOrigins,
+    developmentTokenEcho:
+      config.nodeEnv !== "production" && config.developmentTokenEcho,
     logger,
-    trustProxyHops: configuredTrustProxyHops(),
+    trustProxyHops: config.trustProxyHops,
   });
   const server = createServer(app);
-  const port = configuredPort();
+  const port = config.port;
   let shuttingDown = false;
   const shutdown = () => {
     if (shuttingDown) return;
