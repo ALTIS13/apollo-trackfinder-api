@@ -63,15 +63,18 @@ function knownModules(
 
   const requestedKeys = new Set(requested);
   const byKey = new Map<string, PlatformModule>();
+  const seenModuleIds = new Set<string>();
   for (const module of modules) {
     if (
       module.state !== "active" ||
       !requestedKeys.has(module.moduleKey) ||
-      byKey.has(module.moduleKey)
+      byKey.has(module.moduleKey) ||
+      seenModuleIds.has(module.id)
     ) {
       return null;
     }
     byKey.set(module.moduleKey, module);
+    seenModuleIds.add(module.id);
   }
 
   if (byKey.size !== requestedKeys.size) {

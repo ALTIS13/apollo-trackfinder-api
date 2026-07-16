@@ -266,6 +266,24 @@ describe("PolicyService", () => {
     });
   });
 
+  test("fails closed when requested module rows share an id", async () => {
+    const harness = createHarness();
+    const sharedId = harness.state.modules[0]!.id;
+    const modules = [
+      { ...harness.state.modules[0]!, id: sharedId },
+      { ...harness.state.modules[1]!, id: sharedId },
+    ];
+    harness.repository.findModulesByKeys.mockResolvedValueOnce(modules);
+    harness.repository.listAccountEntitlements.mockResolvedValueOnce(
+      modules.map((module) => entitlementFor(module)),
+    );
+
+    await expect(harness.service.evaluate(evaluateInput())).resolves.toEqual({
+      allowed: false,
+      code: "policy_unavailable",
+    });
+  });
+
   test.each([
     [
       "account id",
