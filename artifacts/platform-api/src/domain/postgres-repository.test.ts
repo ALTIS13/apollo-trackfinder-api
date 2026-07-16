@@ -642,20 +642,25 @@ describe("PostgresPlatformRepository", () => {
     expectQuery(
       client,
       19,
-      /insert into apollo_platform\.invitation_module_grants/i,
+      /insert into apollo_platform\.invitation_module_grants[\s\S]*from unnest\(\$2::uuid\[\]\) as invitation_grant\(module_id\)/i,
       [invitationId, moduleIds],
     );
-    expectQuery(client, 20, /from apollo_platform\.invitation_module_grants/i, [
-      invitationId,
-    ]);
+    expectQuery(
+      client,
+      20,
+      /from apollo_platform\.invitation_module_grants as invitation_grant[\s\S]*where invitation_grant\.invitation_id = \$1/i,
+      [invitationId],
+    );
     expectQuery(client, 21, /uses_count = uses_count \+ 1/i, [
       invitationId,
       now,
     ]);
-    expectQuery(client, 22, /update apollo_platform\.invitations/i, [
-      invitationId,
-      later,
-    ]);
+    expectQuery(
+      client,
+      22,
+      /update apollo_platform\.invitations[\s\S]*where id = \$1 and revoked_at is null/i,
+      [invitationId, later],
+    );
     expectQuery(client, 23, /from apollo_platform\.modules/i, [moduleKeys]);
     expectQuery(
       client,

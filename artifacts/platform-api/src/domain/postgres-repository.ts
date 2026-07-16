@@ -655,8 +655,8 @@ export class PostgresPlatformRepository implements PlatformRepository {
       client,
       `insert into apollo_platform.invitation_module_grants
          (invitation_id, module_id)
-       select $1, grant.module_id
-       from unnest($2::uuid[]) as grant(module_id)
+       select $1, invitation_grant.module_id
+       from unnest($2::uuid[]) as invitation_grant(module_id)
        on conflict (invitation_id, module_id) do nothing`,
       [input.invitationId, input.moduleIds],
     );
@@ -668,10 +668,10 @@ export class PostgresPlatformRepository implements PlatformRepository {
   ): Promise<readonly InvitationGrant[]> {
     const result = await execute<InvitationGrantRow>(
       client,
-      `select grant.invitation_id, grant.module_id, module.module_key
-       from apollo_platform.invitation_module_grants as grant
-       join apollo_platform.modules as module on module.id = grant.module_id
-       where grant.invitation_id = $1
+      `select invitation_grant.invitation_id, invitation_grant.module_id, module.module_key
+       from apollo_platform.invitation_module_grants as invitation_grant
+       join apollo_platform.modules as module on module.id = invitation_grant.module_id
+       where invitation_grant.invitation_id = $1
        order by module.module_key`,
       [invitationId],
     );
@@ -703,9 +703,9 @@ export class PostgresPlatformRepository implements PlatformRepository {
     const result = await execute<InvitationRow>(
       client,
       `update apollo_platform.invitations
-       set revoked_at = coalesce(revoked_at, $2),
+       set revoked_at = $2,
            updated_at = $2
-       where id = $1
+       where id = $1 and revoked_at is null
        returning id, email, expires_at, uses_limit, uses_count, revoked_at,
                  created_by_account_id, reason, created_at, updated_at`,
       [input.invitationId, input.revokedAt],

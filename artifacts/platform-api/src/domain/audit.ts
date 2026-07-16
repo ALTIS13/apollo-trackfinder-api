@@ -12,11 +12,15 @@ export const AUDIT_ACTIONS = Object.freeze({
   accountEmailVerified: "account.email_verified",
   accountActivated: "account.activated",
   accountSuspended: "account.suspended",
+  invitationCreated: "invitation.created",
+  invitationRedeemed: "invitation.redeemed",
+  invitationRevoked: "invitation.revoked",
 });
 
 export const SYSTEM_AUDIT_REASONS = Object.freeze({
   registration: "self_service_registration",
   emailVerification: "self_service_email_verification",
+  invitationRedemption: "invitation_redemption",
 });
 
 export function appendAuditEvent(
