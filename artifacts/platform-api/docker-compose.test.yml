@@ -1,0 +1,35 @@
+name: apollo-platform-db-task2-test
+
+services:
+  platform-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: platform_postgres_test
+      POSTGRES_DB: apollo_platform_test
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - platform-postgres-test-data:/var/lib/postgresql/data
+      - ./postgres/0000_roles.sql:/docker-entrypoint-initdb.d/0000_roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d apollo_platform_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  platform-redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:56379:6379"
+    volumes:
+      - platform-redis-test-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  platform-postgres-test-data:
+  platform-redis-test-data:

@@ -10,6 +10,9 @@
       "path": "./lib/platform-contract"
     },
     {
+      "path": "./lib/platform-db"
+    },
+    {
       "path": "./lib/db"
     },
     {

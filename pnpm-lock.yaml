@@ -812,6 +812,25 @@ importers:
         specifier: ^4.0.18
         version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
 
+  lib/platform-db:
+    dependencies:
+      '@workspace/platform-contract':
+        specifier: workspace:*
+        version: link:../platform-contract
+      pg:
+        specifier: ^8.20.0
+        version: 8.20.0
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 25.3.5
+      '@types/pg':
+        specifier: ^8.18.0
+        version: 8.18.0
+      vitest:
+        specifier: ^4.0.18
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
+
   scripts:
     devDependencies:
       '@types/node':
