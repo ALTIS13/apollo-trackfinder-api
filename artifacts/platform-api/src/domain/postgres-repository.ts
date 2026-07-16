@@ -898,6 +898,24 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return row === undefined ? null : mapSession(row);
   }
 
+  async lockSessionByDigest(
+    client: PoolClient,
+    sessionDigest: string,
+  ): Promise<AuthSession | null> {
+    await setSessionDigestContext(client, sessionDigest);
+    const result = await execute<SessionRow>(
+      client,
+      `select id, account_id, installation_id, audience, expires_at,
+              revoked_at, created_at, last_seen_at
+       from apollo_platform.auth_sessions
+       where session_digest = $1
+       for update`,
+      [sessionDigest],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : mapSession(row);
+  }
+
   async findSessionById(
     client: PoolClient,
     sessionId: string,

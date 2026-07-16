@@ -1,4 +1,4 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 import {
@@ -14,6 +14,7 @@ import {
   OperatorSessionService,
 } from "./operator-sessions.js";
 import { PostgresPlatformRepository } from "./postgres-repository.js";
+import type { AuthSession } from "./repository.js";
 import type { PlatformTransaction } from "./registration.js";
 
 const migratorConnectionString = process.env.PLATFORM_TEST_DATABASE_URL;
@@ -25,6 +26,40 @@ const describePostgres =
 
 const BOOTSTRAP_TOKEN = "task-6-real-postgres-bootstrap-token";
 const NOW = new Date(Date.now() + 60_000);
+
+class PausingDigestLookupRepository extends PostgresPlatformRepository {
+  readonly initialReadCompleted: Promise<void>;
+  private notifyInitialRead!: () => void;
+  private readonly mutationCommitted: Promise<void>;
+  private notifyMutationCommitted!: () => void;
+
+  constructor() {
+    super();
+    this.initialReadCompleted = new Promise((resolve) => {
+      this.notifyInitialRead = resolve;
+    });
+    this.mutationCommitted = new Promise((resolve) => {
+      this.notifyMutationCommitted = resolve;
+    });
+  }
+
+  override async findSessionByDigest(
+    client: PoolClient,
+    sessionDigest: string,
+  ): Promise<AuthSession | null> {
+    const staleSnapshot = await super.findSessionByDigest(
+      client,
+      sessionDigest,
+    );
+    this.notifyInitialRead();
+    await this.mutationCommitted;
+    return staleSnapshot;
+  }
+
+  releaseAfterMutationCommit(): void {
+    this.notifyMutationCommitted();
+  }
+}
 
 function createTransactionBarrier() {
   let arrivals = 0;
@@ -53,7 +88,7 @@ function createTransactionBarrier() {
   };
 }
 
-describePostgres("OperatorSessionService PostgreSQL bootstrap guard", () => {
+describePostgres("OperatorSessionService PostgreSQL concurrency", () => {
   let migrator: Pool;
   let firstRuntime: Pool;
   let secondRuntime: Pool;
@@ -74,7 +109,7 @@ describePostgres("OperatorSessionService PostgreSQL bootstrap guard", () => {
     ]);
   });
 
-  test("serializes two runtime bootstraps, records one terminal marker, and never clears it", async () => {
+  test("serializes bootstrap and rejects stale authentication after revoke or rotation commits", async () => {
     const barrier = createTransactionBarrier();
     const first = new OperatorSessionService(
       firstRuntime,
@@ -138,6 +173,53 @@ describePostgres("OperatorSessionService PostgreSQL bootstrap guard", () => {
     const winnerReason = winner.email.includes("first")
       ? "Task 6 initial bootstrap"
       : "Task 6 competing bootstrap";
+
+    const firstSession = await first.login(
+      { email: winner.email, password: "correct horse battery staple" },
+      { correlationId: "00000000-0000-4000-8000-000000000304" },
+    );
+    const revokeBarrierRepository = new PausingDigestLookupRepository();
+    const authenticationDuringRevoke = new OperatorSessionService(
+      firstRuntime,
+      revokeBarrierRepository,
+      BOOTSTRAP_TOKEN,
+      () => new Date(NOW),
+    ).authenticate(firstSession.rawToken);
+    await revokeBarrierRepository.initialReadCompleted;
+    try {
+      await second.revoke(firstSession.rawToken, {
+        correlationId: "00000000-0000-4000-8000-000000000305",
+      });
+    } finally {
+      revokeBarrierRepository.releaseAfterMutationCommit();
+    }
+    await expect(authenticationDuringRevoke).rejects.toMatchObject({
+      code: "invalid_credentials",
+    });
+
+    const rotationCandidate = await first.login(
+      { email: winner.email, password: "correct horse battery staple" },
+      { correlationId: "00000000-0000-4000-8000-000000000306" },
+    );
+    const rotationBarrierRepository = new PausingDigestLookupRepository();
+    const authenticationDuringRotation = new OperatorSessionService(
+      firstRuntime,
+      rotationBarrierRepository,
+      BOOTSTRAP_TOKEN,
+      () => new Date(NOW),
+    ).authenticate(rotationCandidate.rawToken);
+    await rotationBarrierRepository.initialReadCompleted;
+    try {
+      await second.login(
+        { email: winner.email, password: "correct horse battery staple" },
+        { correlationId: "00000000-0000-4000-8000-000000000307" },
+      );
+    } finally {
+      rotationBarrierRepository.releaseAfterMutationCommit();
+    }
+    await expect(authenticationDuringRotation).rejects.toMatchObject({
+      code: "invalid_credentials",
+    });
 
     const committed = await withPlatformTransaction(
       firstRuntime,
@@ -236,5 +318,5 @@ describePostgres("OperatorSessionService PostgreSQL bootstrap guard", () => {
         { correlationId: "00000000-0000-4000-8000-000000000303" },
       ),
     ).rejects.toMatchObject({ code: "invalid_credentials" });
-  }, 60_000);
+  }, 120_000);
 });

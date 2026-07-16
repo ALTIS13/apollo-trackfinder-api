@@ -16,7 +16,11 @@ import type {
   PlatformRepository,
   RegistrationSettings,
 } from "./repository.js";
-import { digestOpaqueToken, hashPassword } from "./security.js";
+import {
+  digestOpaqueToken,
+  hashPassword,
+  type PasswordVerificationResult,
+} from "./security.js";
 import type { PlatformTransaction } from "./registration.js";
 
 const ACCOUNT_ID = "00000000-0000-4000-8000-000000000001";
@@ -30,6 +34,10 @@ const PASSWORD = "correct horse battery staple";
 
 type Mutable<T> = { -readonly [Key in keyof T]: T[Key] };
 type StoredSession = Mutable<AuthSession> & { digest: string };
+type PasswordVerifier = (
+  hash: string,
+  password: string,
+) => Promise<PasswordVerificationResult>;
 
 interface SessionState {
   settings: RegistrationSettings;
@@ -87,6 +95,10 @@ function expectDomainError(error: unknown, code: PlatformDomainError["code"]) {
 function createHarness(
   passwordHash: string,
   configuredToken = BOOTSTRAP_TOKEN,
+  passwordVerification?: {
+    readonly verify: PasswordVerifier;
+    readonly dummyHash: string;
+  },
 ) {
   const timeline: string[] = [];
   const client = {
@@ -114,7 +126,9 @@ function createHarness(
   };
 
   const repository = {
-    lockRegistrationSettings: vi.fn(async () => {
+    lockRegistrationSettings: vi.fn<
+      PlatformRepository["lockRegistrationSettings"]
+    >(async () => {
       timeline.push("lockRegistrationSettings");
       return state.settings;
     }),
@@ -262,6 +276,12 @@ function createHarness(
         state.sessions.find((candidate) => candidate.digest === digest) ?? null
       );
     }),
+    lockSessionByDigest: vi.fn(async (_client, digest: string) => {
+      timeline.push("lockSessionByDigest");
+      return (
+        state.sessions.find((candidate) => candidate.digest === digest) ?? null
+      );
+    }),
     revokeSession: vi.fn(async (_client, input) => {
       timeline.push("revokeSession");
       const current = state.sessions.find(
@@ -307,6 +327,7 @@ function createHarness(
     configuredToken,
     clock,
     transaction,
+    passwordVerification,
   );
   return { service, state, repository, timeline, clock };
 }
@@ -457,6 +478,66 @@ describe("OperatorSessionService", () => {
     },
   );
 
+  test("fails closed when registration settings are missing", async () => {
+    const harness = createHarness(currentPasswordHash);
+    harness.repository.lockRegistrationSettings.mockResolvedValueOnce(null);
+
+    const error = await harness.service
+      .bootstrap(
+        {
+          bootstrapToken: BOOTSTRAP_TOKEN,
+          email: "operator@example.com",
+          displayName: "Operator",
+          password: PASSWORD,
+          reason: "initial bootstrap",
+        },
+        { correlationId: CORRELATION_ID },
+      )
+      .catch((candidate) => candidate);
+
+    expectDomainError(error, "policy_unavailable");
+    expect(harness.state.accounts).toEqual([]);
+    expect(harness.state.audits).toEqual([]);
+  });
+
+  test.each([
+    ["token equal", BOOTSTRAP_TOKEN],
+    ["token embedded", `approved ${BOOTSTRAP_TOKEN} bootstrap`],
+    ["password equal", PASSWORD],
+    ["password embedded", `approved ${PASSWORD} bootstrap`],
+    ["email equal", "OPERATOR@EXAMPLE.COM"],
+    ["email embedded", "approved Operator@Example.Com bootstrap"],
+  ])(
+    "rejects a bootstrap reason containing the full raw %s before mutation",
+    async (_scenario, reason) => {
+      const harness = createHarness(currentPasswordHash);
+      const before = structuredClone(harness.state);
+
+      const error = await harness.service
+        .bootstrap(
+          {
+            bootstrapToken: BOOTSTRAP_TOKEN,
+            email: " Operator@Example.COM ",
+            displayName: "Operator",
+            password: PASSWORD,
+            reason,
+          },
+          { correlationId: CORRELATION_ID },
+        )
+        .catch((candidate) => candidate);
+
+      expectDomainError(error, "invalid_credentials");
+      expect(harness.timeline).toEqual([]);
+      expect(harness.state).toEqual(before);
+      expect(harness.repository.createAccount).not.toHaveBeenCalled();
+      expect(
+        harness.repository.insertOperatorCapabilities,
+      ).not.toHaveBeenCalled();
+      expect(harness.repository.insertAuditEvent).not.toHaveBeenCalled();
+    },
+    30_000,
+  );
+
   test("logs in an active capable operator, rotates only admin sessions, and stores a token digest", async () => {
     const harness = createHarness(currentPasswordHash);
     harness.state.accounts.push(account());
@@ -551,18 +632,36 @@ describe("OperatorSessionService", () => {
   });
 
   test.each([
-    ["missing account", null, PASSWORD, true],
-    ["pending account", "pending", PASSWORD, true],
-    ["suspended account", "suspended", PASSWORD, true],
-    ["deleted account", "deleted", PASSWORD, true],
-    ["wrong password", "active", "wrong password", true],
-    ["no live capability", "active", PASSWORD, false],
+    ["missing account", null, false, PASSWORD, true],
+    ["pending account", "pending", true, PASSWORD, true],
+    ["suspended account", "suspended", true, PASSWORD, true],
+    ["deleted account", "deleted", true, PASSWORD, true],
+    ["credentialless account", "active", false, PASSWORD, true],
+    ["wrong password", "active", true, "wrong password", true],
+    ["no live capability", "active", true, PASSWORD, false],
   ] as const)(
-    "returns the same invalid credentials for %s",
-    async (_scenario, status, suppliedPassword, withCapability) => {
-      const harness = createHarness(currentPasswordHash);
+    "performs one verification and returns the same invalid credentials for %s",
+    async (
+      _scenario,
+      status,
+      withCredential,
+      suppliedPassword,
+      withCapability,
+    ) => {
+      const passwordVerifier = vi.fn<PasswordVerifier>(
+        async (hash, password) => ({
+          valid: hash === currentPasswordHash && password === PASSWORD,
+          needsRehash: false,
+        }),
+      );
+      const harness = createHarness(currentPasswordHash, BOOTSTRAP_TOKEN, {
+        verify: passwordVerifier,
+        dummyHash: legacyPasswordHash,
+      });
       if (status !== null) {
         harness.state.accounts.push(account({ status }));
+      }
+      if (withCredential) {
         harness.state.credentials.push({
           accountId: ACCOUNT_ID,
           passwordHash: currentPasswordHash,
@@ -586,6 +685,11 @@ describe("OperatorSessionService", () => {
         .catch((candidate) => candidate);
 
       expectDomainError(error, "invalid_credentials");
+      expect(passwordVerifier).toHaveBeenCalledOnce();
+      expect(passwordVerifier).toHaveBeenCalledWith(
+        withCredential ? currentPasswordHash : legacyPasswordHash,
+        suppliedPassword,
+      );
       expect(harness.state.sessions).toEqual([]);
       expect(harness.state.audits).toEqual([]);
     },
@@ -634,6 +738,202 @@ describe("OperatorSessionService", () => {
         .authenticate(rawToken)
         .catch((candidate) => candidate);
       expectDomainError(error, "invalid_credentials");
+    },
+  );
+
+  test.each(["suspended", "deleted"] as const)(
+    "rejects authenticate and revoke for a %s account",
+    async (status) => {
+      for (const operation of ["authenticate", "revoke"] as const) {
+        const harness = createHarness(currentPasswordHash);
+        const rawToken = `${operation}-${status}-session`;
+        harness.state.accounts.push(account({ status }));
+        harness.state.capabilities.push({
+          accountId: ACCOUNT_ID,
+          capability: OPERATOR_CAPABILITIES[0],
+        });
+        harness.state.sessions.push(session(rawToken));
+
+        const error = await (
+          operation === "authenticate"
+            ? harness.service.authenticate(rawToken)
+            : harness.service.revoke(rawToken, {
+                correlationId: CORRELATION_ID,
+              })
+        ).catch((candidate) => candidate);
+
+        expectDomainError(error, "invalid_credentials");
+        expect(harness.state.audits).toEqual([]);
+      }
+    },
+  );
+
+  test.each(["authenticate", "revoke"] as const)(
+    "%s fails closed for a non-finite clock",
+    async (operation) => {
+      const harness = createHarness(currentPasswordHash);
+      const rawToken = `${operation}-invalid-clock`;
+      harness.state.accounts.push(account());
+      harness.state.capabilities.push({
+        accountId: ACCOUNT_ID,
+        capability: OPERATOR_CAPABILITIES[0],
+      });
+      harness.state.sessions.push(session(rawToken));
+      harness.clock.mockReturnValueOnce(new Date("invalid"));
+
+      const error = await (
+        operation === "authenticate"
+          ? harness.service.authenticate(rawToken)
+          : harness.service.revoke(rawToken, { correlationId: CORRELATION_ID })
+      ).catch((candidate) => candidate);
+
+      expectDomainError(error, "policy_unavailable");
+      expect(harness.state.audits).toEqual([]);
+    },
+  );
+
+  test("revoke fails closed when storage returns a session without a revocation date", async () => {
+    const harness = createHarness(currentPasswordHash);
+    const rawToken = "missing-revocation-date";
+    harness.state.accounts.push(account());
+    harness.state.capabilities.push({
+      accountId: ACCOUNT_ID,
+      capability: OPERATOR_CAPABILITIES[0],
+    });
+    harness.state.sessions.push(session(rawToken));
+    harness.repository.revokeSession.mockResolvedValueOnce(
+      session(rawToken, { revokedAt: null }),
+    );
+
+    const error = await harness.service
+      .revoke(rawToken, { correlationId: CORRELATION_ID })
+      .catch((candidate) => candidate);
+
+    expectDomainError(error, "policy_unavailable");
+    expect(harness.state.audits).toEqual([]);
+  });
+
+  test.each([
+    ["authenticate", "expiresAt"],
+    ["authenticate", "revokedAt"],
+    ["revoke", "expiresAt"],
+    ["revoke", "revokedAt"],
+  ] as const)(
+    "%s fails closed for a non-finite session %s",
+    async (operation, dateField) => {
+      const harness = createHarness(currentPasswordHash);
+      const rawToken = `${operation}-invalid-${dateField}`;
+      harness.state.accounts.push(account());
+      harness.state.capabilities.push({
+        accountId: ACCOUNT_ID,
+        capability: OPERATOR_CAPABILITIES[0],
+      });
+      harness.state.sessions.push(
+        session(rawToken, { [dateField]: new Date("invalid") }),
+      );
+
+      const error = await (
+        operation === "authenticate"
+          ? harness.service.authenticate(rawToken)
+          : harness.service.revoke(rawToken, { correlationId: CORRELATION_ID })
+      ).catch((candidate) => candidate);
+
+      expectDomainError(error, "policy_unavailable");
+      expect(harness.state.audits).toEqual([]);
+    },
+  );
+
+  test.each([
+    [
+      "locked account identity",
+      (harness: ReturnType<typeof createHarness>) => {
+        harness.repository.lockAccountById.mockResolvedValueOnce(
+          account({ id: "00000000-0000-4000-8000-000000000099" }),
+        );
+      },
+    ],
+    [
+      "fresh session id",
+      (harness: ReturnType<typeof createHarness>) => {
+        harness.repository.lockSessionByDigest.mockResolvedValueOnce(
+          session("ignored", {
+            id: "00000000-0000-4000-8000-000000000098",
+          }),
+        );
+      },
+    ],
+    [
+      "fresh session account identity",
+      (harness: ReturnType<typeof createHarness>) => {
+        harness.repository.lockSessionByDigest.mockResolvedValueOnce(
+          session("ignored", {
+            accountId: "00000000-0000-4000-8000-000000000097",
+          }),
+        );
+      },
+    ],
+  ] as const)("fails closed for mismatched %s", async (_scenario, arrange) => {
+    const harness = createHarness(currentPasswordHash);
+    const rawToken = "identity-mismatch-session";
+    harness.state.accounts.push(account());
+    harness.state.capabilities.push({
+      accountId: ACCOUNT_ID,
+      capability: OPERATOR_CAPABILITIES[0],
+    });
+    harness.state.sessions.push(session(rawToken));
+    arrange(harness);
+
+    const error = await harness.service
+      .authenticate(rawToken)
+      .catch((candidate) => candidate);
+
+    expectDomainError(error, "policy_unavailable");
+  });
+
+  test.each(["revoke", "login rotation"])(
+    "authentication cannot succeed after %s commits after the initial digest read",
+    async (_mutation) => {
+      const harness = createHarness(currentPasswordHash);
+      const rawToken = `stale-${_mutation}-session`;
+      harness.state.accounts.push(account());
+      harness.state.capabilities.push({
+        accountId: ACCOUNT_ID,
+        capability: OPERATOR_CAPABILITIES[0],
+      });
+      harness.state.sessions.push(session(rawToken));
+      let releaseInitialRead!: () => void;
+      const mutationCommitted = new Promise<void>((resolve) => {
+        releaseInitialRead = resolve;
+      });
+      let notifyInitialRead!: () => void;
+      const initialReadCompleted = new Promise<void>((resolve) => {
+        notifyInitialRead = resolve;
+      });
+      harness.repository.findSessionByDigest.mockImplementationOnce(
+        async (_client, digest) => {
+          const stale = structuredClone(
+            harness.state.sessions.find(
+              (candidate) => candidate.digest === digest,
+            ) ?? null,
+          );
+          notifyInitialRead();
+          await mutationCommitted;
+          return stale;
+        },
+      );
+
+      const authentication = harness.service.authenticate(rawToken);
+      await initialReadCompleted;
+      harness.state.sessions[0]!.revokedAt = new Date(NOW);
+      releaseInitialRead();
+
+      await expect(authentication).rejects.toMatchObject({
+        code: "invalid_credentials",
+      });
+      expect(harness.repository.lockSessionByDigest).toHaveBeenCalledWith(
+        expect.anything(),
+        digestOpaqueToken(rawToken),
+      );
     },
   );
 

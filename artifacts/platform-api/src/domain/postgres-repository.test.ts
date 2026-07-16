@@ -201,6 +201,7 @@ describe("PostgresPlatformRepository", () => {
       "insertOperatorCapabilities",
       "createSession",
       "findSessionByDigest",
+      "lockSessionByDigest",
       "findSessionById",
       "listSessionsForAccount",
       "revokeSession",
@@ -391,7 +392,7 @@ describe("PostgresPlatformRepository", () => {
     }
   });
 
-  it("executes all 31 methods with their essential SQL and parameter behavior", async () => {
+  it("executes repository methods with their essential SQL and parameter behavior", async () => {
     const passwordHash = credentialRow.password_hash;
     const verificationDigest = "a".repeat(64);
     const invitationDigest = "b".repeat(64);
@@ -904,6 +905,39 @@ describe("PostgresPlatformRepository", () => {
     expect(allSql).not.toContain(sessionId);
     expect(allSql).not.toContain("apollo-admin");
     expect(allSql).not.toContain("initial operator bootstrap");
+  });
+
+  it("re-establishes exact digest context and locks a session by digest", async () => {
+    const sessionDigest = "d".repeat(64);
+    const client = new RecordingClient([[], [sessionRow]]);
+    const repository = new PostgresPlatformRepository();
+
+    await expect(
+      repository.lockSessionByDigest(asPoolClient(client), sessionDigest),
+    ).resolves.toEqual({
+      id: sessionId,
+      accountId,
+      installationId: null,
+      audience: "apollo-operator",
+      expiresAt: later,
+      revokedAt: null,
+      createdAt: now,
+      lastSeenAt: now,
+    });
+
+    expectQuery(client, 0, /set_config\('app\.session_digest', \$1, true\)/i, [
+      sessionDigest,
+    ]);
+    expectQuery(
+      client,
+      1,
+      /from apollo_platform\.auth_sessions[\s\S]*session_digest = \$1[\s\S]*for update$/i,
+      [sessionDigest],
+    );
+    expect(client.queries[1]!.text.match(/\bFOR\s+UPDATE\b/gi)).toHaveLength(1);
+    expect(client.queries.map(({ text }) => text).join("\n")).not.toContain(
+      sessionDigest,
+    );
   });
 
   it("makes entitlement and individual-session revocation conditional", async () => {

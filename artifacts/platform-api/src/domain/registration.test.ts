@@ -487,6 +487,9 @@ class StatefulRegistrationHarness implements PlatformRepository {
   findSessionByDigest: PlatformRepository["findSessionByDigest"] = async () =>
     this.unsupported("findSessionByDigest");
 
+  lockSessionByDigest: PlatformRepository["lockSessionByDigest"] = async () =>
+    this.unsupported("lockSessionByDigest");
+
   findSessionById: PlatformRepository["findSessionById"] = async () =>
     this.unsupported("findSessionById");
 

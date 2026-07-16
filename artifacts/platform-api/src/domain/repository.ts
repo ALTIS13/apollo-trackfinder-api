@@ -360,6 +360,10 @@ export interface PlatformRepository {
     client: PoolClient,
     sessionDigest: string,
   ): Promise<AuthSession | null>;
+  lockSessionByDigest(
+    client: PoolClient,
+    sessionDigest: string,
+  ): Promise<AuthSession | null>;
   findSessionById(
     client: PoolClient,
     sessionId: string,

@@ -15,7 +15,12 @@ import {
   SYSTEM_AUDIT_REASONS,
 } from "./audit.js";
 import { mapDomainError, platformDomainError } from "./errors.js";
-import type { Account, AuthSession, PlatformRepository } from "./repository.js";
+import type {
+  Account,
+  AuthSession,
+  Credential,
+  PlatformRepository,
+} from "./repository.js";
 import type {
   Clock,
   PlatformTransaction,
@@ -26,6 +31,7 @@ import {
   hashPassword,
   issueOpaqueToken,
   normalizeEmail,
+  type PasswordVerificationResult,
   verifyPassword,
 } from "./security.js";
 
@@ -39,6 +45,8 @@ export const OPERATOR_CAPABILITIES = Object.freeze([
 
 const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1_000;
 const ACTIVE_OPERATOR_CAPABILITIES = new Set<string>(OPERATOR_CAPABILITIES);
+const OPERATOR_LOGIN_DUMMY_PASSWORD_HASH =
+  "$argon2id$v=19$m=65536,t=3,p=4$dCrSSBd7zISZ/iAdFIAZgw$QcKE8JgsrSf9rUzxW1Xw7mwoOWF4GwOfsLjWeZVEwGQ";
 
 const requestContextSchema = z
   .object({ correlationId: z.string().uuid() })
@@ -76,6 +84,20 @@ export interface AuthenticatedOperator {
   readonly capabilities: readonly string[];
 }
 
+export interface OperatorPasswordVerification {
+  readonly verify: (
+    hash: string,
+    password: string,
+  ) => Promise<PasswordVerificationResult>;
+  readonly dummyHash: string;
+}
+
+const DEFAULT_PASSWORD_VERIFICATION: OperatorPasswordVerification =
+  Object.freeze({
+    verify: verifyPassword,
+    dummyHash: OPERATOR_LOGIN_DUMMY_PASSWORD_HASH,
+  });
+
 function invalidCredentials(): never {
   throw platformDomainError("invalid_credentials");
 }
@@ -84,6 +106,40 @@ function activeCapabilities(capabilities: readonly string[]): string[] {
   return capabilities
     .filter((capability) => ACTIVE_OPERATOR_CAPABILITIES.has(capability))
     .sort();
+}
+
+function policyUnavailable(): never {
+  throw platformDomainError("policy_unavailable");
+}
+
+function finiteClockValue(clock: Clock): Date {
+  const now = clock();
+  if (!Number.isFinite(now.getTime())) {
+    policyUnavailable();
+  }
+  return now;
+}
+
+function sessionDatesAreFinite(session: AuthSession): boolean {
+  return (
+    Number.isFinite(session.expiresAt.getTime()) &&
+    (session.revokedAt === null || Number.isFinite(session.revokedAt.getTime()))
+  );
+}
+
+function bootstrapReasonContainsSecret(
+  input: Readonly<{
+    bootstrapToken: string;
+    email: string;
+    password: string;
+    reason: string;
+  }>,
+): boolean {
+  return (
+    input.reason.includes(input.bootstrapToken) ||
+    input.reason.includes(input.password) ||
+    input.reason.toLowerCase().includes(normalizeEmail(input.email))
+  );
 }
 
 function publicSessionValue(session: AuthSession) {
@@ -103,6 +159,7 @@ export class OperatorSessionService {
     configuredBootstrapToken: string | undefined,
     private readonly clock: Clock,
     private readonly transaction: PlatformTransaction = withPlatformTransaction,
+    private readonly passwordVerification: OperatorPasswordVerification = DEFAULT_PASSWORD_VERIFICATION,
   ) {
     this.bootstrapTokenDigest =
       configuredBootstrapToken === undefined ||
@@ -130,16 +187,24 @@ export class OperatorSessionService {
     if (!timingSafeEqual(this.bootstrapTokenDigest, suppliedDigest)) {
       invalidCredentials();
     }
+    if (bootstrapReasonContainsSecret(parsedInput.data)) {
+      invalidCredentials();
+    }
 
     try {
       const passwordHash = await hashPassword(parsedInput.data.password);
       return await this.transaction(this.pool, async (client) => {
         const settings = await this.repository.lockRegistrationSettings(client);
+        if (settings === null) {
+          policyUnavailable();
+        }
         if (
-          settings === null ||
-          settings.operatorBootstrapAccountId !== null ||
-          settings.operatorBootstrapCompletedAt !== null
+          (settings.operatorBootstrapAccountId === null) !==
+          (settings.operatorBootstrapCompletedAt === null)
         ) {
+          policyUnavailable();
+        }
+        if (settings.operatorBootstrapAccountId !== null) {
           invalidCredentials();
         }
         const now = this.clock();
@@ -205,38 +270,51 @@ export class OperatorSessionService {
           client,
           normalizeEmail(parsedInput.data.email),
         );
-        if (candidate === null) {
-          invalidCredentials();
+        let account: Account | null = null;
+        let credential: Credential | null = null;
+        let capabilities: string[] = [];
+        if (candidate !== null) {
+          await setAccountContext(client, candidate.id);
+          account = await this.repository.lockAccountById(client, candidate.id);
+          credential = await this.repository.findCredentialByAccountId(
+            client,
+            candidate.id,
+          );
+          capabilities = activeCapabilities(
+            await this.repository.listOperatorCapabilities(
+              client,
+              candidate.id,
+            ),
+          );
         }
-        await setAccountContext(client, candidate.id);
-        const account = await this.repository.lockAccountById(
-          client,
-          candidate.id,
-        );
-        if (account === null || account.status !== "active") {
-          invalidCredentials();
-        }
-        const credential = await this.repository.findCredentialByAccountId(
-          client,
-          account.id,
-        );
-        if (credential === null) {
-          invalidCredentials();
-        }
-        const verification = await verifyPassword(
-          credential.passwordHash,
+
+        const credentialIsConsistent =
+          credential === null ||
+          (candidate !== null && credential.accountId === candidate.id);
+        const verification = await this.passwordVerification.verify(
+          credential !== null && credentialIsConsistent
+            ? credential.passwordHash
+            : this.passwordVerification.dummyHash,
           parsedInput.data.password,
         );
-        if (!verification.valid) {
+        if (
+          candidate !== null &&
+          ((account !== null && account.id !== candidate.id) ||
+            !credentialIsConsistent)
+        ) {
+          policyUnavailable();
+        }
+        if (
+          candidate === null ||
+          account === null ||
+          account.status !== "active" ||
+          credential === null ||
+          !verification.valid ||
+          capabilities.length === 0
+        ) {
           invalidCredentials();
         }
-        const capabilities = activeCapabilities(
-          await this.repository.listOperatorCapabilities(client, account.id),
-        );
-        if (capabilities.length === 0) {
-          invalidCredentials();
-        }
-        const now = this.clock();
+        const now = finiteClockValue(this.clock);
         if (verification.needsRehash) {
           await this.repository.updateCredential(client, {
             accountId: account.id,
@@ -299,17 +377,30 @@ export class OperatorSessionService {
           client,
           session.accountId,
         );
+        const freshSession = await this.repository.lockSessionByDigest(
+          client,
+          digest,
+        );
+        if (
+          (account !== null && account.id !== session.accountId) ||
+          freshSession === null ||
+          freshSession.id !== session.id ||
+          freshSession.accountId !== session.accountId ||
+          !sessionDatesAreFinite(freshSession)
+        ) {
+          policyUnavailable();
+        }
         const capabilities = activeCapabilities(
           await this.repository.listOperatorCapabilities(
             client,
-            session.accountId,
+            freshSession.accountId,
           ),
         );
-        const now = this.clock();
+        const now = finiteClockValue(this.clock);
         if (
-          session.audience !== APOLLO_ADMIN_AUDIENCE ||
-          session.revokedAt !== null ||
-          session.expiresAt.getTime() <= now.getTime() ||
+          freshSession.audience !== APOLLO_ADMIN_AUDIENCE ||
+          freshSession.revokedAt !== null ||
+          freshSession.expiresAt.getTime() <= now.getTime() ||
           account === null ||
           account.status !== "active" ||
           capabilities.length === 0
@@ -318,7 +409,7 @@ export class OperatorSessionService {
         }
         return {
           accountId: account.id,
-          sessionId: session.id,
+          sessionId: freshSession.id,
           capabilities,
         };
       });
@@ -349,35 +440,56 @@ export class OperatorSessionService {
           client,
           session.accountId,
         );
+        const freshSession = await this.repository.lockSessionByDigest(
+          client,
+          digest,
+        );
+        if (
+          (account !== null && account.id !== session.accountId) ||
+          freshSession === null ||
+          freshSession.id !== session.id ||
+          freshSession.accountId !== session.accountId ||
+          !sessionDatesAreFinite(freshSession)
+        ) {
+          policyUnavailable();
+        }
         const capabilities = activeCapabilities(
           await this.repository.listOperatorCapabilities(
             client,
-            session.accountId,
+            freshSession.accountId,
           ),
         );
-        const now = this.clock();
+        const now = finiteClockValue(this.clock);
         if (
-          session.audience !== APOLLO_ADMIN_AUDIENCE ||
-          session.revokedAt !== null ||
-          session.expiresAt.getTime() <= now.getTime() ||
+          freshSession.audience !== APOLLO_ADMIN_AUDIENCE ||
+          freshSession.revokedAt !== null ||
+          freshSession.expiresAt.getTime() <= now.getTime() ||
           account === null ||
           account.status !== "active" ||
           capabilities.length === 0
         ) {
           invalidCredentials();
         }
-        const previousValue = publicSessionValue(session);
+        const previousValue = publicSessionValue(freshSession);
         const revoked = await this.repository.revokeSession(client, {
-          sessionId: session.id,
+          sessionId: freshSession.id,
           revokedAt: now,
         });
         if (revoked === null) {
           invalidCredentials();
         }
+        if (
+          revoked.id !== freshSession.id ||
+          revoked.accountId !== freshSession.accountId ||
+          revoked.revokedAt === null ||
+          !sessionDatesAreFinite(revoked)
+        ) {
+          policyUnavailable();
+        }
         await appendAuditEvent(this.repository, client, {
           actorAccountId: account.id,
           targetType: "auth_session",
-          targetId: session.id,
+          targetId: freshSession.id,
           action: AUDIT_ACTIONS.operatorSessionRevoked,
           correlationId: parsedContext.data.correlationId,
           reason: SYSTEM_AUDIT_REASONS.operatorLogout,

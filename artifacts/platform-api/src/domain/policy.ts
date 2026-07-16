@@ -68,6 +68,7 @@ function knownModules(
 }
 
 function entitlementStateIsConsistent(
+  accountId: string,
   requested: ReadonlySet<string>,
   modules: ReadonlyMap<string, PlatformModule>,
   entitlements: readonly AccountEntitlement[],
@@ -78,6 +79,7 @@ function entitlementStateIsConsistent(
     const module = modules.get(entitlement.moduleKey);
     if (
       module === undefined ||
+      entitlement.accountId !== accountId ||
       module.id !== entitlement.moduleId ||
       seen.has(entitlement.moduleKey) ||
       (entitlement.expiresAt !== null &&
@@ -125,6 +127,14 @@ export class PolicyService {
         ) {
           return policyUnavailable();
         }
+        if (
+          (account !== null && account.id !== parsed.data.accountId) ||
+          (session !== null &&
+            (session.id !== parsed.data.sessionId ||
+              session.accountId !== parsed.data.accountId))
+        ) {
+          return policyUnavailable();
+        }
         const modules = knownModules(
           requiredModules,
           await this.repository.findModulesByKeys(client, requiredModules),
@@ -138,7 +148,12 @@ export class PolicyService {
         );
         const requestedSet = new Set(requiredModules);
         if (
-          !entitlementStateIsConsistent(requestedSet, modules, entitlements)
+          !entitlementStateIsConsistent(
+            parsed.data.accountId,
+            requestedSet,
+            modules,
+            entitlements,
+          )
         ) {
           return policyUnavailable();
         }

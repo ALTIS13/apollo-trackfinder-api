@@ -245,6 +245,64 @@ describe("PolicyService", () => {
     });
   });
 
+  test.each([
+    [
+      "account id",
+      (harness: ReturnType<typeof createHarness>) => {
+        harness.repository.lockAccountById.mockResolvedValueOnce(
+          activeAccount({
+            id: "00000000-0000-4000-8000-000000000291",
+          }),
+        );
+      },
+    ],
+    [
+      "session id",
+      (harness: ReturnType<typeof createHarness>) => {
+        harness.repository.findSessionById.mockResolvedValueOnce(
+          authSession({
+            id: "00000000-0000-4000-8000-000000000292",
+          }),
+        );
+      },
+    ],
+    [
+      "session account id",
+      (harness: ReturnType<typeof createHarness>) => {
+        harness.repository.findSessionById.mockResolvedValueOnce(
+          authSession({
+            accountId: "00000000-0000-4000-8000-000000000293",
+          }),
+        );
+      },
+    ],
+    [
+      "entitlement account id",
+      (harness: ReturnType<typeof createHarness>) => {
+        harness.repository.listAccountEntitlements.mockResolvedValueOnce([
+          entitlementFor(harness.state.modules[0]!, {
+            accountId: "00000000-0000-4000-8000-000000000294",
+          }),
+        ]);
+      },
+    ],
+  ] as const)(
+    "fails closed for mismatched repository %s",
+    async (_scenario, arrange) => {
+      const harness = createHarness();
+      arrange(harness);
+
+      await expect(
+        harness.service.evaluate(
+          evaluateInput({ requiredModules: ["tf.search"] }),
+        ),
+      ).resolves.toEqual({
+        allowed: false,
+        code: "policy_unavailable",
+      });
+    },
+  );
+
   test("fails closed for an invalid session expiry returned by the repository", async () => {
     const harness = createHarness();
     harness.state.session = authSession({ expiresAt: new Date("invalid") });
