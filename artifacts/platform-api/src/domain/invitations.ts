@@ -47,6 +47,10 @@ export type {
 const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1_000;
 const INITIAL_GRANT_REASON = "invitation_initial_grant";
 
+type OpaqueTokenIssuer = (
+  byteLength: number,
+) => ReturnType<typeof issueOpaqueToken>;
+
 const requestContextSchema = z
   .object({ correlationId: z.string().uuid() })
   .strict();
@@ -233,6 +237,7 @@ export class InvitationService {
     private readonly repository: PlatformRepository,
     private readonly clock: Clock,
     private readonly transaction: PlatformTransaction = withPlatformTransaction,
+    private readonly invitationTokenIssuer: OpaqueTokenIssuer = issueOpaqueToken,
   ) {}
 
   async create(
@@ -242,9 +247,9 @@ export class InvitationService {
     const parsedInput = requireCreateInput(input);
     const parsedOperator = requireOperatorContext(operator);
     const expiresAt = new Date(parsedInput.expiresAt);
-    const issuedToken = issueOpaqueToken(32);
 
     try {
+      const issuedToken = this.invitationTokenIssuer(32);
       const invitation = await this.transaction(this.pool, async (client) => {
         const foundModules = await this.repository.findModulesByKeys(
           client,

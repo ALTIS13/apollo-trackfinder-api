@@ -577,6 +577,40 @@ describe("InvitationService create and inspect", () => {
     expectAuditRedacted(harness.state.audits[0]);
   });
 
+  test("maps invitation token issuance failures before opening a transaction", async () => {
+    const harness = new InvitationHarness();
+    const issuerFailureMessage = "CSPRNG provider exposed internal state";
+    const service = new InvitationService(
+      FAKE_POOL,
+      harness,
+      harness.clock,
+      harness.transaction,
+      () => {
+        throw new Error(issuerFailureMessage);
+      },
+    );
+
+    const error = await captureError(
+      service.create(
+        {
+          expiresAt: EXPIRES_AT.toISOString(),
+          usesLimit: 1,
+          moduleKeys: ["tf.search"],
+          reason: "Issuer failure",
+        },
+        OPERATOR,
+      ),
+    );
+
+    expectDomainError(error, "policy_unavailable");
+    expect((error as Error).message).not.toContain(issuerFailureMessage);
+    expect(harness.transactionCount).toBe(0);
+    expect(harness.operations).toEqual([]);
+    expect(harness.state.invitations).toEqual([]);
+    expect(harness.state.grants).toEqual([]);
+    expect(harness.state.audits).toEqual([]);
+  });
+
   test.each([
     ["unknown", ["tf.search", "tf.unknown"]],
     ["disabled", ["tf.downloads"]],

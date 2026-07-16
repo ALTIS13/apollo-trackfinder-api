@@ -9,9 +9,8 @@ import {
 } from "@workspace/platform-db";
 
 import { PlatformDomainError } from "./errors.js";
-import { InvitationService } from "./invitations.js";
+import { InvitationService, type PlatformTransaction } from "./invitations.js";
 import { PostgresPlatformRepository } from "./postgres-repository.js";
-import { digestOpaqueToken } from "./security.js";
 
 const migratorConnectionString = process.env.PLATFORM_TEST_DATABASE_URL;
 const runtimeConnectionString = process.env.PLATFORM_TEST_RUNTIME_DATABASE_URL;
@@ -20,11 +19,55 @@ const describePostgres =
     ? describe.sequential
     : describe.skip;
 
-const NOW = new Date("2026-07-16T10:00:00.000Z");
-const EXPIRES_AT = new Date("2026-07-17T10:00:00.000Z");
+const NOW = new Date(Date.now() + 60_000);
+const EXPIRES_AT = new Date(NOW.getTime() + 24 * 60 * 60 * 1_000);
 const CORRELATION_ID = "00000000-0000-4000-8000-000000000100";
 const SECOND_CORRELATION_ID = "00000000-0000-4000-8000-000000000101";
-const INVITEE_EMAIL = "task-5-concurrent-invitee@example.com";
+const CANDIDATE_EMAILS = [
+  "task-5-concurrent-first@example.com",
+  "task-5-concurrent-second@example.com",
+] as const;
+
+function createTransactionBarrier() {
+  let arrivalCount = 0;
+  const pools = new Set<Pool>();
+  const clients = new Set<unknown>();
+  let notifyAllReached!: () => void;
+  const allReached = new Promise<void>((resolve) => {
+    notifyAllReached = resolve;
+  });
+  let releaseTransactions!: () => void;
+  const released = new Promise<void>((resolve) => {
+    releaseTransactions = resolve;
+  });
+
+  const transaction: PlatformTransaction = (pool, callback) =>
+    withPlatformTransaction(pool, async (client) => {
+      arrivalCount += 1;
+      pools.add(pool);
+      clients.add(client);
+      if (arrivalCount === 2) {
+        notifyAllReached();
+      }
+      await released;
+      return callback(client);
+    });
+
+  return {
+    transaction,
+    allReached,
+    release: releaseTransactions,
+    get arrivalCount() {
+      return arrivalCount;
+    },
+    get poolCount() {
+      return pools.size;
+    },
+    get clientCount() {
+      return clients.size;
+    },
+  };
+}
 
 describePostgres("InvitationService concurrent PostgreSQL redemption", () => {
   let migrator: Pool;
@@ -50,7 +93,7 @@ describePostgres("InvitationService concurrent PostgreSQL redemption", () => {
     ]);
   });
 
-  test("uses independent transactions so exactly one uses_limit=1 redemption commits", async () => {
+  test("serializes two synchronized unbound uses_limit=1 redemptions", async () => {
     const operator = await withPlatformTransaction(
       setupRuntime,
       async (client) => {
@@ -72,7 +115,6 @@ describePostgres("InvitationService concurrent PostgreSQL redemption", () => {
     );
     const created = await setupService.create(
       {
-        email: INVITEE_EMAIL,
         expiresAt: EXPIRES_AT.toISOString(),
         usesLimit: 1,
         moduleKeys: ["tf.search", "tf.collections"],
@@ -80,30 +122,51 @@ describePostgres("InvitationService concurrent PostgreSQL redemption", () => {
       },
       { accountId: operator.id, correlationId: CORRELATION_ID },
     );
+    expect(created.invitation.emailBound).toBe(false);
 
+    const barrier = createTransactionBarrier();
     const firstService = new InvitationService(
       firstRuntime,
       repository,
       () => new Date(NOW),
+      barrier.transaction,
     );
     const secondService = new InvitationService(
       secondRuntime,
       repository,
       () => new Date(NOW),
+      barrier.transaction,
     );
-    const input = {
-      invitationToken: created.rawToken,
-      email: INVITEE_EMAIL,
-      displayName: "Concurrent Invitee",
-      password: "correct horse battery staple",
-    };
+    const redemptionPromises = [
+      firstService.redeem(
+        {
+          invitationToken: created.rawToken,
+          email: CANDIDATE_EMAILS[0],
+          displayName: "Concurrent Invitee One",
+          password: "correct horse battery staple",
+        },
+        { correlationId: CORRELATION_ID },
+      ),
+      secondService.redeem(
+        {
+          invitationToken: created.rawToken,
+          email: CANDIDATE_EMAILS[1],
+          displayName: "Concurrent Invitee Two",
+          password: "correct horse battery staple",
+        },
+        {
+          correlationId: SECOND_CORRELATION_ID,
+        },
+      ),
+    ] as const;
 
-    const outcomes = await Promise.allSettled([
-      firstService.redeem(input, { correlationId: CORRELATION_ID }),
-      secondService.redeem(input, {
-        correlationId: SECOND_CORRELATION_ID,
-      }),
-    ]);
+    await barrier.allReached;
+    expect(barrier.arrivalCount).toBe(2);
+    expect(barrier.poolCount).toBe(2);
+    expect(barrier.clientCount).toBe(2);
+    barrier.release();
+
+    const outcomes = await Promise.allSettled(redemptionPromises);
     const winners = outcomes.filter(
       (outcome) => outcome.status === "fulfilled",
     );
@@ -126,17 +189,21 @@ describePostgres("InvitationService concurrent PostgreSQL redemption", () => {
       throw new Error("Expected one fulfilled redemption");
     }
     const accountId = winner.value.account.id;
+    expect(CANDIDATE_EMAILS).toContain(winner.value.account.email);
+
     const committed = await withPlatformTransaction(
       setupRuntime,
       async (client) => {
-        const account = await repository.findAccountByNormalizedEmail(
-          client,
-          INVITEE_EMAIL,
-        );
-        const accountCount = await client.query<{ count: string }>(
-          "select count(*)::text as count from apollo_platform.accounts where email = $1",
-          [INVITEE_EMAIL],
-        );
+        const candidateAccounts = [];
+        for (const email of CANDIDATE_EMAILS) {
+          const account = await repository.findAccountByNormalizedEmail(
+            client,
+            email,
+          );
+          if (account !== null) {
+            candidateAccounts.push(account);
+          }
+        }
         await setAccountContext(client, accountId);
         const credentialCount = await client.query<{ count: string }>(
           "select count(*)::text as count from apollo_platform.credentials where account_id = $1",
@@ -155,19 +222,24 @@ describePostgres("InvitationService concurrent PostgreSQL redemption", () => {
           stable_reason: boolean;
         }>(
           `select count(*)::text as count,
-                    array_agg(module.module_key order by module.module_key) as module_keys,
-                    bool_and(entitlement.source = 'invitation') as invitation_source,
-                    bool_and(entitlement.granted_by_account_id = $2) as correct_grantor,
-                    bool_and(entitlement.expires_at is null) as no_expiry,
-                    bool_and(entitlement.reason = 'invitation_initial_grant') as stable_reason
-             from apollo_platform.account_module_entitlements as entitlement
-             join apollo_platform.modules as module on module.id = entitlement.module_id
-             where entitlement.account_id = $1`,
+                  array_agg(module.module_key order by module.module_key) as module_keys,
+                  bool_and(entitlement.source = 'invitation') as invitation_source,
+                  bool_and(entitlement.granted_by_account_id = $2) as correct_grantor,
+                  bool_and(entitlement.expires_at is null) as no_expiry,
+                  bool_and(entitlement.reason = 'invitation_initial_grant') as stable_reason
+           from apollo_platform.account_module_entitlements as entitlement
+           join apollo_platform.modules as module on module.id = entitlement.module_id
+           where entitlement.account_id = $1`,
           [accountId, operator.id],
         );
-        const invitation = await repository.lockInvitationByDigest(
-          client,
-          digestOpaqueToken(created.rawToken),
+        const invitation = await client.query<{
+          uses_count: number;
+          uses_limit: number;
+        }>(
+          `select uses_count, uses_limit
+           from apollo_platform.invitations
+           where id = $1`,
+          [created.invitation.id],
         );
         const invitationGrantCount = await client.query<{ count: string }>(
           "select count(*)::text as count from apollo_platform.invitation_module_grants where invitation_id = $1",
@@ -175,48 +247,37 @@ describePostgres("InvitationService concurrent PostgreSQL redemption", () => {
         );
         const redemptionAuditCount = await client.query<{ count: string }>(
           `select count(*)::text as count
-             from apollo_platform.audit_events
-             where target_type = 'invitation'
-               and target_id = $1
-               and action = 'invitation.redeemed'`,
+           from apollo_platform.audit_events
+           where target_type = 'invitation'
+             and target_id = $1
+             and action = 'invitation.redeemed'`,
           [created.invitation.id],
         );
         return {
-          account,
-          accountCount: Number(accountCount.rows[0]?.count),
-          credentialCount: Number(credentialCount.rows[0]?.count),
-          verificationCount: Number(verificationCount.rows[0]?.count),
-          entitlementSet: {
-            count: Number(entitlementSet.rows[0]?.count),
-            moduleKeys: entitlementSet.rows[0]?.module_keys,
-            invitationSource: entitlementSet.rows[0]?.invitation_source,
-            correctGrantor: entitlementSet.rows[0]?.correct_grantor,
-            noExpiry: entitlementSet.rows[0]?.no_expiry,
-            stableReason: entitlementSet.rows[0]?.stable_reason,
-          },
-          invitation,
-          invitationGrantCount: Number(invitationGrantCount.rows[0]?.count),
-          redemptionAuditCount: Number(redemptionAuditCount.rows[0]?.count),
+          candidateAccounts,
+          credentialCount: credentialCount.rows[0]?.count,
+          verificationCount: verificationCount.rows[0]?.count,
+          entitlementSet: entitlementSet.rows[0],
+          invitation: invitation.rows,
+          invitationGrantCount: invitationGrantCount.rows[0]?.count,
+          redemptionAuditCount: redemptionAuditCount.rows[0]?.count,
         };
       },
     );
 
-    expect(committed).toMatchObject({
-      account: { id: accountId, status: "pending" },
-      accountCount: 1,
-      credentialCount: 1,
-      verificationCount: 1,
-      entitlementSet: {
-        count: 2,
-        moduleKeys: ["tf.collections", "tf.search"],
-        invitationSource: true,
-        correctGrantor: true,
-        noExpiry: true,
-        stableReason: true,
-      },
-      invitation: { usesCount: 1, usesLimit: 1 },
-      invitationGrantCount: 2,
-      redemptionAuditCount: 1,
+    expect(committed.candidateAccounts).toEqual([winner.value.account]);
+    expect(committed.credentialCount).toBe("1");
+    expect(committed.verificationCount).toBe("1");
+    expect(committed.entitlementSet).toEqual({
+      count: "2",
+      module_keys: ["tf.collections", "tf.search"],
+      invitation_source: true,
+      correct_grantor: true,
+      no_expiry: true,
+      stable_reason: true,
     });
+    expect(committed.invitation).toEqual([{ uses_count: 1, uses_limit: 1 }]);
+    expect(committed.invitationGrantCount).toBe("2");
+    expect(committed.redemptionAuditCount).toBe("1");
   }, 60_000);
 });

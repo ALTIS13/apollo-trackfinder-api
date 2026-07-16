@@ -790,7 +790,9 @@ describe("PostgresPlatformRepository", () => {
     );
 
     for (const queryIndex of [0, 1, 3, 4]) {
-      expect(client.queries[queryIndex]!.text).toMatch(/\bFOR\s+UPDATE\b/i);
+      const lockSql = client.queries[queryIndex]!.text;
+      expect(lockSql.match(/\bFOR\s+UPDATE\b/gi)).toHaveLength(1);
+      expect(lockSql.trim()).toMatch(/FOR\s+UPDATE$/i);
     }
     expectQuery(
       client,
