@@ -1,0 +1,29 @@
+{
+  "name": "@workspace/platform-api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run src",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "start": "node --enable-source-maps ./dist/index.js"
+  },
+  "dependencies": {
+    "@workspace/platform-contract": "workspace:*",
+    "@workspace/platform-db": "workspace:*",
+    "argon2": "^0.44.0",
+    "cookie-parser": "^1.4.7",
+    "express": "^5.2.1",
+    "pg": "^8.20.0",
+    "pino": "^9.14.0",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.10",
+    "@types/express": "^5.0.6",
+    "@types/node": "catalog:",
+    "@types/pg": "^8.18.0",
+    "vitest": "^4.1.10"
+  }
+}
