@@ -101,7 +101,7 @@ describe("evidence visual bounds", () => {
     expect(bounds.y).toBeLessThanOrEqual(evidenceRect.y);
   });
 
-  it("includes aggregate fan extents that are not part of the owner's solid route", () => {
+  it("includes the horizontal aggregate trunk in connector visual bounds", () => {
     const geometry = buildConnectorGeometry({
       sourceX: 0,
       sourceY: 0,
@@ -109,16 +109,15 @@ describe("evidence visual bounds", () => {
       targetX: 200,
       targetY: -80,
       targetPosition: Position.Left,
-      sharedBranchLength: 0,
-      branchAttachmentY: -24,
+      sharedBranchLength: 120,
+      branchAttachmentX: 12,
       branchChannel: 1,
-      sharedFanMinimumY: -24,
-      sharedFanMaximumY: 48,
+      branchChannelY: -24,
     });
     const [routeRect] = getConnectorVisualRects(geometry, "1/мин");
 
-    expect(Math.max(...geometry.routePoints.map((point) => point.y))).toBe(-24);
-    expect(geometry.sharedRoutePoints).toContainEqual({ x: 0, y: 48 });
-    expect(routeRect!.y + routeRect!.height).toBeGreaterThan(48);
+    expect(geometry.routePoints[0]).toEqual({ x: 12, y: 0 });
+    expect(geometry.sharedRoutePoints).toContainEqual({ x: 120, y: 0 });
+    expect(routeRect!.x + routeRect!.width).toBeGreaterThan(120);
   });
 });

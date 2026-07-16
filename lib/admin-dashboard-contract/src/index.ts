@@ -117,6 +117,19 @@ export const dashboardSnapshotSchema = z
     );
     uniqueIds(snapshot.providers, "providers");
 
+    const directedEdgeRelations = new Set<string>();
+    snapshot.edges.forEach((edge, index) => {
+      const relation = `${edge.source}\u0000${edge.target}`;
+      if (directedEdgeRelations.has(relation)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate directed edge relation: ${edge.source} -> ${edge.target}`,
+          path: ["edges", index, "target"],
+        });
+      }
+      directedEdgeRelations.add(relation);
+    });
+
     snapshot.incidents.forEach((incident, index) => {
       if (!moduleIds.has(incident.serviceId)) {
         context.addIssue({

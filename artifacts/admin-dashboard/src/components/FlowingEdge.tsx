@@ -4,6 +4,7 @@ import {
   type EdgeProps,
 } from "@xyflow/react";
 import { motion } from "framer-motion";
+import { useId } from "react";
 import { buildConnectorGeometry } from "../lib/topology-connector-geometry";
 import { CONNECTOR_VISUAL_METRICS } from "../lib/topology-evidence-layout";
 import { buildStatusGradientStops } from "../lib/topology-status-gradient";
@@ -55,11 +56,10 @@ export interface FlowingEdgeData extends Record<string, unknown> {
   sharedStatusBands?: SharedStatusBand[];
   sharedBranchLength?: number;
   renderSharedTrunk?: boolean;
-  branchAttachmentY?: number;
+  branchAttachmentX?: number;
   branchChannel?: number;
+  branchChannelY?: number;
   branchApproachX?: number;
-  sharedFanMinimumY?: number;
-  sharedFanMaximumY?: number;
   evidenceLane?: number;
 }
 
@@ -71,11 +71,18 @@ function getLabelText(label: EdgeProps<TopologyFlowEdge>["label"]) {
     : undefined;
 }
 
-function getGradientId(edgeId: string): string {
-  const encodedId = edgeId.replace(/[^a-zA-Z0-9-]/g, (character) =>
-    `_${character.codePointAt(0)!.toString(16)}_`,
-  );
-  return `topology-gradient-${encodedId}`;
+function encodeGradientIdPart(value: string): string {
+  return Array.from(value, (character) =>
+    /^[a-zA-Z0-9-]$/.test(character)
+      ? character
+      : `_${character.codePointAt(0)!.toString(16)}_`,
+  ).join("");
+}
+
+function getGradientId(instanceId: string, edgeId: string): string {
+  const encodedInstance = encodeGradientIdPart(instanceId);
+  const encodedEdge = encodeGradientIdPart(edgeId);
+  return `topology-gradient-${encodedInstance.length}-${encodedInstance}-${encodedEdge.length}-${encodedEdge}`;
 }
 
 export function getEvidenceLabelText(status: HealthStatus, code?: string) {
@@ -116,6 +123,7 @@ export function getEdgeAccessibleLabel(
 }
 
 export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
+  const instanceId = useId();
   const {
     data,
     sourceX,
@@ -128,7 +136,7 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
   const status = data?.status ?? "unknown";
   const sharedStatusBands = data?.sharedStatusBands ?? [];
   const gradientStops = buildStatusGradientStops(sharedStatusBands);
-  const gradientId = getGradientId(props.id);
+  const gradientId = getGradientId(instanceId, props.id);
   const geometry = buildConnectorGeometry({
     sourceX,
     sourceY,
@@ -137,11 +145,10 @@ export function FlowingEdge(props: EdgeProps<TopologyFlowEdge>) {
     targetY,
     targetPosition,
     sharedBranchLength: data?.sharedBranchLength,
-    branchAttachmentY: data?.branchAttachmentY,
+    branchAttachmentX: data?.branchAttachmentX,
     branchChannel: data?.branchChannel,
+    branchChannelY: data?.branchChannelY,
     branchApproachX: data?.branchApproachX,
-    sharedFanMinimumY: data?.sharedFanMinimumY,
-    sharedFanMaximumY: data?.sharedFanMaximumY,
   });
   const color = edgeColors[status];
   const labelText = getLabelText(props.label);

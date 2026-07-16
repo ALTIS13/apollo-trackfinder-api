@@ -21,11 +21,10 @@ export interface ConnectorGeometryInput {
   targetY: number;
   targetPosition: Position;
   sharedBranchLength?: number;
-  branchAttachmentY?: number;
+  branchAttachmentX?: number;
   branchChannel?: number;
+  branchChannelY?: number;
   branchApproachX?: number;
-  sharedFanMinimumY?: number;
-  sharedFanMaximumY?: number;
 }
 
 export interface ConnectorGeometry {
@@ -56,11 +55,24 @@ function collapseRoutePoints(points: RoutePoint[]): RoutePoint[] {
     if (previous?.x === point.x && previous.y === point.y) return collapsed;
 
     const beforePrevious = collapsed.at(-2);
+    const horizontalMiddle =
+      beforePrevious !== undefined &&
+      previous !== undefined &&
+      beforePrevious.y === previous.y &&
+      previous.y === point.y &&
+      previous.x >= Math.min(beforePrevious.x, point.x) &&
+      previous.x <= Math.max(beforePrevious.x, point.x);
+    const verticalMiddle =
+      beforePrevious !== undefined &&
+      previous !== undefined &&
+      beforePrevious.x === previous.x &&
+      previous.x === point.x &&
+      previous.y >= Math.min(beforePrevious.y, point.y) &&
+      previous.y <= Math.max(beforePrevious.y, point.y);
     if (
       beforePrevious !== undefined &&
       previous !== undefined &&
-      ((beforePrevious.x === previous.x && previous.x === point.x) ||
-        (beforePrevious.y === previous.y && previous.y === point.y))
+      (horizontalMiddle || verticalMiddle)
     ) {
       collapsed[collapsed.length - 1] = point;
       return collapsed;
@@ -198,6 +210,7 @@ function buildFannedRoute(
   source: RoutePoint,
   target: RoutePoint,
   branchChannel: number,
+  branchChannelY: number,
   branchApproachX?: number,
 ): { points: RoutePoint[]; usedDetour: boolean } {
   const approachX =
@@ -207,7 +220,8 @@ function buildFannedRoute(
     return {
       points: [
         source,
-        { x: approachX, y: source.y },
+        { x: source.x, y: branchChannelY },
+        { x: approachX, y: branchChannelY },
         { x: approachX, y: target.y },
         target,
       ],
@@ -220,6 +234,7 @@ function buildFannedRoute(
       source,
       target,
       branchChannel,
+      branchChannelY,
       branchApproachX,
     ),
     usedDetour: true,
@@ -230,6 +245,7 @@ function buildFannedDetourRoute(
   source: RoutePoint,
   target: RoutePoint,
   branchChannel: number,
+  branchChannelY: number,
   branchApproachX?: number,
 ): RoutePoint[] {
   const approachX =
@@ -239,10 +255,14 @@ function buildFannedDetourRoute(
     Math.max(source.x, target.x) +
     112 +
     branchChannel * CONNECTOR_BEND_RADIUS * 2;
-  const detourY = Math.max(source.y, target.y) + 64;
+  const detourY =
+    Math.max(source.y, target.y, branchChannelY) +
+    64 +
+    branchChannel * CONNECTOR_BEND_RADIUS * 2;
   return [
     source,
-    { x: detourX, y: source.y },
+    { x: source.x, y: branchChannelY },
+    { x: detourX, y: branchChannelY },
     { x: detourX, y: detourY },
     { x: approachX, y: detourY },
     { x: approachX, y: target.y },
@@ -250,56 +270,46 @@ function buildFannedDetourRoute(
   ];
 }
 
-function buildSharedRoute(input: ConnectorGeometryInput, branchSourceX: number) {
-  const minimumY = Math.min(input.sourceY, input.sharedFanMinimumY ?? input.sourceY);
-  const maximumY = Math.max(input.sourceY, input.sharedFanMaximumY ?? input.sourceY);
-  const pathParts: string[] = [];
-  const points: RoutePoint[] = [];
-
-  if (branchSourceX !== input.sourceX) {
-    pathParts.push(`M ${input.sourceX} ${input.sourceY} H ${branchSourceX}`);
-    points.push(
-      { x: input.sourceX, y: input.sourceY },
-      { x: branchSourceX, y: input.sourceY },
-    );
-  }
-  if (minimumY < input.sourceY) {
-    pathParts.push(`M ${branchSourceX} ${input.sourceY} V ${minimumY}`);
-    points.push({ x: branchSourceX, y: minimumY });
-  }
-  if (maximumY > input.sourceY) {
-    pathParts.push(`M ${branchSourceX} ${input.sourceY} V ${maximumY}`);
-    points.push({ x: branchSourceX, y: maximumY });
-  }
-
-  const verticalGradient = branchSourceX === input.sourceX && minimumY !== maximumY;
+function buildSharedRoute(input: ConnectorGeometryInput, trunkEndX: number) {
+  const points =
+    trunkEndX === input.sourceX
+      ? []
+      : [
+          { x: input.sourceX, y: input.sourceY },
+          { x: trunkEndX, y: input.sourceY },
+        ];
   return {
-    path: pathParts.length === 0 ? undefined : pathParts.join(" "),
+    path:
+      points.length === 0
+        ? undefined
+        : `M ${input.sourceX} ${input.sourceY} H ${trunkEndX}`,
     points,
-    gradientStart: verticalGradient
-      ? { x: branchSourceX, y: minimumY }
-      : { x: input.sourceX, y: input.sourceY },
-    gradientEnd: verticalGradient
-      ? { x: branchSourceX, y: maximumY }
-      : { x: branchSourceX, y: input.sourceY },
+    gradientStart: { x: input.sourceX, y: input.sourceY },
+    gradientEnd: { x: trunkEndX, y: input.sourceY },
   };
 }
 
 export function buildConnectorGeometry(input: ConnectorGeometryInput): ConnectorGeometry {
   const sharedBranchLength = Math.max(0, input.sharedBranchLength ?? 0);
-  const branchSourceX = input.sourceX + sharedBranchLength;
+  const trunkEndX = input.sourceX + sharedBranchLength;
   const branchChannel = Math.max(0, input.branchChannel ?? 0);
+  const isFanned =
+    branchChannel > 0 &&
+    input.branchAttachmentX !== undefined &&
+    input.branchChannelY !== undefined;
+  const branchSourceX = isFanned ? input.branchAttachmentX! : trunkEndX;
   const source = {
     x: branchSourceX,
-    y: branchChannel > 0 ? (input.branchAttachmentY ?? input.sourceY) : input.sourceY,
+    y: input.sourceY,
   };
   const target = { x: input.targetX, y: input.targetY };
   const fannedRoute =
-    branchChannel > 0
+    isFanned
       ? buildFannedRoute(
           source,
           target,
           branchChannel,
+          input.branchChannelY!,
           input.branchApproachX,
         )
       : undefined;
@@ -313,11 +323,12 @@ export function buildConnectorGeometry(input: ConnectorGeometryInput): Connector
 
   if (contactSegment === undefined) {
     routePoints = collapseRoutePoints(
-      branchChannel > 0
+      isFanned
         ? buildFannedDetourRoute(
             source,
             target,
             branchChannel,
+            input.branchChannelY!,
             input.branchApproachX,
           )
         : buildDetourRoute(source, target),
@@ -328,7 +339,7 @@ export function buildConnectorGeometry(input: ConnectorGeometryInput): Connector
   if (contactSegment === undefined) {
     throw new Error("The deterministic connector detour must contain a plug segment");
   }
-  const sharedRoute = buildSharedRoute(input, branchSourceX);
+  const sharedRoute = buildSharedRoute(input, trunkEndX);
 
   const contactY = routePoints[contactSegment.index].y;
   const contactX = contactSegment.contactX;

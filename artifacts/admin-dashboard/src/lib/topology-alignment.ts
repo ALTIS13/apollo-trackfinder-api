@@ -2,6 +2,7 @@ import type { XYPosition } from "@xyflow/react";
 
 export const TOPOLOGY_GRID_SIZE = 24;
 export const TOPOLOGY_MAGNETIC_THRESHOLD_PX = 8;
+export const TOPOLOGY_NODE_CLEARANCE = 24;
 
 export type TopologyAlignmentMode = "free" | "align";
 export type AlignmentAxis = "x" | "y";
@@ -27,6 +28,15 @@ export interface AlignTopologyPositionInput {
   zoom: number;
   mode: TopologyAlignmentMode;
   precision: boolean;
+}
+
+export interface PreventTopologyNodeOverlapInput {
+  nodeId: string;
+  position: XYPosition;
+  fallbackPosition: XYPosition;
+  width: number;
+  height: number;
+  nodes: readonly AlignableTopologyNode[];
 }
 
 function snap(value: number): number {
@@ -113,4 +123,20 @@ export function moveTopologyPositionByKeyboard(input: {
     ArrowDown: { x: 0, y: step },
   }[input.key];
   return { x: input.position.x + delta.x, y: input.position.y + delta.y };
+}
+
+export function preventTopologyNodeOverlap(
+  input: PreventTopologyNodeOverlapInput,
+): XYPosition {
+  const overlapsPeer = input.nodes.some((node) => {
+    if (node.id === input.nodeId) return false;
+    return (
+      input.position.x < node.position.x + node.width + TOPOLOGY_NODE_CLEARANCE &&
+      input.position.x + input.width + TOPOLOGY_NODE_CLEARANCE > node.position.x &&
+      input.position.y < node.position.y + node.height + TOPOLOGY_NODE_CLEARANCE &&
+      input.position.y + input.height + TOPOLOGY_NODE_CLEARANCE > node.position.y
+    );
+  });
+
+  return overlapsPeer ? input.fallbackPosition : input.position;
 }

@@ -38,6 +38,7 @@ import {
 import {
   alignTopologyPosition,
   moveTopologyPositionByKeyboard,
+  preventTopologyNodeOverlap,
   TOPOLOGY_GRID_SIZE,
   type AlignmentGuide,
   type TopologyAlignmentMode,
@@ -290,15 +291,12 @@ function TopologyCanvas({
           targetPosition: Position.Left,
           sharedBranchLength:
             sharedSourceRoutes.get(edge.id)?.sharedBranchLength,
-          branchAttachmentY:
-            sharedSourceRoutes.get(edge.id)?.branchAttachmentY,
+          branchAttachmentX:
+            sharedSourceRoutes.get(edge.id)?.branchAttachmentX,
           branchChannel: sharedSourceRoutes.get(edge.id)?.branchChannel,
+          branchChannelY: sharedSourceRoutes.get(edge.id)?.branchChannelY,
           branchApproachX:
             sharedSourceRoutes.get(edge.id)?.branchApproachX,
-          sharedFanMinimumY:
-            sharedSourceRoutes.get(edge.id)?.sharedFanMinimumY,
-          sharedFanMaximumY:
-            sharedSourceRoutes.get(edge.id)?.sharedFanMaximumY,
         }),
       );
     });
@@ -476,15 +474,12 @@ function TopologyCanvas({
             sharedStatusBands: sharedSourceRoutes.get(edge.id)?.statusBands,
             sharedBranchLength:
               sharedSourceRoutes.get(edge.id)?.sharedBranchLength,
-            branchAttachmentY:
-              sharedSourceRoutes.get(edge.id)?.branchAttachmentY,
+            branchAttachmentX:
+              sharedSourceRoutes.get(edge.id)?.branchAttachmentX,
             branchChannel: sharedSourceRoutes.get(edge.id)?.branchChannel,
+            branchChannelY: sharedSourceRoutes.get(edge.id)?.branchChannelY,
             branchApproachX:
               sharedSourceRoutes.get(edge.id)?.branchApproachX,
-            sharedFanMinimumY:
-              sharedSourceRoutes.get(edge.id)?.sharedFanMinimumY,
-            sharedFanMaximumY:
-              sharedSourceRoutes.get(edge.id)?.sharedFanMaximumY,
             renderSharedTrunk: sharedSourceRoutes.get(edge.id)?.renderTrunk,
             ...(edge.status === "healthy"
               ? {}
@@ -566,34 +561,53 @@ function TopologyCanvas({
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<ServiceFlowNode>[]) => {
-      changes.forEach((change) => {
-        if (change.type !== "position" || change.position === undefined) return;
-        if (alignmentMode === "free") freelyMovedNodeIds.current.add(change.id);
-        else freelyMovedNodeIds.current.delete(change.id);
-      });
+      const acceptedNodePositions = new Map(currentNodePositions);
+      const alignableNodes = () =>
+        Array.from(acceptedNodePositions, ([id, node]) => ({
+          id,
+          position: { x: node.x, y: node.y },
+          width: node.width,
+          height: node.height,
+        }));
       const normalizedChanges = changes.map((change) => {
         if (change.type !== "position" || change.position === undefined)
           return change;
-        const moving = currentNodePositions.get(change.id);
+        const moving = acceptedNodePositions.get(change.id);
         if (moving === undefined) return change;
         const aligned = alignTopologyPosition({
           nodeId: change.id,
           position: change.position,
           width: moving.width,
           height: moving.height,
-          nodes: Array.from(currentNodePositions, ([id, node]) => ({
-            id,
-            position: { x: node.x, y: node.y },
-            width: node.width,
-            height: node.height,
-          })),
+          nodes: alignableNodes(),
           zoom: getZoom(),
           mode: alignmentMode,
           precision: false,
         });
-        if (change.dragging === true) setAlignmentGuides(aligned.guides);
+        const position = preventTopologyNodeOverlap({
+          nodeId: change.id,
+          position: aligned.position,
+          fallbackPosition: { x: moving.x, y: moving.y },
+          width: moving.width,
+          height: moving.height,
+          nodes: alignableNodes(),
+        });
+        const positionChanged = position.x !== moving.x || position.y !== moving.y;
+        if (positionChanged) {
+          if (alignmentMode === "free") freelyMovedNodeIds.current.add(change.id);
+          else freelyMovedNodeIds.current.delete(change.id);
+        }
+        const positionBlocked =
+          position.x !== aligned.position.x || position.y !== aligned.position.y;
+        if (change.dragging === true && !positionBlocked)
+          setAlignmentGuides(aligned.guides);
         else setAlignmentGuides([]);
-        return { ...change, position: aligned.position };
+        acceptedNodePositions.set(change.id, {
+          ...moving,
+          x: position.x,
+          y: position.y,
+        });
+        return { ...change, position };
       });
       setPositionOverrides((overrides) =>
         applyPositionChanges(overrides, normalizedChanges),
@@ -678,11 +692,29 @@ function TopologyCanvas({
             x: aligned.position.x + gridPhase.x,
             y: aligned.position.y + gridPhase.y,
           };
-      if (!precision) freelyMovedNodeIds.current.delete(nodeId);
+      const nonOverlappingPosition = preventTopologyNodeOverlap({
+        nodeId,
+        position,
+        fallbackPosition: { x: moving.x, y: moving.y },
+        width: moving.width,
+        height: moving.height,
+        nodes: Array.from(currentNodePositions, ([id, node]) => ({
+          id,
+          position: { x: node.x, y: node.y },
+          width: node.width,
+          height: node.height,
+        })),
+      });
+      if (
+        !precision &&
+        (nonOverlappingPosition.x !== moving.x ||
+          nonOverlappingPosition.y !== moving.y)
+      )
+        freelyMovedNodeIds.current.delete(nodeId);
       setAlignmentGuides([]);
       setPositionOverrides((overrides) =>
         applyPositionChanges(overrides, [
-          { type: "position", id: nodeId, position },
+          { type: "position", id: nodeId, position: nonOverlappingPosition },
         ]),
       );
     },

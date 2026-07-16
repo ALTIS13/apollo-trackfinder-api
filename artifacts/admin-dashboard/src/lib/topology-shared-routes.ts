@@ -19,11 +19,10 @@ export interface SharedSourceRoute {
   sharedBranchLength: number;
   branchIndex: number;
   branchCount: number;
-  branchAttachmentY: number;
+  branchAttachmentX?: number;
   branchChannel: number;
+  branchChannelY?: number;
   branchApproachX?: number;
-  sharedFanMinimumY: number;
-  sharedFanMaximumY: number;
 }
 
 export interface TopologyNodePosition {
@@ -48,6 +47,9 @@ function targetCenterY(position: TopologyNodePosition): number {
 }
 
 type BranchDirection = "above" | "same" | "below";
+
+const FAN_ATTACHMENT_INSET = 12;
+const FAN_ATTACHMENT_GAP = CONTACT_BEND_CLEARANCE;
 
 function branchDirection(sourceY: number, targetY: number): BranchDirection {
   if (targetY < sourceY) return "above";
@@ -113,82 +115,155 @@ export function getSharedSourceRoutes(
       );
       edgesByDirection.get(direction)!.push(edge);
     });
-    const crowdedBelowCount =
-      edgesByDirection.get("below")!.length > 1
-        ? edgesByDirection.get("below")!.length
-        : 0;
+    const fanOutActive = Array.from(edgesByDirection.values()).some(
+      (directionEdges) => directionEdges.length > 1,
+    );
+    const allTargetsKnown = orderedEdges.every((edge) =>
+      nodePositions.has(edge.target),
+    );
+    const desiredFanBranchLength =
+      FAN_ATTACHMENT_INSET * 2 +
+      FAN_ATTACHMENT_GAP * Math.max(0, orderedEdges.length - 1);
+    const safeFanBranchLength = orderedEdges.reduce((safeLength, edge) => {
+      const targetPosition = nodePositions.get(edge.target);
+      if (targetPosition === undefined || targetPosition.x < sourceX)
+        return safeLength;
+      const targetOnSourceRow = targetCenterY(targetPosition) === sourceY;
+      if (targetPosition.x === sourceX && !targetOnSourceRow) return safeLength;
+      const terminalReserve = targetOnSourceRow ? TARGET_STUB_LENGTH : 0;
+      return Math.min(
+        safeLength,
+        Math.max(0, targetPosition.x - sourceX - terminalReserve),
+      );
+    }, desiredFanBranchLength);
+    const effectiveSharedBranchLength =
+      fanOutActive && allTargetsKnown
+        ? safeFanBranchLength
+        : sharedBranchLength;
+    if (
+      fanOutActive &&
+      allTargetsKnown &&
+      effectiveSharedBranchLength === 0
+    ) {
+      throw new Error(
+        "Crowded topology fan requires a positive horizontal corridor",
+      );
+    }
     const metadata = new Map<
       string,
       Pick<
         SharedSourceRoute,
         | "branchIndex"
         | "branchCount"
-        | "branchAttachmentY"
+        | "branchAttachmentX"
         | "branchChannel"
+        | "branchChannelY"
         | "branchApproachX"
       >
     >();
-    const sameRowApproaches = new Map<string, number>();
-    const sameRowEdges = [...edgesByDirection.get("same")!].sort((left, right) => {
-      const leftX = nodePositions.get(left.target)?.x ?? 0;
-      const rightX = nodePositions.get(right.target)?.x ?? 0;
-      return leftX === rightX ? left.id.localeCompare(right.id) : leftX - rightX;
+    const branchApproaches = new Map<string, number>();
+    const reservedVerticalTracks: number[] = fanOutActive && allTargetsKnown
+      ? orderedEdges.map(
+          (_, index) =>
+            sourceX +
+            (effectiveSharedBranchLength * (index + 1)) /
+              (orderedEdges.length + 1),
+        )
+      : [];
+    const isReservedTrack = (candidate: number) =>
+      reservedVerticalTracks.some(
+        (reserved) => Math.abs(candidate - reserved) < 0.000001,
+      );
+    const reserveApproach = (lower: number, upper: number) => {
+      for (let level = 1; level <= 12; level += 1) {
+        const denominator = 2 ** level;
+        for (let numerator = 1; numerator < denominator; numerator += 2) {
+          const candidate = lower + ((upper - lower) * numerator) / denominator;
+          if (!isReservedTrack(candidate)) {
+            reservedVerticalTracks.push(candidate);
+            return candidate;
+          }
+        }
+      }
+      throw new Error("Unable to reserve a distinct topology approach track");
+    };
+    const edgesByTargetRow = new Map<number, ServiceEdge[]>();
+    orderedEdges.forEach((edge) => {
+      const targetPosition = nodePositions.get(edge.target);
+      if (targetPosition === undefined) return;
+      const row = targetCenterY(targetPosition);
+      const rowEdges = edgesByTargetRow.get(row) ?? [];
+      rowEdges.push(edge);
+      edgesByTargetRow.set(row, rowEdges);
     });
-    if (sameRowEdges.length > 1) {
+    edgesByTargetRow.forEach((rowEdges) => {
+      const orderedRowEdges = [...rowEdges].sort((left, right) => {
+        const leftX = nodePositions.get(left.target)?.x ?? 0;
+        const rightX = nodePositions.get(right.target)?.x ?? 0;
+        return leftX === rightX ? left.id.localeCompare(right.id) : leftX - rightX;
+      });
       let previousTargetX: number | undefined;
-      sameRowEdges.forEach((edge) => {
+      orderedRowEdges.forEach((edge) => {
         const targetX = nodePositions.get(edge.target)?.x ?? sourceX;
-        const approachX =
-          previousTargetX === undefined || targetX <= previousTargetX
-            ? targetX - CONNECTOR_BEND_RADIUS
-            : (previousTargetX + targetX) / 2;
-        sameRowApproaches.set(edge.id, approachX);
+        const lower = Math.max(
+          targetX - TARGET_STUB_LENGTH,
+          previousTargetX ?? Number.NEGATIVE_INFINITY,
+        );
+        if (fanOutActive && allTargetsKnown) {
+          branchApproaches.set(edge.id, reserveApproach(lower, targetX));
+        }
         previousTargetX = targetX;
       });
-    }
-    let branchChannel = 0;
-    orderedEdges.forEach((edge) => {
+    });
+
+    const usedChannelSlots = new Set<number>();
+    const reserveChannelSlot = (direction: BranchDirection, index: number) => {
+      let slot =
+        direction === "above"
+          ? -(index + 1)
+          : direction === "below"
+            ? index + 1
+            : index % 2 === 0
+              ? index / 2 + 1
+              : -(index + 1) / 2;
+      const step = slot < 0 ? -1 : 1;
+      while (usedChannelSlots.has(slot)) slot += step;
+      usedChannelSlots.add(slot);
+      return slot;
+    };
+
+    orderedEdges.forEach((edge, orderedIndex) => {
       const targetPosition = nodePositions.get(edge.target);
       const direction = branchDirection(
         sourceY,
         targetPosition === undefined ? sourceY : targetCenterY(targetPosition),
       );
       const directionEdges = edgesByDirection.get(direction)!;
-      const branchIndex = directionEdges.findIndex((candidate) => candidate.id === edge.id);
-      const branchCount = directionEdges.length;
-      if (branchCount < 2) {
+      const directionIndex = directionEdges.findIndex(
+        (candidate) => candidate.id === edge.id,
+      );
+      if (!fanOutActive || !allTargetsKnown) {
         metadata.set(edge.id, {
-          branchIndex,
-          branchCount,
-          branchAttachmentY: sourceY,
+          branchIndex: directionIndex,
+          branchCount: directionEdges.length,
           branchChannel: 0,
         });
         return;
       }
 
-      branchChannel += 1;
-      const slot =
-        direction === "above"
-          ? -(branchIndex + 1)
-          : direction === "below"
-            ? branchIndex + 1
-            : crowdedBelowCount + branchIndex + 1;
+      const slot = reserveChannelSlot(direction, directionIndex);
       metadata.set(edge.id, {
-        branchIndex,
-        branchCount,
-        branchAttachmentY: sourceY + slot * CONTACT_BEND_CLEARANCE,
-        branchChannel,
-        ...(sameRowApproaches.has(edge.id)
-          ? { branchApproachX: sameRowApproaches.get(edge.id)! }
-          : {}),
+        branchIndex: orderedIndex,
+        branchCount: orderedEdges.length,
+        branchAttachmentX:
+          sourceX +
+          (effectiveSharedBranchLength * (orderedIndex + 1)) /
+            (orderedEdges.length + 1),
+        branchChannel: orderedIndex + 1,
+        branchChannelY: sourceY + slot * CONTACT_BEND_CLEARANCE,
+        branchApproachX: branchApproaches.get(edge.id)!,
       });
     });
-    const attachmentYs = [
-      sourceY,
-      ...Array.from(metadata.values(), (item) => item.branchAttachmentY),
-    ];
-    const sharedFanMinimumY = Math.min(...attachmentYs);
-    const sharedFanMaximumY = Math.max(...attachmentYs);
 
     orderedEdges.forEach((edge, index) => {
       const branch = metadata.get(edge.id)!;
@@ -196,10 +271,8 @@ export function getSharedSourceRoutes(
         statusBands,
         aggregateStatus,
         renderTrunk: index === orderedEdges.length - 1,
-        sharedBranchLength,
+        sharedBranchLength: effectiveSharedBranchLength,
         ...branch,
-        sharedFanMinimumY,
-        sharedFanMaximumY,
       });
     });
   });

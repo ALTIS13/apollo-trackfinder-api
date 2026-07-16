@@ -115,6 +115,10 @@ function getReactFlowProps() {
         sharedBranchLength?: number;
         renderSharedTrunk?: boolean;
         evidenceLane?: number;
+        branchAttachmentX?: number;
+        branchChannel?: number;
+        branchChannelY?: number;
+        branchApproachX?: number;
       };
     }>;
     onNodesChange: (changes: unknown[]) => void;
@@ -300,80 +304,37 @@ describe("TopologyPanel", () => {
     expect(bounds.y + bounds.height).toBeGreaterThan(geometry.contactY + 24);
   });
   it("assigns ordered status bands to every shared source edge and a deterministic trunk owner", () => {
-    expect(
-      Array.from(
-        getSharedSourceRoutes(
-          demoSnapshot.edges,
-          new Map([
-            ["core-api", { x: 298, y: 0, width: 190, height: 76 }],
-            ["account-integrations", { x: 572, y: 0, width: 190, height: 76 }],
-            ["search-media", { x: 572, y: 240, width: 190, height: 76 }],
-            ["download-worker", { x: 572, y: 120, width: 190, height: 76 }],
-          ]),
-        ).entries(),
-      ),
-    ).toEqual([
-      [
-        "core-api-account-integrations",
-        {
-          statusBands: [
-            { status: "healthy", count: 1 },
-            { status: "degraded", count: 1 },
-            { status: "warning", count: 1 },
-          ],
-          aggregateStatus: "degraded",
-          renderTrunk: false,
-          sharedBranchLength: 24,
-          branchIndex: 0,
-          branchCount: 1,
-          branchAttachmentY: 38,
-          branchChannel: 0,
-          sharedFanMinimumY: 38,
-          sharedFanMaximumY: 86,
-        },
-      ],
-      [
-        "core-api-download-worker",
-        {
-          statusBands: [
-            { status: "healthy", count: 1 },
-            { status: "degraded", count: 1 },
-            { status: "warning", count: 1 },
-          ],
-          aggregateStatus: "degraded",
-          renderTrunk: false,
-          sharedBranchLength: 24,
-          branchIndex: 0,
-          branchCount: 2,
-          branchAttachmentY: 62,
-          branchChannel: 1,
-          sharedFanMinimumY: 38,
-          sharedFanMaximumY: 86,
-        },
-      ],
-      [
-        "core-api-search-media",
-        {
-          statusBands: [
-            { status: "healthy", count: 1 },
-            { status: "degraded", count: 1 },
-            { status: "warning", count: 1 },
-          ],
-          aggregateStatus: "degraded",
-          renderTrunk: true,
-          sharedBranchLength: 24,
-          branchIndex: 1,
-          branchCount: 2,
-          branchAttachmentY: 86,
-          branchChannel: 2,
-          sharedFanMinimumY: 38,
-          sharedFanMaximumY: 86,
-        },
-      ],
+    const routes = getSharedSourceRoutes(
+      demoSnapshot.edges,
+      new Map([
+        ["core-api", { x: 298, y: 120, width: 190, height: 76 }],
+        ["account-integrations", { x: 572, y: 0, width: 190, height: 76 }],
+        ["download-worker", { x: 572, y: 120, width: 190, height: 76 }],
+        ["search-media", { x: 572, y: 240, width: 190, height: 76 }],
+      ]),
+    );
+    const coreRoutes = Array.from(routes.entries());
+
+    expect(coreRoutes.map(([id]) => id)).toEqual([
+      "core-api-account-integrations",
+      "core-api-download-worker",
+      "core-api-search-media",
     ]);
+    coreRoutes.forEach(([, route]) => {
+      expect(route.statusBands).toEqual([
+        { status: "healthy", count: 1 },
+        { status: "degraded", count: 1 },
+        { status: "warning", count: 1 },
+      ]);
+      expect(route.aggregateStatus).toBe("degraded");
+      expect(route.sharedBranchLength).toBe(24);
+      expect(route.branchChannel).toBe(0);
+      expect(route.branchAttachmentX).toBeUndefined();
+    });
+    expect(coreRoutes.filter(([, route]) => route.renderTrunk)).toHaveLength(1);
   });
 
-  it("keeps every shared Core API branch on one shortened trunk after the trunk owner moves left", async () => {
+  it("keeps every crowded Core API branch on one deterministic horizontal trunk", async () => {
     render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
 
     await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
@@ -414,16 +375,21 @@ describe("TopologyPanel", () => {
       numericBranchLengths.forEach((length) =>
         expect(length).toBeCloseTo(numericBranchLengths[0], 6),
       );
-      expect(numericBranchLengths[0]).toBeCloseTo(6.436, 3);
-      expect(numericBranchLengths[0]).toBeGreaterThan(0);
-      expect(numericBranchLengths[0]).toBeLessThan(24);
+      expect(numericBranchLengths[0]).toBeCloseTo(57.936, 3);
+      expect(numericBranchLengths[0]).toBeLessThan(72);
+      expect(
+        new Set(sharedRoutes.map((edge) => edge.data?.branchAttachmentX)).size,
+      ).toBe(3);
+      expect(
+        new Set(sharedRoutes.map((edge) => edge.data?.branchChannelY)).size,
+      ).toBe(3);
       expect(
         sharedRoutes.filter((edge) => edge.data?.renderSharedTrunk),
       ).toHaveLength(1);
     });
   });
 
-  it("disables the shared trunk for every branch when one target has no clearance", () => {
+  it("preserves a deterministic fan trunk when one target has no clearance", () => {
     const routes = getSharedSourceRoutes(
       demoSnapshot.edges,
       new Map([
@@ -436,7 +402,76 @@ describe("TopologyPanel", () => {
 
     expect(
       Array.from(routes.values(), (route) => route.sharedBranchLength),
-    ).toEqual([0, 0, 0]);
+    ).toEqual([39.5, 39.5, 39.5]);
+  });
+
+  it("holds a free drag at its last valid position when module cards would overlap", async () => {
+    render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
+
+    await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
+    const core = getReactFlowProps().nodes.find((node) => node.id === "core-api")!;
+    const account = getReactFlowProps().nodes.find(
+      (node) => node.id === "account-integrations",
+    )!;
+    const initialPosition = { ...core.position };
+
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        {
+          type: "position",
+          id: "core-api",
+          position: { ...account.position },
+          dragging: true,
+        },
+      ]);
+    });
+
+    await waitFor(() =>
+      expect(
+        getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position,
+      ).toEqual(initialPosition),
+    );
+  });
+
+  it("validates batch position changes against earlier accepted moves", async () => {
+    render(<TopologyPanel snapshot={demoSnapshot} onSelectService={vi.fn()} />);
+
+    await waitFor(() => expect(reactFlowProps.latest).toBeDefined());
+    fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
+    const accountInitial = {
+      ...getReactFlowProps().nodes.find(
+        (node) => node.id === "account-integrations",
+      )!.position,
+    };
+
+    act(() => {
+      getReactFlowProps().onNodesChange([
+        {
+          type: "position",
+          id: "core-api",
+          position: { x: 640, y: 500 },
+          dragging: true,
+        },
+        {
+          type: "position",
+          id: "account-integrations",
+          position: { x: 640, y: 500 },
+          dragging: true,
+        },
+      ]);
+    });
+
+    await waitFor(() => {
+      expect(
+        getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position,
+      ).toEqual({ x: 640, y: 500 });
+      expect(
+        getReactFlowProps().nodes.find(
+          (node) => node.id === "account-integrations",
+        )?.position,
+      ).toEqual(accountInitial);
+    });
   });
 
   it("centers an incident-selected node with zero-duration reduced motion", async () => {
@@ -583,7 +618,7 @@ describe("TopologyPanel", () => {
         {
           type: "position",
           id: "account-integrations",
-          position: { x: 238, y: 72 },
+          position: { x: 238, y: -1000 },
         },
       ]);
     });
@@ -594,7 +629,7 @@ describe("TopologyPanel", () => {
         {
           type: "position",
           id: "core-api",
-          position: { x: 49, y: 71 },
+          position: { x: 49, y: -887 },
           dragging: true,
         },
       ]);
@@ -602,17 +637,17 @@ describe("TopologyPanel", () => {
     await waitFor(() =>
       expect(getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position).toEqual({
         x: 48,
-        y: 72,
+        y: -888,
       }),
     );
-    expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(2);
+    expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(1);
 
     act(() => {
       getReactFlowProps().onNodesChange([
         {
           type: "position",
           id: "core-api",
-          position: { x: 48, y: 72 },
+          position: { x: 48, y: -888 },
           dragging: false,
         },
       ]);
@@ -624,13 +659,13 @@ describe("TopologyPanel", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
     act(() => {
       getReactFlowProps().onNodesChange([
-        { type: "position", id: "core-api", position: { x: 49, y: 71 } },
+        { type: "position", id: "core-api", position: { x: 47, y: -887 } },
       ]);
     });
     await waitFor(() =>
       expect(getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position).toEqual({
-        x: 49,
-        y: 71,
+        x: 47,
+        y: -887,
       }),
     );
   });
@@ -754,7 +789,7 @@ describe("TopologyPanel", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
     act(() => {
       getReactFlowProps().onNodesChange([
-        { type: "position", id: "account-integrations", position: { x: 238, y: 72 } },
+        { type: "position", id: "account-integrations", position: { x: 238, y: -1000 } },
       ]);
     });
     fireEvent.click(screen.getByRole("radio", { name: "Выровнять" }));
@@ -763,13 +798,13 @@ describe("TopologyPanel", () => {
         {
           type: "position",
           id: "core-api",
-          position: { x: 49, y: 71 },
+          position: { x: 49, y: -887 },
           dragging: true,
         },
       ]);
     });
     await waitFor(() =>
-      expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(2),
+      expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(1),
     );
 
     fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
@@ -783,13 +818,13 @@ describe("TopologyPanel", () => {
         {
           type: "position",
           id: "core-api",
-          position: { x: 49, y: 71 },
+          position: { x: 49, y: -887 },
           dragging: true,
         },
       ]);
     });
     await waitFor(() =>
-      expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(2),
+      expect(view.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(1),
     );
     fireEvent.click(screen.getByRole("button", { name: "Сбросить раскладку" }));
     await waitFor(() =>
@@ -806,7 +841,7 @@ describe("TopologyPanel", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Свободно" }));
     act(() => {
       getReactFlowProps().onNodesChange([
-        { type: "position", id: "account-integrations", position: { x: 238, y: 72 } },
+        { type: "position", id: "account-integrations", position: { x: 238, y: -1000 } },
       ]);
     });
     fireEvent.click(screen.getByRole("radio", { name: "Выровнять" }));
@@ -815,13 +850,13 @@ describe("TopologyPanel", () => {
         {
           type: "position",
           id: "core-api",
-          position: { x: 49, y: 71 },
+          position: { x: 49, y: -887 },
           dragging: true,
         },
       ]);
     });
     await waitFor(() =>
-      expect(firstMount.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(2),
+      expect(firstMount.container.querySelectorAll("[data-alignment-axis]")).toHaveLength(1),
     );
 
     firstMount.unmount();
@@ -868,24 +903,24 @@ describe("TopologyPanel", () => {
 
     act(() => {
       getReactFlowProps().onNodesChange([
-        { type: "position", id: "core-api", position: { x: 640, y: 120 } },
+        { type: "position", id: "core-api", position: { x: 640, y: 400 } },
       ]);
     });
     await waitFor(() =>
       expect(getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position).toEqual({
         x: 640,
-        y: 120,
+        y: 400,
       }),
     );
 
     act(() => {
       getReactFlowProps().onNodesChange([
-        { type: "position", id: "core-api", position: { x: 680, y: 152 } },
+        { type: "position", id: "core-api", position: { x: 680, y: 420 } },
       ]);
     });
     await waitFor(() => {
       const node = getReactFlowProps().nodes.find((item) => item.id === "core-api");
-      expect(node?.position).toEqual({ x: 680, y: 152 });
+      expect(node?.position).toEqual({ x: 680, y: 420 });
       expect(node?.measured).toEqual({
         width: initialNode.width,
         height: initialNode.height,
@@ -905,13 +940,13 @@ describe("TopologyPanel", () => {
     };
     act(() => {
       getReactFlowProps().onNodesChange([
-        { type: "position", id: "core-api", position: { x: 680, y: 152 } },
+        { type: "position", id: "core-api", position: { x: 680, y: 420 } },
       ]);
     });
     await waitFor(() =>
       expect(
         getReactFlowProps().nodes.find((node) => node.id === "core-api")?.position,
-      ).toEqual({ x: 680, y: 152 }),
+      ).toEqual({ x: 680, y: 420 }),
     );
 
     firstMount.unmount();

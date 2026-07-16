@@ -374,6 +374,33 @@ const connectorInput = (
 });
 
 describe("buildConnectorGeometry", () => {
+  it("branches from a horizontal shared trunk through its own attachment and channel", () => {
+    const geometry = buildConnectorGeometry(
+      connectorInput({
+        targetX: 380,
+        targetY: 80,
+        sharedBranchLength: 120,
+        branchAttachmentX: 36,
+        branchChannel: 1,
+        branchChannelY: -24,
+        branchApproachX: 372.5,
+      }),
+    );
+
+    expectCanonicalContact(geometry);
+    expect(geometry.sharedTrunkPath).toBe("M 0 0 H 120");
+    expect(geometry.sharedRoutePoints).toEqual([
+      { x: 0, y: 0 },
+      { x: 120, y: 0 },
+    ]);
+    expect(geometry.sharedGradientStart).toEqual({ x: 0, y: 0 });
+    expect(geometry.sharedGradientEnd).toEqual({ x: 120, y: 0 });
+    expect(geometry.routePoints.slice(0, 2)).toEqual([
+      { x: 36, y: 0 },
+      { x: 36, y: -24 },
+    ]);
+  });
+
   it.each([
     {
       name: "default above, same, and below targets",
@@ -400,6 +427,48 @@ describe("buildConnectorGeometry", () => {
         { id: "same-a", x: 380, y: 100, width: 190, height: 76 },
         { id: "same-b", x: 400, y: 100, width: 190, height: 76 },
         { id: "same-c", x: 420, y: 100, width: 190, height: 76 },
+      ],
+    },
+    {
+      name: "two off-source targets on one row",
+      source: { x: 0, y: 180, width: 190, height: 76 },
+      targets: [
+        { id: "above-a", x: 380, y: 20, width: 190, height: 76 },
+        { id: "above-b", x: 400, y: 20, width: 190, height: 76 },
+      ],
+    },
+    {
+      name: "cross-row targets with colliding local approach formulas",
+      source: { x: 0, y: 180, width: 190, height: 76 },
+      targets: [
+        { id: "target-a", x: 380, y: -120, width: 190, height: 76 },
+        { id: "target-b", x: 395, y: -20, width: 190, height: 76 },
+      ],
+    },
+    {
+      name: "narrow right-side corridor",
+      source: { x: 0, y: 100, width: 190, height: 76 },
+      targets: [
+        { id: "narrow-a", x: 210, y: -180, width: 190, height: 76 },
+        { id: "narrow-b", x: 210, y: -80, width: 190, height: 76 },
+        { id: "narrow-c", x: 210, y: 100, width: 190, height: 76 },
+      ],
+    },
+    {
+      name: "minimal off-row corridor",
+      source: { x: 0, y: 180, width: 190, height: 76 },
+      targets: [
+        { id: "target-a", x: 202, y: -20, width: 190, height: 76 },
+        { id: "target-b", x: 202, y: 80, width: 190, height: 76 },
+      ],
+    },
+    {
+      name: "mixed crowded and singleton directions",
+      source: { x: 0, y: 100, width: 190, height: 76 },
+      targets: [
+        { id: "above-a", x: 380, y: -80, width: 190, height: 76 },
+        { id: "above-b", x: 380, y: 0, width: 190, height: 76 },
+        { id: "below", x: 380, y: 260, width: 190, height: 76 },
       ],
     },
     {

@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   alignTopologyPosition,
   moveTopologyPositionByKeyboard,
+  preventTopologyNodeOverlap,
   TOPOLOGY_GRID_SIZE,
   TOPOLOGY_MAGNETIC_THRESHOLD_PX,
+  TOPOLOGY_NODE_CLEARANCE,
 } from "./topology-alignment";
 
 describe("topology alignment", () => {
@@ -215,6 +217,65 @@ describe("topology alignment", () => {
         precision: false,
       }),
     ).toEqual({ x: 48, y: 24 });
+  });
+
+  it("holds the last valid position when a dragged module would overlap a peer", () => {
+    expect(
+      preventTopologyNodeOverlap({
+        nodeId: "moving",
+        position: { x: 250, y: 120 },
+        fallbackPosition: { x: 24, y: 48 },
+        width: 190,
+        height: 76,
+        nodes: [
+          moving,
+          {
+            id: "peer",
+            position: { x: 240, y: 100 },
+            width: 190,
+            height: 76,
+          },
+        ],
+      }),
+    ).toEqual({ x: 24, y: 48 });
+  });
+
+  it("rejects edge-touching modules and allows the required clearance", () => {
+    expect(
+      preventTopologyNodeOverlap({
+        nodeId: "moving",
+        position: { x: 50, y: 100 },
+        fallbackPosition: { x: 24, y: 48 },
+        width: 190,
+        height: 76,
+        nodes: [
+          {
+            id: "peer",
+            position: { x: 240, y: 100 },
+            width: 190,
+            height: 76,
+          },
+        ],
+      }),
+    ).toEqual({ x: 24, y: 48 });
+    expect(
+      preventTopologyNodeOverlap({
+        nodeId: "moving",
+        position: { x: 26, y: 100 },
+        fallbackPosition: { x: 24, y: 48 },
+        width: 190,
+        height: 76,
+        nodes: [
+          {
+            id: "peer",
+            position: { x: 240, y: 100 },
+            width: 190,
+            height: 76,
+          },
+        ],
+      }),
+    ).toEqual({ x: 26, y: 100 });
+    expect(TOPOLOGY_NODE_CLEARANCE).toBe(24);
   });
 
   it("keeps tiny and invalid zoom values finite", () => {

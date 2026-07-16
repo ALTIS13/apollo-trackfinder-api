@@ -1,6 +1,6 @@
 # Apollo TF implementation status
 
-Last updated: 2026-07-15.
+Last updated: 2026-07-16.
 
 ## Что сделано
 
@@ -41,6 +41,9 @@ Last updated: 2026-07-15.
 - Authenticated module heartbeat rollout: root и nested API Compose передают `APOLLO_MODULE_HEARTBEAT_KEYS` только API service с empty-default interpolation; admin, web, PostgreSQL и Redis его не получают. `.gitignore` и `.dockerignore` exclude `.env`, `.env.*` and `.ops-private` while retaining `.env.example`. `MODULES.md` documents the Unix-second HMAC canonical string, 30-second sender interval, 90-second freshness TTL, API-restart reset, per-module JSON keys, and disabled-by-default behavior. HomeNode/Coolify were not changed.
 - На branch `codex/fix/admin-thin-connector-lines` длинные status-colored кабели topology заменены нейтральными полностью непрозрачными трассами `#596273` шириной `1.75` topology units. Каждая физическая ветка сохраняет тонкую непрозрачную status-lane шириной `1`; общий source trunk рисуется одной нейтральной основой и максимум тремя отдельными lanes с фиксированными позициями `healthy=-1`, `warning=0`, `degraded=1`, поэтому состояния не смешиваются и не меняют вертикальное положение между render cycles. `unknown` остаётся доступен отдельной ветке, но не создаёт четвёртую линию общей шины.
 - Существующая female/male геометрия, gaps, module terminals, dragging/reset и incident activation сохранены. Штекеры стали выразительнее за счёт state-colored корпуса/glow, непрозрачного внутреннего светового штриха и тёмной обводки, которая рисуется последней поверх корпуса. Длинные линии, status-lanes и новые детали не используют alpha mixing; HomeNode/Coolify/Caddy/UFW/domains не менялись.
+- Topology Task 7 завершает режимы `Свободно`/`Выровнять`, 24-unit grid и безопасный drag: карточки больше нельзя положить друг на друга, поэтому совпадающие module ports не создаются пользовательским перемещением. Переключение режима не двигает узлы; клавиатура сохраняет grid/Alt-precision контракт.
+- Составной вертикальный fan удалён. Перегруженная source-группа получает одну короткую горизонтальную aggregate-шину с opaque weighted gradient и уникальные attachment/channel координаты для каждой ветки; одинаковые target-row подходы разделяются для целей выше, на уровне и ниже источника. Стандартный Core above/same/below layout остаётся прежним.
+- SVG gradient identity объединяет стабильный React instance ID и инъективно кодированный edge ID, поэтому два одновременно открытых topology экземпляра не делят `<linearGradient>`. Bounds учитывают шину, полные маршруты, контакты, traffic и evidence labels.
 
 ## Validation
 
@@ -82,6 +85,7 @@ Last updated: 2026-07-15.
 - Module heartbeat final feature validation 2026-07-15 at `0f39175`: shared contract 1 file / 4 passed, API 6 files / 109 passed with 1 opt-in Redis skip, and admin 11 files / 120 passed. Workspace typecheck, API/admin production builds, root/nested Compose config, and `git diff --check` passed; Compose emitted only the expected unset local Spotify credential warnings. Final independent re-review reported no actionable findings with `READY TO MERGE: YES`, `Spec: PASS`, and `Quality: APPROVED`. Browser evidence remains valid because the post-QA fixes changed only API tests/runtime and status documentation. HomeNode/Coolify/Caddy/UFW/domains were not changed.
 - Thin topology connector TDD 2026-07-15: initial implementation focused GREEN was `47/47`; independent review then found shifting subset offsets, a possible fourth shared `unknown` lane, weak outline paint order and alpha highlight. Review-fix RED reproduced the contracts with `6 failed / 26 passed`; focused GREEN passed `32/32`, connector regression passed `54/54`, and fresh full admin regression passed 11 files / `127/127`. Admin and workspace typecheck, Vite production build (2556 modules), and `git diff --check` passed.
 - Codex in-app browser QA for thin connectors passed at the default side-panel viewport and temporary `390x844`: 15 neutral conductor bases render at `1.75`, 17 opaque status lanes render at `1`, and the shared trunk exposes exactly three ordered lanes `healthy -1`, `warning 0`, `degraded +1`. Fourteen plug outlines and fourteen internal highlights are present; keyboard drag/reset restores module translation, `ERROR DLW-E502` opens the matching sanitized incident journal, and no module/diagnostic regression was observed. Temporary mobile viewport override was reset after QA.
+- Admin topology Task 7 collision-safe horizontal-fan validation 2026-07-16: boundary RED reproduced edge-touching and narrow corridors, cross-row approach collisions, attachment/approach collisions, positive Q/L overlap, stale batched drag state and duplicate directed relations. Focused admin GREEN passed 5 files / 124 tests; full admin passed 15 files / 216 tests, shared contract 5/5, and API 109 passed with 1 opt-in Redis skip. Workspace typecheck, admin/API production builds, and `git diff --check` passed. In-app browser DOM reported 8 modules, 7 female/male contact pairs, one horizontal shared trunk and three unobscured diagnostic labels; paired visual comparison confirms the reported Download Worker/Search Media loop is absent. Final independent spec and quality re-reviews returned PASS with no findings.
 
 ## Commit/push
 
@@ -104,7 +108,7 @@ Last updated: 2026-07-15.
 
 ## Следующий логичный этап реализации
 
-- После обязательного просмотра записанных спецификаций подготовить отдельные implementation plans. Первый технический feature stage: topology alignment, увеличенные интервалы, plugs на прямых сегментах и единый opaque aggregate gradient; следующий stage: Apollo Identity/Policy и versioned database migrations.
+- Следующий feature stage: Apollo Identity/Policy и versioned database migrations для трёх режимов регистрации, invite lifecycle, operator controls и server-enforced module entitlements. После backend policy contract можно обновлять Apollo portal/TF client zone.
 - Coolify/HomeNode rollout выполняется только после локальной реализации и validation всех web/server модулей, повторного read-only preflight и явного разрешения владельца непосредственно перед удалёнными изменениями.
 - Native Android APK decision remains separate: сохранить Expo-модули через native prebuild/Gradle либо выполнить отдельную миграцию на bare React Native.
 

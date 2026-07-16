@@ -82,10 +82,15 @@ function renderEdge({
   );
 }
 
-function straightPathSegments(path: string) {
+interface RenderedPathSegment {
+  start: { x: number; y: number };
+  end: { x: number; y: number };
+}
+
+function renderedPathSegments(path: string): RenderedPathSegment[] {
   const commands = Array.from(path.matchAll(/([MLQ])([^MLQ]*)/g));
   let current: { x: number; y: number } | undefined;
-  return commands.flatMap(([, type, coordinates]) => {
+  return commands.flatMap<RenderedPathSegment>(([, type, coordinates]) => {
     const values = Array.from(
       coordinates.matchAll(/-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi),
       ([value]) => Number(value),
@@ -96,52 +101,128 @@ function straightPathSegments(path: string) {
     }
     if (current === undefined) throw new Error("Expected an absolute SVG path");
     if (type === "Q") {
-      current = { x: values[2]!, y: values[3]! };
-      return [];
+      const start = current;
+      const control = { x: values[0]!, y: values[1]! };
+      const end = { x: values[2]!, y: values[3]! };
+      current = end;
+      let previous = start;
+      return Array.from({ length: 16 }, (_, index) => {
+        const t = (index + 1) / 16;
+        const inverse = 1 - t;
+        const point = {
+          x:
+            inverse * inverse * start.x +
+            2 * inverse * t * control.x +
+            t * t * end.x,
+          y:
+            inverse * inverse * start.y +
+            2 * inverse * t * control.y +
+            t * t * end.y,
+        };
+        const segment = { start: previous, end: point };
+        previous = point;
+        return segment;
+      });
     }
     const start = current;
     const end = { x: values[0]!, y: values[1]! };
     current = end;
-    return [{
-      horizontal: start.y === end.y,
-      fixed: start.y === end.y ? start.y : start.x,
-      minimum: Math.min(
-        start.y === end.y ? start.x : start.y,
-        start.y === end.y ? end.x : end.y,
-      ),
-      maximum: Math.max(
-        start.y === end.y ? start.x : start.y,
-        start.y === end.y ? end.x : end.y,
-      ),
-    }];
+    return [{ start, end }];
   });
+}
+
+function segmentsHavePositiveLengthOverlap(
+  left: RenderedPathSegment,
+  right: RenderedPathSegment,
+) {
+  const leftVector = {
+    x: left.end.x - left.start.x,
+    y: left.end.y - left.start.y,
+  };
+  const rightVector = {
+    x: right.end.x - right.start.x,
+    y: right.end.y - right.start.y,
+  };
+  const cross = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+    a.x * b.y - a.y * b.x;
+  const epsilon = 0.000001;
+  if (
+    Math.hypot(leftVector.x, leftVector.y) <= epsilon ||
+    Math.hypot(rightVector.x, rightVector.y) <= epsilon ||
+    Math.abs(cross(leftVector, rightVector)) > epsilon ||
+    Math.abs(
+      cross(
+        leftVector,
+        {
+          x: right.start.x - left.start.x,
+          y: right.start.y - left.start.y,
+        },
+      ),
+    ) > epsilon
+  )
+    return false;
+
+  const axis = Math.abs(leftVector.x) >= Math.abs(leftVector.y) ? "x" : "y";
+  const leftMinimum = Math.min(left.start[axis], left.end[axis]);
+  const leftMaximum = Math.max(left.start[axis], left.end[axis]);
+  const rightMinimum = Math.min(right.start[axis], right.end[axis]);
+  const rightMaximum = Math.max(right.start[axis], right.end[axis]);
+  return (
+    Math.min(leftMaximum, rightMaximum) -
+      Math.max(leftMinimum, rightMinimum) >
+    epsilon
+  );
+}
+
+function renderedPathsHavePositiveLengthOverlap(
+  leftPath: string,
+  rightPath: string,
+) {
+  const leftSegments = renderedPathSegments(leftPath);
+  const rightSegments = renderedPathSegments(rightPath);
+  return leftSegments.some((left) =>
+    rightSegments.some((right) => segmentsHavePositiveLengthOverlap(left, right)),
+  );
 }
 
 function expectRenderedSolidLanesDisjoint(container: HTMLElement) {
-  const edgeSegments = Array.from(
+  const edgePaths = Array.from(
     container.querySelectorAll<SVGPathElement>(
       ".topology-edge-status-lane:not(.topology-edge-shared-trunk)",
     ),
-    (path) => straightPathSegments(path.getAttribute("d") ?? ""),
+    (path) => path.getAttribute("d") ?? "",
+  );
+  const sharedPaths = Array.from(
+    container.querySelectorAll<SVGPathElement>(
+      ".topology-edge-shared-trunk.topology-edge-status-lane",
+    ),
+    (path) => path.getAttribute("d") ?? "",
   );
 
-  edgeSegments.forEach((leftSegments, leftIndex) => {
-    edgeSegments.slice(leftIndex + 1).forEach((rightSegments) => {
-      leftSegments.forEach((left) => {
-        rightSegments.forEach((right) => {
-          if (left.horizontal !== right.horizontal || left.fixed !== right.fixed)
-            return;
-          expect(
-            Math.min(left.maximum, right.maximum) -
-              Math.max(left.minimum, right.minimum),
-          ).toBeLessThanOrEqual(0);
-        });
-      });
+  edgePaths.forEach((leftPath, leftIndex) => {
+    edgePaths.slice(leftIndex + 1).forEach((rightPath) => {
+      expect(renderedPathsHavePositiveLengthOverlap(leftPath, rightPath)).toBe(
+        false,
+      );
     });
   });
+  sharedPaths.forEach((trunk) =>
+    edgePaths.forEach((solid) =>
+      expect(renderedPathsHavePositiveLengthOverlap(trunk, solid)).toBe(false),
+    ),
+  );
 }
 
 describe("FlowingEdge", () => {
+  it("detects positive-length overlap between flattened quadratic and line paths", () => {
+    expect(
+      renderedPathsHavePositiveLengthOverlap(
+        "M0 0 Q10 0 20 0",
+        "M5 0 L15 0",
+      ),
+    ).toBe(true);
+  });
+
   it("uses the shared visible label width formula", () => {
     expect(getEvidenceLabelWidth("WARNING SC-429")).toBe(87.60000000000001);
     expect(getEvidenceLabelWidth("NO DATA")).toBe(49.800000000000004);
@@ -545,6 +626,49 @@ describe("FlowingEdge", () => {
     ]);
   });
 
+  it("keeps duplicate edge IDs isolated across mounted topology instances and stable on rerender", () => {
+    const duplicate = (key: string) => (
+      <svg key={key} data-instance={key}>
+        <FlowingEdge
+          id="duplicate-edge"
+          source="source"
+          target="target"
+          sourceX={0}
+          sourceY={0}
+          targetX={160}
+          targetY={0}
+          sourcePosition={Position.Right}
+          targetPosition={Position.Left}
+          selected={false}
+          selectable={false}
+          deletable={false}
+          data={{
+            status: "healthy",
+            motionEnabled: false,
+            sharedStatusBands: [
+              { status: "healthy", count: 1 },
+              { status: "warning", count: 1 },
+            ],
+            sharedBranchLength: 24,
+            renderSharedTrunk: true,
+          }}
+          label="1/мин"
+        />
+      </svg>
+    );
+    const view = render(<div>{[duplicate("first"), duplicate("second")]}</div>);
+    const readIds = () =>
+      Array.from(view.container.querySelectorAll("linearGradient"), (gradient) =>
+        gradient.getAttribute("id"),
+      );
+    const initialIds = readIds();
+
+    expect(initialIds).toHaveLength(2);
+    expect(new Set(initialIds).size).toBe(2);
+    view.rerender(<div>{[duplicate("first"), duplicate("second")]}</div>);
+    expect(readIds()).toEqual(initialIds);
+  });
+
   it("keeps unknown status paint on an individual edge", () => {
     const { container } = renderEdge({ status: "unknown" });
     const lanes = container.querySelectorAll(
@@ -677,6 +801,48 @@ describe("FlowingEdge", () => {
       ],
     },
     {
+      name: "off-source same-row fan-out",
+      source: { x: 0, y: 180, width: 190, height: 76 },
+      targets: [
+        { id: "above-a", x: 380, y: 20, width: 190, height: 76 },
+        { id: "above-b", x: 400, y: 20, width: 190, height: 76 },
+      ],
+    },
+    {
+      name: "cross-row approach collision fan-out",
+      source: { x: 0, y: 180, width: 190, height: 76 },
+      targets: [
+        { id: "target-a", x: 380, y: -120, width: 190, height: 76 },
+        { id: "target-b", x: 395, y: -20, width: 190, height: 76 },
+      ],
+    },
+    {
+      name: "narrow right-side corridor fan-out",
+      source: { x: 0, y: 100, width: 190, height: 76 },
+      targets: [
+        { id: "narrow-a", x: 210, y: -180, width: 190, height: 76 },
+        { id: "narrow-b", x: 210, y: -80, width: 190, height: 76 },
+        { id: "narrow-c", x: 210, y: 100, width: 190, height: 76 },
+      ],
+    },
+    {
+      name: "minimal off-row corridor fan-out",
+      source: { x: 0, y: 180, width: 190, height: 76 },
+      targets: [
+        { id: "target-a", x: 202, y: -20, width: 190, height: 76 },
+        { id: "target-b", x: 202, y: 80, width: 190, height: 76 },
+      ],
+    },
+    {
+      name: "mixed crowded and singleton fan-out",
+      source: { x: 0, y: 100, width: 190, height: 76 },
+      targets: [
+        { id: "above-a", x: 380, y: -80, width: 190, height: 76 },
+        { id: "above-b", x: 380, y: 0, width: 190, height: 76 },
+        { id: "below", x: 380, y: 260, width: 190, height: 76 },
+      ],
+    },
+    {
       name: "zero-clearance crossed fan-out",
       source: { x: 120, y: 100, width: 190, height: 76 },
       targets: [
@@ -787,7 +953,7 @@ describe("FlowingEdge", () => {
 
     view.rerender(<svg>{[edge("unrelated", 80), edge("stable-owner", 0)]}</svg>);
 
-    expect(initial.id).toBe("topology-gradient-stable-owner");
+    expect(initial.id).toMatch(/^topology-gradient-.+-stable-owner$/);
     expect(readGradient()).toEqual(initial);
     expect(initial.stops.map((stop) => stop[1])).toEqual([
       "#22c55e",

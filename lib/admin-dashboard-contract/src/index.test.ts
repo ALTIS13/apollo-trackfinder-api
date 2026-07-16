@@ -86,6 +86,22 @@ describe("admin dashboard contract", () => {
     ).toThrow("Invalid admin dashboard snapshot");
   });
 
+  it("rejects duplicate directed module connections with distinct edge IDs", () => {
+    expect(() =>
+      parseDashboardSnapshot({
+        ...validSnapshot,
+        edges: [
+          validSnapshot.edges[0],
+          {
+            ...validSnapshot.edges[0],
+            id: "core-api-search-media-shadow",
+            incidentId: undefined,
+          },
+        ],
+      }),
+    ).toThrow("Duplicate directed edge relation");
+  });
+
   it("accepts unknown modules and providers without fabricated observation times", () => {
     const modules = validSnapshot.modules.map((module, index) => {
       if (index !== 0) return module;
