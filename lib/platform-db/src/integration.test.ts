@@ -89,7 +89,14 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
   });
 
   afterAll(async () => {
-    await Promise.all([migrator?.end(), runtime?.end()]);
+    try {
+      await migrator?.query("drop schema if exists apollo_platform cascade");
+      if (migrator !== undefined) {
+        await runPlatformMigrations(migrator);
+      }
+    } finally {
+      await Promise.all([migrator?.end(), runtime?.end()]);
+    }
   });
 
   test("installs the approved schema once with closed registration and exact seed modules", async () => {
