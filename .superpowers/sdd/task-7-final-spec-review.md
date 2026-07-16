@@ -1,8 +1,8 @@
 # Task 7 Final Spec Re-review
 
-**Reviewed state:** current feature worktree after boundary-fix TDD  
-**Status:** Complete  
-**Verdict:** PASS  
+**Reviewed state:** current feature worktree after boundary-fix TDD
+**Status:** Complete
+**Verdict:** PASS
 **Explicit spec-compliance verdict:** PASS
 
 ## Evidence
