@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -23,48 +23,65 @@ function generatedSecret(bytes = 32) {
 
 function configuredEnvironment() {
   const environment = { ...process.env };
-  const defaultValue = (name, create) => {
-    if ((environment[name] ?? "").trim().length === 0) {
-      environment[name] = create();
-    }
-  };
-  defaultValue(
-    "COMPOSE_PROJECT_NAME",
-    () =>
-      `apollo-platform-smoke-${process.pid}-${randomBytes(4).toString("hex")}`,
-  );
-  defaultValue("PLATFORM_API_PORT", () => "8081");
-  defaultValue(
-    "PLATFORM_ALLOWED_ORIGINS",
-    () => `http://127.0.0.1:${environment.PLATFORM_API_PORT}`,
-  );
-  defaultValue("PLATFORM_POSTGRES_ADMIN_PASSWORD", generatedSecret);
-  defaultValue("PLATFORM_MIGRATOR_PASSWORD", generatedSecret);
-  defaultValue("PLATFORM_RUNTIME_PASSWORD", generatedSecret);
-  defaultValue("PLATFORM_OPERATOR_BOOTSTRAP_TOKEN", generatedSecret);
-  defaultValue("PLATFORM_SMOKE_SESSION_TOKEN", generatedSecret);
-  defaultValue(
+  for (const name of [
+    "DATABASE_URL",
+    "MIGRATOR_DATABASE_URL",
     "PLATFORM_MIGRATOR_DATABASE_URL",
-    () =>
-      `postgres://apollo_platform_migrator:${encodeURIComponent(environment.PLATFORM_MIGRATOR_PASSWORD)}` +
-      "@platform-postgres:5432/apollo_platform",
-  );
-  defaultValue(
+    "PLATFORM_MIGRATOR_PASSWORD",
+    "PLATFORM_OPERATOR_BOOTSTRAP_TOKEN",
+    "PLATFORM_POSTGRES_ADMIN_PASSWORD",
     "PLATFORM_RUNTIME_DATABASE_URL",
-    () =>
-      `postgres://apollo_platform_runtime:${encodeURIComponent(environment.PLATFORM_RUNTIME_PASSWORD)}` +
-      "@platform-postgres:5432/apollo_platform",
-  );
+    "PLATFORM_RUNTIME_PASSWORD",
+    "PLATFORM_SECRET_DIRECTORY",
+    "PLATFORM_SMOKE_SESSION_TOKEN",
+    "PLATFORM_TEST_MIGRATOR_DATABASE_URL",
+    "PLATFORM_TEST_RUNTIME_DATABASE_URL",
+  ]) {
+    delete environment[name];
+  }
+
+  environment.COMPOSE_PROJECT_NAME = `apollo-platform-smoke-${process.pid}-${randomBytes(4).toString("hex")}`;
+  environment.PLATFORM_API_PORT = "8081";
+  environment.PLATFORM_ALLOWED_ORIGINS = `http://127.0.0.1:${environment.PLATFORM_API_PORT}`;
+  environment.PLATFORM_POSTGRES_ADMIN_PASSWORD = generatedSecret();
+  environment.PLATFORM_MIGRATOR_PASSWORD = generatedSecret();
+  environment.PLATFORM_RUNTIME_PASSWORD = generatedSecret();
+  environment.PLATFORM_OPERATOR_BOOTSTRAP_TOKEN = generatedSecret();
+  environment.PLATFORM_SMOKE_SESSION_TOKEN = generatedSecret();
+  environment.PLATFORM_MIGRATOR_DATABASE_URL =
+    `postgres://apollo_platform_migrator:${encodeURIComponent(environment.PLATFORM_MIGRATOR_PASSWORD)}` +
+    "@platform-postgres:5432/apollo_platform";
+  environment.PLATFORM_RUNTIME_DATABASE_URL =
+    `postgres://apollo_platform_runtime:${encodeURIComponent(environment.PLATFORM_RUNTIME_PASSWORD)}` +
+    "@platform-postgres:5432/apollo_platform";
   environment.PLATFORM_NODE_ENV = "development";
   environment.PLATFORM_DEVELOPMENT_TOKEN_ECHO = "true";
+  environment.PLATFORM_TRUST_PROXY_HOPS = "0";
+
+  assertInternalDatabaseUrl(
+    environment.PLATFORM_MIGRATOR_DATABASE_URL,
+    "apollo_platform_migrator",
+  );
+  assertInternalDatabaseUrl(
+    environment.PLATFORM_RUNTIME_DATABASE_URL,
+    "apollo_platform_runtime",
+  );
   return environment;
 }
 
-async function prepareSecretDirectory(environment) {
-  if ((environment.PLATFORM_SECRET_DIRECTORY ?? "").trim().length > 0) {
-    return undefined;
-  }
+function assertInternalDatabaseUrl(value, expectedUsername) {
+  const parsed = new URL(value);
+  assert.equal(parsed.protocol, "postgres:");
+  assert.equal(parsed.hostname, "platform-postgres");
+  assert.equal(parsed.port, "5432");
+  assert.equal(parsed.pathname, "/apollo_platform");
+  assert.equal(parsed.username, expectedUsername);
+  assert(parsed.password.length > 0);
+  assert.equal(parsed.search, "");
+  assert.equal(parsed.hash, "");
+}
 
+async function prepareSecretDirectory(environment) {
   const directory = await mkdtemp(join(tmpdir(), "apollo-platform-secrets-"));
   try {
     await chmod(directory, 0o700);
@@ -109,13 +126,89 @@ function assertSecretFree(text, secrets, label) {
   }
 }
 
-async function compose(environment, args, options = {}) {
-  return execFileAsync("docker", ["compose", "-f", composeFile, ...args], {
+async function assertTrackedFilesSecretFree(secrets) {
+  const { stdout } = await execFileAsync("git", ["ls-files", "-z"], {
+    cwd: repositoryRoot,
+    encoding: "buffer",
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  const files = stdout.toString("utf8").split("\0").filter(Boolean);
+  await assertFileBytesSecretFree(files, secrets, repositoryRoot);
+}
+
+export async function assertFileBytesSecretFree(
+  files,
+  secrets,
+  root = repositoryRoot,
+) {
+  const needles = secrets.flatMap((secret) => [
+    Buffer.from(secret),
+    Buffer.from(digest(secret)),
+  ]);
+
+  for (const file of files) {
+    const bytes = await readFile(join(root, file));
+    if (needles.some((needle) => bytes.includes(needle))) {
+      const label = file.replace(/[^a-zA-Z0-9._/-]/g, "?").slice(0, 200);
+      throw new Error(`tracked file contains secret material: ${label}`);
+    }
+  }
+}
+
+function isLocalDockerEndpoint(value) {
+  const normalized = value.trim().toLowerCase();
+  return normalized.startsWith("npipe://") || normalized.startsWith("unix://");
+}
+
+async function assertLocalDockerTarget(environment) {
+  const dockerHost = (environment.DOCKER_HOST ?? "").trim();
+  if (dockerHost.length > 0) {
+    assert(
+      isLocalDockerEndpoint(dockerHost),
+      "Platform smoke requires a local Docker socket",
+    );
+    return;
+  }
+
+  const context = (environment.DOCKER_CONTEXT ?? "").trim();
+  const args = ["context", "inspect"];
+  if (context.length > 0) args.push(context);
+  args.push("--format", "{{json .Endpoints.docker.Host}}");
+  const { stdout } = await execFileAsync("docker", args, {
     cwd: repositoryRoot,
     env: environment,
-    maxBuffer: 8 * 1024 * 1024,
-    ...options,
+    maxBuffer: 1024 * 1024,
   });
+  let endpoint;
+  try {
+    endpoint = JSON.parse(stdout.trim());
+  } catch {
+    endpoint = undefined;
+  }
+  assert(
+    typeof endpoint === "string" && isLocalDockerEndpoint(endpoint),
+    "Platform smoke requires a local Docker socket",
+  );
+}
+
+async function compose(environment, args, options = {}) {
+  return execFileAsync(
+    "docker",
+    [
+      "compose",
+      "-f",
+      composeFile,
+      "-p",
+      environment.COMPOSE_PROJECT_NAME,
+      ...args,
+    ],
+    {
+      cwd: repositoryRoot,
+      env: environment,
+      maxBuffer: 8 * 1024 * 1024,
+      ...options,
+    },
+  );
 }
 
 async function waitForReady(baseUrl) {
@@ -433,10 +526,13 @@ async function runSmoke(environment) {
       `public projection ${projection.path}`,
     );
   }
+  await assertTrackedFilesSecretFree(rawSecrets);
 }
 
 async function main() {
   const environment = configuredEnvironment();
+  smokeStage = "docker-context";
+  await assertLocalDockerTarget(environment);
   const ownedSecretDirectory = await prepareSecretDirectory(environment);
   const secrets = [
     environment.PLATFORM_POSTGRES_ADMIN_PASSWORD,
@@ -457,11 +553,8 @@ async function main() {
       secrets,
       "Compose config",
     );
-    const running = await compose(environment, ["ps", "-q", "platform-api"]);
-    if (running.stdout.trim().length === 0) {
-      smokeStage = "compose-up";
-      await compose(environment, ["up", "-d", "--build", "--wait"]);
-    }
+    smokeStage = "compose-up";
+    await compose(environment, ["up", "-d", "--build", "--wait"]);
     smokeStage = "readiness";
     await waitForReady(`http://127.0.0.1:${environment.PLATFORM_API_PORT}`);
     await runSmoke(environment);
@@ -477,21 +570,23 @@ async function main() {
       if (failure === undefined) failure = cleanupError;
       else process.stderr.write("Platform smoke cleanup also failed\n");
     }
-    if (ownedSecretDirectory !== undefined) {
-      try {
-        await rm(ownedSecretDirectory, { force: true, recursive: true });
-      } catch (cleanupError) {
-        if (failure === undefined) failure = cleanupError;
-        else
-          process.stderr.write("Platform smoke secret cleanup also failed\n");
-      }
+    try {
+      await rm(ownedSecretDirectory, { force: true, recursive: true });
+    } catch (cleanupError) {
+      if (failure === undefined) failure = cleanupError;
+      else process.stderr.write("Platform smoke secret cleanup also failed\n");
     }
   }
 
   if (failure !== undefined) throw failure;
 }
 
-void main().catch(() => {
-  process.stderr.write(`Platform smoke failed at ${smokeStage}\n`);
-  process.exitCode = 1;
-});
+if (
+  process.argv[1] !== undefined &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  void main().catch(() => {
+    process.stderr.write(`Platform smoke failed at ${smokeStage}\n`);
+    process.exitCode = 1;
+  });
+}

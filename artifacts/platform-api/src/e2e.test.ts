@@ -1,7 +1,18 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  access,
+  chmod,
+  copyFile,
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -11,6 +22,9 @@ const execFileAsync = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const composeFile = fileURLToPath(
   new URL("../docker-compose.yml", import.meta.url),
+);
+const smokeScript = fileURLToPath(
+  new URL("../scripts/smoke.mjs", import.meta.url),
 );
 const contractSecrets = Object.freeze({
   PLATFORM_OPERATOR_BOOTSTRAP_TOKEN: "contract-bootstrap-secret",
@@ -75,6 +89,179 @@ async function renderedCompose(): Promise<Record<string, unknown>> {
   }
 }
 
+type FakeDockerRecord = {
+  args: string[];
+  command: string;
+  effectiveProject: string;
+  inheritedCredentials: boolean;
+  inheritedDatabaseUrls: boolean;
+  inheritedSecretDirectory: boolean;
+  migratorUrl: { database?: string; hostname?: string; username?: string };
+  runtimeUrl: { database?: string; hostname?: string; username?: string };
+};
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function fakeDockerExecutable(directory: string): Promise<string> {
+  const executable = join(
+    directory,
+    process.platform === "win32" ? "docker.exe" : "docker",
+  );
+  try {
+    await link(process.execPath, executable);
+  } catch {
+    await copyFile(process.execPath, executable);
+  }
+  if (process.platform !== "win32") await chmod(executable, 0o755);
+  return executable;
+}
+
+async function runSmokeWithFakeDocker(
+  environmentOverrides: NodeJS.ProcessEnv = {},
+): Promise<{
+  records: FakeDockerRecord[];
+  sentinelExists: boolean;
+}> {
+  const directory = await mkdtemp(join(tmpdir(), "apollo-smoke-boundary-"));
+  const binDirectory = join(directory, "bin");
+  const logPath = join(directory, "docker-invocations.jsonl");
+  const sentinelPath = join(directory, "existing-project.sentinel");
+  const inheritedSecretDirectory = join(directory, "hostile-secret-directory");
+  const hookPath = join(directory, "fake-docker.cjs");
+  await mkdir(binDirectory);
+  await fakeDockerExecutable(binDirectory);
+  await writeFile(sentinelPath, "existing project must survive", "utf8");
+  await writeFile(
+    hookPath,
+    String.raw`
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(1);
+const executableArgument = path.basename(args[0] ?? "");
+if (executableArgument === "compose" || executableArgument === "context") {
+args[0] = executableArgument;
+const env = process.env;
+const projectIndex = args.indexOf("-p");
+const effectiveProject = projectIndex === -1 ? env.COMPOSE_PROJECT_NAME ?? "" : args[projectIndex + 1] ?? "";
+const command = args[0] === "context" ? "context" : ["config", "ps", "up", "down"].find((value) => args.includes(value)) ?? "other";
+function urlShape(name) {
+  try {
+    const value = new URL(env[name]);
+    return { database: value.pathname.replace(/^\//, ""), hostname: value.hostname, username: value.username };
+  } catch {
+    return {};
+  }
+}
+const record = {
+  args,
+  command,
+  effectiveProject,
+  inheritedCredentials: [
+    ["PLATFORM_POSTGRES_ADMIN_PASSWORD", "HOSTILE_POSTGRES_ADMIN_PASSWORD"],
+    ["PLATFORM_MIGRATOR_PASSWORD", "HOSTILE_MIGRATOR_PASSWORD"],
+    ["PLATFORM_RUNTIME_PASSWORD", "HOSTILE_RUNTIME_PASSWORD"],
+    ["PLATFORM_OPERATOR_BOOTSTRAP_TOKEN", "HOSTILE_BOOTSTRAP_TOKEN"],
+    ["PLATFORM_SMOKE_SESSION_TOKEN", "HOSTILE_SESSION_TOKEN"],
+  ].some(([actual, hostile]) => env[actual] === env[hostile]),
+  inheritedDatabaseUrls:
+    env.PLATFORM_MIGRATOR_DATABASE_URL === env.HOSTILE_MIGRATOR_DATABASE_URL ||
+    env.PLATFORM_RUNTIME_DATABASE_URL === env.HOSTILE_RUNTIME_DATABASE_URL,
+  inheritedSecretDirectory: env.PLATFORM_SECRET_DIRECTORY === env.HOSTILE_SECRET_DIRECTORY,
+  migratorUrl: urlShape("PLATFORM_MIGRATOR_DATABASE_URL"),
+  runtimeUrl: urlShape("PLATFORM_RUNTIME_DATABASE_URL"),
+};
+fs.appendFileSync(env.FAKE_DOCKER_LOG, JSON.stringify(record) + "\n");
+if (command === "context") {
+  process.stdout.write(JSON.stringify("npipe:////./pipe/docker_engine"));
+  process.exit(0);
+}
+if (command === "config") {
+  process.stdout.write("{}");
+  process.exit(0);
+}
+if (command === "up") process.exit(42);
+if (command === "down") {
+  if (effectiveProject === env.HOSTILE_PROJECT_NAME) {
+    fs.rmSync(env.FAKE_EXISTING_PROJECT_SENTINEL, { force: true });
+  }
+  process.exit(0);
+}
+process.exit(0);
+}
+`,
+    "utf8",
+  );
+
+  const hostile = {
+    HOSTILE_BOOTSTRAP_TOKEN: "inherited-bootstrap-token",
+    HOSTILE_MIGRATOR_DATABASE_URL:
+      "postgres://wrong_migrator:inherited@remote.example:5432/production",
+    HOSTILE_MIGRATOR_PASSWORD: "inherited-migrator-password",
+    HOSTILE_POSTGRES_ADMIN_PASSWORD: "inherited-admin-password",
+    HOSTILE_PROJECT_NAME: "existing-platform-project",
+    HOSTILE_RUNTIME_DATABASE_URL:
+      "postgres://wrong_runtime:inherited@remote.example:5432/production",
+    HOSTILE_RUNTIME_PASSWORD: "inherited-runtime-password",
+    HOSTILE_SECRET_DIRECTORY: inheritedSecretDirectory,
+    HOSTILE_SESSION_TOKEN: "inherited-session-token",
+  };
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...hostile,
+    COMPOSE_PROJECT_NAME: hostile.HOSTILE_PROJECT_NAME,
+    DOCKER_CONTEXT: "",
+    DOCKER_HOST: "",
+    FAKE_DOCKER_LOG: logPath,
+    FAKE_EXISTING_PROJECT_SENTINEL: sentinelPath,
+    NODE_OPTIONS: `--require=${hookPath}`,
+    PATH: `${binDirectory}${delimiter}${process.env.PATH ?? ""}`,
+    PLATFORM_MIGRATOR_DATABASE_URL: hostile.HOSTILE_MIGRATOR_DATABASE_URL,
+    PLATFORM_MIGRATOR_PASSWORD: hostile.HOSTILE_MIGRATOR_PASSWORD,
+    PLATFORM_OPERATOR_BOOTSTRAP_TOKEN: hostile.HOSTILE_BOOTSTRAP_TOKEN,
+    PLATFORM_POSTGRES_ADMIN_PASSWORD: hostile.HOSTILE_POSTGRES_ADMIN_PASSWORD,
+    PLATFORM_RUNTIME_DATABASE_URL: hostile.HOSTILE_RUNTIME_DATABASE_URL,
+    PLATFORM_RUNTIME_PASSWORD: hostile.HOSTILE_RUNTIME_PASSWORD,
+    PLATFORM_SECRET_DIRECTORY: hostile.HOSTILE_SECRET_DIRECTORY,
+    PLATFORM_SMOKE_SESSION_TOKEN: hostile.HOSTILE_SESSION_TOKEN,
+    ...environmentOverrides,
+  };
+  for (const name of Object.keys(environment)) {
+    if (name.toLowerCase() === "path") delete environment[name];
+  }
+  environment.PATH = `${binDirectory}${delimiter}${process.env.PATH ?? process.env.Path ?? ""}`;
+
+  try {
+    await expect(
+      execFileAsync(process.execPath, [smokeScript], {
+        cwd: repositoryRoot,
+        env: environment,
+        timeout: 10_000,
+      }),
+    ).rejects.toBeDefined();
+    const log = (await pathExists(logPath))
+      ? await readFile(logPath, "utf8")
+      : "";
+    const records = log
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as FakeDockerRecord);
+    return {
+      records,
+      sentinelExists: await pathExists(sentinelPath),
+    };
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+}
+
 function service(
   config: Record<string, unknown>,
   name: string,
@@ -86,6 +273,60 @@ function service(
 }
 
 describe("platform container contract", () => {
+  test("isolates every smoke lifecycle from a hostile inherited Compose project", async () => {
+    const { records, sentinelExists } = await runSmokeWithFakeDocker();
+    const composeRecords = records.filter(({ args }) => args[0] === "compose");
+
+    expect(sentinelExists).toBe(true);
+    expect(composeRecords.map(({ command }) => command)).toEqual([
+      "config",
+      "up",
+      "down",
+    ]);
+    const projects = new Set(
+      composeRecords.map(({ effectiveProject }) => effectiveProject),
+    );
+    expect(projects.size).toBe(1);
+    const [project] = projects;
+    expect(project).toMatch(/^apollo-platform-smoke-\d+-[a-f0-9]{8}$/);
+    expect(project).not.toBe("existing-platform-project");
+    for (const record of composeRecords) {
+      expect(record.args).toContain("-p");
+      expect(record.args[record.args.indexOf("-p") + 1]).toBe(project);
+    }
+  });
+
+  test("replaces inherited credentials, database URLs, and secret paths", async () => {
+    const { records } = await runSmokeWithFakeDocker();
+    const composeRecords = records.filter(({ args }) => args[0] === "compose");
+
+    expect(composeRecords.length).toBeGreaterThan(0);
+    for (const record of composeRecords) {
+      expect(record.inheritedCredentials).toBe(false);
+      expect(record.inheritedDatabaseUrls).toBe(false);
+      expect(record.inheritedSecretDirectory).toBe(false);
+      expect(record.migratorUrl).toEqual({
+        database: "apollo_platform",
+        hostname: "platform-postgres",
+        username: "apollo_platform_migrator",
+      });
+      expect(record.runtimeUrl).toEqual({
+        database: "apollo_platform",
+        hostname: "platform-postgres",
+        username: "apollo_platform_runtime",
+      });
+    }
+  });
+
+  test("refuses a remote Docker host before invoking Docker", async () => {
+    const { records, sentinelExists } = await runSmokeWithFakeDocker({
+      DOCKER_HOST: "tcp://remote.example:2375",
+    });
+
+    expect(records).toEqual([]);
+    expect(sentinelExists).toBe(true);
+  });
+
   test("uses a Debian/glibc multi-stage image with immutable runtime assets", async () => {
     const dockerfile = await readFile(
       new URL("../Dockerfile", import.meta.url),
@@ -140,6 +381,9 @@ describe("platform container contract", () => {
     expect(migrate.depends_on).toMatchObject({
       "platform-postgres": { condition: "service_healthy" },
     });
+    expect(
+      JSON.stringify(service(config, "platform-postgres").healthcheck),
+    ).toContain("pg_isready -h 127.0.0.1 -U postgres -d apollo_platform");
     expect(JSON.stringify(api.healthcheck)).toContain("/healthz");
     expect(JSON.stringify(api.healthcheck)).toContain("/readyz");
     expect(api.environment).not.toHaveProperty("DATABASE_URL");
@@ -222,6 +466,77 @@ describe("platform container contract", () => {
     expect(smoke.indexOf("invitation-entitlement-revoke")).toBeLessThan(
       smoke.indexOf("activation-without-entitlement"),
     );
+  });
+
+  test("scans every tracked file byte for generated secrets and digests", async () => {
+    const smoke = await readFile(
+      new URL("../scripts/smoke.mjs", import.meta.url),
+      "utf8",
+    );
+
+    expect(smoke).toMatch(/execFileAsync\(\s*"git",\s*\["ls-files", "-z"\]/);
+    expect(smoke).toContain(
+      "assertFileBytesSecretFree(files, secrets, repositoryRoot)",
+    );
+    expect(smoke).toContain("Buffer.from(digest(secret))");
+    expect(smoke).toContain("tracked file contains secret material");
+  });
+
+  test("byte scanner detects raw and digest material with sanitized labels", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "apollo-secret-scan-"));
+    const rawFile = "raw secret.bin";
+    const digestFile = "digest secret.bin";
+    const safeFile = "safe.bin";
+    const secret = randomBytes(24).toString("base64url");
+    const secretDigest = createHash("sha256").update(secret).digest("hex");
+    try {
+      await Promise.all([
+        writeFile(join(directory, rawFile), Buffer.from(secret)),
+        writeFile(join(directory, digestFile), Buffer.from(secretDigest)),
+        writeFile(join(directory, safeFile), Buffer.from("public material")),
+      ]);
+      const runner = String.raw`
+const module = await import(process.env.SMOKE_MODULE_URL);
+const messages = [];
+for (const file of [process.env.RAW_FILE, process.env.DIGEST_FILE]) {
+  try {
+    await module.assertFileBytesSecretFree([file], [process.env.SCAN_SECRET], process.env.SCAN_ROOT);
+  } catch (error) {
+    messages.push(error.message);
+  }
+}
+await module.assertFileBytesSecretFree([process.env.SAFE_FILE], [process.env.SCAN_SECRET], process.env.SCAN_ROOT);
+process.stdout.write(JSON.stringify(messages));
+`;
+      const { stdout, stderr } = await execFileAsync(
+        process.execPath,
+        ["--input-type=module", "-e", runner],
+        {
+          cwd: repositoryRoot,
+          env: {
+            ...process.env,
+            DIGEST_FILE: digestFile,
+            DOCKER_HOST: "tcp://remote.example:2375",
+            RAW_FILE: rawFile,
+            SAFE_FILE: safeFile,
+            SCAN_ROOT: directory,
+            SCAN_SECRET: secret,
+            SMOKE_MODULE_URL: new URL("../scripts/smoke.mjs", import.meta.url)
+              .href,
+          },
+        },
+      );
+      expect(stderr).toBe("");
+      const messages = JSON.parse(stdout) as string[];
+      expect(messages).toEqual([
+        "tracked file contains secret material: raw?secret.bin",
+        "tracked file contains secret material: digest?secret.bin",
+      ]);
+      expect(stdout).not.toContain(secret);
+      expect(stdout).not.toContain(secretDigest);
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
   });
 });
 
