@@ -7,6 +7,9 @@
       "path": "./lib/admin-dashboard-contract"
     },
     {
+      "path": "./lib/platform-contract"
+    },
+    {
       "path": "./lib/db"
     },
     {
