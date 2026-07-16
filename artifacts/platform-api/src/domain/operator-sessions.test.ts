@@ -538,6 +538,60 @@ describe("OperatorSessionService", () => {
     30_000,
   );
 
+  test.each([
+    ["lowercase digest equal", digestOpaqueToken(BOOTSTRAP_TOKEN)],
+    [
+      "lowercase digest embedded",
+      `approved ${digestOpaqueToken(BOOTSTRAP_TOKEN)} bootstrap`,
+    ],
+    [
+      "uppercase digest equal",
+      digestOpaqueToken(BOOTSTRAP_TOKEN).toUpperCase(),
+    ],
+    [
+      "uppercase digest embedded",
+      `approved ${digestOpaqueToken(BOOTSTRAP_TOKEN).toUpperCase()} bootstrap`,
+    ],
+  ])(
+    "rejects a bootstrap reason containing the full %s before mutation",
+    async (_scenario, reason) => {
+      const harness = createHarness(currentPasswordHash);
+      const before = structuredClone(harness.state);
+      const bootstrapDigest = digestOpaqueToken(BOOTSTRAP_TOKEN);
+
+      const error = await harness.service
+        .bootstrap(
+          {
+            bootstrapToken: BOOTSTRAP_TOKEN,
+            email: "operator@example.com",
+            displayName: "Operator",
+            password: PASSWORD,
+            reason,
+          },
+          { correlationId: CORRELATION_ID },
+        )
+        .catch((candidate) => candidate);
+
+      expectDomainError(error, "invalid_credentials");
+      expect(harness.timeline).toEqual([]);
+      expect(harness.state).toEqual(before);
+      expect(harness.state.audits).toEqual([]);
+      expect(harness.repository.createAccount).not.toHaveBeenCalled();
+      expect(
+        harness.repository.insertOperatorCapabilities,
+      ).not.toHaveBeenCalled();
+      expect(harness.repository.insertAuditEvent).not.toHaveBeenCalled();
+      for (const serialized of [
+        JSON.stringify(error),
+        JSON.stringify(harness.state),
+      ]) {
+        expect(serialized).not.toContain(BOOTSTRAP_TOKEN);
+        expect(serialized.toLowerCase()).not.toContain(bootstrapDigest);
+      }
+    },
+    30_000,
+  );
+
   test("logs in an active capable operator, rotates only admin sessions, and stores a token digest", async () => {
     const harness = createHarness(currentPasswordHash);
     harness.state.accounts.push(account());

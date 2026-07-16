@@ -135,10 +135,12 @@ function bootstrapReasonContainsSecret(
     reason: string;
   }>,
 ): boolean {
+  const normalizedReason = input.reason.toLowerCase();
   return (
     input.reason.includes(input.bootstrapToken) ||
     input.reason.includes(input.password) ||
-    input.reason.toLowerCase().includes(normalizeEmail(input.email))
+    normalizedReason.includes(normalizeEmail(input.email)) ||
+    normalizedReason.includes(digestOpaqueToken(input.bootstrapToken))
   );
 }
 

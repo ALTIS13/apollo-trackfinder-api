@@ -245,6 +245,27 @@ describe("PolicyService", () => {
     });
   });
 
+  test("fails closed for duplicate repository module rows that could otherwise allow", async () => {
+    const harness = createHarness();
+    const duplicate = moduleRecord("tf.search", 9);
+    harness.repository.findModulesByKeys.mockResolvedValueOnce([
+      { ...harness.state.modules[0]!, state: "disabled" },
+      duplicate,
+    ]);
+    harness.repository.listAccountEntitlements.mockResolvedValueOnce([
+      entitlementFor(duplicate),
+    ]);
+
+    await expect(
+      harness.service.evaluate(
+        evaluateInput({ requiredModules: ["tf.search"] }),
+      ),
+    ).resolves.toEqual({
+      allowed: false,
+      code: "policy_unavailable",
+    });
+  });
+
   test.each([
     [
       "account id",

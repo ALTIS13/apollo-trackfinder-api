@@ -57,11 +57,24 @@ function knownModules(
   requested: readonly string[],
   modules: readonly PlatformModule[],
 ): Map<string, PlatformModule> | null {
-  const byKey = new Map(modules.map((module) => [module.moduleKey, module]));
-  if (
-    byKey.size !== requested.length ||
-    requested.some((key) => byKey.get(key)?.state !== "active")
-  ) {
+  if (modules.length !== requested.length) {
+    return null;
+  }
+
+  const requestedKeys = new Set(requested);
+  const byKey = new Map<string, PlatformModule>();
+  for (const module of modules) {
+    if (
+      module.state !== "active" ||
+      !requestedKeys.has(module.moduleKey) ||
+      byKey.has(module.moduleKey)
+    ) {
+      return null;
+    }
+    byKey.set(module.moduleKey, module);
+  }
+
+  if (byKey.size !== requestedKeys.size) {
     return null;
   }
   return byKey;
