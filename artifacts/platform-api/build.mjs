@@ -4,7 +4,12 @@ import { rm } from "node:fs/promises";
 await rm("dist", { force: true, recursive: true });
 await build({
   bundle: true,
-  entryPoints: ["src/index.ts"],
+  entryNames: "[name]",
+  entryPoints: {
+    index: "src/index.ts",
+    migrate: "src/migrate.ts",
+    "policy-smoke": "src/policy-smoke.ts",
+  },
   external: [
     "argon2",
     "cookie-parser",
@@ -15,7 +20,8 @@ await build({
     "zod",
   ],
   format: "esm",
-  outfile: "dist/index.mjs",
+  outExtension: { ".js": ".mjs" },
+  outdir: "dist",
   platform: "node",
   target: "node20",
 });

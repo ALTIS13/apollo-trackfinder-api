@@ -1,0 +1,149 @@
+name: ${COMPOSE_PROJECT_NAME:-apollo-platform-local}
+
+services:
+  platform-postgres:
+    build:
+      context: ../..
+      dockerfile: artifacts/platform-api/Dockerfile
+      target: postgres-role-init
+    image: ${PLATFORM_POSTGRES_IMAGE:-apollo-platform-postgres:local}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: apollo_platform
+      POSTGRES_PASSWORD_FILE: /run/secrets/platform_postgres_admin_password
+      POSTGRES_USER: postgres
+    secrets:
+      - platform_postgres_admin_password
+      - platform_migrator_password
+      - platform_runtime_password
+    volumes:
+      - platform-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d apollo_platform"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  platform-redis:
+    image: redis:7-bookworm
+    restart: unless-stopped
+    read_only: true
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - platform-redis-data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+  platform-migrate:
+    build:
+      context: ../..
+      dockerfile: artifacts/platform-api/Dockerfile
+      target: runtime
+    image: ${PLATFORM_API_IMAGE:-apollo-platform-api:local}
+    user: "10001:10001"
+    read_only: true
+    command: ["node", "/app/dist/migrate.mjs"]
+    environment:
+      MIGRATOR_DATABASE_URL_FILE: /run/secrets/platform_migrator_database_url
+    secrets:
+      - source: platform_migrator_database_url
+        target: platform_migrator_database_url
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    depends_on:
+      platform-postgres:
+        condition: service_healthy
+    restart: "no"
+
+  platform-api:
+    build:
+      context: ../..
+      dockerfile: artifacts/platform-api/Dockerfile
+      target: runtime
+    image: ${PLATFORM_API_IMAGE:-apollo-platform-api:local}
+    user: "10001:10001"
+    read_only: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PLATFORM_API_PORT:-8081}:8080"
+    environment:
+      APOLLO_ALLOWED_ORIGINS: ${PLATFORM_ALLOWED_ORIGINS:-}
+      APOLLO_DEVELOPMENT_TOKEN_ECHO: ${PLATFORM_DEVELOPMENT_TOKEN_ECHO:-false}
+      APOLLO_OPERATOR_BOOTSTRAP_TOKEN_FILE: /run/secrets/platform_operator_bootstrap_token
+      APOLLO_REDIS_URL: redis://platform-redis:6379
+      APOLLO_TRUST_PROXY_HOPS: ${PLATFORM_TRUST_PROXY_HOPS:-0}
+      DATABASE_URL_FILE: /run/secrets/platform_runtime_database_url
+      NODE_ENV: ${PLATFORM_NODE_ENV:-production}
+      PORT: 8080
+    secrets:
+      - source: platform_operator_bootstrap_token
+        target: platform_operator_bootstrap_token
+      - source: platform_runtime_database_url
+        target: platform_runtime_database_url
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    depends_on:
+      platform-migrate:
+        condition: service_completed_successfully
+      platform-redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          Promise.all(['/healthz','/readyz'].map(async p=>{const r=await fetch('http://127.0.0.1:8080'+p);if(!r.ok)throw new Error('not ready')}))
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  platform-smoke:
+    profiles: ["smoke"]
+    image: ${PLATFORM_API_IMAGE:-apollo-platform-api:local}
+    user: "10001:10001"
+    read_only: true
+    command: ["node", "/app/dist/policy-smoke.mjs"]
+    environment:
+      DATABASE_URL_FILE: /run/secrets/platform_runtime_database_url
+      PLATFORM_SMOKE_CONTAINER: "true"
+      PLATFORM_SMOKE_SESSION_TOKEN_FILE: /run/secrets/platform_smoke_session_token
+    secrets:
+      - source: platform_runtime_database_url
+        target: platform_runtime_database_url
+      - source: platform_smoke_session_token
+        target: platform_smoke_session_token
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    depends_on:
+      platform-api:
+        condition: service_healthy
+    restart: "no"
+
+secrets:
+  platform_postgres_admin_password:
+    environment: PLATFORM_POSTGRES_ADMIN_PASSWORD
+  platform_migrator_password:
+    environment: PLATFORM_MIGRATOR_PASSWORD
+  platform_runtime_password:
+    environment: PLATFORM_RUNTIME_PASSWORD
+  platform_migrator_database_url:
+    file: ${PLATFORM_SECRET_DIRECTORY:-}/platform_migrator_database_url
+  platform_runtime_database_url:
+    file: ${PLATFORM_SECRET_DIRECTORY:-}/platform_runtime_database_url
+  platform_operator_bootstrap_token:
+    file: ${PLATFORM_SECRET_DIRECTORY:-}/platform_operator_bootstrap_token
+  platform_smoke_session_token:
+    file: ${PLATFORM_SECRET_DIRECTORY:-}/platform_smoke_session_token
+
+volumes:
+  platform-postgres-data:
+  platform-redis-data:

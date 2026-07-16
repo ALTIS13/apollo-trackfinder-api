@@ -32,6 +32,7 @@ minimumReleaseAgeExclude: []
 
 onlyBuiltDependencies:
   - '@swc/core'
+  - argon2
   - esbuild
   - msw
   - unrs-resolver

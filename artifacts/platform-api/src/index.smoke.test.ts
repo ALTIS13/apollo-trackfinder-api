@@ -70,12 +70,16 @@ afterEach(async () => {
 });
 
 describe("production bundle", () => {
-  it("emits only the runnable index bundle", async () => {
+  it("emits only the runnable API, migration, and policy-smoke bundles", async () => {
     await execFileAsync(process.execPath, ["build.mjs"], {
       cwd: process.cwd(),
     });
 
-    await expect(readdir("dist")).resolves.toEqual(["index.mjs"]);
+    await expect(readdir("dist")).resolves.toEqual([
+      "index.mjs",
+      "migrate.mjs",
+      "policy-smoke.mjs",
+    ]);
   });
 
   it("starts without migrations and reports unavailable readiness", async () => {
