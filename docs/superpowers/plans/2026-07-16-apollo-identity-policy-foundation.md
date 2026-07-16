@@ -143,7 +143,7 @@ Create `apollo_platform.schema_migrations(name text primary key, checksum text n
 
 - [ ] **Step 4: Write the complete version `0001` SQL migration**
 
-The migration creates the 16 approved tables, UUID primary keys, normalized unique email/module constraints, foreign keys, expiry/revocation checks, invitation `uses_count <= uses_limit`, immutable audit-event trigger, seed registration mode `closed`, and the four initial modules. Enable and force RLS on account-owned tables. Policies read `NULLIF(current_setting('app.account_id', true), '')::uuid`; absent context matches no rows.
+The migration creates the 17 approved tables, UUID primary keys, normalized unique email/module constraints, foreign keys, expiry/revocation checks, invitation `uses_count <= uses_limit`, immutable audit-event trigger, seed registration mode `closed`, and the four initial modules. Enable and force RLS on account-owned tables. Policies read `NULLIF(current_setting('app.account_id', true), '')::uuid`; absent context matches no rows.
 
 - [ ] **Step 5: Write PostgreSQL integration RED tests**
 
