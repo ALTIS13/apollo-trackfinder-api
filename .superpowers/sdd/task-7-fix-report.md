@@ -51,4 +51,4 @@
 
 - Final independent spec and quality re-reviews: PASS, no findings.
 - Implementation commit: `13a2743` (`fix(admin): make topology fan routing collision-safe`).
-- Feature push and fast-forward merge to `main`: pending.
+- Feature branch published through `7ab3a4f` and fast-forward merged into `main`; final `main` publication is recorded by the status commit containing this report.
