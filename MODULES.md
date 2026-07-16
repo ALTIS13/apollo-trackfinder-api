@@ -1,6 +1,6 @@
 # Apollo TrackFinder — Документация по модулям
 
-> Кросс-платформенный музыкальный плеер: Expo-приложение (Android + PWA) + самохостящийся Docker-бэкенд.
+> Web/server система Apollo TF с отдельным Apollo Platform Identity/Policy boundary и самохостящимся Docker-бэкендом. Native Android APK отложен; существующий Expo-код не является активным delivery path.
 > Язык интерфейса: русский. Монорепозиторий на pnpm.
 
 ---
@@ -12,10 +12,13 @@ apollo-trackfinder/
 ├── artifacts/
 │   ├── api-server/          # Бэкенд (Express + Node.js)
 │   ├── admin-dashboard/     # Admin topology dashboard (React + Vite + nginx)
-│   ├── trackfinder-mobile/  # Мобильное приложение (Expo / React Native)
+│   ├── platform-api/        # Apollo Platform Identity/Policy HTTP API + containers
+│   ├── trackfinder-mobile/  # Существующий Expo-код; native APK delivery отложен
 │   └── music-player/        # Веб-плеер (React + Vite)
 ├── lib/
 │   ├── db/                  # Drizzle ORM + PostgreSQL схема
+│   ├── platform-contract/   # Apollo Platform shared contracts
+│   ├── platform-db/         # Apollo Platform repositories + immutable migrations
 │   ├── api-spec/            # OpenAPI-спецификация
 │   ├── api-zod/             # Zod-схемы (авто-генерация из OpenAPI)
 │   └── api-client-react/    # React Query клиент (авто-генерация из OpenAPI)
@@ -160,9 +163,23 @@ POST
 
 ---
 
+## 1A. Apollo Platform — `artifacts/platform-api` + `lib/platform-*`
+
+Apollo Platform является отдельной Identity/Policy границей, а не частью Apollo TF media API. Он реализует режимы регистрации `closed`, `invite_only` и `open_approval`, invitation lifecycle, verification, операторские сессии, module entitlements и server-side policy evaluation.
+
+HTTP runtime использует versioned contract и доменные сервисы из `lib/platform-*`. Readiness становится успешной только при готовом Redis и точном наборе имён/checksum immutable PostgreSQL migrations `0001`–`0003`; runtime не запускает миграции. Migrator и runtime используют отдельные роли с минимальными правами.
+
+Локальный production-compatible stack находится в `artifacts/platform-api/docker-compose.yml` и содержит отдельные `platform-postgres`, `platform-redis`, one-shot `platform-migrate` и `platform-api`; private profile `platform-smoke` выполняет end-to-end policy проверку без test-only public route. PostgreSQL и Redis не публикуют host ports, API привязан только к loopback. Образ Debian/glibc запускает API от numeric UID/GID `10001:10001`; app tree остаётся root-owned/non-writable, а runtime services используют `read_only: true`.
+
+В используемой Docker Desktop Compose implementation read-only services требуют file-backed top-level secrets. Direct mounts в `/run/secrets/*` проверены как читаемые процессом UID `10001`, но Docker Desktop представляет bind-backed secret files со своими ownership/mode semantics; документация не обещает применение Compose `uid`, `gid` или `mode`. Smoke создаёт уникальную host temp directory и файлы с ограниченными host permissions там, где это поддерживается, подключает их напрямую без volume/tmpfs поверх `/run/secrets` и удаляет temp directory только после `docker compose down -v --remove-orphans`.
+
+Native Android delivery остаётся отдельным будущим этапом: текущая Apollo Platform foundation предназначена для web/server workflows, а Android должен поставляться как отдельно проверяемый APK.
+
+---
+
 ## 2. Мобильное приложение — `artifacts/trackfinder-mobile`
 
-**Стек:** Expo SDK 53, React Native, Expo Router (file-based navigation), expo-av (аудио), TypeScript
+**Состояние:** существующий Expo SDK 53 / React Native код сохранён как исходная база, но Expo Go и static export не являются активным delivery path. Android delivery отложен до отдельного native APK этапа с проверкой через ADB.
 
 ### 2.1 Экраны — `app/(tabs)/`
 
@@ -455,6 +472,12 @@ const parseResult = SearchTracksBody.safeParse(req.body);
 
 ## 7. Деплой — Docker
 
+### `artifacts/platform-api/Dockerfile` и `docker-compose.yml`
+
+Root-context multi-stage build использует Debian/glibc Node 20 и pinned `pnpm@10.33.2`, собирает только нужный workspace subset и производит `dist/index.mjs`, `dist/migrate.mjs` и private `dist/policy-smoke.mjs`. Production dependency closure включает native Argon2; image verification выполняет реальный `hash` + `verify`, а не только dynamic import. Runtime image запускается от UID `10001` с root-owned read-only app tree.
+
+Compose запускает PostgreSQL, Redis, one-shot migrator и API раздельно. Migrator применяет immutable migration bundle до старта готового API; API не выполняет startup migrations. `/healthz` отражает process liveness, а `/readyz` отдельно требует Redis readiness и точный migration manifest. Локальный smoke использует generated per-run secrets, loopback API port, private policy runner и гарантированный teardown с volumes/orphans; это локальная validation, а не deployment в Coolify/HomeNode.
+
 ### `artifacts/api-server/Dockerfile`
 
 1. Базовый образ: `node:20-alpine`
@@ -524,7 +547,7 @@ docker compose up -d --build
 |----------|---------|------|
 | API Server | `pnpm --filter @workspace/api-server run dev` | 8080 |
 | Admin Dashboard | `pnpm --filter @workspace/admin-dashboard dev` | 5173 |
-| TrackFinder Mobile | `expo start --localhost` | dynamic |
+| TrackFinder Mobile (legacy source only) | `expo start --localhost` | dynamic |
 | Music Player (web) | `vite --host 0.0.0.0` | 25424 |
 | Mockup Sandbox | `vite dev` | 8081 |
 

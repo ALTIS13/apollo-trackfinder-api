@@ -1,6 +1,6 @@
 # Apollo TF implementation status
 
-Last updated: 2026-07-16.
+Last updated: 2026-07-17.
 
 ## Что сделано
 
@@ -44,6 +44,8 @@ Last updated: 2026-07-16.
 - Topology Task 7 завершает режимы `Свободно`/`Выровнять`, 24-unit grid и безопасный drag: карточки больше нельзя положить друг на друга, поэтому совпадающие module ports не создаются пользовательским перемещением. Переключение режима не двигает узлы; клавиатура сохраняет grid/Alt-precision контракт.
 - Составной вертикальный fan удалён. Перегруженная source-группа получает одну короткую горизонтальную aggregate-шину с opaque weighted gradient и уникальные attachment/channel координаты для каждой ветки; одинаковые target-row подходы разделяются для целей выше, на уровне и ниже источника. Стандартный Core above/same/below layout остаётся прежним.
 - SVG gradient identity объединяет стабильный React instance ID и инъективно кодированный edge ID, поэтому два одновременно открытых topology экземпляра не делят `<linearGradient>`. Bounds учитывают шину, полные маршруты, контакты, traffic и evidence labels.
+- Task 8 завершил локальный production-compatible Apollo Platform stack: отдельные PostgreSQL, Redis, one-shot migrator и API, immutable migration bundle без startup migrations, private profile smoke без test-only public policy route, loopback-only API и отсутствие host ports у data services. Debian/glibc image запускается от UID/GID `10001:10001` с root-owned/non-writable app tree и native Argon2 production closure.
+- Read-only Platform services получают generated per-run credentials только через file-backed top-level Compose secrets в фиксированных `/run/secrets/*` paths. Direct secret mounts проверены как читаемые UID `10001`; для Docker Desktop bind-backed secrets не заявляется enforcement `uid`/`gid`/`mode`. Smoke удаляет host temp secret directory после гарантированного `down -v --remove-orphans`.
 
 ## Validation
 
@@ -86,6 +88,10 @@ Last updated: 2026-07-16.
 - Thin topology connector TDD 2026-07-15: initial implementation focused GREEN was `47/47`; independent review then found shifting subset offsets, a possible fourth shared `unknown` lane, weak outline paint order and alpha highlight. Review-fix RED reproduced the contracts with `6 failed / 26 passed`; focused GREEN passed `32/32`, connector regression passed `54/54`, and fresh full admin regression passed 11 files / `127/127`. Admin and workspace typecheck, Vite production build (2556 modules), and `git diff --check` passed.
 - Codex in-app browser QA for thin connectors passed at the default side-panel viewport and temporary `390x844`: 15 neutral conductor bases render at `1.75`, 17 opaque status lanes render at `1`, and the shared trunk exposes exactly three ordered lanes `healthy -1`, `warning 0`, `degraded +1`. Fourteen plug outlines and fourteen internal highlights are present; keyboard drag/reset restores module translation, `ERROR DLW-E502` opens the matching sanitized incident journal, and no module/diagnostic regression was observed. Temporary mobile viewport override was reset after QA.
 - Admin topology Task 7 collision-safe horizontal-fan validation 2026-07-16: boundary RED reproduced edge-touching and narrow corridors, cross-row approach collisions, attachment/approach collisions, positive Q/L overlap, stale batched drag state and duplicate directed relations. Focused admin GREEN passed 5 files / 124 tests; full admin passed 15 files / 216 tests, shared contract 5/5, and API 109 passed with 1 opt-in Redis skip. Workspace typecheck, admin/API production builds, and `git diff --check` passed. In-app browser DOM reported 8 modules, 7 female/male contact pairs, one horizontal shared trunk and three unobscured diagnostic labels; paired visual comparison confirms the reported Download Worker/Search Media loop is absent. Final independent spec and quality re-reviews returned PASS with no findings.
+- Apollo Platform Task 8 live container validation 2026-07-17: production image built on Debian/glibc with pinned `pnpm@10.33.2`; native Argon2 completed a real in-image hash/verify. Live Compose tests passed 13 files with `216 passed / 9 skipped`; a separate disposable PostgreSQL/Redis regression ran platform-contract `5/5`, platform-db `24/24` and platform-api `222 passed / 3 skipped`. The opt-in skips were covered in their corresponding live environment rather than silently omitted.
+- Task 8 smoke passed the complete closed/bootstrap/login/invite/redeem/verify/grant/activate/allow/revoke/deny sequence and scanned rendered config, logs and response projections for generated secret canaries and digests. API server passed `109 passed / 1 existing opt-in Redis skip`; admin passed `216/216`; root typecheck, all required production builds, `node --check`, workspace-import scan, Prettier and `git diff --check` passed. Every disposable project ended with no matching containers, networks, volumes or temp secret directories.
+- Direct environment-backed Compose secrets produced the expected Docker Desktop failure for a read-only service (`file` is the sole supported option). File-backed direct `/run/secrets/*` mounts were then proven readable by UID `10001`; Docker Desktop exposed bind-backed files with host-controlled metadata, so no `uid`/`gid`/`mode` guarantee is claimed. No persistent credential volume, remote infrastructure mutation or deployment was performed.
+- Task 8 final serial review verdict: `SPEC: PASS`; quality review found no remaining actionable finding. Independent subagent review was unavailable in the active tool surface, so that review mode is explicitly skipped rather than claimed.
 
 ## Commit/push
 
@@ -106,10 +112,11 @@ Last updated: 2026-07-16.
 - Thin topology connectors опубликованы в `origin/codex/fix/admin-thin-connector-lines` through validation tip `ee2f33f` (implementation/review-fix tips `98ca750` and `da23795`), затем fast-forward merged и опубликованы в `origin/main`. Merged result повторно прошёл 11 files / `127/127`, admin/workspace typecheck, Vite production build (2556 modules) и `git diff --check`; final independent review reported `SPEC: PASS`, `QUALITY: APPROVED`, `READY TO MERGE: YES`. HomeNode/Coolify/Caddy/UFW/domains не менялись.
 - Утверждённые Apollo Platform/Identity/topology/client/Coolify design specs зафиксированы на `codex/docs/apollo-platform-specs` commit `299db7f70dd8b3f358d04f40954ed5d5f1b8e5a9`; ветка опубликована в `origin`, но ещё не объединена с `main`.
 - Topology Task 7 collision-safe routing implementation `13a2743` and validation documentation `7ab3a4f` опубликованы в `origin/codex/feat/admin-topology-alignment-routing`, затем fast-forward merged в `main`. Final `main` publication is recorded by the current status commit after fresh merged-result validation; HomeNode/Coolify/Caddy/UFW/domains не менялись.
+- Apollo Platform Task 8 container/smoke implementation is committed locally on `codex/feat/apollo-identity-policy` as `9632f46`; the status documentation is a separate local commit. No push, merge or HomeNode/Coolify/Caddy/UFW/DNS mutation was performed.
 
 ## Следующий логичный этап реализации
 
-- Следующий feature stage: Apollo Identity/Policy и versioned database migrations для трёх режимов регистрации, invite lifecycle, operator controls и server-enforced module entitlements. После backend policy contract можно обновлять Apollo portal/TF client zone.
+- Локальная Apollo Platform Identity/Policy foundation и production-compatible container smoke завершены. Следующий feature stage должен начинаться только по отдельному binding brief; Task 8 не включает portal/TF client zone или дальнейшую платформенную функциональность.
 - Coolify/HomeNode rollout выполняется только после локальной реализации и validation всех web/server модулей, повторного read-only preflight и явного разрешения владельца непосредственно перед удалёнными изменениями.
 - Native Android APK decision remains separate: сохранить Expo-модули через native prebuild/Gradle либо выполнить отдельную миграцию на bare React Native.
 
