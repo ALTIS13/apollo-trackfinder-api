@@ -1,3 +1,6 @@
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Pool, QueryResultRow } from "pg";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
@@ -90,12 +93,18 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
 
   test("installs the approved schema once with closed registration and exact seed modules", async () => {
     await expect(runPlatformMigrations(migrator)).resolves.toEqual({
-      applied: ["0001_platform_identity.sql"],
+      applied: [
+        "0001_platform_identity.sql",
+        "0002_operator_bootstrap_guard.sql",
+      ],
       alreadyApplied: [],
     });
     await expect(runPlatformMigrations(migrator)).resolves.toEqual({
       applied: [],
-      alreadyApplied: ["0001_platform_identity.sql"],
+      alreadyApplied: [
+        "0001_platform_identity.sql",
+        "0002_operator_bootstrap_guard.sql",
+      ],
     });
 
     await expect(
@@ -146,6 +155,74 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
         `,
       ),
     ).resolves.toBe("1");
+  });
+
+  test("adds all-or-none operator bootstrap metadata and a non-public trigger function", async () => {
+    await expect(
+      column<{ column_name: string }>(
+        migrator,
+        `
+          select column_name
+          from information_schema.columns
+          where table_schema = 'apollo_platform'
+            and table_name = 'registration_settings'
+            and column_name like 'operator_bootstrap_%'
+          order by column_name
+        `,
+        "column_name",
+      ),
+    ).resolves.toEqual([
+      "operator_bootstrap_account_id",
+      "operator_bootstrap_completed_at",
+    ]);
+    await expect(
+      scalar(
+        migrator,
+        `
+          select (
+            operator_bootstrap_account_id is null
+            and operator_bootstrap_completed_at is null
+          )::text as value
+          from apollo_platform.registration_settings
+        `,
+      ),
+    ).resolves.toBe("true");
+    await expect(
+      scalar(
+        migrator,
+        `
+          select has_function_privilege(
+            'public',
+            'apollo_platform.record_operator_bootstrap()',
+            'EXECUTE'
+          )::text as value
+        `,
+      ),
+    ).resolves.toBe("false");
+    await expect(
+      migrator.query(`
+        update apollo_platform.registration_settings
+        set operator_bootstrap_account_id = gen_random_uuid(),
+            operator_bootstrap_completed_at = null,
+            revision = revision + 1
+      `),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      runtime.query(`
+        update apollo_platform.registration_settings
+        set operator_bootstrap_account_id = gen_random_uuid(),
+            operator_bootstrap_completed_at = now(),
+            revision = revision + 1
+      `),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      runtime.query(`
+        update apollo_platform.registration_settings
+        set mode = mode,
+            revision = revision + 1,
+            updated_at = now()
+      `),
+    ).resolves.toMatchObject({ rowCount: 1 });
   });
 
   test("enforces normalized unique keys, bounded invitation use, and digest-only secrets", async () => {
@@ -507,5 +584,125 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
     await expect(
       migrator.query("truncate table apollo_platform.project_releases cascade"),
     ).rejects.toMatchObject({ code: "55000" });
+  });
+
+  test("applies 0002 after 0001 and backfills an existing live operator role", async () => {
+    const firstMigrationDirectory = await mkdtemp(
+      join(tmpdir(), "apollo-platform-0001-"),
+    );
+    try {
+      await migrator.query("drop schema if exists apollo_platform cascade");
+      await copyFile(
+        new URL("../migrations/0001_platform_identity.sql", import.meta.url),
+        join(firstMigrationDirectory, "0001_platform_identity.sql"),
+      );
+      await expect(
+        runPlatformMigrations(migrator, firstMigrationDirectory),
+      ).resolves.toEqual({
+        applied: ["0001_platform_identity.sql"],
+        alreadyApplied: [],
+      });
+
+      const existingRole = await withPlatformTransaction(
+        migrator,
+        async (client) => {
+          await setAccountContext(client, firstAccountId);
+          await client.query(
+            `insert into apollo_platform.accounts
+               (id, email, display_name, status, email_verified_at, activated_at)
+             values ($1, 'bootstrap-existing@example.com',
+                     'Existing Operator', 'active', now(), now())`,
+            [firstAccountId],
+          );
+          const result = await client.query<{
+            id: string;
+            account_id: string;
+            capability: string;
+            granted_at: Date;
+            revoked_at: Date | null;
+          }>(
+            `insert into apollo_platform.operator_roles
+               (account_id, capability, reason)
+             values ($1, 'platform.accounts.manage', 'existing operator')
+             returning id, account_id, capability, granted_at, revoked_at`,
+            [firstAccountId],
+          );
+          return result.rows[0]!;
+        },
+      );
+
+      await expect(runPlatformMigrations(migrator)).resolves.toEqual({
+        applied: ["0002_operator_bootstrap_guard.sql"],
+        alreadyApplied: ["0001_platform_identity.sql"],
+      });
+
+      const marker = await migrator.query<{
+        operator_bootstrap_account_id: string;
+        operator_bootstrap_completed_at: Date;
+      }>(`
+        select operator_bootstrap_account_id, operator_bootstrap_completed_at
+        from apollo_platform.registration_settings
+      `);
+      const preservedRole = await withPlatformTransaction(
+        migrator,
+        async (client) => {
+          await setAccountContext(client, firstAccountId);
+          const result = await client.query<{
+            id: string;
+            account_id: string;
+            capability: string;
+            granted_at: Date;
+            revoked_at: Date | null;
+          }>(`
+            select id, account_id, capability, granted_at, revoked_at
+            from apollo_platform.operator_roles
+          `);
+          return result.rows[0]!;
+        },
+      );
+      const operatorRoleSecurity = await migrator.query<{
+        tableowner: string;
+        relrowsecurity: boolean;
+        relforcerowsecurity: boolean;
+      }>(`
+        select tableowner, relrowsecurity, relforcerowsecurity
+        from pg_tables
+        join pg_class on relname = tablename
+        join pg_namespace on pg_namespace.oid = pg_class.relnamespace
+        where schemaname = 'apollo_platform'
+          and tablename = 'operator_roles'
+          and nspname = schemaname
+      `);
+
+      expect(marker.rows[0]).toEqual({
+        operator_bootstrap_account_id: firstAccountId,
+        operator_bootstrap_completed_at: existingRole.granted_at,
+      });
+      expect(preservedRole).toEqual(existingRole);
+      expect(operatorRoleSecurity.rows).toEqual([
+        {
+          tableowner: "apollo_platform_migrator",
+          relrowsecurity: true,
+          relforcerowsecurity: true,
+        },
+      ]);
+      await expect(
+        scalar(
+          migrator,
+          `select rolbypassrls::text as value
+           from pg_roles
+           where rolname = 'apollo_platform_runtime'`,
+        ),
+      ).resolves.toBe("false");
+      await expect(
+        scalar(
+          runtime,
+          `select count(*)::text as value
+           from apollo_platform.operator_roles`,
+        ),
+      ).resolves.toBe("0");
+    } finally {
+      await rm(firstMigrationDirectory, { recursive: true, force: true });
+    }
   });
 });

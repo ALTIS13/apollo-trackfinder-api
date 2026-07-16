@@ -15,12 +15,19 @@ export const AUDIT_ACTIONS = Object.freeze({
   invitationCreated: "invitation.created",
   invitationRedeemed: "invitation.redeemed",
   invitationRevoked: "invitation.revoked",
+  operatorBootstrapCompleted: "operator.bootstrap_completed",
+  operatorSessionCreated: "operator.session_created",
+  operatorSessionRevoked: "operator.session_revoked",
+  entitlementGranted: "entitlement.granted",
+  entitlementRevoked: "entitlement.revoked",
 });
 
 export const SYSTEM_AUDIT_REASONS = Object.freeze({
   registration: "self_service_registration",
   emailVerification: "self_service_email_verification",
   invitationRedemption: "invitation_redemption",
+  operatorLogin: "operator_login",
+  operatorLogout: "operator_logout",
 });
 
 export function appendAuditEvent(

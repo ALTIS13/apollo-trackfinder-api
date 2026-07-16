@@ -10,6 +10,8 @@ export interface RegistrationSettings {
   readonly revision: number;
   readonly updatedByAccountId: string | null;
   readonly updatedAt: Date;
+  readonly operatorBootstrapAccountId: string | null;
+  readonly operatorBootstrapCompletedAt: Date | null;
 }
 
 export interface UpdateRegistrationSettingsInput {
@@ -194,6 +196,19 @@ export interface RevokeAllSessionsInput {
   readonly revokedAt: Date;
 }
 
+export interface InsertOperatorCapabilitiesInput {
+  readonly accountId: string;
+  readonly capabilities: readonly string[];
+  readonly grantedByAccountId: string | null;
+  readonly reason: string;
+}
+
+export interface RevokeSessionsForAccountByAudienceInput {
+  readonly accountId: string;
+  readonly audience: string;
+  readonly revokedAt: Date;
+}
+
 export type AuditValue =
   | string
   | number
@@ -227,8 +242,12 @@ export interface InsertAuditEventInput {
 }
 
 export interface PlatformRepository {
-  getRegistrationSettings(client: PoolClient): Promise<RegistrationSettings | null>;
-  lockRegistrationSettings(client: PoolClient): Promise<RegistrationSettings | null>;
+  getRegistrationSettings(
+    client: PoolClient,
+  ): Promise<RegistrationSettings | null>;
+  lockRegistrationSettings(
+    client: PoolClient,
+  ): Promise<RegistrationSettings | null>;
   updateRegistrationSettings(
     client: PoolClient,
     input: UpdateRegistrationSettingsInput,
@@ -238,8 +257,14 @@ export interface PlatformRepository {
     client: PoolClient,
     normalizedEmail: string,
   ): Promise<Account | null>;
-  createAccount(client: PoolClient, input: CreateAccountInput): Promise<Account>;
-  lockAccountById(client: PoolClient, accountId: string): Promise<Account | null>;
+  createAccount(
+    client: PoolClient,
+    input: CreateAccountInput,
+  ): Promise<Account>;
+  lockAccountById(
+    client: PoolClient,
+    accountId: string,
+  ): Promise<Account | null>;
   updateAccountStatus(
     client: PoolClient,
     input: UpdateAccountStatusInput,
@@ -322,11 +347,22 @@ export interface PlatformRepository {
     client: PoolClient,
     accountId: string,
   ): Promise<readonly string[]>;
+  insertOperatorCapabilities(
+    client: PoolClient,
+    input: InsertOperatorCapabilitiesInput,
+  ): Promise<void>;
 
-  createSession(client: PoolClient, input: CreateSessionInput): Promise<AuthSession>;
+  createSession(
+    client: PoolClient,
+    input: CreateSessionInput,
+  ): Promise<AuthSession>;
   findSessionByDigest(
     client: PoolClient,
     sessionDigest: string,
+  ): Promise<AuthSession | null>;
+  findSessionById(
+    client: PoolClient,
+    sessionId: string,
   ): Promise<AuthSession | null>;
   listSessionsForAccount(
     client: PoolClient,
@@ -336,6 +372,10 @@ export interface PlatformRepository {
     client: PoolClient,
     input: RevokeSessionInput,
   ): Promise<AuthSession | null>;
+  revokeSessionsForAccountByAudience(
+    client: PoolClient,
+    input: RevokeSessionsForAccountByAudienceInput,
+  ): Promise<number>;
   revokeAllSessionsForAccount(
     client: PoolClient,
     input: RevokeAllSessionsInput,

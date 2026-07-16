@@ -53,6 +53,8 @@ const registrationRow = {
   revision: "7",
   updated_by_account_id: actorAccountId,
   updated_at: now,
+  operator_bootstrap_account_id: accountId,
+  operator_bootstrap_completed_at: now,
 };
 
 const accountRow = {
@@ -196,10 +198,13 @@ describe("PostgresPlatformRepository", () => {
       "upsertAccountEntitlement",
       "revokeAccountEntitlement",
       "listOperatorCapabilities",
+      "insertOperatorCapabilities",
       "createSession",
       "findSessionByDigest",
+      "findSessionById",
       "listSessionsForAccount",
       "revokeSession",
+      "revokeSessionsForAccountByAudience",
       "revokeAllSessionsForAccount",
       "insertAuditEvent",
     ];
@@ -806,6 +811,8 @@ describe("PostgresPlatformRepository", () => {
       revision: 7,
       updatedByAccountId: actorAccountId,
       updatedAt: now,
+      operatorBootstrapAccountId: accountId,
+      operatorBootstrapCompletedAt: now,
     });
     expect(account).toEqual({
       id: accountId,
@@ -838,6 +845,84 @@ describe("PostgresPlatformRepository", () => {
       createdAt: now,
       updatedAt: now,
     });
+  });
+
+  it("inserts operator capabilities and scopes session lookup and rotation without secret interpolation", async () => {
+    const capabilities = [
+      "platform.accounts.manage",
+      "platform.entitlements.manage",
+    ] as const;
+    const client = new RecordingClient([[], [sessionRow], []]);
+    const repository = new PostgresPlatformRepository();
+
+    await repository.insertOperatorCapabilities(asPoolClient(client), {
+      accountId,
+      capabilities,
+      grantedByAccountId: null,
+      reason: "initial operator bootstrap",
+    });
+    await expect(
+      repository.findSessionById(asPoolClient(client), sessionId),
+    ).resolves.toEqual({
+      id: sessionId,
+      accountId,
+      installationId: null,
+      audience: "apollo-operator",
+      expiresAt: later,
+      revokedAt: null,
+      createdAt: now,
+      lastSeenAt: now,
+    });
+    await expect(
+      repository.revokeSessionsForAccountByAudience(asPoolClient(client), {
+        accountId,
+        audience: "apollo-admin",
+        revokedAt: later,
+      }),
+    ).resolves.toBe(0);
+
+    expectQuery(
+      client,
+      0,
+      /insert into apollo_platform\.operator_roles[\s\S]*from unnest\(\$2::text\[\]\)/i,
+      [accountId, capabilities, null, "initial operator bootstrap"],
+    );
+    expectQuery(
+      client,
+      1,
+      /from apollo_platform\.auth_sessions[\s\S]*where id = \$1/i,
+      [sessionId],
+    );
+    expectQuery(
+      client,
+      2,
+      /update apollo_platform\.auth_sessions[\s\S]*account_id = \$1[\s\S]*audience = \$2[\s\S]*revoked_at is null/i,
+      [accountId, "apollo-admin", later],
+    );
+    const allSql = client.queries.map(({ text }) => text).join("\n");
+    expect(allSql).not.toContain(accountId);
+    expect(allSql).not.toContain(sessionId);
+    expect(allSql).not.toContain("apollo-admin");
+    expect(allSql).not.toContain("initial operator bootstrap");
+  });
+
+  it("makes entitlement and individual-session revocation conditional", async () => {
+    const client = new RecordingClient([[], []]);
+    const repository = new PostgresPlatformRepository();
+
+    await repository.revokeAccountEntitlement(asPoolClient(client), {
+      accountId,
+      moduleId,
+      revokedAt: later,
+      reason: "removed",
+    });
+    await repository.revokeSession(asPoolClient(client), {
+      sessionId,
+      revokedAt: later,
+    });
+
+    expect(client.queries[0]!.text).toMatch(/entitlement\.revoked_at is null/i);
+    expect(client.queries[1]!.text).toMatch(/revoked_at is null/i);
   });
 
   it("keeps token and session repository APIs digest-only", async () => {

@@ -89,6 +89,8 @@ function makeSettings(mode: RegistrationMode): RegistrationSettings {
     revision: 1,
     updatedByAccountId: null,
     updatedAt: CREATED_AT,
+    operatorBootstrapAccountId: null,
+    operatorBootstrapCompletedAt: null,
   };
 }
 
@@ -406,17 +408,26 @@ class InvitationHarness implements PlatformRepository {
   listOperatorCapabilities: PlatformRepository["listOperatorCapabilities"] =
     async () => this.unsupported("listOperatorCapabilities");
 
+  insertOperatorCapabilities: PlatformRepository["insertOperatorCapabilities"] =
+    async () => this.unsupported("insertOperatorCapabilities");
+
   createSession: PlatformRepository["createSession"] = async () =>
     this.unsupported("createSession");
 
   findSessionByDigest: PlatformRepository["findSessionByDigest"] = async () =>
     this.unsupported("findSessionByDigest");
 
+  findSessionById: PlatformRepository["findSessionById"] = async () =>
+    this.unsupported("findSessionById");
+
   listSessionsForAccount: PlatformRepository["listSessionsForAccount"] =
     async () => this.unsupported("listSessionsForAccount");
 
   revokeSession: PlatformRepository["revokeSession"] = async () =>
     this.unsupported("revokeSession");
+
+  revokeSessionsForAccountByAudience: PlatformRepository["revokeSessionsForAccountByAudience"] =
+    async () => this.unsupported("revokeSessionsForAccountByAudience");
 
   revokeAllSessionsForAccount: PlatformRepository["revokeAllSessionsForAccount"] =
     async () => this.unsupported("revokeAllSessionsForAccount");

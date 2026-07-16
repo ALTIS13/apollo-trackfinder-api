@@ -19,6 +19,7 @@ import type {
   CreateVerificationTokenInput,
   Credential,
   IncrementInvitationUseInput,
+  InsertOperatorCapabilitiesInput,
   InsertAuditEventInput,
   Invitation,
   InvitationGrant,
@@ -30,6 +31,7 @@ import type {
   RevokeAllSessionsInput,
   RevokeInvitationInput,
   RevokeSessionInput,
+  RevokeSessionsForAccountByAudienceInput,
   UpdateAccountStatusInput,
   UpdateCredentialInput,
   UpdateRegistrationSettingsInput,
@@ -136,6 +138,8 @@ interface RegistrationSettingsRow extends QueryResultRow {
   readonly revision: string | number;
   readonly updated_by_account_id: string | null;
   readonly updated_at: Date;
+  readonly operator_bootstrap_account_id: string | null;
+  readonly operator_bootstrap_completed_at: Date | null;
 }
 
 interface AccountRow extends QueryResultRow {
@@ -248,6 +252,8 @@ function mapRegistrationSettings(
     revision: Number(row.revision),
     updatedByAccountId: row.updated_by_account_id,
     updatedAt: row.updated_at,
+    operatorBootstrapAccountId: row.operator_bootstrap_account_id,
+    operatorBootstrapCompletedAt: row.operator_bootstrap_completed_at,
   };
 }
 
@@ -372,7 +378,8 @@ export class PostgresPlatformRepository implements PlatformRepository {
   ): Promise<RegistrationSettings | null> {
     const result = await execute<RegistrationSettingsRow>(
       client,
-      `select id, mode, revision, updated_by_account_id, updated_at
+      `select id, mode, revision, updated_by_account_id, updated_at,
+              operator_bootstrap_account_id, operator_bootstrap_completed_at
        from apollo_platform.registration_settings
        where singleton = true`,
     );
@@ -385,7 +392,8 @@ export class PostgresPlatformRepository implements PlatformRepository {
   ): Promise<RegistrationSettings | null> {
     const result = await execute<RegistrationSettingsRow>(
       client,
-      `select id, mode, revision, updated_by_account_id, updated_at
+      `select id, mode, revision, updated_by_account_id, updated_at,
+              operator_bootstrap_account_id, operator_bootstrap_completed_at
        from apollo_platform.registration_settings
        where singleton = true
        for update`,
@@ -406,7 +414,8 @@ export class PostgresPlatformRepository implements PlatformRepository {
            updated_by_account_id = $2,
            updated_at = now()
        where singleton = true
-       returning id, mode, revision, updated_by_account_id, updated_at`,
+       returning id, mode, revision, updated_by_account_id, updated_at,
+                 operator_bootstrap_account_id, operator_bootstrap_completed_at`,
       [input.mode, input.updatedByAccountId],
     );
     return mapRegistrationSettings(requireRow(result.rows));
@@ -796,12 +805,13 @@ export class PostgresPlatformRepository implements PlatformRepository {
     const result = await execute<AccountEntitlementRow>(
       client,
       `update apollo_platform.account_module_entitlements as entitlement
-       set revoked_at = coalesce(entitlement.revoked_at, $3),
+       set revoked_at = $3,
            reason = $4,
            updated_at = $3
        from apollo_platform.modules as module
        where entitlement.account_id = $1
          and entitlement.module_id = $2
+         and entitlement.revoked_at is null
          and module.id = entitlement.module_id
        returning entitlement.id, entitlement.account_id,
                  entitlement.module_id, module.module_key,
@@ -828,6 +838,25 @@ export class PostgresPlatformRepository implements PlatformRepository {
       [accountId],
     );
     return result.rows.map((row) => row.capability);
+  }
+
+  async insertOperatorCapabilities(
+    client: PoolClient,
+    input: InsertOperatorCapabilitiesInput,
+  ): Promise<void> {
+    await execute<QueryResultRow>(
+      client,
+      `insert into apollo_platform.operator_roles
+         (account_id, capability, granted_by_account_id, reason)
+       select $1, capability, $3, $4
+       from unnest($2::text[]) as operator_capability(capability)`,
+      [
+        input.accountId,
+        input.capabilities,
+        input.grantedByAccountId,
+        input.reason,
+      ],
+    );
   }
 
   async createSession(
@@ -869,6 +898,22 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return row === undefined ? null : mapSession(row);
   }
 
+  async findSessionById(
+    client: PoolClient,
+    sessionId: string,
+  ): Promise<AuthSession | null> {
+    const result = await execute<SessionRow>(
+      client,
+      `select id, account_id, installation_id, audience, expires_at,
+              revoked_at, created_at, last_seen_at
+       from apollo_platform.auth_sessions
+       where id = $1`,
+      [sessionId],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : mapSession(row);
+  }
+
   async listSessionsForAccount(
     client: PoolClient,
     accountId: string,
@@ -893,13 +938,29 @@ export class PostgresPlatformRepository implements PlatformRepository {
       client,
       `update apollo_platform.auth_sessions
        set revoked_at = coalesce(revoked_at, $2)
-       where id = $1
+       where id = $1 and revoked_at is null
        returning id, account_id, installation_id, audience, expires_at,
                  revoked_at, created_at, last_seen_at`,
       [input.sessionId, input.revokedAt],
     );
     const row = result.rows[0];
     return row === undefined ? null : mapSession(row);
+  }
+
+  async revokeSessionsForAccountByAudience(
+    client: PoolClient,
+    input: RevokeSessionsForAccountByAudienceInput,
+  ): Promise<number> {
+    const result = await execute<QueryResultRow>(
+      client,
+      `update apollo_platform.auth_sessions
+       set revoked_at = $3
+       where account_id = $1
+         and audience = $2
+         and revoked_at is null`,
+      [input.accountId, input.audience, input.revokedAt],
+    );
+    return result.rowCount ?? 0;
   }
 
   async revokeAllSessionsForAccount(

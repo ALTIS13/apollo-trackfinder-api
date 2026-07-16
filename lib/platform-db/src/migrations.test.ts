@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Pool, QueryResult } from "pg";
@@ -93,6 +93,41 @@ afterEach(async () => {
 });
 
 describe("runPlatformMigrations", () => {
+  test("ships an immutable bootstrap marker migration with a terminal insert trigger", async () => {
+    const sql = await readFile(
+      new URL(
+        "../migrations/0002_operator_bootstrap_guard.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+
+    expect(sql).toMatch(/add column operator_bootstrap_account_id uuid/i);
+    expect(sql).toMatch(
+      /add column operator_bootstrap_completed_at timestamptz/i,
+    );
+    expect(sql).toMatch(/operator_bootstrap_metadata_check/i);
+    expect(sql).toMatch(
+      /from apollo_platform\.operator_roles[\s\S]*revoked_at is null/i,
+    );
+    expect(sql).toMatch(/before insert on apollo_platform\.operator_roles/i);
+    expect(sql).toMatch(
+      /for each row execute function apollo_platform\.record_operator_bootstrap\(\)/i,
+    );
+    expect(sql).toMatch(/operator_bootstrap_account_id is null/i);
+    expect(sql).toMatch(/security definer/i);
+    expect(sql).toMatch(
+      /revoke update on apollo_platform\.registration_settings[\s\S]*from apollo_platform_runtime/i,
+    );
+    expect(sql).toMatch(
+      /grant update \(mode, revision, updated_by_account_id, updated_at\)[\s\S]*to apollo_platform_runtime/i,
+    );
+    expect(sql).toMatch(
+      /revoke execute on function apollo_platform\.record_operator_bootstrap\(\)[\s\S]*from public/i,
+    );
+    expect(sql).not.toMatch(/disable row level security|bypassrls/i);
+  });
+
   test("applies numeric SQL migrations with immutable checksums and one transaction each", async () => {
     const directory = await fixtureDirectory({
       "0002_second.sql": "select 'second migration';",
