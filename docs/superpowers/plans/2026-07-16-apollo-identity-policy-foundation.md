@@ -192,6 +192,8 @@ git commit -m "feat(platform): add immutable identity database"
 - Create: `artifacts/platform-api/src/domain/repository.ts`
 - Create: `artifacts/platform-api/src/domain/postgres-repository.ts`
 - Create: `artifacts/platform-api/src/domain/postgres-repository.test.ts`
+- Create: `artifacts/platform-api/src/domain/postgres-repository.integration.test.ts`
+- Modify: `lib/platform-db/migrations/0001_platform_identity.sql`
 - Modify: `pnpm-lock.yaml`
 - Modify: `tsconfig.json`
 
@@ -211,6 +213,8 @@ Tests assert lowercase/trimmed email and module normalization, 32-byte opaque to
 
 Repository tests use a recording `PoolClient` test double to assert parameterized SQL, stable row mapping, explicit `FOR UPDATE` on the three lock methods, no raw-token parameters, and stable domain-error mapping for PostgreSQL uniqueness/check/foreign-key failures. The test double verifies query text/values; it does not emulate database behavior.
 
+The PostgreSQL integration test runs through `apollo_platform_runtime` and proves four pre-auth bootstrap operations under forced RLS: create a pending account, find an account by exact normalized email, lock a verification record by exact digest, and find a session by exact digest. Each operation sets only a transaction-local exact-match context; no runtime role receives table ownership or `BYPASSRLS`.
+
 - [ ] **Step 3: Run tests and verify RED**
 
 Run: `pnpm --dir artifacts/platform-api test -- src/domain/security.test.ts src/domain/postgres-repository.test.ts`
@@ -223,7 +227,9 @@ Use `randomBytes(32).toString('base64url')`, SHA-256 hex digests, `timingSafeEqu
 
 - [ ] **Step 5: Implement PostgreSQL repository methods**
 
-Use parameterized SQL only. Map PostgreSQL uniqueness/check failures to stable domain errors without exposing SQL, connection strings, email existence, or token digests. Keep row-locking methods explicit: `lockRegistrationSettings`, `lockInvitationByDigest`, and `lockAccountById` use `FOR UPDATE`.
+Use parameterized SQL only. Map PostgreSQL uniqueness/check failures to stable domain errors without exposing SQL, connection strings, email existence, or token digests. Keep row-locking methods explicit: `lockRegistrationSettings`, `lockInvitationByDigest`, `lockAccountById`, and `lockVerificationTokenByDigest` use `FOR UPDATE`.
+
+Add command-scoped forced-RLS policies for pre-auth bootstrap only: account `SELECT`/`INSERT` match `app.pre_auth_email`, verification-token `SELECT`/`UPDATE` match `app.verification_digest`, and session `SELECT` matches `app.session_digest`. Repository methods set these values with parameterized `set_config(..., true)` inside the caller-owned transaction. Empty/absent contexts match no rows; existing account-ID isolation remains unchanged.
 
 - [ ] **Step 6: Run security tests and typecheck**
 
