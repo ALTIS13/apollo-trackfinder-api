@@ -191,6 +191,7 @@ git commit -m "feat(platform): add immutable identity database"
 - Create: `artifacts/platform-api/src/domain/security.test.ts`
 - Create: `artifacts/platform-api/src/domain/repository.ts`
 - Create: `artifacts/platform-api/src/domain/postgres-repository.ts`
+- Create: `artifacts/platform-api/src/domain/postgres-repository.test.ts`
 - Modify: `pnpm-lock.yaml`
 - Modify: `tsconfig.json`
 
@@ -204,13 +205,15 @@ Create `artifacts/platform-api/package.json` first with the existing artifact co
 
 Run: `pnpm --dir artifacts/platform-api add argon2 express cookie-parser pino zod@3.25.76 pg && pnpm --dir artifacts/platform-api add -D @types/express @types/cookie-parser @types/node @types/pg vitest`
 
-- [ ] **Step 2: Write security RED tests**
+- [ ] **Step 2: Write security and repository RED tests**
 
 Tests assert lowercase/trimmed email and module normalization, 32-byte opaque tokens, deterministic SHA-256 digests, Argon2id hashes without raw passwords, valid verification, invalid verification, and explicit rehash detection when parameters change. Leave the production module absent until RED is observed.
 
+Repository tests use a recording `PoolClient` test double to assert parameterized SQL, stable row mapping, explicit `FOR UPDATE` on the three lock methods, no raw-token parameters, and stable domain-error mapping for PostgreSQL uniqueness/check/foreign-key failures. The test double verifies query text/values; it does not emulate database behavior.
+
 - [ ] **Step 3: Run tests and verify RED**
 
-Run: `pnpm --dir artifacts/platform-api test -- src/domain/security.test.ts`
+Run: `pnpm --dir artifacts/platform-api test -- src/domain/security.test.ts src/domain/postgres-repository.test.ts`
 
 Expected: FAIL because security functions do not exist.
 
@@ -224,7 +227,7 @@ Use parameterized SQL only. Map PostgreSQL uniqueness/check failures to stable d
 
 - [ ] **Step 6: Run security tests and typecheck**
 
-Run: `pnpm --dir artifacts/platform-api test -- src/domain/security.test.ts && pnpm --dir artifacts/platform-api typecheck`
+Run: `pnpm --dir artifacts/platform-api test -- src/domain/security.test.ts src/domain/postgres-repository.test.ts && pnpm --dir artifacts/platform-api typecheck`
 
 Expected: PASS and TypeScript exits 0.
 
