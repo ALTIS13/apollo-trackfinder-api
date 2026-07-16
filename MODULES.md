@@ -173,6 +173,8 @@ HTTP runtime использует versioned contract и доменные сер�
 
 В используемой Docker Desktop Compose implementation read-only services требуют file-backed top-level secrets. Direct mounts в `/run/secrets/*` проверены как читаемые процессом UID `10001`, но Docker Desktop представляет bind-backed secret files со своими ownership/mode semantics; документация не обещает применение Compose `uid`, `gid` или `mode`. Smoke создаёт уникальную host temp directory и файлы с ограниченными host permissions там, где это поддерживается, подключает их напрямую без volume/tmpfs поверх `/run/secrets` и удаляет temp directory только после `docker compose down -v --remove-orphans`.
 
+Остаточные deployment constraints: PostgreSQL role initialization выполняется только для нового data volume. При сохранённом volume ротация migrator/runtime passwords требует согласованного изменения паролей ролей и соответствующих URL secrets; простая замена файлов без обновления ролей нарушит подключение. Используемые base image tags (`node:20-bookworm-slim`, `postgres:16-bookworm`, `redis:7-bookworm`) пока не закреплены digest-значениями, поэтому digest pinning остаётся обязательным release-hardening шагом перед удалённым production rollout.
+
 Native Android delivery остаётся отдельным будущим этапом: текущая Apollo Platform foundation предназначена для web/server workflows, а Android должен поставляться как отдельно проверяемый APK.
 
 ---
