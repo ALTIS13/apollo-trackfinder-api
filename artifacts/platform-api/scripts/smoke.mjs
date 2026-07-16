@@ -1,6 +1,13 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,32 +88,41 @@ function assertInternalDatabaseUrl(value, expectedUsername) {
   assert.equal(parsed.hash, "");
 }
 
-async function prepareSecretDirectory(environment) {
+export async function prepareSecretDirectory(environment) {
   const directory = await mkdtemp(join(tmpdir(), "apollo-platform-secrets-"));
   try {
     await chmod(directory, 0o700);
-    await Promise.all(
+    const secrets = [
       [
-        [
-          "platform_migrator_database_url",
-          environment.PLATFORM_MIGRATOR_DATABASE_URL,
-        ],
-        [
-          "platform_runtime_database_url",
-          environment.PLATFORM_RUNTIME_DATABASE_URL,
-        ],
-        [
-          "platform_operator_bootstrap_token",
-          environment.PLATFORM_OPERATOR_BOOTSTRAP_TOKEN,
-        ],
-        [
-          "platform_smoke_session_token",
-          environment.PLATFORM_SMOKE_SESSION_TOKEN,
-        ],
-      ].map(([name, value]) =>
-        writeFile(join(directory, name), value, { mode: 0o600 }),
-      ),
+        "platform_migrator_database_url",
+        environment.PLATFORM_MIGRATOR_DATABASE_URL,
+      ],
+      [
+        "platform_runtime_database_url",
+        environment.PLATFORM_RUNTIME_DATABASE_URL,
+      ],
+      [
+        "platform_operator_bootstrap_token",
+        environment.PLATFORM_OPERATOR_BOOTSTRAP_TOKEN,
+      ],
+      [
+        "platform_smoke_session_token",
+        environment.PLATFORM_SMOKE_SESSION_TOKEN,
+      ],
+    ];
+    await Promise.all(
+      secrets.map(async ([name, value]) => {
+        const path = join(directory, name);
+        await writeFile(path, value, { mode: 0o600 });
+        await chmod(path, 0o444);
+      }),
     );
+    if (process.platform !== "win32") {
+      assert.equal((await stat(directory)).mode & 0o777, 0o700);
+      for (const [name] of secrets) {
+        assert.equal((await stat(join(directory, name))).mode & 0o777, 0o444);
+      }
+    }
     environment.PLATFORM_SECRET_DIRECTORY = directory;
     return directory;
   } catch (error) {
@@ -312,6 +328,20 @@ async function jsonRequest(state, path, options = {}) {
   return { response, body, text };
 }
 
+export function observableResponseContract({ response, body }) {
+  const normalizedBody = structuredClone(body);
+  assert(
+    normalizedBody !== null &&
+      typeof normalizedBody === "object" &&
+      !Array.isArray(normalizedBody),
+    "public error body must be an object",
+  );
+  assert.equal(typeof normalizedBody.requestId, "string");
+  assert.equal(normalizedBody.requestId, response.headers.get("x-request-id"));
+  normalizedBody.requestId = "<request-id>";
+  return { status: response.status, body: normalizedBody };
+}
+
 function protectedHeaders(state) {
   return {
     Cookie: state.cookies,
@@ -353,6 +383,7 @@ async function runSmoke(environment) {
   const memberEmail = `member-${randomUUID()}@example.test`;
   const operatorPassword = generatedSecret();
   const memberPassword = generatedSecret();
+  const unavailablePassword = generatedSecret();
   const rawSecrets = [
     environment.PLATFORM_POSTGRES_ADMIN_PASSWORD,
     environment.PLATFORM_MIGRATOR_PASSWORD,
@@ -363,6 +394,7 @@ async function runSmoke(environment) {
     environment.PLATFORM_RUNTIME_DATABASE_URL,
     operatorPassword,
     memberPassword,
+    unavailablePassword,
   ];
 
   smokeStage = "registration-closed";
@@ -455,13 +487,43 @@ async function runSmoke(environment) {
   assert.equal(registered.body.account.email, undefined);
   rawSecrets.push(verificationToken);
 
+  const unavailableEmail = `unavailable-${randomUUID()}@example.test`;
+  smokeStage = "invitation-consumed-contract";
+  const consumedInvitation = await jsonRequest(state, "/v1/registrations", {
+    method: "POST",
+    status: 409,
+    body: {
+      email: unavailableEmail,
+      displayName: "Unavailable Invitation",
+      password: unavailablePassword,
+      invitationToken,
+    },
+  });
+  const unknownInvitationToken = generatedSecret();
+  rawSecrets.push(unknownInvitationToken);
+  smokeStage = "invitation-unknown-contract";
+  const unknownInvitation = await jsonRequest(state, "/v1/registrations", {
+    method: "POST",
+    status: 409,
+    body: {
+      email: unavailableEmail,
+      displayName: "Unavailable Invitation",
+      password: unavailablePassword,
+      invitationToken: unknownInvitationToken,
+    },
+  });
+  assert.deepEqual(
+    observableResponseContract(unknownInvitation),
+    observableResponseContract(consumedInvitation),
+  );
+
   smokeStage = "verification-consume";
   await jsonRequest(state, "/v1/email-verifications/consume", {
     method: "POST",
     body: { token: verificationToken },
   });
-  smokeStage = "verification-reconsume";
-  const consumedAgain = await jsonRequest(
+  smokeStage = "verification-consumed-contract";
+  const consumedVerification = await jsonRequest(
     state,
     "/v1/email-verifications/consume",
     {
@@ -470,7 +532,22 @@ async function runSmoke(environment) {
       body: { token: verificationToken },
     },
   );
-  assert.equal(consumedAgain.body.error, "registration_not_available");
+  const unknownVerificationToken = generatedSecret();
+  rawSecrets.push(unknownVerificationToken);
+  smokeStage = "verification-unknown-contract";
+  const unknownVerification = await jsonRequest(
+    state,
+    "/v1/email-verifications/consume",
+    {
+      method: "POST",
+      status: 409,
+      body: { token: unknownVerificationToken },
+    },
+  );
+  assert.deepEqual(
+    observableResponseContract(unknownVerification),
+    observableResponseContract(consumedVerification),
+  );
 
   smokeStage = "invitation-entitlement-revoke";
   await jsonRequest(

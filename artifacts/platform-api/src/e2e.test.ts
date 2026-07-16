@@ -9,6 +9,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -571,6 +572,110 @@ try {
     expect(smoke.indexOf("invitation-entitlement-revoke")).toBeLessThan(
       smoke.indexOf("activation-without-entitlement"),
     );
+  });
+
+  test("compares unavailable tokens by their complete public response contract", async () => {
+    type SmokeResponse = {
+      response: Response;
+      body: Record<string, unknown>;
+    };
+    const smokeModule = (await import(
+      new URL("../scripts/smoke.mjs", import.meta.url).href
+    )) as {
+      observableResponseContract?: (value: SmokeResponse) => unknown;
+    };
+    expect(smokeModule.observableResponseContract).toBeTypeOf("function");
+    const observableResponseContract = smokeModule.observableResponseContract!;
+    const unavailable = {
+      response: new Response(null, {
+        status: 409,
+        headers: { "x-request-id": "request-a" },
+      }),
+      body: {
+        error: "invitation_not_available",
+        requestId: "request-a",
+      },
+    };
+    const unknown = {
+      response: new Response(null, {
+        status: 409,
+        headers: { "x-request-id": "request-b" },
+      }),
+      body: {
+        error: "invitation_not_available",
+        requestId: "request-b",
+      },
+    };
+
+    expect(observableResponseContract(unavailable)).toEqual({
+      status: 409,
+      body: {
+        error: "invitation_not_available",
+        requestId: "<request-id>",
+      },
+    });
+    expect(observableResponseContract(unknown)).toEqual(
+      observableResponseContract(unavailable),
+    );
+
+    const smoke = await readFile(
+      new URL("../scripts/smoke.mjs", import.meta.url),
+      "utf8",
+    );
+    expect(smoke).toContain("invitation-consumed-contract");
+    expect(smoke).toContain("invitation-unknown-contract");
+    expect(smoke).toContain("verification-consumed-contract");
+    expect(smoke).toContain("verification-unknown-contract");
+    expect(smoke).toMatch(
+      /observableResponseContract\(unknownInvitation\)[\s\S]*observableResponseContract\(consumedInvitation\)/,
+    );
+    expect(smoke).toMatch(
+      /observableResponseContract\(unknownVerification\)[\s\S]*observableResponseContract\(consumedVerification\)/,
+    );
+  });
+
+  test("prepares Linux-readable secret files under a private host directory", async () => {
+    const smokeModule = (await import(
+      new URL("../scripts/smoke.mjs", import.meta.url).href
+    )) as {
+      prepareSecretDirectory?: (
+        environment: Record<string, string>,
+      ) => Promise<string>;
+    };
+    expect(smokeModule.prepareSecretDirectory).toBeTypeOf("function");
+    const environment: Record<string, string> = {
+      PLATFORM_MIGRATOR_DATABASE_URL: "migrator-url",
+      PLATFORM_OPERATOR_BOOTSTRAP_TOKEN: "bootstrap-token",
+      PLATFORM_RUNTIME_DATABASE_URL: "runtime-url",
+      PLATFORM_SMOKE_SESSION_TOKEN: "session-token",
+    };
+    const expected = new Map([
+      ["platform_migrator_database_url", "migrator-url"],
+      ["platform_operator_bootstrap_token", "bootstrap-token"],
+      ["platform_runtime_database_url", "runtime-url"],
+      ["platform_smoke_session_token", "session-token"],
+    ]);
+    const directory = await smokeModule.prepareSecretDirectory!(environment);
+    try {
+      expect(environment.PLATFORM_SECRET_DIRECTORY).toBe(directory);
+      if (process.platform !== "win32") {
+        expect((await stat(directory)).mode & 0o777).toBe(0o700);
+      }
+      for (const [name, value] of expected) {
+        const path = join(directory, name);
+        expect((await stat(path)).mode & 0o777).toBe(0o444);
+        expect(await readFile(path, "utf8")).toBe(value);
+      }
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+
+    const smoke = await readFile(
+      new URL("../scripts/smoke.mjs", import.meta.url),
+      "utf8",
+    );
+    expect(smoke).toContain("await chmod(directory, 0o700)");
+    expect(smoke).toContain("await chmod(path, 0o444)");
   });
 
   test("scans every tracked file byte for generated secrets and digests", async () => {
