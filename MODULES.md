@@ -177,6 +177,10 @@ File-backed top-level secrets подключаются напрямую в `/run
 
 Остаточные deployment constraints: PostgreSQL role initialization выполняется только для нового data volume. При сохранённом volume ротация migrator/runtime passwords требует согласованного изменения паролей ролей и соответствующих URL secrets; простая замена файлов без обновления ролей нарушит подключение. Используемые base image tags (`node:20-bookworm-slim`, `postgres:16-bookworm`, `redis:7-bookworm`) пока не закреплены digest-значениями, поэтому digest pinning остаётся обязательным release-hardening шагом перед удалённым production rollout.
 
+Final whole-branch hardening закрывает пять локально найденных границ. Smoke case-insensitively отклоняет inherited BuildKit/Buildx/Bake routing selectors до любого Docker вызова и принудительно использует `COMPOSE_BAKE=false` после проверки exact local Docker selector. Migration runner загружает только exact file-backed manifest, сверяет имена/checksums до подключения и отклоняет extra persisted history; readiness читает всю migration history, поэтому missing, changed и extra rows дают `503`. Account activation и effective-entitlement listing учитывают только entitlements активных modules, а repository проецирует module state из PostgreSQL. Application construction проверяет actual protected-route capability mapping до регистрации routes.
+
+PostgreSQL pools имеют bounded локальные defaults. Runtime profile: connection `5s`, query/statement `10s`, lock `3s`, idle-in-transaction `10s`, idle pool `30s`, максимум `10` connections. One-shot migrator profile: connection `10s`, query/statement `120s`, lock `10s`, idle-in-transaction `30s`, idle pool `30s`, максимум `2` connections. Transaction helper сохраняет исходную ошибку timeout/query и discard-ит client при неуспешном rollback. Эти значения являются кодовыми defaults, а не проверенными remote deployment settings.
+
 Native Android delivery остаётся отдельным будущим этапом: текущая Apollo Platform foundation предназначена для web/server workflows, а Android должен поставляться как отдельно проверяемый APK.
 
 ---
