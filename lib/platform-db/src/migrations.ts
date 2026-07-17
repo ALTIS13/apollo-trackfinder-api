@@ -51,6 +51,10 @@ function migrationContractError(
   return Object.assign(new Error(message), { code });
 }
 
+function migrationCleanupError(error: unknown): Error {
+  return error instanceof Error ? error : new Error("Migration cleanup failed");
+}
+
 async function loadManifestMigrations(
   directory: string,
   manifest: readonly MigrationManifestEntry[],
@@ -93,6 +97,10 @@ export async function runPlatformMigrations(
   const migrations = await loadManifestMigrations(directory, manifest);
   const client = await pool.connect();
   let lockAcquired = false;
+  let cleanupError: Error | undefined;
+  let primaryError: unknown;
+  let primaryErrorCaught = false;
+  const result: MigrationResult = { applied: [], alreadyApplied: [] };
 
   try {
     await client.query("select pg_advisory_lock(hashtext($1))", [
@@ -122,8 +130,6 @@ export async function runPlatformMigrations(
     const checksums = new Map(
       persisted.rows.map(({ name, checksum }) => [name, checksum]),
     );
-    const result: MigrationResult = { applied: [], alreadyApplied: [] };
-
     for (const { name, sql } of migrations) {
       const checksum = createHash("sha256").update(sql).digest("hex");
       const persistedChecksum = checksums.get(name);
@@ -152,21 +158,38 @@ export async function runPlatformMigrations(
         await client.query("COMMIT");
         result.applied.push(name);
       } catch (error) {
-        await client.query("ROLLBACK");
+        try {
+          await client.query("ROLLBACK");
+        } catch (rollbackError) {
+          cleanupError ??= migrationCleanupError(rollbackError);
+        }
         throw error;
       }
     }
-
-    return result;
+  } catch (error) {
+    primaryErrorCaught = true;
+    primaryError = error;
   } finally {
     try {
       if (lockAcquired) {
-        await client.query("select pg_advisory_unlock(hashtext($1))", [
-          MIGRATION_LOCK,
-        ]);
+        try {
+          await client.query("select pg_advisory_unlock(hashtext($1))", [
+            MIGRATION_LOCK,
+          ]);
+        } catch (unlockError) {
+          cleanupError ??= migrationCleanupError(unlockError);
+        }
       }
     } finally {
-      client.release();
+      try {
+        client.release(cleanupError);
+      } catch (releaseError) {
+        cleanupError ??= migrationCleanupError(releaseError);
+      }
     }
   }
+
+  if (primaryErrorCaught) throw primaryError;
+  if (cleanupError !== undefined) throw cleanupError;
+  return result;
 }

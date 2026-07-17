@@ -189,6 +189,7 @@ export class PolicyService {
             .filter(
               (entitlement) =>
                 requestedSet.has(entitlement.moduleKey) &&
+                entitlement.moduleState === "active" &&
                 entitlement.revokedAt === null &&
                 (entitlement.expiresAt === null ||
                   entitlement.expiresAt.getTime() > parsed.data.now.getTime()),

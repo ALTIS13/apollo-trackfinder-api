@@ -23,6 +23,7 @@ class MigrationClientDouble {
   readonly history = new Map<string, string>();
   readonly queries: RecordedQuery[] = [];
   failure?: { error: Error; text: string };
+  readonly failures = new Map<string, Error>();
   releaseCount = 0;
   readonly releaseErrors: (Error | undefined)[] = [];
 
@@ -30,9 +31,10 @@ class MigrationClientDouble {
     this.events.push(text);
     this.queries.push({ text, values });
 
-    if (this.failure?.text === text) {
-      throw this.failure.error;
-    }
+    const failure =
+      this.failures.get(text) ??
+      (this.failure?.text === text ? this.failure.error : undefined);
+    if (failure !== undefined) throw failure;
 
     if (text.includes("select name, checksum")) {
       return {
@@ -325,6 +327,67 @@ describe("runPlatformMigrations", () => {
       "select pg_advisory_unlock(hashtext($1))",
       "release",
     ]);
+  });
+
+  test("preserves the migration failure and destroys the client when rollback fails", async () => {
+    const migrationSql = "select 'broken migration';";
+    const directory = await fixtureDirectory({
+      "0001_broken.sql": migrationSql,
+    });
+    const manifest = await fixtureManifest(directory, ["0001_broken.sql"]);
+    const pool = new MigrationPoolDouble();
+    const primaryFailure = new Error("migration SQL failed");
+    const rollbackFailure = new Error("migration rollback failed");
+    pool.client.failures.set(migrationSql, primaryFailure);
+    pool.client.failures.set("ROLLBACK", rollbackFailure);
+
+    await expect(
+      runPlatformMigrations(asPool(pool), directory, manifest),
+    ).rejects.toBe(primaryFailure);
+    expect(pool.client.events).toContain(
+      "select pg_advisory_unlock(hashtext($1))",
+    );
+    expect(pool.client.releaseErrors).toEqual([rollbackFailure]);
+  });
+
+  test("preserves the migration failure and destroys the client when unlock fails", async () => {
+    const migrationSql = "select 'broken migration';";
+    const directory = await fixtureDirectory({
+      "0001_broken.sql": migrationSql,
+    });
+    const manifest = await fixtureManifest(directory, ["0001_broken.sql"]);
+    const pool = new MigrationPoolDouble();
+    const primaryFailure = new Error("migration SQL failed");
+    const unlockFailure = new Error("migration unlock failed");
+    pool.client.failures.set(migrationSql, primaryFailure);
+    pool.client.failures.set(
+      "select pg_advisory_unlock(hashtext($1))",
+      unlockFailure,
+    );
+
+    await expect(
+      runPlatformMigrations(asPool(pool), directory, manifest),
+    ).rejects.toBe(primaryFailure);
+    expect(pool.client.events).toContain("ROLLBACK");
+    expect(pool.client.releaseErrors).toEqual([unlockFailure]);
+  });
+
+  test("reports an unlock-only failure and destroys the client", async () => {
+    const directory = await fixtureDirectory({
+      "0001_first.sql": "select 'first migration';",
+    });
+    const manifest = await fixtureManifest(directory, ["0001_first.sql"]);
+    const pool = new MigrationPoolDouble();
+    const unlockFailure = new Error("migration unlock failed");
+    pool.client.failures.set(
+      "select pg_advisory_unlock(hashtext($1))",
+      unlockFailure,
+    );
+
+    await expect(
+      runPlatformMigrations(asPool(pool), directory, manifest),
+    ).rejects.toBe(unlockFailure);
+    expect(pool.client.releaseErrors).toEqual([unlockFailure]);
   });
 });
 

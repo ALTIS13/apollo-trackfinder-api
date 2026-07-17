@@ -212,6 +212,25 @@ describe("PolicyService", () => {
     });
   });
 
+  test("denies when the entitlement projection observes a module disabled after lookup", async () => {
+    const harness = createHarness();
+    const activeModule = harness.state.modules[0]!;
+    harness.repository.findModulesByKeys.mockResolvedValueOnce([activeModule]);
+    harness.repository.listAccountEntitlements.mockResolvedValueOnce([
+      entitlementFor(activeModule, { moduleState: "disabled" }),
+    ]);
+
+    await expect(
+      harness.service.evaluate(
+        evaluateInput({ requiredModules: [activeModule.moduleKey] }),
+      ),
+    ).resolves.toEqual({
+      allowed: false,
+      code: "module_access_denied",
+      missingModuleKeys: [activeModule.moduleKey],
+    });
+  });
+
   test.each([
     ["unknown module", () => undefined],
     [
