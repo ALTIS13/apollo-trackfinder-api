@@ -181,6 +181,8 @@ Final whole-branch hardening закрывает пять локально най
 
 PostgreSQL pools имеют bounded локальные defaults. Runtime profile: connection `5s`, query/statement `10s`, lock `3s`, idle-in-transaction `10s`, idle pool `30s`, максимум `10` connections. One-shot migrator profile: connection `10s`, query/statement `120s`, lock `10s`, idle-in-transaction `30s`, idle pool `30s`, максимум `2` connections. Transaction helper сохраняет исходную ошибку timeout/query и discard-ит client при неуспешном rollback. Эти значения являются кодовыми defaults, а не проверенными remote deployment settings.
 
+Final narrow follow-up закрывает ещё две race/cleanup границы. PolicyService принимает allow-решение только если более поздняя entitlement projection также сообщает `moduleState: active`; disable между module lookup и entitlement read теперь даёт fail-closed `module_access_denied`. Migration runner отдельно хранит primary operation failure и cleanup failure: rollback и advisory unlock по-прежнему предпринимаются в bounded migration pool, cleanup failure передаётся в `client.release(error)` для уничтожения client, primary error не маскируется, а cleanup-only failure возвращается вызывающему коду.
+
 Native Android delivery остаётся отдельным будущим этапом: текущая Apollo Platform foundation предназначена для web/server workflows, а Android должен поставляться как отдельно проверяемый APK.
 
 ---
