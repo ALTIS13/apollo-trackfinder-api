@@ -183,6 +183,8 @@ PostgreSQL pools имеют bounded локальные defaults. Runtime profile
 
 Final narrow follow-up закрывает ещё две race/cleanup границы. PolicyService принимает allow-решение только если более поздняя entitlement projection также сообщает `moduleState: active`; disable между module lookup и entitlement read теперь даёт fail-closed `module_access_denied`. Migration runner отдельно хранит primary operation failure и cleanup failure: rollback и advisory unlock по-прежнему предпринимаются в bounded migration pool, cleanup failure передаётся в `client.release(error)` для уничтожения client, primary error не маскируется, а cleanup-only failure возвращается вызывающему коду.
 
+Advisory-lock acquisition также считается uncertain connection state: если `pg_advisory_lock` завершается ошибкой или client-side timeout, runner сохраняет точный primary error для вызывающего кода и передаёт тот же `Error` в `client.release(error)`, чтобы pool уничтожил client. Поскольку успешное получение lock не подтверждено, runner не заявляет и не выполняет advisory unlock; существующие rollback/unlock cleanup guarantees остаются без изменений.
+
 Native Android delivery остаётся отдельным будущим этапом: текущая Apollo Platform foundation предназначена для web/server workflows, а Android должен поставляться как отдельно проверяемый APK.
 
 ---
