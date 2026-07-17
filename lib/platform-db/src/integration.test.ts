@@ -588,6 +588,23 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
     ).rejects.toMatchObject({ code: "55000" });
   });
 
+  test("rejects persisted migration history outside the immutable manifest", async () => {
+    await migrator.query(
+      "insert into apollo_platform.schema_migrations (name, checksum) values ($1, $2)",
+      ["9999_untrusted.sql", "extra"],
+    );
+    try {
+      await expect(runPlatformMigrations(migrator)).rejects.toMatchObject({
+        code: "migration_history_mismatch",
+      });
+    } finally {
+      await migrator.query(
+        "delete from apollo_platform.schema_migrations where name = $1",
+        ["9999_untrusted.sql"],
+      );
+    }
+  });
+
   test("applies 0002 after 0001 and backfills an existing live operator role", async () => {
     const firstMigrationDirectory = await mkdtemp(
       join(tmpdir(), "apollo-platform-0001-"),
@@ -599,7 +616,11 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
         join(firstMigrationDirectory, "0001_platform_identity.sql"),
       );
       await expect(
-        runPlatformMigrations(migrator, firstMigrationDirectory),
+        runPlatformMigrations(
+          migrator,
+          firstMigrationDirectory,
+          PLATFORM_MIGRATION_MANIFEST.slice(0, 1),
+        ),
       ).resolves.toEqual({
         applied: ["0001_platform_identity.sql"],
         alreadyApplied: [],

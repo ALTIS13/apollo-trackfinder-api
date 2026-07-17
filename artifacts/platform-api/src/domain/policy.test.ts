@@ -74,6 +74,7 @@ function entitlementFor(
     accountId: ACCOUNT_ID,
     moduleId: module.id,
     moduleKey: module.moduleKey,
+    moduleState: module.state,
     expiresAt: null,
     revokedAt: null,
     source: "operator",

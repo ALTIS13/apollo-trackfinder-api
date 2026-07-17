@@ -22,6 +22,19 @@ const composeFile = fileURLToPath(
 );
 const INVITATION_MODULE_KEY = "tf.integrations";
 const POLICY_MODULE_KEY = "tf.search";
+const FORBIDDEN_BUILD_SELECTORS = Object.freeze([
+  "BUILDKIT_HOST",
+  "BUILDX_BUILDER",
+  "BUILDX_CONFIG",
+  "BUILDX_BAKE_FILE",
+  "BUILDX_BAKE_FILE_SEPARATOR",
+  "BUILDX_BAKE_GIT_AUTH_HEADER",
+  "BUILDX_BAKE_GIT_AUTH_TOKEN",
+  "BUILDX_BAKE_GIT_SSH",
+  "BUILDX_BAKE_ENTITLEMENTS_FS",
+  "COMPOSE_BAKE",
+  "DOCKER_CONFIG",
+]);
 let smokeStage = "startup";
 
 function generatedSecret(bytes = 32) {
@@ -192,10 +205,17 @@ export function canonicalizeDockerSelectors(environment) {
     return values.values().next().value ?? "";
   };
 
+  for (const name of FORBIDDEN_BUILD_SELECTORS) {
+    if (readSelector(name).length > 0) {
+      throw new Error("Unsafe Docker build selector environment");
+    }
+  }
+
   const context = readSelector("DOCKER_CONTEXT");
   const host = readSelector("DOCKER_HOST");
   if (context.length > 0) canonicalEnvironment.DOCKER_CONTEXT = context;
   else if (host.length > 0) canonicalEnvironment.DOCKER_HOST = host;
+  canonicalEnvironment.COMPOSE_BAKE = "false";
 
   return { context, environment: canonicalEnvironment, host };
 }

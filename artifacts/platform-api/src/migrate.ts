@@ -19,7 +19,7 @@ async function migrate(): Promise<void> {
   const connectionString = await requiredSecretFile(
     "MIGRATOR_DATABASE_URL_FILE",
   );
-  const pool = createPlatformPool(connectionString);
+  const pool = createPlatformPool(connectionString, "migration");
   try {
     const result = await runPlatformMigrations(pool, "/app/migrations");
     process.stdout.write(

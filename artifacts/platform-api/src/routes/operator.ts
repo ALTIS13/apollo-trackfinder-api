@@ -144,6 +144,7 @@ function entitlementProjection(entitlement: {
 function registerProtectedRoute(
   router: Router,
   dependencies: OperatorRouteDependencies,
+  protectedRouteMapping: Readonly<Record<string, readonly string[]>>,
   route: ProtectedPlatformRoute,
   handler: OperatorRouteHandler,
 ): void {
@@ -153,7 +154,7 @@ function registerProtectedRoute(
   ];
   const middleware = protectedRoute(
     dependencies,
-    REGISTERED_PROTECTED_PLATFORM_ROUTES[route],
+    protectedRouteMapping[route] ?? [],
     handler,
   );
   switch (method) {
@@ -175,6 +176,9 @@ function registerProtectedRoute(
 export function registerOperatorRoutes(
   router: Router,
   dependencies: OperatorRouteDependencies,
+  protectedRouteMapping: Readonly<
+    Record<string, readonly string[]>
+  > = REGISTERED_PROTECTED_PLATFORM_ROUTES,
 ): void {
   router.post("/v1/operator/bootstrap", async (request, response, next) => {
     try {
@@ -238,6 +242,7 @@ export function registerOperatorRoutes(
   registerProtectedRoute(
     router,
     dependencies,
+    protectedRouteMapping,
     "PATCH /v1/operator/registration-settings",
     async (request, response) => {
       const result = await dependencies.registration.changeMode(
@@ -251,6 +256,7 @@ export function registerOperatorRoutes(
   registerProtectedRoute(
     router,
     dependencies,
+    protectedRouteMapping,
     "POST /v1/operator/invitations",
     async (request, response) => {
       const result = await dependencies.invitations.create(
@@ -267,6 +273,7 @@ export function registerOperatorRoutes(
   registerProtectedRoute(
     router,
     dependencies,
+    protectedRouteMapping,
     "POST /v1/operator/invitations/:id/revoke",
     async (request, response) => {
       const result = await dependencies.invitations.revoke(
@@ -283,6 +290,7 @@ export function registerOperatorRoutes(
   registerProtectedRoute(
     router,
     dependencies,
+    protectedRouteMapping,
     "POST /v1/operator/accounts/:id/activate",
     async (request, response) => {
       const account = await dependencies.registration.activateAccount(
@@ -299,6 +307,7 @@ export function registerOperatorRoutes(
   registerProtectedRoute(
     router,
     dependencies,
+    protectedRouteMapping,
     "POST /v1/operator/accounts/:id/suspend",
     async (request, response) => {
       const account = await dependencies.registration.suspendAccount(
@@ -315,6 +324,7 @@ export function registerOperatorRoutes(
   registerProtectedRoute(
     router,
     dependencies,
+    protectedRouteMapping,
     "PUT /v1/operator/accounts/:id/entitlements/:moduleKey",
     async (request, response) => {
       const body = parseBody(entitlementBodySchema, request.body);
@@ -333,6 +343,7 @@ export function registerOperatorRoutes(
   registerProtectedRoute(
     router,
     dependencies,
+    protectedRouteMapping,
     "DELETE /v1/operator/accounts/:id/entitlements/:moduleKey",
     async (request, response) => {
       const result = await dependencies.entitlements.revoke(

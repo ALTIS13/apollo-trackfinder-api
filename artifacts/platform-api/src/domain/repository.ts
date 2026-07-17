@@ -142,6 +142,7 @@ export interface AccountEntitlement {
   readonly accountId: string;
   readonly moduleId: string;
   readonly moduleKey: string;
+  readonly moduleState: "active" | "disabled";
   readonly expiresAt: Date | null;
   readonly revokedAt: Date | null;
   readonly source: string;

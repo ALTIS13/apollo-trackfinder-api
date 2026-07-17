@@ -64,6 +64,7 @@ function entitlement(
     accountId: ACCOUNT_ID,
     moduleId: MODULE_ID,
     moduleKey: "tf.search",
+    moduleState: "active",
     expiresAt: null,
     revokedAt: null,
     source: "operator",
@@ -356,6 +357,12 @@ describe("EntitlementService", () => {
         moduleKey: "tf.integrations",
       }),
       entitlement({ expiresAt: new Date(NOW.getTime() + 1) }),
+      entitlement({
+        id: "00000000-0000-4000-8000-000000000126",
+        moduleId: "00000000-0000-4000-8000-000000000127",
+        moduleKey: "tf.disabled",
+        moduleState: "disabled",
+      }),
       entitlement({
         id: "00000000-0000-4000-8000-000000000122",
         moduleId: "00000000-0000-4000-8000-000000000123",

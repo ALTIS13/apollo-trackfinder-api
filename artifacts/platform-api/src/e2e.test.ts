@@ -93,6 +93,7 @@ async function renderedCompose(): Promise<Record<string, unknown>> {
 type FakeDockerRecord = {
   args: string[];
   command: string;
+  composeBake: string;
   dockerContext: string;
   dockerHost: string;
   effectiveProject: string;
@@ -129,6 +130,7 @@ async function fakeDockerExecutable(directory: string): Promise<string> {
 async function runSmokeWithFakeDocker(
   environmentOverrides: NodeJS.ProcessEnv = {},
 ): Promise<{
+  exfiltrationAttempted: boolean;
   records: FakeDockerRecord[];
   sentinelExists: boolean;
 }> {
@@ -136,6 +138,7 @@ async function runSmokeWithFakeDocker(
   const binDirectory = join(directory, "bin");
   const logPath = join(directory, "docker-invocations.jsonl");
   const sentinelPath = join(directory, "existing-project.sentinel");
+  const exfiltrationPath = join(directory, "repository-exfiltration.attempted");
   const inheritedSecretDirectory = join(directory, "hostile-secret-directory");
   const hookPath = join(directory, "fake-docker.cjs");
   await mkdir(binDirectory);
@@ -169,6 +172,7 @@ function urlShape(name) {
 const record = {
   args,
   command,
+  composeBake: environmentValue("COMPOSE_BAKE"),
   dockerContext: environmentValue("DOCKER_CONTEXT"),
   dockerHost: environmentValue("DOCKER_HOST"),
   effectiveProject,
@@ -187,6 +191,25 @@ const record = {
   runtimeUrl: urlShape("PLATFORM_RUNTIME_DATABASE_URL"),
 };
 fs.appendFileSync(env.FAKE_DOCKER_LOG, JSON.stringify(record) + "\n");
+const buildSelectors = [
+  "BUILDKIT_HOST",
+  "BUILDX_BUILDER",
+  "BUILDX_CONFIG",
+  "BUILDX_BAKE_FILE",
+  "BUILDX_BAKE_FILE_SEPARATOR",
+  "BUILDX_BAKE_GIT_AUTH_HEADER",
+  "BUILDX_BAKE_GIT_AUTH_TOKEN",
+  "BUILDX_BAKE_GIT_SSH",
+  "BUILDX_BAKE_ENTITLEMENTS_FS",
+  "COMPOSE_BAKE",
+  "DOCKER_CONFIG",
+];
+if (args[0] === "compose" && buildSelectors.some((name) => {
+  const value = environmentValue(name);
+  return value.length > 0 && !(name === "COMPOSE_BAKE" && value === "false");
+})) {
+  fs.writeFileSync(env.FAKE_EXFILTRATION_SENTINEL, "unsafe build route reached compose");
+}
 if (command === "context") {
   if (args.includes("show")) {
     process.stdout.write("local-context");
@@ -234,6 +257,7 @@ process.exit(0);
     COMPOSE_PROJECT_NAME: hostile.HOSTILE_PROJECT_NAME,
     FAKE_DOCKER_LOG: logPath,
     FAKE_EXISTING_PROJECT_SENTINEL: sentinelPath,
+    FAKE_EXFILTRATION_SENTINEL: exfiltrationPath,
     NODE_OPTIONS: `--require=${hookPath}`,
     PATH: `${binDirectory}${delimiter}${process.env.PATH ?? ""}`,
     PLATFORM_MIGRATOR_DATABASE_URL: hostile.HOSTILE_MIGRATOR_DATABASE_URL,
@@ -283,6 +307,7 @@ process.exit(0);
       .filter(Boolean)
       .map((line) => JSON.parse(line) as FakeDockerRecord);
     return {
+      exfiltrationAttempted: await pathExists(exfiltrationPath),
       records,
       sentinelExists: await pathExists(sentinelPath),
     };
@@ -303,13 +328,15 @@ function service(
 
 describe("platform container contract", () => {
   test("isolates every smoke lifecycle from a hostile inherited Compose project", async () => {
-    const { records, sentinelExists } = await runSmokeWithFakeDocker();
+    const { exfiltrationAttempted, records, sentinelExists } =
+      await runSmokeWithFakeDocker();
     const contextRecords = records.filter(
       ({ command }) => command === "context",
     );
     const composeRecords = records.filter(({ args }) => args[0] === "compose");
 
     expect(sentinelExists).toBe(true);
+    expect(exfiltrationAttempted).toBe(false);
     expect(contextRecords.map(({ args }) => args.slice(1, 4))).toEqual([
       ["show"],
       ["inspect", "local-context", "--format"],
@@ -339,6 +366,7 @@ describe("platform container contract", () => {
       expect(record.args[record.args.indexOf("-p") + 1]).toBe(project);
       expect(record.dockerContext).toBe("local-context");
       expect(record.dockerHost).toBe("");
+      expect(record.composeBake).toBe("false");
     }
   });
 
@@ -432,6 +460,33 @@ try {
     expect(stderr).toBe("");
     expect(stdout).toBe("Conflicting Docker selector environment");
   });
+
+  test.each([
+    ["BUILDKIT_HOST", "tcp://remote-builder.example:1234"],
+    ["Buildx_Builder", "remote-builder"],
+    ["BUILDX_CONFIG", "/tmp/hostile-buildx-config"],
+    ["BUILDX_BAKE_FILE", "https://attacker.example/compose.hcl"],
+    ["BUILDX_BAKE_FILE_SEPARATOR", ";"],
+    ["BUILDX_BAKE_GIT_AUTH_HEADER", "authorization"],
+    ["BUILDX_BAKE_GIT_AUTH_TOKEN", "attacker-token"],
+    ["BUILDX_BAKE_GIT_SSH", "default=/tmp/attacker.sock"],
+    ["BUILDX_BAKE_ENTITLEMENTS_FS", "*"],
+    ["Compose_Bake", "true"],
+    ["DOCKER_CONFIG", "/tmp/hostile-docker-config"],
+  ])(
+    "rejects inherited build routing selector %s before Docker or repository access",
+    async (name, value) => {
+      const { exfiltrationAttempted, records, sentinelExists } =
+        await runSmokeWithFakeDocker({
+          DOCKER_HOST: "npipe:////./pipe/docker_engine",
+          [name]: value,
+        });
+
+      expect(records).toEqual([]);
+      expect(exfiltrationAttempted).toBe(false);
+      expect(sentinelExists).toBe(true);
+    },
+  );
 
   test("uses a Debian/glibc multi-stage image with immutable runtime assets", async () => {
     const dockerfile = await readFile(

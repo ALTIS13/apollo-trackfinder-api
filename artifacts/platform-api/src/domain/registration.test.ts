@@ -106,6 +106,7 @@ function makeEntitlement(
     accountId: TARGET_ACCOUNT_ID,
     moduleId: uuid(201),
     moduleKey: "tf.search",
+    moduleState: "active",
     expiresAt: null,
     revokedAt: null,
     source: "operator",
@@ -1138,6 +1139,11 @@ describe("RegistrationService activation and suspension", () => {
       "expired entitlement",
       CREATED_AT,
       [makeEntitlement({ expiresAt: new Date(NOW) })],
+    ],
+    [
+      "disabled module entitlement",
+      CREATED_AT,
+      [makeEntitlement({ moduleState: "disabled" })],
     ],
   ] as const)(
     "does not activate an account with %s",

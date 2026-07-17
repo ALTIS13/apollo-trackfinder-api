@@ -135,6 +135,7 @@ const entitlementRow = {
   account_id: accountId,
   module_id: moduleId,
   module_key: "tf.search",
+  module_state: "active",
   expires_at: later,
   revoked_at: null,
   source: "invitation",
@@ -170,6 +171,23 @@ function expectQuery(
 }
 
 describe("PostgresPlatformRepository", () => {
+  it("projects module state with every entitlement read and mutation", async () => {
+    const client = new RecordingClient([[entitlementRow]]);
+    const repository = new PostgresPlatformRepository();
+
+    await expect(
+      repository.listAccountEntitlements(asPoolClient(client), accountId),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        moduleKey: "tf.search",
+        moduleState: "active",
+      }),
+    ]);
+    expect(client.queries[0]?.text).toMatch(
+      /module\.state\s+as\s+module_state/i,
+    );
+  });
+
   it("implements the complete transaction-scoped repository boundary", () => {
     const repository: PlatformRepository = new PostgresPlatformRepository();
     const methodNames: readonly (keyof PlatformRepository)[] = [

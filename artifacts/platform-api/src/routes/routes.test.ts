@@ -34,6 +34,7 @@ const entitlement = {
   accountId,
   moduleId: "55555555-5555-4555-8555-555555555555",
   moduleKey: "tf.search",
+  moduleState: "active" as const,
   expiresAt: null,
   revokedAt: null,
   source: "operator",
@@ -224,6 +225,17 @@ describe("platform HTTP API", () => {
   it("uses the exact protected route manifest", () => {
     expect(REGISTERED_PROTECTED_PLATFORM_ROUTES).toEqual(
       PROTECTED_PLATFORM_ROUTES,
+    );
+  });
+
+  it("fails application construction when the actual protected route mapping drifts", () => {
+    const drifted = {
+      ...REGISTERED_PROTECTED_PLATFORM_ROUTES,
+      "PATCH /v1/operator/registration-settings": [],
+    } as unknown as typeof REGISTERED_PROTECTED_PLATFORM_ROUTES;
+
+    expect(() => createPlatformApp(createDependencies(), drifted)).toThrow(
+      "Protected operator route mapping mismatch",
     );
   });
 

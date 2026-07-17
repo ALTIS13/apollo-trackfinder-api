@@ -339,6 +339,7 @@ export class RegistrationService {
         const now = this.clock();
         const hasLiveEntitlement = entitlements.some(
           (entitlement) =>
+            entitlement.moduleState === "active" &&
             entitlement.revokedAt === null &&
             (entitlement.expiresAt === null ||
               entitlement.expiresAt.getTime() > now.getTime()),

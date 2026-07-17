@@ -44,10 +44,53 @@ export const PLATFORM_MIGRATION_MANIFEST: readonly MigrationManifestEntry[] =
     },
   ]);
 
+function migrationContractError(
+  code: "migration_manifest_mismatch" | "migration_history_mismatch",
+  message: string,
+): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+async function loadManifestMigrations(
+  directory: string,
+  manifest: readonly MigrationManifestEntry[],
+): Promise<readonly { readonly name: string; readonly sql: string }[]> {
+  const filesystemNames = (await readdir(directory))
+    .filter((name) => MIGRATION_NAME.test(name))
+    .sort();
+  const manifestNames = manifest.map(({ name }) => name);
+  if (
+    new Set(manifestNames).size !== manifestNames.length ||
+    manifestNames.some((name) => !MIGRATION_NAME.test(name)) ||
+    JSON.stringify(filesystemNames) !== JSON.stringify(manifestNames)
+  ) {
+    throw migrationContractError(
+      "migration_manifest_mismatch",
+      "Migration manifest does not match filesystem",
+    );
+  }
+
+  return Promise.all(
+    manifest.map(async ({ name, checksum: expectedChecksum }) => {
+      const sql = await readFile(join(directory, name), "utf8");
+      const checksum = createHash("sha256").update(sql).digest("hex");
+      if (checksum !== expectedChecksum) {
+        throw migrationContractError(
+          "migration_manifest_mismatch",
+          `Migration manifest checksum does not match filesystem: ${name}`,
+        );
+      }
+      return { name, sql };
+    }),
+  );
+}
+
 export async function runPlatformMigrations(
   pool: Pool,
   directory = DEFAULT_MIGRATION_DIRECTORY,
+  manifest: readonly MigrationManifestEntry[] = PLATFORM_MIGRATION_MANIFEST,
 ): Promise<MigrationResult> {
+  const migrations = await loadManifestMigrations(directory, manifest);
   const client = await pool.connect();
   let lockAcquired = false;
 
@@ -66,19 +109,22 @@ export async function runPlatformMigrations(
       )
     `);
 
-    const names = (await readdir(directory))
-      .filter((name) => MIGRATION_NAME.test(name))
-      .sort();
     const persisted = await client.query<MigrationRow>(
       "select name, checksum from apollo_platform.schema_migrations",
     );
+    const manifestNames = new Set(manifest.map(({ name }) => name));
+    if (persisted.rows.some(({ name }) => !manifestNames.has(name))) {
+      throw migrationContractError(
+        "migration_history_mismatch",
+        "Persisted migration history contains an unmanifested row",
+      );
+    }
     const checksums = new Map(
       persisted.rows.map(({ name, checksum }) => [name, checksum]),
     );
     const result: MigrationResult = { applied: [], alreadyApplied: [] };
 
-    for (const name of names) {
-      const sql = await readFile(join(directory, name), "utf8");
+    for (const { name, sql } of migrations) {
       const checksum = createHash("sha256").update(sql).digest("hex");
       const persistedChecksum = checksums.get(name);
 

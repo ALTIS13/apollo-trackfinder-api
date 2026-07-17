@@ -206,6 +206,7 @@ interface AccountEntitlementRow extends QueryResultRow {
   readonly account_id: string;
   readonly module_id: string;
   readonly module_key: string;
+  readonly module_state: "active" | "disabled";
   readonly expires_at: Date | null;
   readonly revoked_at: Date | null;
   readonly source: string;
@@ -334,6 +335,7 @@ function mapAccountEntitlement(row: AccountEntitlementRow): AccountEntitlement {
     accountId: row.account_id,
     moduleId: row.module_id,
     moduleKey: row.module_key,
+    moduleState: row.module_state,
     expiresAt: row.expires_at,
     revokedAt: row.revoked_at,
     source: row.source,
@@ -746,7 +748,8 @@ export class PostgresPlatformRepository implements PlatformRepository {
     const result = await execute<AccountEntitlementRow>(
       client,
       `select entitlement.id, entitlement.account_id, entitlement.module_id,
-              module.module_key, entitlement.expires_at,
+              module.module_key, module.state as module_state,
+              entitlement.expires_at,
               entitlement.revoked_at, entitlement.source,
               entitlement.granted_by_account_id, entitlement.reason,
               entitlement.created_at, entitlement.updated_at
@@ -781,7 +784,8 @@ export class PostgresPlatformRepository implements PlatformRepository {
                    granted_by_account_id, reason, created_at, updated_at
        )
        select upserted.id, upserted.account_id, upserted.module_id,
-              module.module_key, upserted.expires_at, upserted.revoked_at,
+              module.module_key, module.state as module_state,
+              upserted.expires_at, upserted.revoked_at,
               upserted.source, upserted.granted_by_account_id,
               upserted.reason, upserted.created_at, upserted.updated_at
        from upserted
@@ -815,6 +819,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
          and module.id = entitlement.module_id
        returning entitlement.id, entitlement.account_id,
                  entitlement.module_id, module.module_key,
+                 module.state as module_state,
                  entitlement.expires_at, entitlement.revoked_at,
                  entitlement.source, entitlement.granted_by_account_id,
                  entitlement.reason, entitlement.created_at,

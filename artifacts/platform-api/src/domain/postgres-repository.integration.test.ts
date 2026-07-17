@@ -220,4 +220,49 @@ describePostgres("PostgresPlatformRepository forced-RLS bootstrap", () => {
       }),
     ).resolves.toEqual([0, 0, 0]);
   });
+
+  test("projects active and disabled module state with account entitlements", async () => {
+    const moduleResult = await migrator.query<{ id: string }>(
+      "select id from apollo_platform.modules where module_key = $1",
+      ["tf.search"],
+    );
+    const moduleId = moduleResult.rows[0]!.id;
+    const granted = await withPlatformTransaction(runtime, async (client) => {
+      await setAccountContext(client, firstAccount.id);
+      return repository.upsertAccountEntitlement(client, {
+        accountId: firstAccount.id,
+        moduleId,
+        expiresAt: null,
+        source: "operator",
+        grantedByAccountId: null,
+        reason: "module-state integration",
+      });
+    });
+    expect(granted.moduleState).toBe("active");
+
+    const readState = () =>
+      withPlatformTransaction(runtime, async (client) => {
+        await setAccountContext(client, firstAccount.id);
+        const entitlements = await repository.listAccountEntitlements(
+          client,
+          firstAccount.id,
+        );
+        return entitlements.find(({ moduleKey }) => moduleKey === "tf.search")
+          ?.moduleState;
+      });
+
+    await expect(readState()).resolves.toBe("active");
+    await migrator.query(
+      "update apollo_platform.modules set state = 'disabled' where id = $1",
+      [moduleId],
+    );
+    try {
+      await expect(readState()).resolves.toBe("disabled");
+    } finally {
+      await migrator.query(
+        "update apollo_platform.modules set state = 'active' where id = $1",
+        [moduleId],
+      );
+    }
+  });
 });

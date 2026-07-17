@@ -38,4 +38,21 @@ describe("migration readiness", () => {
       createMigrationReadinessProbe({ query }, PLATFORM_MIGRATION_MANIFEST)(),
     ).resolves.toBe(false);
   });
+
+  it("queries the complete migration history so extra rows fail readiness", async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        ...PLATFORM_MIGRATION_MANIFEST,
+        { name: "9999_untrusted.sql", checksum: "extra" },
+      ],
+    });
+
+    await expect(
+      createMigrationReadinessProbe({ query }, PLATFORM_MIGRATION_MANIFEST)(),
+    ).resolves.toBe(false);
+    expect(query).toHaveBeenCalledWith(
+      "select name, checksum from apollo_platform.schema_migrations",
+      [],
+    );
+  });
 });

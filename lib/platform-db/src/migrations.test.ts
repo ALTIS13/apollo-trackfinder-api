@@ -11,6 +11,7 @@ import {
   withPlatformTransaction,
 } from "./index.js";
 import { runPlatformMigrations } from "./migrations.js";
+import type { MigrationManifestEntry } from "./migrations.js";
 
 type RecordedQuery = {
   text: string;
@@ -23,6 +24,7 @@ class MigrationClientDouble {
   readonly queries: RecordedQuery[] = [];
   failure?: { error: Error; text: string };
   releaseCount = 0;
+  readonly releaseErrors: (Error | undefined)[] = [];
 
   async query(text: string, values?: readonly unknown[]): Promise<QueryResult> {
     this.events.push(text);
@@ -47,9 +49,10 @@ class MigrationClientDouble {
     return { rows: [], rowCount: 0 } as unknown as QueryResult;
   }
 
-  release(): void {
+  release(error?: Error): void {
     this.events.push("release");
     this.releaseCount += 1;
+    this.releaseErrors.push(error);
   }
 }
 
@@ -80,6 +83,20 @@ async function fixtureDirectory(
   return directory;
 }
 
+async function fixtureManifest(
+  directory: string,
+  names: readonly string[],
+): Promise<readonly MigrationManifestEntry[]> {
+  return Promise.all(
+    names.map(async (name) => ({
+      name,
+      checksum: createHash("sha256")
+        .update(await readFile(join(directory, name), "utf8"))
+        .digest("hex"),
+    })),
+  );
+}
+
 function asPool(double: MigrationPoolDouble): Pool {
   return double as unknown as Pool;
 }
@@ -93,6 +110,49 @@ afterEach(async () => {
 });
 
 describe("runPlatformMigrations", () => {
+  test("refuses filesystem migrations that are absent from the immutable manifest", async () => {
+    const directory = await fixtureDirectory({
+      "0001_first.sql": "select 'first migration';",
+      "0002_unreviewed.sql": "select 'unreviewed migration';",
+    });
+    const manifest = await fixtureManifest(directory, ["0001_first.sql"]);
+    const pool = new MigrationPoolDouble();
+
+    await expect(
+      runPlatformMigrations(asPool(pool), directory, manifest),
+    ).rejects.toMatchObject({ code: "migration_manifest_mismatch" });
+    expect(pool.client.queries).toEqual([]);
+  });
+
+  test("refuses a manifest checksum that differs from its filesystem migration", async () => {
+    const directory = await fixtureDirectory({
+      "0001_first.sql": "select 'first migration';",
+    });
+    const pool = new MigrationPoolDouble();
+
+    await expect(
+      runPlatformMigrations(asPool(pool), directory, [
+        { name: "0001_first.sql", checksum: "wrong" },
+      ]),
+    ).rejects.toMatchObject({ code: "migration_manifest_mismatch" });
+    expect(pool.client.queries).toEqual([]);
+  });
+
+  test("refuses persisted migration rows absent from the immutable manifest", async () => {
+    const directory = await fixtureDirectory({
+      "0001_first.sql": "select 'first migration';",
+    });
+    const manifest = await fixtureManifest(directory, ["0001_first.sql"]);
+    const pool = new MigrationPoolDouble();
+    pool.client.history.set("9999_untrusted.sql", "extra");
+
+    await expect(
+      runPlatformMigrations(asPool(pool), directory, manifest),
+    ).rejects.toMatchObject({ code: "migration_history_mismatch" });
+    expect(pool.client.queries.at(-1)?.text).toContain("pg_advisory_unlock");
+    expect(pool.client.releaseCount).toBe(1);
+  });
+
   test("ships an immutable bootstrap marker migration with a terminal insert trigger", async () => {
     const sql = await readFile(
       new URL(
@@ -135,10 +195,14 @@ describe("runPlatformMigrations", () => {
       "README.md": "ignored",
       "0003-invalid.sql": "select 'also ignored';",
     });
+    const manifest = await fixtureManifest(directory, [
+      "0001_first.sql",
+      "0002_second.sql",
+    ]);
     const pool = new MigrationPoolDouble();
 
     await expect(
-      runPlatformMigrations(asPool(pool), directory),
+      runPlatformMigrations(asPool(pool), directory, manifest),
     ).resolves.toEqual({
       applied: ["0001_first.sql", "0002_second.sql"],
       alreadyApplied: [],
@@ -183,12 +247,16 @@ describe("runPlatformMigrations", () => {
       "0001_first.sql": "select 'first migration';",
       "0002_second.sql": "select 'second migration';",
     });
+    const manifest = await fixtureManifest(directory, [
+      "0001_first.sql",
+      "0002_second.sql",
+    ]);
     const pool = new MigrationPoolDouble();
-    await runPlatformMigrations(asPool(pool), directory);
+    await runPlatformMigrations(asPool(pool), directory, manifest);
     pool.client.queries.length = 0;
 
     await expect(
-      runPlatformMigrations(asPool(pool), directory),
+      runPlatformMigrations(asPool(pool), directory, manifest),
     ).resolves.toEqual({
       applied: [],
       alreadyApplied: ["0001_first.sql", "0002_second.sql"],
@@ -202,19 +270,20 @@ describe("runPlatformMigrations", () => {
     expect(pool.client.releaseCount).toBe(2);
   });
 
-  test("rejects a changed migration checksum and still releases the advisory lock", async () => {
+  test("rejects a changed persisted checksum and still releases the advisory lock", async () => {
     const originalDirectory = await fixtureDirectory({
       "0001_first.sql": "select 'original migration';",
     });
-    const mutatedDirectory = await fixtureDirectory({
-      "0001_first.sql": "select 'mutated migration';",
-    });
+    const manifest = await fixtureManifest(originalDirectory, [
+      "0001_first.sql",
+    ]);
     const pool = new MigrationPoolDouble();
-    await runPlatformMigrations(asPool(pool), originalDirectory);
+    await runPlatformMigrations(asPool(pool), originalDirectory, manifest);
     pool.client.queries.length = 0;
+    pool.client.history.set("0001_first.sql", "changed-persisted-checksum");
 
     await expect(
-      runPlatformMigrations(asPool(pool), mutatedDirectory),
+      runPlatformMigrations(asPool(pool), originalDirectory, manifest),
     ).rejects.toMatchObject({
       code: "migration_checksum_mismatch",
     });
@@ -233,13 +302,14 @@ describe("runPlatformMigrations", () => {
     const directory = await fixtureDirectory({
       "0001_broken.sql": migrationSql,
     });
+    const manifest = await fixtureManifest(directory, ["0001_broken.sql"]);
     const pool = new MigrationPoolDouble();
     const failure = new Error("migration SQL failed");
     pool.client.failure = { error: failure, text: migrationSql };
 
-    await expect(runPlatformMigrations(asPool(pool), directory)).rejects.toBe(
-      failure,
-    );
+    await expect(
+      runPlatformMigrations(asPool(pool), directory, manifest),
+    ).rejects.toBe(failure);
 
     expect(pool.client.history).toEqual(new Map());
     expect(
@@ -265,7 +335,34 @@ describe("platform database helpers", () => {
     const pool = createPlatformPool(connectionString);
 
     expect(pool.options.connectionString).toBe(connectionString);
+    expect(pool.options).toMatchObject({
+      connectionTimeoutMillis: 5_000,
+      idleTimeoutMillis: 30_000,
+      max: 10,
+      query_timeout: 10_000,
+      statement_timeout: 10_000,
+      lock_timeout: 3_000,
+      idle_in_transaction_session_timeout: 10_000,
+    });
 
+    await pool.end();
+  });
+
+  test("uses an explicit longer bounded migrator pool profile", async () => {
+    const pool = createPlatformPool(
+      "postgres://migrator:secret@127.0.0.1:5432/platform",
+      "migration",
+    );
+
+    expect(pool.options).toMatchObject({
+      connectionTimeoutMillis: 10_000,
+      idleTimeoutMillis: 30_000,
+      max: 2,
+      query_timeout: 120_000,
+      statement_timeout: 120_000,
+      lock_timeout: 10_000,
+      idle_in_transaction_session_timeout: 30_000,
+    });
     await pool.end();
   });
 
@@ -306,5 +403,26 @@ describe("platform database helpers", () => {
       { text: "ROLLBACK", values: undefined },
     ]);
     expect(pool.client.releaseCount).toBe(1);
+  });
+
+  test("retains the primary timeout and discards the client when rollback fails", async () => {
+    const pool = new MigrationPoolDouble();
+    const timeout = Object.assign(new Error("query timed out"), {
+      code: "57014",
+    });
+    const rollbackFailure = new Error("rollback connection failure");
+    pool.client.failure = { error: rollbackFailure, text: "ROLLBACK" };
+
+    await expect(
+      withPlatformTransaction(asPool(pool), async () => {
+        throw timeout;
+      }),
+    ).rejects.toBe(timeout);
+
+    expect(pool.client.queries).toEqual([
+      { text: "BEGIN", values: undefined },
+      { text: "ROLLBACK", values: undefined },
+    ]);
+    expect(pool.client.releaseErrors).toEqual([rollbackFailure]);
   });
 });

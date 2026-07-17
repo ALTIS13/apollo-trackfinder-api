@@ -33,6 +33,48 @@ describePostgres("runtime migration readiness", () => {
     ).resolves.toBe(true);
   });
 
+  test("rejects an extra persisted migration row and recovers after cleanup", async () => {
+    const client = await migrator.connect();
+    let lockAcquired = false;
+    let rowInserted = false;
+    try {
+      await client.query("select pg_advisory_lock(hashtext($1))", [
+        "apollo_platform_migrations",
+      ]);
+      lockAcquired = true;
+      await client.query(
+        "insert into apollo_platform.schema_migrations (name, checksum) values ($1, $2)",
+        ["9999_untrusted.sql", "extra"],
+      );
+      rowInserted = true;
+      await expect(
+        createMigrationReadinessProbe(runtime, PLATFORM_MIGRATION_MANIFEST)(),
+      ).resolves.toBe(false);
+    } finally {
+      try {
+        if (rowInserted) {
+          await client.query(
+            "delete from apollo_platform.schema_migrations where name = $1",
+            ["9999_untrusted.sql"],
+          );
+        }
+      } finally {
+        try {
+          if (lockAcquired) {
+            await client.query("select pg_advisory_unlock(hashtext($1))", [
+              "apollo_platform_migrations",
+            ]);
+          }
+        } finally {
+          client.release();
+        }
+      }
+    }
+    await expect(
+      createMigrationReadinessProbe(runtime, PLATFORM_MIGRATION_MANIFEST)(),
+    ).resolves.toBe(true);
+  });
+
   test("keeps migration history owned and immutable to the runtime role", async () => {
     await expect(
       migrator.query<{ tableowner: string }>(`

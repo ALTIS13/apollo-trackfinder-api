@@ -390,6 +390,7 @@ class InvitationHarness implements PlatformRepository {
         accountId: input.accountId,
         moduleId: input.moduleId,
         moduleKey: module.moduleKey,
+        moduleState: module.state,
         expiresAt: input.expiresAt,
         revokedAt: null,
         source: input.source,

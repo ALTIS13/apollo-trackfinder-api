@@ -8,6 +8,7 @@ import type { EntitlementService } from "./domain/entitlements.js";
 import type { InvitationService } from "./domain/invitations.js";
 import type { OperatorSessionService } from "./domain/operator-sessions.js";
 import type { RegistrationService } from "./domain/registration.js";
+import { assertProtectedOperatorRoutes } from "./domain/policy.js";
 import { platformErrorHandler, validationError } from "./http/errors.js";
 import type { RateLimiter } from "./http/rate-limit.js";
 import { type PlatformLogger } from "./logger.js";
@@ -102,7 +103,13 @@ function corsMiddleware(allowedOrigins: readonly string[]): RequestHandler {
   };
 }
 
-export function createPlatformApp(dependencies: PlatformApiDependencies) {
+export function createPlatformApp(
+  dependencies: PlatformApiDependencies,
+  protectedRouteMapping: Readonly<
+    Record<string, readonly string[]>
+  > = REGISTERED_PROTECTED_PLATFORM_ROUTES,
+) {
+  assertProtectedOperatorRoutes(protectedRouteMapping);
   const app = express();
   const trustProxyHops = dependencies.trustProxyHops ?? 0;
   if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0) {
@@ -158,7 +165,7 @@ export function createPlatformApp(dependencies: PlatformApiDependencies) {
     rateLimiter: dependencies.rateLimiter,
     developmentTokenEcho: dependencies.developmentTokenEcho === true,
   });
-  registerOperatorRoutes(app, dependencies);
+  registerOperatorRoutes(app, dependencies, protectedRouteMapping);
   app.use(platformErrorHandler);
   return app;
 }
