@@ -389,6 +389,29 @@ describe("runPlatformMigrations", () => {
     ).rejects.toBe(unlockFailure);
     expect(pool.client.releaseErrors).toEqual([unlockFailure]);
   });
+
+  test("preserves an advisory-lock acquisition failure and destroys the uncertain client", async () => {
+    const directory = await fixtureDirectory({
+      "0001_first.sql": "select 'first migration';",
+    });
+    const manifest = await fixtureManifest(directory, ["0001_first.sql"]);
+    const pool = new MigrationPoolDouble();
+    const lockFailure = Object.assign(new Error("advisory lock timed out"), {
+      code: "57014",
+    });
+    pool.client.failures.set(
+      "select pg_advisory_lock(hashtext($1))",
+      lockFailure,
+    );
+
+    await expect(
+      runPlatformMigrations(asPool(pool), directory, manifest),
+    ).rejects.toBe(lockFailure);
+    expect(pool.client.events).not.toContain(
+      "select pg_advisory_unlock(hashtext($1))",
+    );
+    expect(pool.client.releaseErrors).toEqual([lockFailure]);
+  });
 });
 
 describe("platform database helpers", () => {

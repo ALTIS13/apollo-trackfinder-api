@@ -103,9 +103,14 @@ export async function runPlatformMigrations(
   const result: MigrationResult = { applied: [], alreadyApplied: [] };
 
   try {
-    await client.query("select pg_advisory_lock(hashtext($1))", [
-      MIGRATION_LOCK,
-    ]);
+    try {
+      await client.query("select pg_advisory_lock(hashtext($1))", [
+        MIGRATION_LOCK,
+      ]);
+    } catch (lockError) {
+      cleanupError ??= migrationCleanupError(lockError);
+      throw lockError;
+    }
     lockAcquired = true;
 
     await client.query("create schema if not exists apollo_platform");
