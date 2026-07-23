@@ -145,3 +145,91 @@ disposable RED projects were also removed in `finally` blocks.
    non-exhaustive `src/http/errors.ts` switch for the four new shared codes.
    That HTTP mapping is explicitly Task 5 and was not edited. Task 4 roots pass
    strict typechecking.
+
+## Review Fix: Post-Lock Authorization Time
+
+### Finding And Fix
+
+The Task 4 review found that `exchangeCode` and `introspect` captured the current
+time before entering their transactions. Lock contention could therefore let an
+authorization code, portal session, or entitlement remain valid according to a
+stale pre-wait timestamp.
+
+Both methods now call `finiteNow(this.clock)` inside the transaction, after all
+account/session/installation/code locks and consistency checks have completed,
+immediately before status, expiry, entitlement, and consume decisions. Client
+authentication remains outside the transaction. Generic `invalid_grant`
+behavior and success-only, secret-free audit behavior are unchanged.
+
+### Review-Fix RED Evidence
+
+Command:
+
+```text
+pnpm --filter @workspace/platform-api exec vitest run src/domain/authorization.test.ts
+```
+
+Result before the production change: 1 file failed, 2 failed and 35 passed.
+The exchange test incorrectly received a signed assertion after its code and
+session expired while the transaction callback was gated. The introspection
+test incorrectly returned `tf.search` after that entitlement expired while the
+final installation lock was gated.
+
+### Review-Fix GREEN Evidence
+
+Focused authorization command:
+
+```text
+pnpm --filter @workspace/platform-api exec vitest run src/domain/authorization.test.ts
+```
+
+Result: 1 file passed, 37 tests passed.
+
+Full focused Task 4 command:
+
+```text
+pnpm --dir artifacts/platform-api exec vitest run src/domain/oauth-clients.test.ts src/domain/authorization.test.ts src/domain/assertions.test.ts src/domain/postgres-repository.test.ts --reporter=dot
+```
+
+Result: 4 files passed, 72 tests passed.
+
+### Review-Fix Live PostgreSQL Test
+
+Disposable Compose project:
+`audio-nav-task4-timefix-a863e588`
+
+Approved URLs used together:
+
+```text
+PLATFORM_TEST_DATABASE_URL=postgres://apollo_platform_migrator:platform_migrator_test@127.0.0.1:55432/apollo_platform_test
+PLATFORM_TEST_RUNTIME_DATABASE_URL=postgres://apollo_platform_runtime:platform_runtime_test@127.0.0.1:55432/apollo_platform_test
+```
+
+Command from `artifacts/platform-api`:
+
+```text
+pnpm exec vitest run src/domain/authorization.integration.test.ts --reporter=dot
+```
+
+Result: 1 file passed, 4 tests passed. A PowerShell `finally` block ran:
+
+```text
+docker compose -p audio-nav-task4-timefix-a863e588 -f artifacts/platform-api/docker-compose.test.yml down --volumes --remove-orphans
+```
+
+Cleanup exited zero. Follow-up label queries confirmed zero remaining
+containers, volumes, and networks for the disposable project.
+
+### Review-Fix Files And Self-Review
+
+- `artifacts/platform-api/src/domain/authorization.ts`
+- `artifacts/platform-api/src/domain/authorization.test.ts`
+- `.superpowers/sdd/task-4-report.md`
+
+The deterministic tests use controlled promises rather than elapsed wall time.
+Exchange verifies generic `invalid_grant`, no consume, no signing, and no audit
+after a transaction wait crosses code/session expiry. Introspection verifies
+that a final binding-lock wait crossing entitlement expiry returns the current
+empty entitlement projection. No Task 5 HTTP files or repository interfaces
+were changed, and no new concern was introduced; the two existing Task 4
+concerns above remain unchanged.

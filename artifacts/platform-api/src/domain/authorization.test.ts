@@ -322,7 +322,12 @@ class FakeSigner {
   }
 }
 
-function createFixture() {
+function createFixture(
+  options: {
+    readonly clock?: () => Date;
+    readonly beforeTransactionCallback?: () => Promise<void>;
+  } = {},
+) {
   const repository = new FakeAuthorizationRepository();
   const signer = new FakeSigner(repository.events);
   const clients = OAuthClientRegistry.parse(
@@ -364,6 +369,7 @@ function createFixture() {
   } as unknown as PoolClient;
   const transaction: PlatformTransaction = async (_pool, callback) => {
     transactionCount += 1;
+    await options.beforeTransactionCallback?.();
     return callback(client);
   };
   const service = new AuthorizationService(
@@ -371,7 +377,7 @@ function createFixture() {
     repository,
     clients,
     signer,
-    () => now,
+    options.clock ?? (() => now),
     "apollo-tf-web",
     transaction,
   );
@@ -582,6 +588,45 @@ describe("AuthorizationService.exchangeCode", () => {
     ).resolves.toMatchObject({ tokenType: "Bearer", expiresIn: 300 });
   });
 
+  it("rejects a code and session that expire while the transaction is waiting", async () => {
+    let currentTime = now;
+    let releaseTransaction!: () => void;
+    let transactionWaiting!: () => void;
+    const transactionGate = new Promise<void>((resolve) => {
+      releaseTransaction = resolve;
+    });
+    const transactionStarted = new Promise<void>((resolve) => {
+      transactionWaiting = resolve;
+    });
+    const expiresAt = new Date(now.getTime() + 1_000);
+    const fixture = createFixture({
+      clock: () => currentTime,
+      beforeTransactionCallback: async () => {
+        transactionWaiting();
+        await transactionGate;
+      },
+    });
+    fixture.repository.code = authorizationCode({ expiresAt });
+    fixture.repository.session = session({ expiresAt });
+
+    const exchange = expect(
+      fixture.service.exchangeCode(validExchange, clientSecret, {
+        correlationId,
+      }),
+    ).rejects.toMatchObject({
+      code: "invalid_grant",
+      message: "The authorization grant is invalid.",
+    });
+    await transactionStarted;
+    currentTime = new Date(expiresAt.getTime() + 1);
+    releaseTransaction();
+
+    await exchange;
+    expect(fixture.repository.code?.consumedAt).toBeNull();
+    expect(fixture.signer.calls).toHaveLength(0);
+    expect(fixture.repository.audits).toHaveLength(0);
+  });
+
   it("authenticates the confidential client before opening a transaction", async () => {
     const wrongSecret = createFixture();
     await expect(
@@ -778,6 +823,44 @@ describe("AuthorizationService.introspect", () => {
       fixture.service.introspect(introspectionRequest, "wrong-secret"),
     ).rejects.toMatchObject({ code: "invalid_client" });
     expect(fixture.transactions()).toBe(0);
+  });
+
+  it("excludes an entitlement that expires while the final binding lock is waiting", async () => {
+    let currentTime = now;
+    let releaseLock!: () => void;
+    let lockWaiting!: () => void;
+    const lockGate = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const lockStarted = new Promise<void>((resolve) => {
+      lockWaiting = resolve;
+    });
+    const entitlementExpiresAt = new Date(now.getTime() + 1_000);
+    const fixture = createFixture({ clock: () => currentTime });
+    fixture.repository.entitlements = [
+      entitlement({ expiresAt: entitlementExpiresAt }),
+    ];
+    const lockInstallation = fixture.repository.lockClientInstallation.bind(
+      fixture.repository,
+    );
+    fixture.repository.lockClientInstallation = async (...args) => {
+      const result = await lockInstallation(...args);
+      lockWaiting();
+      await lockGate;
+      return result;
+    };
+
+    const introspection = expect(
+      fixture.service.introspect(introspectionRequest, clientSecret),
+    ).resolves.toMatchObject({
+      active: true,
+      entitlements: [],
+    });
+    await lockStarted;
+    currentTime = new Date(entitlementExpiresAt.getTime() + 1);
+    releaseLock();
+
+    await introspection;
   });
 
   it.each([

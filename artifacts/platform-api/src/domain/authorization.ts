@@ -438,7 +438,6 @@ export class AuthorizationService {
     ) {
       invalidClient();
     }
-    const now = finiteNow(this.clock);
     const codeDigest = digestOpaqueToken(parsedRequest.data.code);
 
     try {
@@ -498,6 +497,7 @@ export class AuthorizationService {
         ) {
           policyUnavailable();
         }
+        const now = finiteNow(this.clock);
         if (
           account === null ||
           session === null ||
@@ -591,7 +591,6 @@ export class AuthorizationService {
     ) {
       invalidClient();
     }
-    const now = finiteNow(this.clock);
 
     try {
       return await this.transaction(this.pool, async (databaseClient) => {
@@ -635,6 +634,7 @@ export class AuthorizationService {
         ) {
           policyUnavailable();
         }
+        const now = finiteNow(this.clock);
         if (
           account === null ||
           session === null ||
