@@ -199,11 +199,18 @@ describe("runPlatformMigrations", () => {
       "utf8",
     );
 
+    expect(sql).toMatch(
+      /lock table apollo_platform\.authorization_codes in access exclusive mode/i,
+    );
+    expect(sql).toMatch(/truncate table apollo_platform\.authorization_codes/i);
+    expect(sql).toMatch(
+      /auth_sessions_id_account_key unique \(id, account_id\)/i,
+    );
     expect(sql).toMatch(/add column auth_session_id uuid not null/i);
     expect(sql).toMatch(/add column installation_id uuid not null/i);
     expect(sql).toMatch(/add column state_digest text not null/i);
     expect(sql).toMatch(
-      /references apollo_platform\.auth_sessions\(id\) on delete cascade/i,
+      /foreign key \(auth_session_id, account_id\)[\s\S]*references apollo_platform\.auth_sessions\(id, account_id\) on delete cascade/i,
     );
     expect(sql).toMatch(
       /foreign key \(installation_id, account_id\)[\s\S]*references apollo_platform\.client_installations\(id, account_id\)/i,

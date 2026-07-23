@@ -1,10 +1,18 @@
+lock table apollo_platform.authorization_codes in access exclusive mode;
+truncate table apollo_platform.authorization_codes;
+
+alter table apollo_platform.auth_sessions
+  add constraint auth_sessions_id_account_key unique (id, account_id);
+
 alter table apollo_platform.authorization_codes
-  add column auth_session_id uuid not null
-    references apollo_platform.auth_sessions(id) on delete cascade,
+  add column auth_session_id uuid not null,
   add column installation_id uuid not null,
   add column state_digest text not null;
 
 alter table apollo_platform.authorization_codes
+  add constraint authorization_codes_session_fkey
+    foreign key (auth_session_id, account_id)
+    references apollo_platform.auth_sessions(id, account_id) on delete cascade,
   add constraint authorization_codes_installation_fkey
     foreign key (installation_id, account_id)
     references apollo_platform.client_installations(id, account_id),

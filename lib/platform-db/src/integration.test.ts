@@ -161,12 +161,77 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
           from pg_constraint
           where conrelid = 'apollo_platform.authorization_codes'::regclass
             and conname in (
+              'authorization_codes_session_fkey',
               'authorization_codes_installation_fkey',
               'authorization_codes_state_digest_check'
             )
         `,
       ),
-    ).resolves.toBe("2");
+    ).resolves.toBe("3");
+  });
+
+  test("rejects an authorization code bound to another account's session", async () => {
+    const firstAccountId = "1836c9a4-d410-4ad5-87e3-b424a4ed1175";
+    const secondAccountId = "6901e0d0-b6c0-4dfa-bb67-24755f3ae37a";
+    const installationId = "1d2d513f-f747-4245-b86b-6a2b96e4763a";
+    const sessionId = "bbb87883-6c75-4722-bddb-088152cb12cc";
+
+    await withPlatformTransaction(migrator, async (client) => {
+      await setAccountContext(client, firstAccountId);
+      await client.query(
+        `
+          insert into apollo_platform.accounts (id, email, display_name)
+          values ($1, 'cross-account-code-first@example.com', 'First Account')
+        `,
+        [firstAccountId],
+      );
+      await client.query(
+        `
+          insert into apollo_platform.client_installations
+            (id, account_id, label)
+          values ($1, $2, 'cross-account authorization-code installation')
+        `,
+        [installationId, firstAccountId],
+      );
+    });
+    await withPlatformTransaction(migrator, async (client) => {
+      await setAccountContext(client, secondAccountId);
+      await client.query(
+        `
+          insert into apollo_platform.accounts (id, email, display_name)
+          values ($1, 'cross-account-code-second@example.com', 'Second Account')
+        `,
+        [secondAccountId],
+      );
+      await client.query(
+        `
+          insert into apollo_platform.auth_sessions
+            (id, account_id, session_digest, audience, expires_at)
+          values ($1, $2, 'sha256:cross-account-code-session', 'product',
+                  now() + interval '1 hour')
+        `,
+        [sessionId, secondAccountId],
+      );
+    });
+
+    await expect(
+      withPlatformTransaction(migrator, async (client) => {
+        await setAccountContext(client, firstAccountId);
+        await client.query(
+          `
+            insert into apollo_platform.authorization_codes
+              (account_id, auth_session_id, installation_id, code_digest,
+               state_digest, client_id, redirect_uri, pkce_challenge, nonce,
+               expires_at)
+            values
+              ($1, $2, $3, 'sha256:cross-account-code', '${"b".repeat(64)}',
+               'test-client', 'https://client.example/callback',
+               'test-pkce-challenge', 'test-nonce', now() + interval '1 hour')
+          `,
+          [firstAccountId, sessionId, installationId],
+        );
+      }),
+    ).rejects.toMatchObject({ code: "23503" });
   });
 
   test("revokes default PUBLIC execute for future migrator functions", async () => {
@@ -681,6 +746,15 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
                      'Existing Operator', 'active', now(), now())`,
             [firstAccountId],
           );
+          await client.query(
+            `insert into apollo_platform.authorization_codes
+               (account_id, code_digest, client_id, redirect_uri, pkce_challenge,
+                nonce, expires_at)
+             values ($1, 'sha256:pre-0004-authorization-code', 'test-client',
+                     'https://client.example/callback', 'test-pkce-challenge',
+                     'test-nonce', now() + interval '1 hour')`,
+            [firstAccountId],
+          );
           const result = await client.query<{
             id: string;
             account_id: string;
@@ -706,6 +780,12 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
         ],
         alreadyApplied: ["0001_platform_identity.sql"],
       });
+      await expect(
+        scalar(
+          migrator,
+          "select count(*)::text as value from apollo_platform.authorization_codes",
+        ),
+      ).resolves.toBe("0");
 
       const marker = await migrator.query<{
         operator_bootstrap_account_id: string;
