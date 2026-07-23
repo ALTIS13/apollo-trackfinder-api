@@ -3,7 +3,10 @@ import { readFile } from "node:fs/promises";
 import type { PoolClient } from "pg";
 import { describe, expect, it } from "vitest";
 
-import type { PlatformRepository } from "./repository.js";
+import type {
+  AuthorizationBindingRepository,
+  PlatformRepository,
+} from "./repository.js";
 import {
   PostgresPlatformRepository,
   mapRepositoryError,
@@ -44,6 +47,8 @@ const moduleId = "10000000-0000-4000-8000-000000000004";
 const sessionId = "10000000-0000-4000-8000-000000000005";
 const tokenId = "10000000-0000-4000-8000-000000000006";
 const correlationId = "10000000-0000-4000-8000-000000000007";
+const installationId = "10000000-0000-4000-8000-000000000011";
+const authorizationCodeId = "10000000-0000-4000-8000-000000000012";
 const now = new Date("2026-07-16T10:00:00.000Z");
 const later = new Date("2026-07-17T10:00:00.000Z");
 
@@ -103,6 +108,32 @@ const sessionRow = {
   revoked_at: null,
   created_at: now,
   last_seen_at: now,
+};
+
+const installationRow = {
+  id: installationId,
+  account_id: accountId,
+  label: "Firefox on Windows",
+  first_seen_at: now,
+  last_seen_at: later,
+  revoked_at: null,
+};
+
+const authorizationCodeRow = {
+  id: authorizationCodeId,
+  account_id: accountId,
+  auth_session_id: sessionId,
+  installation_id: installationId,
+  code_digest: "d".repeat(64),
+  state_digest: "e".repeat(64),
+  client_id: "apollo-desktop",
+  redirect_uri: "https://client.example/callback",
+  pkce_challenge: "pkce-challenge",
+  pkce_method: "S256",
+  nonce: "nonce",
+  expires_at: later,
+  consumed_at: null,
+  created_at: now,
 };
 
 const credentialRow = {
@@ -231,6 +262,167 @@ describe("PostgresPlatformRepository", () => {
     for (const methodName of methodNames) {
       expect(repository[methodName], methodName).toBeTypeOf("function");
     }
+  });
+
+  it("implements the authorization binding repository boundary", () => {
+    const repository: AuthorizationBindingRepository =
+      new PostgresPlatformRepository();
+    const methodNames: readonly (keyof AuthorizationBindingRepository)[] = [
+      "upsertClientInstallation",
+      "lockClientInstallation",
+      "createAuthorizationCode",
+      "lockAuthorizationCodeByDigest",
+      "consumeAuthorizationCode",
+    ];
+
+    for (const methodName of methodNames) {
+      expect(repository[methodName], methodName).toBeTypeOf("function");
+    }
+  });
+
+  it("persists bound authorization codes without returning raw digests", async () => {
+    const client = new RecordingClient([
+      [installationRow],
+      [installationRow],
+      [authorizationCodeRow],
+      [authorizationCodeRow],
+      [authorizationCodeRow],
+    ]);
+    const repository = new PostgresPlatformRepository();
+
+    await expect(
+      repository.upsertClientInstallation(asPoolClient(client), {
+        installationId,
+        accountId,
+        label: "Firefox on Windows",
+        seenAt: later,
+      }),
+    ).resolves.toEqual({
+      id: installationId,
+      accountId,
+      label: "Firefox on Windows",
+      firstSeenAt: now,
+      lastSeenAt: later,
+      revokedAt: null,
+    });
+    await repository.lockClientInstallation(
+      asPoolClient(client),
+      installationId,
+    );
+    await expect(
+      repository.createAuthorizationCode(asPoolClient(client), {
+        accountId,
+        authSessionId: sessionId,
+        installationId,
+        codeDigest: "d".repeat(64),
+        stateDigest: "e".repeat(64),
+        clientId: "apollo-desktop",
+        redirectUri: "https://client.example/callback",
+        pkceChallenge: "pkce-challenge",
+        nonce: "nonce",
+        expiresAt: later,
+      }),
+    ).resolves.toEqual({
+      id: authorizationCodeId,
+      accountId,
+      authSessionId: sessionId,
+      installationId,
+      clientId: "apollo-desktop",
+      redirectUri: "https://client.example/callback",
+      pkceChallenge: "pkce-challenge",
+      pkceMethod: "S256",
+      nonce: "nonce",
+      expiresAt: later,
+      consumedAt: null,
+      createdAt: now,
+    });
+    await repository.lockAuthorizationCodeByDigest(
+      asPoolClient(client),
+      "d".repeat(64),
+    );
+    await repository.consumeAuthorizationCode(asPoolClient(client), {
+      authorizationCodeId,
+      consumedAt: now,
+    });
+
+    expectQuery(
+      client,
+      0,
+      /insert into apollo_platform\.client_installations[\s\S]*on conflict \(id, account_id\)[\s\S]*set label = excluded\.label,[\s\S]*last_seen_at = excluded\.last_seen_at/i,
+      [installationId, accountId, "Firefox on Windows", later],
+    );
+    const installationConflictClause =
+      client.queries[0]!.text.split(/on conflict/i)[1];
+    expect(installationConflictClause).toBeDefined();
+    expect(installationConflictClause).not.toMatch(
+      /revoked_at\s*=|first_seen_at\s*=/i,
+    );
+    expectQuery(
+      client,
+      1,
+      /from apollo_platform\.client_installations[\s\S]*where id = \$1[\s\S]*for update$/i,
+      [installationId],
+    );
+    expectQuery(
+      client,
+      2,
+      /insert into apollo_platform\.authorization_codes/i,
+      [
+        accountId,
+        sessionId,
+        installationId,
+        "d".repeat(64),
+        "e".repeat(64),
+        "apollo-desktop",
+        "https://client.example/callback",
+        "pkce-challenge",
+        "nonce",
+        later,
+      ],
+    );
+    expectQuery(
+      client,
+      3,
+      /from apollo_platform\.authorization_codes[\s\S]*where code_digest = \$1[\s\S]*for update$/i,
+      ["d".repeat(64)],
+    );
+    expectQuery(
+      client,
+      4,
+      /update apollo_platform\.authorization_codes[\s\S]*where id = \$1 and consumed_at is null and expires_at > \$2/i,
+      [authorizationCodeId, now],
+    );
+  });
+
+  it("rejects malformed timestamps from authorization-code rows", async () => {
+    const client = new RecordingClient([
+      [{ ...authorizationCodeRow, created_at: "not-a-timestamp" }],
+    ]);
+    const repository = new PostgresPlatformRepository();
+
+    await expect(
+      repository.lockAuthorizationCodeByDigest(
+        asPoolClient(client),
+        "d".repeat(64),
+      ),
+    ).rejects.toThrow("Invalid repository timestamp");
+  });
+
+  it("keeps authorization repository APIs digest-only", async () => {
+    const repositorySource = await readFile(
+      new URL("./postgres-repository.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(repositorySource).toMatch(
+      /insert into apollo_platform\.authorization_codes/i,
+    );
+    expect(repositorySource).toMatch(
+      /where code_digest = \$1[\s\S]*for update/i,
+    );
+    expect(repositorySource).not.toMatch(
+      /\brawCode\b|\bcodeVerifier\b|\brawState\b/,
+    );
   });
 
   it("passes every caller value separately from SQL text", async () => {

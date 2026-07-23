@@ -190,6 +190,33 @@ describe("runPlatformMigrations", () => {
     expect(sql).not.toMatch(/disable row level security|bypassrls/i);
   });
 
+  test("ships an immutable authorization-code binding migration", async () => {
+    const sql = await readFile(
+      new URL(
+        "../migrations/0004_authorization_code_binding.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+
+    expect(sql).toMatch(/add column auth_session_id uuid not null/i);
+    expect(sql).toMatch(/add column installation_id uuid not null/i);
+    expect(sql).toMatch(/add column state_digest text not null/i);
+    expect(sql).toMatch(
+      /references apollo_platform\.auth_sessions\(id\) on delete cascade/i,
+    );
+    expect(sql).toMatch(
+      /foreign key \(installation_id, account_id\)[\s\S]*references apollo_platform\.client_installations\(id, account_id\)/i,
+    );
+    expect(sql).toMatch(
+      /authorization_codes_state_digest_check[\s\S]*'\^\[0-9a-f\]\{64\}\$'/i,
+    );
+    expect(sql).toMatch(
+      /create index authorization_codes_session_id_idx[\s\S]*on apollo_platform\.authorization_codes\(auth_session_id\)/i,
+    );
+    expect(sql).not.toMatch(/disable row level security|bypassrls|grant\s/i);
+  });
+
   test("applies numeric SQL migrations with immutable checksums and one transaction each", async () => {
     const directory = await fixtureDirectory({
       "0002_second.sql": "select 'second migration';",

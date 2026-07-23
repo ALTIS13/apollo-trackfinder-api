@@ -24,6 +24,8 @@ const firstVerificationDigest = "1".repeat(64);
 const secondVerificationDigest = "2".repeat(64);
 const firstSessionDigest = "3".repeat(64);
 const secondSessionDigest = "4".repeat(64);
+const authorizationCodeDigest = "5".repeat(64);
+const stateDigest = "6".repeat(64);
 const missingDigest = "f".repeat(64);
 const expiresAt = new Date("2030-07-16T10:00:00.000Z");
 
@@ -198,6 +200,99 @@ describePostgres("PostgresPlatformRepository forced-RLS bootstrap", () => {
       });
       expect(hidden).toEqual({ found: null, rowCount: 0 });
     }
+  });
+
+  test("binds authorization codes to RLS-scoped installations and consumes them once", async () => {
+    const seenAt = new Date();
+    const { installation, authorizationCode } = await withPlatformTransaction(
+      runtime,
+      async (client) => {
+        await setAccountContext(client, firstAccount.id);
+        const installation = await repository.upsertClientInstallation(client, {
+          installationId: "f3dd15c3-999a-4a6f-9934-0cc8163fbe88",
+          accountId: firstAccount.id,
+          label: "Integration browser",
+          seenAt,
+        });
+        const session = await repository.createSession(client, {
+          accountId: firstAccount.id,
+          installationId: installation.id,
+          sessionDigest: "7".repeat(64),
+          audience: "apollo-integration",
+          expiresAt,
+        });
+        const authorizationCode = await repository.createAuthorizationCode(
+          client,
+          {
+            accountId: firstAccount.id,
+            authSessionId: session.id,
+            installationId: installation.id,
+            codeDigest: authorizationCodeDigest,
+            stateDigest,
+            clientId: "apollo-integration",
+            redirectUri: "https://client.example/callback",
+            pkceChallenge: "pkce-challenge",
+            nonce: "nonce",
+            expiresAt,
+          },
+        );
+        return { installation, authorizationCode };
+      },
+    );
+
+    expect(authorizationCode).toMatchObject({
+      accountId: firstAccount.id,
+      installationId: installation.id,
+      pkceMethod: "S256",
+      consumedAt: null,
+    });
+    expect(authorizationCode).not.toHaveProperty("codeDigest");
+    expect(authorizationCode).not.toHaveProperty("stateDigest");
+
+    const consumed = await withPlatformTransaction(runtime, async (client) => {
+      await setAccountContext(client, firstAccount.id);
+      const lockedInstallation = await repository.lockClientInstallation(
+        client,
+        installation.id,
+      );
+      const lockedCode = await repository.lockAuthorizationCodeByDigest(
+        client,
+        authorizationCodeDigest,
+      );
+      const consumedAt = new Date();
+      const firstConsumption = await repository.consumeAuthorizationCode(
+        client,
+        {
+          authorizationCodeId: authorizationCode.id,
+          consumedAt,
+        },
+      );
+      const replay = await repository.consumeAuthorizationCode(client, {
+        authorizationCodeId: authorizationCode.id,
+        consumedAt,
+      });
+      return { lockedInstallation, lockedCode, firstConsumption, replay };
+    });
+
+    expect(consumed.lockedInstallation?.id).toBe(installation.id);
+    expect(consumed.lockedCode?.id).toBe(authorizationCode.id);
+    expect(consumed.firstConsumption?.consumedAt).toBeInstanceOf(Date);
+    expect(consumed.replay).toBeNull();
+
+    const hidden = await withPlatformTransaction(runtime, async (client) => {
+      await setAccountContext(client, secondAccount.id);
+      return {
+        installation: await repository.lockClientInstallation(
+          client,
+          installation.id,
+        ),
+        authorizationCode: await repository.lockAuthorizationCodeByDigest(
+          client,
+          authorizationCodeDigest,
+        ),
+      };
+    });
+    expect(hidden).toEqual({ installation: null, authorizationCode: null });
   });
 
   test("absent transaction contexts expose no pre-auth rows", async () => {

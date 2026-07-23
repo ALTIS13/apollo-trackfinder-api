@@ -197,6 +197,55 @@ export interface RevokeAllSessionsInput {
   readonly revokedAt: Date;
 }
 
+export interface ClientInstallation {
+  readonly id: string;
+  readonly accountId: string;
+  readonly label: string;
+  readonly firstSeenAt: Date;
+  readonly lastSeenAt: Date;
+  readonly revokedAt: Date | null;
+}
+
+export interface UpsertClientInstallationInput {
+  readonly installationId: string;
+  readonly accountId: string;
+  readonly label: string;
+  readonly seenAt: Date;
+}
+
+export interface AuthorizationCode {
+  readonly id: string;
+  readonly accountId: string;
+  readonly authSessionId: string;
+  readonly installationId: string;
+  readonly clientId: string;
+  readonly redirectUri: string;
+  readonly pkceChallenge: string;
+  readonly pkceMethod: "S256";
+  readonly nonce: string;
+  readonly expiresAt: Date;
+  readonly consumedAt: Date | null;
+  readonly createdAt: Date;
+}
+
+export interface CreateAuthorizationCodeInput {
+  readonly accountId: string;
+  readonly authSessionId: string;
+  readonly installationId: string;
+  readonly codeDigest: string;
+  readonly stateDigest: string;
+  readonly clientId: string;
+  readonly redirectUri: string;
+  readonly pkceChallenge: string;
+  readonly nonce: string;
+  readonly expiresAt: Date;
+}
+
+export interface ConsumeAuthorizationCodeInput {
+  readonly authorizationCodeId: string;
+  readonly consumedAt: Date;
+}
+
 export interface InsertOperatorCapabilitiesInput {
   readonly accountId: string;
   readonly capabilities: readonly string[];
@@ -240,6 +289,29 @@ export interface InsertAuditEventInput {
   readonly reason: string;
   readonly previousValue: AuditValue;
   readonly newValue: AuditValue;
+}
+
+export interface AuthorizationBindingRepository {
+  upsertClientInstallation(
+    client: PoolClient,
+    input: UpsertClientInstallationInput,
+  ): Promise<ClientInstallation>;
+  lockClientInstallation(
+    client: PoolClient,
+    installationId: string,
+  ): Promise<ClientInstallation | null>;
+  createAuthorizationCode(
+    client: PoolClient,
+    input: CreateAuthorizationCodeInput,
+  ): Promise<AuthorizationCode>;
+  lockAuthorizationCodeByDigest(
+    client: PoolClient,
+    codeDigest: string,
+  ): Promise<AuthorizationCode | null>;
+  consumeAuthorizationCode(
+    client: PoolClient,
+    input: ConsumeAuthorizationCodeInput,
+  ): Promise<AuthorizationCode | null>;
 }
 
 export interface PlatformRepository {

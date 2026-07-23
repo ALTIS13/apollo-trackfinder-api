@@ -8,11 +8,16 @@ import type {
   Account,
   AccountEntitlement,
   AddInvitationGrantsInput,
+  AuthorizationBindingRepository,
   AuditEvent,
   AuditValue,
+  AuthorizationCode,
   AuthSession,
+  ClientInstallation,
+  ConsumeAuthorizationCodeInput,
   ConsumeVerificationTokenInput,
   CreateAccountInput,
+  CreateAuthorizationCodeInput,
   CreateCredentialInput,
   CreateInvitationInput,
   CreateSessionInput,
@@ -36,6 +41,7 @@ import type {
   UpdateCredentialInput,
   UpdateRegistrationSettingsInput,
   UpsertAccountEntitlementInput,
+  UpsertClientInstallationInput,
   VerificationToken,
 } from "./repository.js";
 
@@ -231,6 +237,30 @@ interface SessionRow extends QueryResultRow {
   readonly last_seen_at: Date;
 }
 
+interface ClientInstallationRow extends QueryResultRow {
+  readonly id: string;
+  readonly account_id: string;
+  readonly label: string;
+  readonly first_seen_at: Date;
+  readonly last_seen_at: Date;
+  readonly revoked_at: Date | null;
+}
+
+interface AuthorizationCodeRow extends QueryResultRow {
+  readonly id: string;
+  readonly account_id: string;
+  readonly auth_session_id: string;
+  readonly installation_id: string;
+  readonly client_id: string;
+  readonly redirect_uri: string;
+  readonly pkce_challenge: string;
+  readonly pkce_method: string;
+  readonly nonce: string;
+  readonly expires_at: Date;
+  readonly consumed_at: Date | null;
+  readonly created_at: Date;
+}
+
 interface AuditEventRow extends QueryResultRow {
   readonly id: string;
   readonly actor_account_id: string | null;
@@ -359,6 +389,46 @@ function mapSession(row: SessionRow): AuthSession {
   };
 }
 
+function requireTimestamp(value: unknown): Date {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+    throw new TypeError("Invalid repository timestamp");
+  }
+  return value;
+}
+
+function mapClientInstallation(row: ClientInstallationRow): ClientInstallation {
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    label: row.label,
+    firstSeenAt: requireTimestamp(row.first_seen_at),
+    lastSeenAt: requireTimestamp(row.last_seen_at),
+    revokedAt:
+      row.revoked_at === null ? null : requireTimestamp(row.revoked_at),
+  };
+}
+
+function mapAuthorizationCode(row: AuthorizationCodeRow): AuthorizationCode {
+  if (row.pkce_method !== "S256") {
+    throw new TypeError("Invalid authorization code PKCE method");
+  }
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    authSessionId: row.auth_session_id,
+    installationId: row.installation_id,
+    clientId: row.client_id,
+    redirectUri: row.redirect_uri,
+    pkceChallenge: row.pkce_challenge,
+    pkceMethod: row.pkce_method,
+    nonce: row.nonce,
+    expiresAt: requireTimestamp(row.expires_at),
+    consumedAt:
+      row.consumed_at === null ? null : requireTimestamp(row.consumed_at),
+    createdAt: requireTimestamp(row.created_at),
+  };
+}
+
 function mapAuditEvent(row: AuditEventRow): AuditEvent {
   return {
     id: row.id,
@@ -374,7 +444,9 @@ function mapAuditEvent(row: AuditEventRow): AuditEvent {
   };
 }
 
-export class PostgresPlatformRepository implements PlatformRepository {
+export class PostgresPlatformRepository
+  implements PlatformRepository, AuthorizationBindingRepository
+{
   async getRegistrationSettings(
     client: PoolClient,
   ): Promise<RegistrationSettings | null> {
@@ -998,6 +1070,105 @@ export class PostgresPlatformRepository implements PlatformRepository {
       [input.accountId, input.revokedAt],
     );
     return result.rowCount ?? 0;
+  }
+
+  async upsertClientInstallation(
+    client: PoolClient,
+    input: UpsertClientInstallationInput,
+  ): Promise<ClientInstallation> {
+    const result = await execute<ClientInstallationRow>(
+      client,
+      `insert into apollo_platform.client_installations
+         (id, account_id, label, first_seen_at, last_seen_at)
+       values ($1, $2, $3, $4, $4)
+       on conflict (id, account_id) do update
+       set label = excluded.label,
+           last_seen_at = excluded.last_seen_at
+       returning id, account_id, label, first_seen_at, last_seen_at, revoked_at`,
+      [input.installationId, input.accountId, input.label, input.seenAt],
+    );
+    return mapClientInstallation(requireRow(result.rows));
+  }
+
+  async lockClientInstallation(
+    client: PoolClient,
+    installationId: string,
+  ): Promise<ClientInstallation | null> {
+    const result = await execute<ClientInstallationRow>(
+      client,
+      `select id, account_id, label, first_seen_at, last_seen_at, revoked_at
+       from apollo_platform.client_installations
+       where id = $1
+       for update`,
+      [installationId],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : mapClientInstallation(row);
+  }
+
+  async createAuthorizationCode(
+    client: PoolClient,
+    input: CreateAuthorizationCodeInput,
+  ): Promise<AuthorizationCode> {
+    const result = await execute<AuthorizationCodeRow>(
+      client,
+      `insert into apollo_platform.authorization_codes
+         (account_id, auth_session_id, installation_id, code_digest, state_digest,
+          client_id, redirect_uri, pkce_challenge, nonce, expires_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       returning id, account_id, auth_session_id, installation_id, client_id,
+                 redirect_uri, pkce_challenge, pkce_method, nonce, expires_at,
+                 consumed_at, created_at`,
+      [
+        input.accountId,
+        input.authSessionId,
+        input.installationId,
+        input.codeDigest,
+        input.stateDigest,
+        input.clientId,
+        input.redirectUri,
+        input.pkceChallenge,
+        input.nonce,
+        input.expiresAt,
+      ],
+    );
+    return mapAuthorizationCode(requireRow(result.rows));
+  }
+
+  async lockAuthorizationCodeByDigest(
+    client: PoolClient,
+    codeDigest: string,
+  ): Promise<AuthorizationCode | null> {
+    const result = await execute<AuthorizationCodeRow>(
+      client,
+      `select id, account_id, auth_session_id, installation_id, client_id,
+              redirect_uri, pkce_challenge, pkce_method, nonce, expires_at,
+              consumed_at, created_at
+       from apollo_platform.authorization_codes
+       where code_digest = $1
+       for update`,
+      [codeDigest],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : mapAuthorizationCode(row);
+  }
+
+  async consumeAuthorizationCode(
+    client: PoolClient,
+    input: ConsumeAuthorizationCodeInput,
+  ): Promise<AuthorizationCode | null> {
+    const result = await execute<AuthorizationCodeRow>(
+      client,
+      `update apollo_platform.authorization_codes
+       set consumed_at = $2
+       where id = $1 and consumed_at is null and expires_at > $2
+       returning id, account_id, auth_session_id, installation_id, client_id,
+                 redirect_uri, pkce_challenge, pkce_method, nonce, expires_at,
+                 consumed_at, created_at`,
+      [input.authorizationCodeId, input.consumedAt],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : mapAuthorizationCode(row);
   }
 
   async insertAuditEvent(

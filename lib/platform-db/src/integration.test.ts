@@ -138,6 +138,37 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
     ).resolves.toEqual(SEEDED_MODULE_KEYS);
   });
 
+  test("binds authorization codes to an account installation and session", async () => {
+    await expect(
+      column<{ column_name: string }>(
+        migrator,
+        `
+          select column_name
+          from information_schema.columns
+          where table_schema = 'apollo_platform'
+            and table_name = 'authorization_codes'
+            and column_name in ('auth_session_id', 'installation_id', 'state_digest')
+          order by column_name
+        `,
+        "column_name",
+      ),
+    ).resolves.toEqual(["auth_session_id", "installation_id", "state_digest"]);
+    await expect(
+      scalar(
+        migrator,
+        `
+          select count(*)::text as value
+          from pg_constraint
+          where conrelid = 'apollo_platform.authorization_codes'::regclass
+            and conname in (
+              'authorization_codes_installation_fkey',
+              'authorization_codes_state_digest_check'
+            )
+        `,
+      ),
+    ).resolves.toBe("2");
+  });
+
   test("revokes default PUBLIC execute for future migrator functions", async () => {
     await expect(
       scalar(
@@ -355,13 +386,26 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
     [
       "authorization code",
       `
+        with installation as (
+          insert into apollo_platform.client_installations (account_id, label)
+          values ($1, 'authorization-code-expiry')
+          returning id
+        ), session as (
+          insert into apollo_platform.auth_sessions
+            (account_id, installation_id, session_digest, audience, expires_at)
+          select $1, installation.id, 'sha256:code-expiry-session', 'product',
+                 now() + interval '1 hour'
+          from installation
+          returning id
+        )
         insert into apollo_platform.authorization_codes
-          (account_id, code_digest, client_id, redirect_uri, pkce_challenge,
-           nonce, expires_at, consumed_at)
-        values
-          ($1, 'sha256:code-after-expiry', 'test-client',
-           'https://client.example/callback', 'test-pkce-challenge', 'test-nonce',
-           now() + interval '1 hour', now() + interval '2 hours')
+          (account_id, auth_session_id, installation_id, code_digest, state_digest,
+           client_id, redirect_uri, pkce_challenge, nonce, expires_at, consumed_at)
+        select $1, session.id, installation.id,
+               'sha256:code-after-expiry', '${"a".repeat(64)}', 'test-client',
+               'https://client.example/callback', 'test-pkce-challenge', 'test-nonce',
+               now() + interval '1 hour', now() + interval '2 hours'
+        from installation cross join session
       `,
     ],
   ])("rejects a consumed %s after expiry", async (_name, sql) => {
@@ -658,6 +702,7 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
         applied: [
           "0002_operator_bootstrap_guard.sql",
           "0003_runtime_migration_history_read.sql",
+          "0004_authorization_code_binding.sql",
         ],
         alreadyApplied: ["0001_platform_identity.sql"],
       });
