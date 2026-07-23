@@ -22,6 +22,8 @@ export const AUDIT_ACTIONS = Object.freeze({
   userSessionRevoked: "user.session_revoked",
   entitlementGranted: "entitlement.granted",
   entitlementRevoked: "entitlement.revoked",
+  authorizationCodeIssued: "authorization.code_issued",
+  authorizationCodeExchanged: "authorization.code_exchanged",
 });
 
 export const SYSTEM_AUDIT_REASONS = Object.freeze({
@@ -32,10 +34,12 @@ export const SYSTEM_AUDIT_REASONS = Object.freeze({
   operatorLogout: "operator_logout",
   userLogin: "user_login",
   userLogout: "user_logout",
+  oauthAuthorizationIssue: "oauth_authorization_issue",
+  oauthAuthorizationExchange: "oauth_authorization_exchange",
 });
 
 export function appendAuditEvent(
-  repository: PlatformRepository,
+  repository: Pick<PlatformRepository, "insertAuditEvent">,
   client: PoolClient,
   input: InsertAuditEventInput,
 ): Promise<AuditEvent> {

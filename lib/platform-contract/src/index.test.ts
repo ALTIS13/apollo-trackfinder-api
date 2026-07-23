@@ -47,9 +47,17 @@ describe("platform contract", () => {
     ]);
     expect(moduleKeySchema.safeParse("TF.Search").success).toBe(false);
     expect(moduleKeySchema.parse("tf.search")).toBe("tf.search");
-    expect(platformErrorCodeSchema.parse("module_access_denied")).toBe(
+    expect(platformErrorCodeSchema.options).toEqual([
+      "registration_not_available",
+      "invitation_not_available",
+      "invalid_credentials",
       "module_access_denied",
-    );
+      "policy_unavailable",
+      "invalid_request",
+      "invalid_client",
+      "invalid_grant",
+      "account_access_denied",
+    ]);
   });
 
   it("normalizes public identity inputs and rejects unknown object fields", () => {

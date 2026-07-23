@@ -8,6 +8,10 @@ export const PLATFORM_DOMAIN_ERROR_MESSAGES: Readonly<
   invalid_credentials: "Credentials are invalid.",
   module_access_denied: "Module access is denied.",
   policy_unavailable: "Policy is unavailable.",
+  invalid_request: "The request is invalid.",
+  invalid_client: "Client authentication failed.",
+  invalid_grant: "The authorization grant is invalid.",
+  account_access_denied: "Account access is denied.",
 });
 
 export class PlatformDomainError extends Error {

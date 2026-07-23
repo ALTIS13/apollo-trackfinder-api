@@ -130,6 +130,17 @@ async function setSessionDigestContext(
   );
 }
 
+async function setAuthorizationCodeDigestContext(
+  client: PoolClient,
+  codeDigest: string,
+): Promise<void> {
+  await execute<QueryResultRow>(
+    client,
+    "select set_config('app.authorization_code_digest', $1, true)",
+    [codeDigest],
+  );
+}
+
 function requireRow<Row>(rows: readonly Row[]): Row {
   const row = rows[0];
   if (row === undefined) {
@@ -259,6 +270,10 @@ interface AuthorizationCodeRow extends QueryResultRow {
   readonly expires_at: Date;
   readonly consumed_at: Date | null;
   readonly created_at: Date;
+}
+
+interface AccountContextRow extends QueryResultRow {
+  readonly account_id: string | null;
 }
 
 interface AuditEventRow extends QueryResultRow {
@@ -993,6 +1008,23 @@ export class PostgresPlatformRepository
     return row === undefined ? null : mapSession(row);
   }
 
+  async lockSessionById(
+    client: PoolClient,
+    sessionId: string,
+  ): Promise<AuthSession | null> {
+    const result = await execute<SessionRow>(
+      client,
+      `select id, account_id, installation_id, audience, expires_at,
+              revoked_at, created_at, last_seen_at
+       from apollo_platform.auth_sessions
+       where id = $1
+       for update`,
+      [sessionId],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : mapSession(row);
+  }
+
   async findSessionById(
     client: PoolClient,
     sessionId: string,
@@ -1139,14 +1171,24 @@ export class PostgresPlatformRepository
     client: PoolClient,
     codeDigest: string,
   ): Promise<AuthorizationCode | null> {
+    await setAuthorizationCodeDigestContext(client, codeDigest);
+    const context = await execute<AccountContextRow>(
+      client,
+      `select nullif(current_setting('app.account_id', true), '')
+              as account_id`,
+    );
+    const lockClause =
+      context.rows[0]?.account_id === null ||
+      context.rows[0]?.account_id === undefined
+        ? ""
+        : "\n       for update";
     const result = await execute<AuthorizationCodeRow>(
       client,
       `select id, account_id, auth_session_id, installation_id, client_id,
               redirect_uri, pkce_challenge, pkce_method, nonce, expires_at,
               consumed_at, created_at
        from apollo_platform.authorization_codes
-       where code_digest = $1
-       for update`,
+       where code_digest = $1${lockClause}`,
       [codeDigest],
     );
     const row = result.rows[0];

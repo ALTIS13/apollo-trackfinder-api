@@ -6,12 +6,13 @@ import { describe, expect, it } from "vitest";
 import { PLATFORM_MIGRATION_MANIFEST } from "./index.js";
 
 describe("PLATFORM_MIGRATION_MANIFEST", () => {
-  it("includes the immutable authorization code binding migration", () => {
+  it("includes the immutable authorization code digest-read migration", () => {
     expect(PLATFORM_MIGRATION_MANIFEST.map(({ name }) => name)).toEqual([
       "0001_platform_identity.sql",
       "0002_operator_bootstrap_guard.sql",
       "0003_runtime_migration_history_read.sql",
       "0004_authorization_code_binding.sql",
+      "0005_authorization_code_digest_read.sql",
     ]);
   });
 

@@ -270,6 +270,7 @@ describe("PostgresPlatformRepository", () => {
     const methodNames: readonly (keyof AuthorizationBindingRepository)[] = [
       "upsertClientInstallation",
       "lockClientInstallation",
+      "lockSessionById",
       "createAuthorizationCode",
       "lockAuthorizationCodeByDigest",
       "consumeAuthorizationCode",
@@ -285,6 +286,8 @@ describe("PostgresPlatformRepository", () => {
       [installationRow],
       [installationRow],
       [authorizationCodeRow],
+      [],
+      [{ account_id: null }],
       [authorizationCodeRow],
       [authorizationCodeRow],
     ]);
@@ -383,12 +386,25 @@ describe("PostgresPlatformRepository", () => {
     expectQuery(
       client,
       3,
-      /from apollo_platform\.authorization_codes[\s\S]*where code_digest = \$1[\s\S]*for update$/i,
+      /select set_config\('app\.authorization_code_digest', \$1, true\)/i,
       ["d".repeat(64)],
     );
     expectQuery(
       client,
       4,
+      /select nullif\(current_setting\('app\.account_id', true\), ''\)[\s\S]*as account_id/i,
+      [],
+    );
+    expectQuery(
+      client,
+      5,
+      /from apollo_platform\.authorization_codes[\s\S]*where code_digest = \$1$/i,
+      ["d".repeat(64)],
+    );
+    expect(client.queries[5]!.text).not.toMatch(/for update/i);
+    expectQuery(
+      client,
+      6,
       /update apollo_platform\.authorization_codes[\s\S]*where id = \$1 and consumed_at is null and expires_at > \$2/i,
       [authorizationCodeId, now],
     );
@@ -396,6 +412,8 @@ describe("PostgresPlatformRepository", () => {
 
   it("rejects malformed timestamps from authorization-code rows", async () => {
     const client = new RecordingClient([
+      [],
+      [{ account_id: null }],
       [{ ...authorizationCodeRow, created_at: "not-a-timestamp" }],
     ]);
     const repository = new PostgresPlatformRepository();
@@ -408,6 +426,28 @@ describe("PostgresPlatformRepository", () => {
     ).rejects.toThrow("Invalid repository timestamp");
   });
 
+  it("re-locks a digest-selected authorization code under account context", async () => {
+    const client = new RecordingClient([
+      [],
+      [{ account_id: accountId }],
+      [authorizationCodeRow],
+    ]);
+    const repository = new PostgresPlatformRepository();
+
+    await expect(
+      repository.lockAuthorizationCodeByDigest(
+        asPoolClient(client),
+        "d".repeat(64),
+      ),
+    ).resolves.toMatchObject({ id: authorizationCodeId, accountId });
+    expectQuery(
+      client,
+      2,
+      /from apollo_platform\.authorization_codes[\s\S]*where code_digest = \$1[\s\S]*for update$/i,
+      ["d".repeat(64)],
+    );
+  });
+
   it("keeps authorization repository APIs digest-only", async () => {
     const repositorySource = await readFile(
       new URL("./postgres-repository.ts", import.meta.url),
@@ -417,9 +457,8 @@ describe("PostgresPlatformRepository", () => {
     expect(repositorySource).toMatch(
       /insert into apollo_platform\.authorization_codes/i,
     );
-    expect(repositorySource).toMatch(
-      /where code_digest = \$1[\s\S]*for update/i,
-    );
+    expect(repositorySource).toMatch(/where code_digest = \$1/);
+    expect(repositorySource).toMatch(/lockClause[\s\S]*for update/i);
     expect(repositorySource).not.toMatch(
       /\brawCode\b|\bcodeVerifier\b|\brawState\b/,
     );

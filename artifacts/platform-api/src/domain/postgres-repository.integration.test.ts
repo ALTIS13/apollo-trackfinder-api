@@ -204,9 +204,8 @@ describePostgres("PostgresPlatformRepository forced-RLS bootstrap", () => {
 
   test("binds authorization codes to RLS-scoped installations and consumes them once", async () => {
     const seenAt = new Date();
-    const { installation, authorizationCode } = await withPlatformTransaction(
-      runtime,
-      async (client) => {
+    const { installation, authorizationCode, session } =
+      await withPlatformTransaction(runtime, async (client) => {
         await setAccountContext(client, firstAccount.id);
         const installation = await repository.upsertClientInstallation(client, {
           installationId: "f3dd15c3-999a-4a6f-9934-0cc8163fbe88",
@@ -236,9 +235,8 @@ describePostgres("PostgresPlatformRepository forced-RLS bootstrap", () => {
             expiresAt,
           },
         );
-        return { installation, authorizationCode };
-      },
-    );
+        return { installation, authorizationCode, session };
+      });
 
     expect(authorizationCode).toMatchObject({
       accountId: firstAccount.id,
@@ -254,6 +252,10 @@ describePostgres("PostgresPlatformRepository forced-RLS bootstrap", () => {
       const lockedInstallation = await repository.lockClientInstallation(
         client,
         installation.id,
+      );
+      const lockedSession = await repository.lockSessionById(
+        client,
+        session.id,
       );
       const lockedCode = await repository.lockAuthorizationCodeByDigest(
         client,
@@ -271,10 +273,17 @@ describePostgres("PostgresPlatformRepository forced-RLS bootstrap", () => {
         authorizationCodeId: authorizationCode.id,
         consumedAt,
       });
-      return { lockedInstallation, lockedCode, firstConsumption, replay };
+      return {
+        lockedInstallation,
+        lockedSession,
+        lockedCode,
+        firstConsumption,
+        replay,
+      };
     });
 
     expect(consumed.lockedInstallation?.id).toBe(installation.id);
+    expect(consumed.lockedSession?.id).toBe(session.id);
     expect(consumed.lockedCode?.id).toBe(authorizationCode.id);
     expect(consumed.firstConsumption?.consumedAt).toBeInstanceOf(Date);
     expect(consumed.replay).toBeNull();
@@ -286,13 +295,23 @@ describePostgres("PostgresPlatformRepository forced-RLS bootstrap", () => {
           client,
           installation.id,
         ),
+        session: await repository.lockSessionById(client, session.id),
         authorizationCode: await repository.lockAuthorizationCodeByDigest(
           client,
           authorizationCodeDigest,
         ),
+        digestMutation: await repository.consumeAuthorizationCode(client, {
+          authorizationCodeId: authorizationCode.id,
+          consumedAt: new Date(),
+        }),
       };
     });
-    expect(hidden).toEqual({ installation: null, authorizationCode: null });
+    expect(hidden).toEqual({
+      installation: null,
+      session: null,
+      authorizationCode: null,
+      digestMutation: null,
+    });
   });
 
   test("absent transaction contexts expose no pre-auth rows", async () => {

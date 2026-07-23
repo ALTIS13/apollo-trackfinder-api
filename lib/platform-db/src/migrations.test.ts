@@ -224,6 +224,24 @@ describe("runPlatformMigrations", () => {
     expect(sql).not.toMatch(/disable row level security|bypassrls|grant\s/i);
   });
 
+  test("ships a select-only authorization-code digest policy", async () => {
+    const sql = await readFile(
+      new URL(
+        "../migrations/0005_authorization_code_digest_read.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+
+    expect(sql).toMatch(
+      /create policy authorization_codes_digest_select[\s\S]*on apollo_platform\.authorization_codes[\s\S]*for select to apollo_platform_runtime/i,
+    );
+    expect(sql).toMatch(
+      /code_digest = nullif\(\s*current_setting\('app\.authorization_code_digest', true\),\s*''\s*\)/i,
+    );
+    expect(sql).not.toMatch(/for update|with check|grant\s|bypassrls/i);
+  });
+
   test("applies numeric SQL migrations with immutable checksums and one transaction each", async () => {
     const directory = await fixtureDirectory({
       "0002_second.sql": "select 'second migration';",

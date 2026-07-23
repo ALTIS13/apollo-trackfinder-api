@@ -30,6 +30,10 @@ export const platformErrorCodeSchema = z.enum([
   "invalid_credentials",
   "module_access_denied",
   "policy_unavailable",
+  "invalid_request",
+  "invalid_client",
+  "invalid_grant",
+  "account_access_denied",
 ]);
 
 const normalizedEmailSchema = z.string().trim().toLowerCase().email();

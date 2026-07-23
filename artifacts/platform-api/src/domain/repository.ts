@@ -292,6 +292,10 @@ export interface InsertAuditEventInput {
 }
 
 export interface AuthorizationBindingRepository {
+  lockSessionById(
+    client: PoolClient,
+    sessionId: string,
+  ): Promise<AuthSession | null>;
   upsertClientInstallation(
     client: PoolClient,
     input: UpsertClientInstallationInput,

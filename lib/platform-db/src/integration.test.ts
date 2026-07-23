@@ -170,6 +170,136 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
     ).resolves.toBe("3");
   });
 
+  test("allows digest-selected code reads without digest-selected mutation", async () => {
+    const accountId = "db530976-3df9-476f-af4d-929869b4815d";
+    const installationId = "42d15dd4-bf8d-44d5-a6f2-bc15d05fd634";
+    const sessionId = "39bd5dad-4836-457f-b044-373f5f51e2e4";
+    const codeDigest = "8".repeat(64);
+
+    const authorizationCodeId = await withPlatformTransaction(
+      migrator,
+      async (client) => {
+        await setAccountContext(client, accountId);
+        await client.query(
+          `
+            insert into apollo_platform.accounts
+              (id, email, display_name, status, email_verified_at, activated_at)
+            values
+              ($1, 'digest-read@example.test', 'Digest Read', 'active',
+               now(), now())
+          `,
+          [accountId],
+        );
+        await client.query(
+          `
+            insert into apollo_platform.client_installations
+              (id, account_id, label)
+            values ($1, $2, 'Digest read integration')
+          `,
+          [installationId, accountId],
+        );
+        await client.query(
+          `
+            insert into apollo_platform.auth_sessions
+              (id, account_id, session_digest, audience, expires_at)
+            values ($1, $2, $3, 'apollo-portal', now() + interval '1 hour')
+          `,
+          [sessionId, accountId, "9".repeat(64)],
+        );
+        const inserted = await client.query<{ id: string }>(
+          `
+            insert into apollo_platform.authorization_codes
+              (account_id, auth_session_id, installation_id, code_digest,
+               state_digest, client_id, redirect_uri, pkce_challenge, nonce,
+               expires_at)
+            values ($1, $2, $3, $4, $5, 'apollo-tf-web',
+                    'https://client.example/callback', $6, $7,
+                    now() + interval '1 minute')
+            returning id
+          `,
+          [
+            accountId,
+            sessionId,
+            installationId,
+            codeDigest,
+            "7".repeat(64),
+            "A".repeat(43),
+            "n".repeat(43),
+          ],
+        );
+        return inserted.rows[0]!.id;
+      },
+    );
+
+    await expect(
+      withPlatformTransaction(runtime, async (client) => {
+        const result = await client.query(
+          "select id from apollo_platform.authorization_codes where code_digest = $1",
+          [codeDigest],
+        );
+        return result.rowCount;
+      }),
+    ).resolves.toBe(0);
+
+    await expect(
+      withPlatformTransaction(runtime, async (client) => {
+        await client.query(
+          "select set_config('app.authorization_code_digest', $1, true)",
+          ["0".repeat(64)],
+        );
+        const result = await client.query(
+          "select id from apollo_platform.authorization_codes where code_digest = $1",
+          [codeDigest],
+        );
+        return result.rowCount;
+      }),
+    ).resolves.toBe(0);
+
+    await expect(
+      withPlatformTransaction(runtime, async (client) => {
+        await client.query(
+          "select set_config('app.authorization_code_digest', $1, true)",
+          [codeDigest],
+        );
+        const selected = await client.query<{ id: string }>(
+          "select id from apollo_platform.authorization_codes where code_digest = $1",
+          [codeDigest],
+        );
+        const updated = await client.query(
+          `
+            update apollo_platform.authorization_codes
+            set consumed_at = now()
+            where code_digest = $1
+            returning id
+          `,
+          [codeDigest],
+        );
+        return {
+          selectedIds: selected.rows.map(({ id }) => id),
+          updatedCount: updated.rowCount,
+        };
+      }),
+    ).resolves.toEqual({
+      selectedIds: [authorizationCodeId],
+      updatedCount: 0,
+    });
+
+    await expect(
+      withPlatformTransaction(migrator, async (client) => {
+        await setAccountContext(client, accountId);
+        const result = await client.query<{ value: string }>(
+          `
+            select (consumed_at is null)::text as value
+            from apollo_platform.authorization_codes
+            where id = $1
+          `,
+          [authorizationCodeId],
+        );
+        return result.rows[0]?.value;
+      }),
+    ).resolves.toBe("true");
+  });
+
   test("rejects an authorization code bound to another account's session", async () => {
     const firstAccountId = "1836c9a4-d410-4ad5-87e3-b424a4ed1175";
     const secondAccountId = "6901e0d0-b6c0-4dfa-bb67-24755f3ae37a";
@@ -777,6 +907,7 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
           "0002_operator_bootstrap_guard.sql",
           "0003_runtime_migration_history_read.sql",
           "0004_authorization_code_binding.sql",
+          "0005_authorization_code_digest_read.sql",
         ],
         alreadyApplied: ["0001_platform_identity.sql"],
       });
