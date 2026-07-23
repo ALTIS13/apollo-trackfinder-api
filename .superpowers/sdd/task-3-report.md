@@ -95,3 +95,57 @@ stack was stopped and removed with volumes and orphans in a `finally` block.
   portal session's `pending` status and portal audience. Task 3 does not create
   the future authorization service or product HTTP/OAuth boundaries that will
   consume that contract.
+
+## Review Fix
+
+### Changes
+
+- Email verification eligibility now requires a finite `Date`. A null timestamp
+  remains a generic `invalid_credentials` denial, while an invalid `Date`, an
+  infinite timestamp, or a non-`Date` persisted value fails closed as
+  `policy_unavailable` after account identity is established.
+- Digest-bound authentication and revocation now classify a missing re-locked
+  account as `policy_unavailable`, alongside existing account/session identity
+  mismatches.
+- Unit coverage now proves that `UserSessionService.revoke` cannot revoke an
+  `apollo-admin` or product-audience session.
+
+### RED Evidence
+
+```powershell
+pnpm --dir artifacts/platform-api test -- src/domain/user-sessions.test.ts
+```
+
+Result: exit 1 with six expected failures: malformed login verification dates
+were accepted, malformed persisted verification dates authenticated/revoked,
+and missing re-locked accounts returned `invalid_credentials` instead of
+`policy_unavailable`.
+
+### Final Verification
+
+```powershell
+pnpm --dir artifacts/platform-api test -- src/domain/user-sessions.test.ts
+pnpm --dir artifacts/platform-api typecheck
+```
+
+Result: both exit 0. The focused command reported 14 files passed, 273 tests
+passed, and 16 skipped. TypeScript completed without errors.
+
+```powershell
+docker compose -p audio-nav-task3-review-bcd859d1 -f docker-compose.test.yml up -d --wait
+$env:PLATFORM_TEST_DATABASE_URL = 'postgres://apollo_platform_migrator:platform_migrator_test@127.0.0.1:55432/apollo_platform_test'
+$env:PLATFORM_TEST_RUNTIME_DATABASE_URL = 'postgres://apollo_platform_runtime:platform_runtime_test@127.0.0.1:55432/apollo_platform_test'
+pnpm exec vitest run src/domain/user-sessions.integration.test.ts
+docker compose -p audio-nav-task3-review-bcd859d1 -f docker-compose.test.yml down --volumes --remove-orphans
+```
+
+Result: exit 0, one integration file and one test passed. The unique disposable
+Compose project was removed with volumes and orphans in a `finally` block.
+
+The package-script form
+`pnpm --dir artifacts/platform-api test -- src/domain/user-sessions.integration.test.ts`
+was also attempted with the disposable stack. Its `vitest run src` script
+collects the whole API suite; the portal integration passed, but an unrelated
+`src/e2e.test.ts` container-contract test timed out at its fixed five-second
+limit. No Task 3 code was changed for that unrelated timeout; the direct Vitest
+invocation above isolates and passes the requested portal integration file.

@@ -89,8 +89,17 @@ function isPortalEligible(account: Account): account is Account & {
   readonly emailVerifiedAt: Date;
 } {
   return (
-    account.emailVerifiedAt !== null &&
+    account.emailVerifiedAt instanceof Date &&
+    Number.isFinite(account.emailVerifiedAt.getTime()) &&
     (account.status === "pending" || account.status === "active")
+  );
+}
+
+function hasMalformedEmailVerification(account: Account): boolean {
+  return (
+    account.emailVerifiedAt !== null &&
+    (!(account.emailVerifiedAt instanceof Date) ||
+      !Number.isFinite(account.emailVerifiedAt.getTime()))
   );
 }
 
@@ -160,6 +169,9 @@ export class UserSessionService {
           ((account !== null && account.id !== candidate.id) ||
             !credentialIsConsistent)
         ) {
+          policyUnavailable();
+        }
+        if (account !== null && hasMalformedEmailVerification(account)) {
           policyUnavailable();
         }
         if (
@@ -233,7 +245,8 @@ export class UserSessionService {
           digest,
         );
         if (
-          (account !== null && account.id !== session.accountId) ||
+          account === null ||
+          account.id !== session.accountId ||
           freshSession === null ||
           freshSession.id !== session.id ||
           freshSession.accountId !== session.accountId ||
@@ -241,6 +254,7 @@ export class UserSessionService {
         ) {
           policyUnavailable();
         }
+        if (hasMalformedEmailVerification(account)) policyUnavailable();
         const now = finiteClockValue(this.clock);
         if (
           freshSession.audience !== APOLLO_PORTAL_AUDIENCE ||
@@ -283,7 +297,8 @@ export class UserSessionService {
           digest,
         );
         if (
-          (account !== null && account.id !== session.accountId) ||
+          account === null ||
+          account.id !== session.accountId ||
           freshSession === null ||
           freshSession.id !== session.id ||
           freshSession.accountId !== session.accountId ||
@@ -291,6 +306,7 @@ export class UserSessionService {
         ) {
           policyUnavailable();
         }
+        if (hasMalformedEmailVerification(account)) policyUnavailable();
         const now = finiteClockValue(this.clock);
         if (
           freshSession.audience !== APOLLO_PORTAL_AUDIENCE ||

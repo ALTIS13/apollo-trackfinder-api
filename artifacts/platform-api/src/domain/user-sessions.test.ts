@@ -340,6 +340,36 @@ describe("UserSessionService", () => {
   });
 
   test.each([
+    new Date("invalid"),
+    new Date(Infinity),
+    "malformed" as unknown as Date,
+  ])(
+    "fails closed for a malformed login verification timestamp",
+    async (emailVerifiedAt) => {
+      const harness = createHarness(currentPasswordHash);
+      harness.state.accounts.push(account({ emailVerifiedAt }));
+      harness.state.credentials.push({
+        accountId: ACCOUNT_ID,
+        passwordHash: currentPasswordHash,
+        passwordChangedAt: NOW,
+        createdAt: NOW,
+        updatedAt: NOW,
+      });
+
+      const error = await harness.service
+        .login(
+          { email: "pending@example.test", password: PASSWORD },
+          { correlationId: CORRELATION_ID },
+        )
+        .catch((candidate) => candidate);
+
+      expectDomainError(error, "policy_unavailable");
+      expect(harness.state.sessions).toEqual([]);
+      expect(harness.state.audits).toEqual([]);
+    },
+  );
+
+  test.each([
     ["expired", { expiresAt: NOW }],
     ["revoked", { revokedAt: NOW }],
     ["wrong audience", { audience: "trackfinder-api" }],
@@ -355,6 +385,90 @@ describe("UserSessionService", () => {
 
       const error = await harness.service.authenticate(rawToken).catch((candidate) => candidate);
       expectDomainError(error, "invalid_credentials");
+    },
+  );
+
+  test.each(["authenticate", "revoke"] as const)(
+    "%s fails closed for a malformed persisted verification timestamp",
+    async (operation) => {
+      const harness = createHarness(currentPasswordHash);
+      const rawToken = `${operation}-invalid-verification-time`;
+      harness.state.accounts.push(account({ emailVerifiedAt: new Date(Infinity) }));
+      harness.state.sessions.push(session(rawToken));
+
+      const error = await (
+        operation === "authenticate"
+          ? harness.service.authenticate(rawToken)
+          : harness.service.revoke(rawToken, { correlationId: CORRELATION_ID })
+      ).catch((candidate) => candidate);
+
+      expectDomainError(error, "policy_unavailable");
+      expect(harness.state.audits).toEqual([]);
+    },
+  );
+
+  test.each(["authenticate", "revoke"] as const)(
+    "%s fails closed when the digest-bound account cannot be re-locked",
+    async (operation) => {
+      const harness = createHarness(currentPasswordHash);
+      const rawToken = `${operation}-missing-account`;
+      harness.state.accounts.push(account());
+      harness.state.sessions.push(session(rawToken));
+      harness.repository.lockAccountById.mockResolvedValueOnce(null);
+
+      const error = await (
+        operation === "authenticate"
+          ? harness.service.authenticate(rawToken)
+          : harness.service.revoke(rawToken, { correlationId: CORRELATION_ID })
+      ).catch((candidate) => candidate);
+
+      expectDomainError(error, "policy_unavailable");
+      expect(harness.state.audits).toEqual([]);
+    },
+  );
+
+  test.each(["authenticate", "revoke"] as const)(
+    "%s fails closed for a digest-bound session account mismatch",
+    async (operation) => {
+      const harness = createHarness(currentPasswordHash);
+      const rawToken = `${operation}-session-account-mismatch`;
+      harness.state.accounts.push(account());
+      harness.state.sessions.push(session(rawToken));
+      harness.repository.lockSessionByDigest.mockResolvedValueOnce(
+        session(rawToken, {
+          accountId: "00000000-0000-4000-8000-000000000099",
+        }),
+      );
+
+      const error = await (
+        operation === "authenticate"
+          ? harness.service.authenticate(rawToken)
+          : harness.service.revoke(rawToken, { correlationId: CORRELATION_ID })
+      ).catch((candidate) => candidate);
+
+      expectDomainError(error, "policy_unavailable");
+      expect(harness.state.audits).toEqual([]);
+    },
+  );
+
+  test.each([
+    ["admin", "apollo-admin"],
+    ["product", "trackfinder-api"],
+  ] as const)(
+    "cannot revoke a %s session through the portal service",
+    async (_audienceName, audience) => {
+      const harness = createHarness(currentPasswordHash);
+      const rawToken = `${_audienceName}-session`;
+      harness.state.accounts.push(account());
+      harness.state.sessions.push(session(rawToken, { audience }));
+
+      const error = await harness.service
+        .revoke(rawToken, { correlationId: CORRELATION_ID })
+        .catch((candidate) => candidate);
+
+      expectDomainError(error, "invalid_credentials");
+      expect(harness.state.sessions[0]?.revokedAt).toBeNull();
+      expect(harness.state.audits).toEqual([]);
     },
   );
 
