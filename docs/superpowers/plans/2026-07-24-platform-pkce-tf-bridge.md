@@ -385,6 +385,35 @@ git commit -m "feat(platform): persist bound authorization codes"
 - Produces: `AuthenticatedUser { accountId, sessionId, status, emailVerified }`.
 - Consumes: `PlatformRepository`, Argon2 helpers, `withPlatformTransaction`, and digest-only auth sessions.
 
+Use an 8-hour portal session TTL and these exact public service types:
+
+```ts
+export const APOLLO_PORTAL_AUDIENCE = "apollo-portal";
+export const PORTAL_SESSION_TTL_MS = 8 * 60 * 60 * 1_000;
+
+export interface UserSessionResult {
+  readonly account: Account;
+  readonly session: AuthSession;
+  readonly rawToken: string;
+}
+
+export interface AuthenticatedUser {
+  readonly accountId: string;
+  readonly sessionId: string;
+  readonly status: "pending" | "active";
+  readonly emailVerified: true;
+}
+
+export class UserSessionService {
+  async login(
+    input: UserSessionRequest,
+    context: RequestContext,
+  ): Promise<UserSessionResult>;
+  async authenticate(rawToken: string): Promise<AuthenticatedUser>;
+  async revoke(rawToken: string, context: RequestContext): Promise<void>;
+}
+```
+
 - [ ] **Step 1: Write RED tests for pending visibility and product denial**
 
 ```ts
@@ -410,22 +439,11 @@ Expected: FAIL because `UserSessionService` is absent.
 
 - [ ] **Step 3: Implement the service**
 
-```ts
-export interface AuthenticatedUser {
-  readonly accountId: string;
-  readonly sessionId: string;
-  readonly status: "pending" | "active";
-  readonly emailVerified: boolean;
-}
+Use a separate fixed dummy Argon2id password hash and the same verification path for unknown email. Allow only email-verified `pending` and `active` accounts to create portal sessions; unverified, suspended, and deleted accounts return the same `invalid_credentials` error as an unknown email. Rotate only `apollo-portal` sessions, never admin or TF product sessions. Portal sessions use `installationId: null`.
 
-export class UserSessionService {
-  async login(input: UserSessionRequest, context: RequestContext): Promise<UserSessionResult>;
-  async authenticate(rawToken: string): Promise<AuthenticatedUser>;
-  async revoke(rawToken: string, context: RequestContext): Promise<void>;
-}
-```
+`authenticate` digests the exact opaque token, verifies the persisted session again under the account RLS context, checks finite dates, exact audience, expiry/revocation, email verification, and current `pending`/`active` status. Any inconsistent repository relation or non-finite date fails as `policy_unavailable`; ordinary invalid/expired/revoked access fails as `invalid_credentials`.
 
-Use a separate fixed dummy password hash and constant behavior for unknown email. Allow only verified `pending` and `active` accounts to create portal sessions. Rotate only `apollo-portal` sessions, never admin or TF product sessions.
+`revoke` locks the digest-bound portal session under account context, revokes only that exact session, and appends an audit event. Audit values include only audience, expiry, revocation state, and account status; they never include email, password, raw token, or token digest.
 
 - [ ] **Step 4: Run focused and integration tests**
 
