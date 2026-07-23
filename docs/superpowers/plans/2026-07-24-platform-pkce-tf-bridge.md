@@ -197,9 +197,87 @@ git commit -m "feat(platform): define PKCE bridge contracts"
 - Modify: `artifacts/platform-api/src/domain/postgres-repository.integration.test.ts`
 
 **Interfaces:**
-- Produces: `ClientInstallation`, `AuthorizationCode`, `CreateAuthorizationCodeInput`, and `ConsumeAuthorizationCodeInput`.
+- Produces: `ClientInstallation`, `UpsertClientInstallationInput`, `AuthorizationCode`, `CreateAuthorizationCodeInput`, and `ConsumeAuthorizationCodeInput`.
 - Produces repository methods `upsertClientInstallation`, `lockClientInstallation`, `createAuthorizationCode`, `lockAuthorizationCodeByDigest`, and `consumeAuthorizationCode`.
 - Consumes: existing digest-only repository conventions and `setAccountContext`.
+
+Use these exact interfaces:
+
+```ts
+export interface ClientInstallation {
+  readonly id: string;
+  readonly accountId: string;
+  readonly label: string;
+  readonly firstSeenAt: Date;
+  readonly lastSeenAt: Date;
+  readonly revokedAt: Date | null;
+}
+
+export interface UpsertClientInstallationInput {
+  readonly installationId: string;
+  readonly accountId: string;
+  readonly label: string;
+  readonly seenAt: Date;
+}
+
+export interface AuthorizationCode {
+  readonly id: string;
+  readonly accountId: string;
+  readonly authSessionId: string;
+  readonly installationId: string;
+  readonly clientId: string;
+  readonly redirectUri: string;
+  readonly pkceChallenge: string;
+  readonly pkceMethod: "S256";
+  readonly nonce: string;
+  readonly expiresAt: Date;
+  readonly consumedAt: Date | null;
+  readonly createdAt: Date;
+}
+
+export interface CreateAuthorizationCodeInput {
+  readonly accountId: string;
+  readonly authSessionId: string;
+  readonly installationId: string;
+  readonly codeDigest: string;
+  readonly stateDigest: string;
+  readonly clientId: string;
+  readonly redirectUri: string;
+  readonly pkceChallenge: string;
+  readonly nonce: string;
+  readonly expiresAt: Date;
+}
+
+export interface ConsumeAuthorizationCodeInput {
+  readonly authorizationCodeId: string;
+  readonly consumedAt: Date;
+}
+```
+
+Repository signatures are exact:
+
+```ts
+upsertClientInstallation(
+  client: PoolClient,
+  input: UpsertClientInstallationInput,
+): Promise<ClientInstallation>;
+lockClientInstallation(
+  client: PoolClient,
+  installationId: string,
+): Promise<ClientInstallation | null>;
+createAuthorizationCode(
+  client: PoolClient,
+  input: CreateAuthorizationCodeInput,
+): Promise<AuthorizationCode>;
+lockAuthorizationCodeByDigest(
+  client: PoolClient,
+  codeDigest: string,
+): Promise<AuthorizationCode | null>;
+consumeAuthorizationCode(
+  client: PoolClient,
+  input: ConsumeAuthorizationCodeInput,
+): Promise<AuthorizationCode | null>;
+```
 
 - [ ] **Step 1: Write migration and repository RED tests**
 
@@ -246,7 +324,7 @@ create index authorization_codes_session_id_idx
   on apollo_platform.authorization_codes(auth_session_id);
 ```
 
-Also grant only the exact runtime `select`, `insert`, and `update` privileges needed for installations, sessions, and authorization codes. Preserve forced RLS and default deny without account context.
+The existing runtime grants already include installations, sessions, and authorization codes. Do not widen grants or add a new role. Preserve forced RLS and default deny without account context.
 
 - [ ] **Step 4: Implement digest-only repository methods**
 
@@ -267,7 +345,9 @@ consumeAuthorizationCode(
 ): Promise<AuthorizationCode | null>;
 ```
 
-`consumeAuthorizationCode` must use `where consumed_at is null and expires_at > $consumedAt` and return `null` on replay/expiry. Mappers must reject malformed timestamps and cross-account installation/session relations.
+`upsertClientInstallation` inserts the caller-supplied UUID and uses `on conflict (id, account_id)` to update only `label` and `last_seen_at`; it must not clear `revoked_at` or change `first_seen_at`. `lockClientInstallation` selects by ID under the already-set account RLS context and ends in `for update`.
+
+`consumeAuthorizationCode` must use `where id = $1 and consumed_at is null and expires_at > $2`, set `consumed_at = $2`, and return `null` on replay/expiry. Mappers must reject malformed timestamps. The database foreign keys and account RLS context enforce session/installation ownership; repository return models intentionally omit code/state digests.
 
 - [ ] **Step 5: Run unit and disposable PostgreSQL integration tests**
 
