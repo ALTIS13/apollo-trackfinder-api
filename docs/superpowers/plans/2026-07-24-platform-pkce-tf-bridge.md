@@ -36,7 +36,7 @@
 
 **Interfaces:**
 - Produces: `userSessionRequestSchema`, `authorizationRequestSchema`, `authorizationCodeExchangeSchema`, `platformAssertionClaimsSchema`, `policyIntrospectionRequestSchema`, `policyIntrospectionResponseSchema`.
-- Produces: inferred TypeScript types with the same base names and `Request`, `Claims`, or `Response` suffixes.
+- Produces: `UserSessionRequest`, `AuthorizationRequest`, `AuthorizationCodeExchangeRequest`, `PlatformAssertionClaims`, `PolicyIntrospectionRequest`, and `PolicyIntrospectionResponse`.
 - Consumes: existing account/module key normalization conventions from `@workspace/platform-contract`.
 
 - [ ] **Step 1: Write contract tests that reject downgrade and unknown fields**
@@ -49,8 +49,8 @@ it("accepts only exact S256 authorization input", () => {
     responseType: "code",
     codeChallenge: "A".repeat(43),
     codeChallengeMethod: "S256",
-    state: "state-value",
-    nonce: "nonce-value",
+    state: "s".repeat(43),
+    nonce: "n".repeat(43),
     installationId: "10000000-0000-4000-8000-000000000001",
     installationLabel: "Firefox on Windows",
   })).toMatchObject({ codeChallengeMethod: "S256" });
@@ -61,8 +61,8 @@ it("accepts only exact S256 authorization input", () => {
     responseType: "code",
     codeChallenge: "A".repeat(43),
     codeChallengeMethod: "plain",
-    state: "state-value",
-    nonce: "nonce-value",
+    state: "s".repeat(43),
+    nonce: "n".repeat(43),
     installationId: "10000000-0000-4000-8000-000000000001",
     installationLabel: "Firefox on Windows",
   })).toThrow();
@@ -84,8 +84,8 @@ export const authorizationRequestSchema = z.object({
   responseType: z.literal("code"),
   codeChallenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
   codeChallengeMethod: z.literal("S256"),
-  state: z.string().min(16).max(512),
-  nonce: z.string().min(16).max(512),
+  state: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  nonce: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
   installationId: z.string().uuid(),
   installationLabel: z.string().trim().min(1).max(120),
 }).strict();
@@ -99,7 +99,62 @@ export const authorizationCodeExchangeSchema = z.object({
 }).strict();
 ```
 
-Define assertion claims with exact issuer, audience, subject/account, session, installation, nonce, entitlement array, `jti`, `iat`, `nbf`, and `exp` fields. Define introspection response as a strict discriminated union: `{ active: false }` or `{ active: true, accountId, sessionId, accountStatus: "active", entitlements, expiresAt }`.
+Define the remaining schemas exactly:
+
+```ts
+const tfEntitlementsSchema = z
+  .array(z.enum(PLATFORM_MODULE_KEYS))
+  .max(PLATFORM_MODULE_KEYS.length)
+  .refine((values) => new Set(values).size === values.length, {
+    message: "Entitlements must be unique",
+  });
+
+export const userSessionRequestSchema = z.object({
+  email: z.string().trim().toLowerCase().email().max(254),
+  password: z.string().min(1).max(1024),
+}).strict();
+
+export const platformAssertionClaimsSchema = z.object({
+  iss: z.string().url().max(2048),
+  aud: z.literal("apollo-tf"),
+  sub: z.string().uuid(),
+  sid: z.string().uuid(),
+  installation_id: z.string().uuid(),
+  nonce: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  account_status: z.literal("active"),
+  entitlements: tfEntitlementsSchema,
+  jti: z.string().uuid(),
+  iat: z.number().int().nonnegative(),
+  nbf: z.number().int().nonnegative(),
+  exp: z.number().int().positive(),
+}).strict().superRefine((claims, context) => {
+  if (claims.nbf > claims.iat || claims.iat >= claims.exp || claims.exp - claims.iat > 300) {
+    context.addIssue({ code: "custom", message: "Invalid assertion lifetime" });
+  }
+});
+
+export const policyIntrospectionRequestSchema = z.object({
+  accountId: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  installationId: z.string().uuid(),
+  audience: z.literal("apollo-tf"),
+}).strict();
+
+export const policyIntrospectionResponseSchema = z.discriminatedUnion("active", [
+  z.object({ active: z.literal(false) }).strict(),
+  z.object({
+    active: z.literal(true),
+    accountId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    installationId: z.string().uuid(),
+    accountStatus: z.literal("active"),
+    entitlements: tfEntitlementsSchema,
+    expiresAt: z.string().datetime({ offset: true }),
+  }).strict(),
+]);
+```
+
+`iss` is configuration-bound and therefore validated as an exact URL shape in the shared schema; `tf-api` compares it with its configured exact issuer. `aud` is the Release 1 literal `"apollo-tf"`.
 
 - [ ] **Step 4: Add `jose` to Platform and TF API packages**
 
