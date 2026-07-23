@@ -12,8 +12,8 @@
   },
   "dependencies": {
     "@types/express-session": "^1.18.2",
-    "@workspace/api-zod": "workspace:*",
     "@workspace/admin-dashboard-contract": "workspace:*",
+    "@workspace/api-zod": "workspace:*",
     "@workspace/db": "workspace:*",
     "bullmq": "^5.73.0",
     "cookie-parser": "^1.4.7",
@@ -22,6 +22,7 @@
     "express": "^5",
     "express-session": "^1.19.0",
     "ioredis": "^5.10.1",
+    "jose": "^6.2.4",
     "pino": "^9",
     "pino-http": "^10",
     "ws": "^8.20.0",

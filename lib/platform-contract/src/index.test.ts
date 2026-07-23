@@ -3,6 +3,8 @@ import {
   PLATFORM_MODULE_KEYS,
   PROTECTED_PLATFORM_ROUTES,
   accountStatusSchema,
+  authorizationCodeExchangeSchema,
+  authorizationRequestSchema,
   changeEntitlementRequestSchema,
   changeRegistrationModeRequestSchema,
   createInvitationRequestSchema,
@@ -10,12 +12,18 @@ import {
   moduleKeySchema,
   operatorSessionRequestSchema,
   platformErrorCodeSchema,
+  platformAssertionClaimsSchema,
   policyDecisionSchema,
+  policyIntrospectionRequestSchema,
+  policyIntrospectionResponseSchema,
   registrationModeSchema,
   registrationStatusResponseSchema,
+  userSessionRequestSchema,
 } from "./index";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
+const installationId = "10000000-0000-4000-8000-000000000001";
+const sessionId = "20000000-0000-4000-8000-000000000002";
 const expiresAt = "2026-08-16T12:00:00.000Z";
 
 describe("platform contract", () => {
@@ -79,6 +87,175 @@ describe("platform contract", () => {
         displayName: "User",
         password: "password",
         internalStatus: "active",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("normalizes bounded user session input and rejects unknown fields", () => {
+    expect(
+      userSessionRequestSchema.parse({
+        email: "  User@Example.COM ",
+        password: "password",
+      }),
+    ).toEqual({ email: "user@example.com", password: "password" });
+    expect(
+      userSessionRequestSchema.safeParse({
+        email: "user@example.com",
+        password: "password",
+        audience: "apollo-tf",
+      }).success,
+    ).toBe(false);
+    expect(
+      userSessionRequestSchema.safeParse({
+        email: "user@example.com",
+        password: "p".repeat(1025),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts only exact S256 authorization input", () => {
+    const request = {
+      clientId: "apollo-tf-web",
+      redirectUri: "https://api.tf.apollot.ru/api/auth/callback",
+      responseType: "code",
+      codeChallenge: "A".repeat(43),
+      codeChallengeMethod: "S256",
+      state: "s".repeat(43),
+      nonce: "n".repeat(43),
+      installationId,
+      installationLabel: "Firefox on Windows",
+    };
+
+    expect(authorizationRequestSchema.parse(request)).toMatchObject({
+      codeChallengeMethod: "S256",
+    });
+    expect(
+      authorizationRequestSchema.safeParse({
+        ...request,
+        codeChallengeMethod: "plain",
+      }).success,
+    ).toBe(false);
+    expect(
+      authorizationRequestSchema.safeParse({
+        ...request,
+        state: "state-value",
+      }).success,
+    ).toBe(false);
+    expect(
+      authorizationRequestSchema.safeParse({
+        ...request,
+        internalRedirect: true,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts bounded authorization code exchanges only", () => {
+    const exchange = {
+      grantType: "authorization_code",
+      clientId: "apollo-tf-web",
+      code: "c".repeat(32),
+      codeVerifier: "v".repeat(43),
+      redirectUri: "https://api.tf.apollot.ru/api/auth/callback",
+    };
+
+    expect(authorizationCodeExchangeSchema.parse(exchange)).toEqual(exchange);
+    expect(
+      authorizationCodeExchangeSchema.safeParse({
+        ...exchange,
+        codeVerifier: "v".repeat(42),
+      }).success,
+    ).toBe(false);
+    expect(
+      authorizationCodeExchangeSchema.safeParse({
+        ...exchange,
+        grantType: "refresh_token",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("validates bounded active platform assertion claims", () => {
+    const claims = {
+      iss: "https://api.apollot.ru",
+      aud: "apollo-tf",
+      sub: accountId,
+      sid: sessionId,
+      installation_id: installationId,
+      nonce: "n".repeat(43),
+      account_status: "active",
+      entitlements: ["tf.search", "tf.downloads"],
+      jti: "30000000-0000-4000-8000-000000000003",
+      iat: 1_700_000_000,
+      nbf: 1_700_000_000,
+      exp: 1_700_000_300,
+    };
+
+    expect(platformAssertionClaimsSchema.parse(claims)).toEqual(claims);
+    expect(
+      platformAssertionClaimsSchema.safeParse({
+        ...claims,
+        aud: "other-audience",
+      }).success,
+    ).toBe(false);
+    expect(
+      platformAssertionClaimsSchema.safeParse({
+        ...claims,
+        entitlements: ["tf.search", "tf.search"],
+      }).success,
+    ).toBe(false);
+    expect(
+      platformAssertionClaimsSchema.safeParse({
+        ...claims,
+        exp: claims.iat + 301,
+      }).success,
+    ).toBe(false);
+    expect(
+      platformAssertionClaimsSchema.safeParse({
+        ...claims,
+        nbf: claims.iat + 1,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("validates strict policy introspection contracts", () => {
+    const request = {
+      accountId,
+      sessionId,
+      installationId,
+      audience: "apollo-tf",
+    };
+    const activeResponse = {
+      active: true,
+      accountId,
+      sessionId,
+      installationId,
+      accountStatus: "active",
+      entitlements: ["tf.search"],
+      expiresAt,
+    };
+
+    expect(policyIntrospectionRequestSchema.parse(request)).toEqual(request);
+    expect(policyIntrospectionResponseSchema.parse({ active: false })).toEqual({
+      active: false,
+    });
+    expect(policyIntrospectionResponseSchema.parse(activeResponse)).toEqual(
+      activeResponse,
+    );
+    expect(
+      policyIntrospectionRequestSchema.safeParse({
+        ...request,
+        audience: "apollo-admin",
+      }).success,
+    ).toBe(false);
+    expect(
+      policyIntrospectionResponseSchema.safeParse({
+        active: false,
+        accountId,
+      }).success,
+    ).toBe(false);
+    expect(
+      policyIntrospectionResponseSchema.safeParse({
+        ...activeResponse,
+        entitlements: ["tf.search", "tf.search"],
       }).success,
     ).toBe(false);
   });
