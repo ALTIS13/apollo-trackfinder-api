@@ -465,6 +465,17 @@ git commit -m "feat(platform): add end-user portal sessions"
 ### Task 4: PKCE Authorization, Signed Assertions, and Introspection
 
 **Files:**
+- Create: `lib/platform-db/migrations/0005_authorization_code_digest_read.sql`
+- Modify: `lib/platform-db/src/migrations.ts`
+- Modify: `lib/platform-db/src/migrations.test.ts`
+- Modify: `lib/platform-db/src/migration-manifest.test.ts`
+- Modify: `lib/platform-db/src/integration.test.ts`
+- Modify: `lib/platform-contract/src/index.ts`
+- Modify: `lib/platform-contract/src/index.test.ts`
+- Modify: `artifacts/platform-api/src/domain/repository.ts`
+- Modify: `artifacts/platform-api/src/domain/postgres-repository.ts`
+- Modify: `artifacts/platform-api/src/domain/postgres-repository.test.ts`
+- Modify: `artifacts/platform-api/src/domain/postgres-repository.integration.test.ts`
 - Create: `artifacts/platform-api/src/domain/oauth-clients.ts`
 - Create: `artifacts/platform-api/src/domain/oauth-clients.test.ts`
 - Create: `artifacts/platform-api/src/domain/authorization.ts`
@@ -476,10 +487,52 @@ git commit -m "feat(platform): add end-user portal sessions"
 - Modify: `artifacts/platform-api/src/domain/errors.ts`
 
 **Interfaces:**
-- Produces: `RegisteredOAuthClient { clientId, audience, redirectUris, clientSecretDigest }`.
+- Produces: `RegisteredOAuthClient { clientId, audience: "apollo-tf", redirectUris, clientSecretDigest }` and `OAuthClientRegistry`.
 - Produces: `AuthorizationService.issueCode`, `.exchangeCode`, `.introspect`.
 - Produces: `PlatformAssertionSigner.sign` and `.publicJwks`.
 - Consumes: current portal session, bound code repository, active entitlements, Ed25519 private JWK, and exact client registry.
+
+Before service implementation, add migration `0005_authorization_code_digest_read.sql`. It creates a `for select to apollo_platform_runtime` RLS policy that permits a row only when `code_digest = nullif(current_setting('app.authorization_code_digest', true), '')`. Do not grant update by digest. Pin the exact checksum and test default deny, wrong digest deny, exact digest select, and no digest-based update.
+
+Add `lockSessionById(client, sessionId): Promise<AuthSession | null>` to `AuthorizationBindingRepository`. `lockAuthorizationCodeByDigest` must set transaction-local `app.authorization_code_digest` before the query. `AuthorizationService.exchangeCode` first locks by digest, then sets the discovered account context and re-locks the account, portal session, installation, and code before making a decision. This allows lookup without exposing the account ID in the raw code while preserving account-owned mutation.
+
+Add exact domain error codes `invalid_request`, `invalid_client`, `invalid_grant`, and `account_access_denied` to the shared `platformErrorCodeSchema`.
+
+Use these exact registry boundaries:
+
+```ts
+export interface RegisteredOAuthClient {
+  readonly clientId: string;
+  readonly audience: "apollo-tf";
+  readonly redirectUris: readonly string[];
+  readonly clientSecretDigest: string;
+}
+
+export class OAuthClientRegistry {
+  static parse(raw: unknown, nodeEnv: string): OAuthClientRegistry;
+  get(clientId: string): RegisteredOAuthClient | null;
+  verifySecret(client: RegisteredOAuthClient, rawSecret: string): boolean;
+}
+```
+
+The registry is an array of 1-8 strict client objects. Each client has 1-8 unique redirect URIs. Client IDs are unique globally, redirect URIs are unique globally, secret digests are exactly 64 lowercase hex characters, and audience is exactly `apollo-tf`. Production redirects are HTTPS. Development additionally allows exact loopback `http://localhost` or `http://127.0.0.1` origins. Secret verification SHA-256-digests the exact raw UTF-8 bytes and uses `timingSafeEqual` on fixed-length buffers.
+
+Use these exact authorization results:
+
+```ts
+export interface IssuedAuthorizationCode {
+  readonly rawCode: string;
+  readonly redirectUri: string;
+  readonly state: string;
+}
+
+export interface ExchangedAuthorizationCode {
+  readonly assertion: string;
+  readonly claims: PlatformAssertionClaims;
+  readonly expiresIn: 300;
+  readonly tokenType: "Bearer";
+}
+```
 
 - [ ] **Step 1: Write PKCE/replay/redirect/client RED tests**
 
@@ -518,13 +571,13 @@ export function pkceS256(verifier: string): string {
 
 export interface RegisteredOAuthClient {
   readonly clientId: string;
-  readonly audience: string;
+  readonly audience: "apollo-tf";
   readonly redirectUris: readonly string[];
   readonly clientSecretDigest: string;
 }
 ```
 
-Reject duplicate IDs, duplicate redirect URIs, non-HTTPS production redirects, non-SHA256 secret digests, unknown audiences, and unknown JSON keys during startup.
+Reject duplicate IDs, duplicate redirect URIs, non-HTTPS production redirects, non-loopback development HTTP redirects, non-SHA256 secret digests, unknown audiences, and unknown JSON keys during startup.
 
 - [ ] **Step 4: Implement code issue/exchange and introspection**
 
@@ -533,13 +586,13 @@ issueCode(
   user: AuthenticatedUser,
   request: AuthorizationRequest,
   context: RequestContext,
-): Promise<{ rawCode: string; redirectUri: string; state: string }>;
+): Promise<IssuedAuthorizationCode>;
 
 exchangeCode(
   request: AuthorizationCodeExchangeRequest,
   rawClientSecret: string,
   context: RequestContext,
-): Promise<{ assertion: string; expiresIn: number; tokenType: "Bearer" }>;
+): Promise<ExchangedAuthorizationCode>;
 
 introspect(
   request: PolicyIntrospectionRequest,
@@ -547,7 +600,13 @@ introspect(
 ): Promise<PolicyIntrospectionResponse>;
 ```
 
-Issue codes for 60 seconds and assertions for 5 minutes. `exchangeCode` locks the code, validates all bindings before consumption, consumes exactly once, and signs only the current effective entitlement keys. `introspect` verifies client audience, active Platform session/account/installation, and current entitlements.
+`issueCode` requires the current user contract to be `active` and email-verified. In one account-scoped transaction it revalidates the active account and live `apollo-portal` session, upserts then locks the requested installation, rejects a revoked installation, and creates a code with a 60-second TTL. Store only SHA-256 digests of the exact raw code and state. Return the registered redirect URI and original state unchanged.
+
+`exchangeCode` validates the strict request and exact client secret before opening a transaction. It locks the code by digest, sets account context, re-locks all bindings, and validates client ID, exact redirect URI, `S256` verifier, 60-second expiry, single use, active account, live `apollo-portal` session, active installation, finite dates, and current effective module entitlements. It consumes the code exactly once before signing only current active entitlement keys. All ordinary code/binding/replay failures are generic `invalid_grant`; bad confidential credentials are `invalid_client`; repository inconsistency/storage failure is `policy_unavailable`.
+
+`introspect` verifies the client secret before its transaction, requires request audience `apollo-tf`, sets request account context, re-locks the active account, `apollo-portal` session, and installation, and returns only current active entitlements. Ordinary inactive/revoked/expired/status mismatch returns `{ active: false }`; inconsistent relations or storage failure throws `policy_unavailable`.
+
+Append audits only for successful code issue and exchange. Audit values may contain client ID, audience, redirect origin, installation ID, session ID, expiry, and entitlement keys. They must not contain email, raw/digested code, raw/digested state, verifier/challenge, client secret/digest, assertion, nonce, or private/public key material.
 
 - [ ] **Step 5: Implement Ed25519 assertion signing**
 
@@ -564,7 +623,9 @@ await new SignJWT(claims)
   .sign(privateKey);
 ```
 
-The signer accepts one active private JWK and a bounded public JWKS containing the active key plus optional overlap verification keys. Private key material must not be returned by `publicJwks()`.
+`PlatformAssertionSigner` accepts an exact issuer URL, one active Ed25519 private JWK, 1-3 Ed25519 public JWKs, and a clock. Require `kty: "OKP"`, `crv: "Ed25519"`, `alg: "EdDSA"`, `use: "sig"`, a nonempty unique `kid`, public `x`, and private `d` only on the active signing key. The active public key must match the active private key's `kid` and `x`. `publicJwks()` returns a deep-frozen clone with no `d` property.
+
+`sign` receives account ID, Platform portal session ID, installation ID, 43-character nonce, audience `apollo-tf`, and sorted unique active entitlement keys. It issues the exact shared claim shape with a random UUID `jti`, `nbf = iat - 5`, and `exp = iat + 300`. It returns both compact assertion and parsed claims for the exchange result. Reject non-finite clock values.
 
 - [ ] **Step 6: Run focused and live database tests**
 
