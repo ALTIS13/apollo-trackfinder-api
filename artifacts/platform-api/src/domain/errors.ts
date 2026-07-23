@@ -26,6 +26,10 @@ export function platformDomainError(
   return new PlatformDomainError(code);
 }
 
+export function invalidCredentialsError(): PlatformDomainError {
+  return platformDomainError("invalid_credentials");
+}
+
 function isRepositoryConflict(error: unknown): boolean {
   return (
     typeof error === "object" &&

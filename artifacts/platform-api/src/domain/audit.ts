@@ -18,6 +18,8 @@ export const AUDIT_ACTIONS = Object.freeze({
   operatorBootstrapCompleted: "operator.bootstrap_completed",
   operatorSessionCreated: "operator.session_created",
   operatorSessionRevoked: "operator.session_revoked",
+  userSessionCreated: "user.session_created",
+  userSessionRevoked: "user.session_revoked",
   entitlementGranted: "entitlement.granted",
   entitlementRevoked: "entitlement.revoked",
 });
@@ -28,6 +30,8 @@ export const SYSTEM_AUDIT_REASONS = Object.freeze({
   invitationRedemption: "invitation_redemption",
   operatorLogin: "operator_login",
   operatorLogout: "operator_logout",
+  userLogin: "user_login",
+  userLogout: "user_logout",
 });
 
 export function appendAuditEvent(
