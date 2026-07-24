@@ -248,12 +248,6 @@ export function createAuthRouter(dependencies: AuthRouteDependencies): Router {
 
   router.get("/callback", async (request, response) => {
     try {
-      const query = exactQuery(request, ["code", "state"]);
-      const code = query.code!;
-      const state = query.state!;
-      if (!CODE_PATTERN.test(code) || !OPAQUE_PATTERN.test(state)) {
-        throw new AuthRequestError(400);
-      }
       const transactionHandle = cookieValue(
         request,
         AUTH_COOKIE_NAMES.transaction,
@@ -266,7 +260,17 @@ export function createAuthRouter(dependencies: AuthRouteDependencies): Router {
       }
       const transaction =
         await dependencies.sessionStore.consumeTransaction(transactionHandle);
-      if (transaction === null || !fixedOpaqueEqual(transaction.state, state)) {
+      if (transaction === null) {
+        throw new AuthRequestError(400);
+      }
+      const query = exactQuery(request, ["code", "state"]);
+      const code = query.code!;
+      const state = query.state!;
+      if (
+        !CODE_PATTERN.test(code) ||
+        !OPAQUE_PATTERN.test(state) ||
+        !fixedOpaqueEqual(transaction.state, state)
+      ) {
         throw new AuthRequestError(400);
       }
       const exchange = await dependencies.platform.exchangeCode({

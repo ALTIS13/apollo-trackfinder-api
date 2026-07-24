@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   PlatformAuthClient,
@@ -300,6 +300,8 @@ describe("PlatformAuthClient", () => {
     ["wrong audience", { audience: "wrong-audience" }],
     ["wrong nonce", { nonce: randomBytes(32).toString("base64url") }],
     ["expired time", { expired: true }],
+    ["future issued-at", { futureIssuedAt: true }],
+    ["stale issued-at", { staleIssuedAt: true }],
     ["malformed claims", { extra: true }],
     ["unknown kid", { unknownKid: true }],
   ] as const)(
@@ -312,8 +314,17 @@ describe("PlatformAuthClient", () => {
               ? await generateKeyPair("EdDSA")
               : undefined;
           const now = Math.floor(Date.now() / 1_000);
-          const issuedAt = "expired" in mutation ? now - 600 : now;
-          const expiration = "expired" in mutation ? now - 300 : now + 300;
+          const issuedAt =
+            "expired" in mutation || "staleIssuedAt" in mutation
+              ? now - 600
+              : "futureIssuedAt" in mutation
+                ? now + 3_600
+                : now;
+          const notBefore = "futureIssuedAt" in mutation ? now - 5 : issuedAt;
+          const expiration =
+            "expired" in mutation || "staleIssuedAt" in mutation
+              ? now - 300
+              : issuedAt + 300;
           const payload: Record<string, unknown> = {
             sid: SESSION_ID,
             installation_id: INSTALLATION_ID,
@@ -337,7 +348,7 @@ describe("PlatformAuthClient", () => {
             .setSubject(ACCOUNT_ID)
             .setJti(randomUUID())
             .setIssuedAt(issuedAt)
-            .setNotBefore(issuedAt)
+            .setNotBefore(notBefore)
             .setExpirationTime(expiration)
             .sign(signingPair?.privateKey ?? fixture.activeKeyPair.privateKey);
         },
@@ -505,6 +516,38 @@ describe("TF auth runtime configuration", () => {
       clientSecret: fixture.secret,
       authRedisUrl: "redis://127.0.0.1:16379/7",
     });
+  });
+
+  it("rejects a secret that grows beyond the byte limit after stat", async () => {
+    const fixture = await runtimeEnvironment();
+    const grownSecret = Buffer.from("é".repeat(2_049), "utf8");
+    let position = 0;
+    let largestRead = 0;
+    const close = vi.fn(async () => {});
+
+    await expect(
+      parseTfAuthRuntimeConfig(fixture.environment, {
+        openSecretFile: async () => ({
+          stat: async () => ({
+            isFile: () => true,
+            size: 1,
+          }),
+          read: async (buffer: Uint8Array, offset: number, length: number) => {
+            largestRead = Math.max(largestRead, length);
+            const bytesRead = Math.min(length, grownSecret.length - position);
+            buffer.set(
+              grownSecret.subarray(position, position + bytesRead),
+              offset,
+            );
+            position += bytesRead;
+            return { bytesRead, buffer };
+          },
+          close,
+        }),
+      }),
+    ).rejects.toThrow("TF authentication configuration is invalid");
+    expect(largestRead).toBeLessThanOrEqual(4_097);
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("allows exact loopback HTTP only outside production", async () => {

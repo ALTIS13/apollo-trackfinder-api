@@ -581,23 +581,29 @@ describe("GET /api/auth/callback", () => {
     `code=${opaque()}&state=${opaque()}&extra=bad`,
     `code=${opaque()}&code=${opaque()}&state=${opaque()}`,
     `code=${opaque()}&state=${opaque()}&state=${opaque()}`,
+    `code=short&state=${opaque()}`,
+    `code=${opaque()}&state=short`,
   ])(
-    "rejects incomplete, extra, or duplicate callback query %s",
+    "consumes the transaction before rejecting malformed callback query %s",
     async (query) => {
       const dependencies = createDependencies();
       const baseUrl = await startAuthServer(dependencies);
+      const transactionHandle = opaque();
 
       const response = await fetch(`${baseUrl}/callback?${query}`, {
         redirect: "manual",
         headers: {
-          cookie: `${AUTH_COOKIE_NAMES.transaction}=${opaque()}`,
+          cookie: `${AUTH_COOKIE_NAMES.transaction}=${transactionHandle}`,
         },
       });
 
       expect(response.status).toBe(400);
       expect(
         dependencies.sessionStore.consumeTransaction,
-      ).not.toHaveBeenCalled();
+      ).toHaveBeenCalledOnce();
+      expect(dependencies.sessionStore.consumeTransaction).toHaveBeenCalledWith(
+        transactionHandle,
+      );
       expect(dependencies.platform.exchangeCode).not.toHaveBeenCalled();
     },
   );
@@ -854,6 +860,49 @@ describe("TF auth logger hygiene", () => {
     expect(output).not.toContain(arraySecret);
     expect(output).not.toContain(interpolationSecret);
     expect(output).toContain("[Accessor]");
+    expect(output).toContain("[REDACTED]");
+  });
+
+  it("redacts auth aliases and recursively sanitizes child bindings", () => {
+    let output = "";
+    const destination = new Writable({
+      write(chunk, _encoding, callback) {
+        output += chunk.toString();
+        callback();
+      },
+    });
+    const logger = createTfLogger(destination);
+    const canaries = {
+      authorizationCode: opaque(),
+      rawAuthorizationCode: opaque(),
+      authorizationCodeDigest: opaque(),
+      rawToken: opaque(),
+      tokenDigest: opaque(),
+      refreshToken: opaque(),
+      providerAccessToken: opaque(),
+      providerRefreshToken: opaque(),
+      sessionHandle: opaque(),
+      rawSessionHandle: opaque(),
+      sessionDigest: opaque(),
+      ticketHandle: opaque(),
+      rawTicket: opaque(),
+      ticketDigest: opaque(),
+      password: opaque(),
+    };
+    const childSecret = opaque();
+    const child = logger.child({
+      nested: {
+        clientSecret: childSecret,
+        sessionHandle: canaries.sessionHandle,
+      },
+    });
+
+    logger.error({ nested: canaries }, "alias canaries");
+    child.info({ event: "child-canary" }, "child binding canary");
+
+    for (const canary of [...Object.values(canaries), childSecret]) {
+      expect(output).not.toContain(canary);
+    }
     expect(output).toContain("[REDACTED]");
   });
 

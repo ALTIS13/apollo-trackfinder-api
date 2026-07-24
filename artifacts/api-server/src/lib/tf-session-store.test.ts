@@ -356,9 +356,14 @@ describe("TfSessionStore sessions", () => {
     );
     await expect(store.getSession("invalid")).resolves.toBeNull();
 
+    const key = `tf-auth:session:${digest(created.handle)}`;
+    const stored = JSON.parse((await redis.get(key)) ?? "") as Record<
+      string,
+      unknown
+    >;
     await redis.set(
-      `tf-auth:session:${digest(created.handle)}`,
-      JSON.stringify({ ...created.session, extra: "private-payload" }),
+      key,
+      JSON.stringify({ ...stored, extra: "private-payload" }),
       "EX",
       60,
     );
@@ -367,18 +372,94 @@ describe("TfSessionStore sessions", () => {
     );
   });
 
+  it("treats an expired strict session as absent", async () => {
+    const created = await store.createSession({
+      assertionClaims: assertionClaims(),
+      introspection: activeIntrospection(),
+    });
+    const key = `tf-auth:session:${digest(created.handle)}`;
+    const stored = JSON.parse((await redis.get(key)) ?? "") as {
+      revision?: string;
+      session?: Record<string, unknown>;
+    } & Record<string, unknown>;
+    const currentSession = stored.session ?? stored;
+    const expiredSession = {
+      ...currentSession,
+      assertionExpiresAt: new Date(Date.now() - 2_000).toISOString(),
+      expiresAt: new Date(Date.now() - 1_000).toISOString(),
+    };
+    const expired =
+      stored.session === undefined
+        ? expiredSession
+        : { ...stored, session: expiredSession };
+    await redis.set(key, JSON.stringify(expired), "EX", 60);
+
+    await expect(store.getSession(created.handle)).resolves.toBeNull();
+  });
+
+  it.each([
+    [
+      "session lifetime",
+      {
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1_000).toISOString(),
+        assertionExpiresAt: new Date(Date.now() + 4 * 60 * 1_000).toISOString(),
+      },
+    ],
+    [
+      "policy freshness",
+      {
+        expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+        assertionExpiresAt: new Date(
+          Date.now() + 20 * 60 * 1_000,
+        ).toISOString(),
+      },
+    ],
+  ])(
+    "fails closed when strict stored JSON exceeds the %s bound",
+    async (_label, dates) => {
+      const created = await store.createSession({
+        assertionClaims: assertionClaims(),
+        introspection: activeIntrospection(),
+      });
+      const key = `tf-auth:session:${digest(created.handle)}`;
+      const current = JSON.parse((await redis.get(key)) ?? "") as Record<
+        string,
+        unknown
+      >;
+      const currentSession =
+        "session" in current
+          ? (current.session as Record<string, unknown>)
+          : current;
+      const malformedSession = { ...currentSession, ...dates };
+      const malformed =
+        "session" in current
+          ? { ...current, session: malformedSession }
+          : malformedSession;
+      await redis.set(key, JSON.stringify(malformed), "EX", 60 * 60);
+
+      await expect(store.getSession(created.handle)).rejects.toThrow(
+        "TF authentication storage unavailable",
+      );
+    },
+  );
+
   it("atomically refreshes only policy freshness without extending the session", async () => {
     const created = await store.createSession({
       assertionClaims: assertionClaims(),
       introspection: activeIntrospection(),
     });
+    const observed = await store.observeSession(created.handle);
     const originalExpiry = created.session.expiresAt;
     const refresh = activeIntrospection({
       entitlements: ["tf.collections", "tf.search"],
       expiresAt: originalExpiry,
     });
 
-    const refreshed = await store.refreshSession(created.handle, refresh);
+    const refreshed = await store.refreshSession(
+      created.handle,
+      observed!.revision,
+      refresh,
+    );
 
     expect(refreshed).toMatchObject({
       id: created.session.id,
@@ -396,24 +477,108 @@ describe("TfSessionStore sessions", () => {
     );
   });
 
+  it("rejects a stale different-response refresh instead of regranting revoked entitlements", async () => {
+    const created = await store.createSession({
+      assertionClaims: assertionClaims(),
+      introspection: activeIntrospection({ entitlements: ["tf.search"] }),
+    });
+    const staleObservation = await store.observeSession(created.handle);
+    const revocationObservation = await store.observeSession(created.handle);
+
+    await expect(
+      store.refreshSession(
+        created.handle,
+        revocationObservation!.revision,
+        activeIntrospection({
+          entitlements: [],
+          expiresAt: created.session.expiresAt,
+        }),
+      ),
+    ).resolves.toMatchObject({ entitlements: [] });
+
+    await expect(
+      store.refreshSession(
+        created.handle,
+        staleObservation!.revision,
+        activeIntrospection({
+          entitlements: ["tf.search"],
+          expiresAt: created.session.expiresAt,
+        }),
+      ),
+    ).rejects.toThrow("TF authentication storage unavailable");
+    await expect(store.getSession(created.handle)).resolves.toMatchObject({
+      entitlements: [],
+    });
+  });
+
+  it("atomically shortens payload expiry and Redis TTL for an earlier Platform expiry", async () => {
+    const strictRedis = createStrictRedisClient(redis);
+    const delayedStore = new TfSessionStore({
+      ...strictRedis,
+      eval: async (script, numberOfKeys, ...arguments_) => {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return strictRedis.eval(script, numberOfKeys, ...arguments_);
+      },
+    });
+    const created = await delayedStore.createSession({
+      assertionClaims: assertionClaims(),
+      introspection: activeIntrospection({
+        expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+      }),
+    });
+    const observed = await delayedStore.observeSession(created.handle);
+    const key = `tf-auth:session:${digest(created.handle)}`;
+    const originalTtl = await redis.pttl(key);
+    const shortenedExpiry = new Date(
+      Date.now() + 30 * 60 * 1_000,
+    ).toISOString();
+
+    const refreshed = await delayedStore.refreshSession(
+      created.handle,
+      observed!.revision,
+      activeIntrospection({
+        entitlements: ["tf.collections"],
+        expiresAt: shortenedExpiry,
+      }),
+    );
+
+    expect(refreshed?.expiresAt).toBe(shortenedExpiry);
+    const shortenedTtl = await redis.pttl(key);
+    expect(shortenedTtl).toBeLessThan(originalTtl);
+    expect(shortenedTtl).toBeGreaterThanOrEqual(30 * 60 * 1_000 - 2_000);
+    expect(shortenedTtl).toBeLessThanOrEqual(30 * 60 * 1_000);
+    expect(Date.now() + shortenedTtl).toBeLessThanOrEqual(
+      Date.parse(shortenedExpiry) + 50,
+    );
+    await expect(store.getSession(created.handle)).resolves.toMatchObject({
+      expiresAt: shortenedExpiry,
+      entitlements: ["tf.collections"],
+    });
+  });
+
   it("keeps concurrent refresh/revoke races atomic and never resurrects a session", async () => {
     const created = await store.createSession({
       assertionClaims: assertionClaims(),
       introspection: activeIntrospection(),
     });
+    const observed = await store.observeSession(created.handle);
     const refresh = activeIntrospection({
       entitlements: ["tf.collections"],
       expiresAt: created.session.expiresAt,
     });
 
-    const outcomes = await Promise.all([
+    const outcomes = await Promise.allSettled([
       ...Array.from({ length: 16 }, () =>
-        store.refreshSession(created.handle, refresh),
+        store.refreshSession(created.handle, observed!.revision, refresh),
       ),
       ...Array.from({ length: 8 }, () => store.revokeSession(created.handle)),
     ]);
 
-    expect(outcomes.some((result) => result === true)).toBe(true);
+    expect(
+      outcomes.some(
+        (outcome) => outcome.status === "fulfilled" && outcome.value === true,
+      ),
+    ).toBe(true);
     await expect(store.getSession(created.handle)).resolves.toBeNull();
   });
 
@@ -422,10 +587,12 @@ describe("TfSessionStore sessions", () => {
       assertionClaims: assertionClaims(),
       introspection: activeIntrospection(),
     });
+    const observed = await store.observeSession(created.handle);
 
     await expect(
       store.refreshSession(
         created.handle,
+        observed!.revision,
         activeIntrospection({
           sessionId: "40000000-0000-4000-8000-000000000004",
         }),
@@ -434,6 +601,7 @@ describe("TfSessionStore sessions", () => {
     await expect(
       store.refreshSession(
         created.handle,
+        observed!.revision,
         activeIntrospection({
           expiresAt: new Date(Date.now() - 1_000).toISOString(),
         }),

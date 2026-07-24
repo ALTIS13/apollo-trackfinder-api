@@ -15,7 +15,6 @@ const WEBSOCKET_TICKET_TTL_SECONDS = 30;
 const SESSION_MAX_TTL_SECONDS = 8 * 60 * 60;
 const POLICY_REFRESH_SECONDS = 300;
 const RANDOM_WRITE_ATTEMPTS = 4;
-const CAS_ATTEMPTS = 16;
 const OPAQUE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
 
@@ -59,6 +58,13 @@ const tfSessionSchema = z
   })
   .strict();
 
+const storedSessionSchema = z
+  .object({
+    revision: z.string().regex(OPAQUE_PATTERN),
+    session: tfSessionSchema,
+  })
+  .strict();
+
 const websocketTicketSchema = z
   .object({
     accountId: z.string().uuid(),
@@ -78,15 +84,30 @@ end
 return value
 `;
 
-const COMPARE_AND_REPLACE_SCRIPT = `
+const COMPARE_REVISION_AND_REPLACE_SCRIPT = `
 local current = redis.call("GET", KEYS[1])
 if not current then
   return -1
 end
-if current ~= ARGV[1] then
+local decoded
+local ok
+ok, decoded = pcall(cjson.decode, current)
+if not ok or type(decoded) ~= "table" or decoded["revision"] == nil then
+  return -2
+end
+if decoded["revision"] ~= ARGV[1] then
   return 0
 end
-redis.call("SET", KEYS[1], ARGV[2], "KEEPTTL")
+local current_ttl = redis.call("PTTL", KEYS[1])
+local requested_expiry = tonumber(ARGV[3])
+local redis_time = redis.call("TIME")
+local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+if current_ttl <= 0 or not requested_expiry or requested_expiry <= now_ms then
+  return -2
+end
+local current_expiry = now_ms + current_ttl
+local replacement_expiry = math.min(current_expiry, requested_expiry)
+redis.call("SET", KEYS[1], ARGV[2], "PXAT", replacement_expiry)
 return 1
 `;
 
@@ -143,6 +164,11 @@ export interface TfSession {
   readonly expiresAt: string;
 }
 
+export interface TfSessionObservation {
+  readonly revision: string;
+  readonly session: TfSession;
+}
+
 export interface WebSocketTicket {
   readonly accountId: string;
   readonly sessionId: string;
@@ -196,6 +222,26 @@ function positiveTtl(expiresAt: number, now: number): number {
   return ttl;
 }
 
+function positiveTtlMilliseconds(expiresAt: number, now: number): number {
+  const ttl = Math.floor(expiresAt - now);
+  if (!Number.isFinite(ttl) || ttl < 1) {
+    throw new Error("invalid lifetime");
+  }
+  return ttl;
+}
+
+function validateSessionSemantics(session: TfSession, now: number): void {
+  const expiresAt = finiteTimestamp(session.expiresAt);
+  const assertionExpiresAt = finiteTimestamp(session.assertionExpiresAt);
+  if (
+    expiresAt - now > SESSION_MAX_TTL_SECONDS * 1_000 ||
+    assertionExpiresAt > expiresAt ||
+    assertionExpiresAt - now > POLICY_REFRESH_SECONDS * 1_000
+  ) {
+    throw new Error("invalid session lifetime");
+  }
+}
+
 function parseScriptInteger(value: unknown): number {
   if (typeof value === "number" && Number.isInteger(value)) return value;
   if (
@@ -210,6 +256,7 @@ function parseScriptInteger(value: unknown): number {
 
 interface StoredSession {
   readonly raw: string;
+  readonly revision: string;
   readonly session: TfSession;
 }
 
@@ -293,7 +340,11 @@ export class TfSessionStore {
         platformExpiresAt,
         now + SESSION_MAX_TTL_SECONDS * 1_000,
       );
-      const assertionExpiresAt = Math.min(claims.exp * 1_000, expiresAt);
+      const assertionExpiresAt = Math.min(
+        claims.exp * 1_000,
+        now + POLICY_REFRESH_SECONDS * 1_000,
+        expiresAt,
+      );
       const ttl = positiveTtl(expiresAt, now);
       positiveTtl(assertionExpiresAt, now);
       const session = tfSessionSchema.parse({
@@ -305,9 +356,13 @@ export class TfSessionStore {
         assertionExpiresAt: new Date(assertionExpiresAt).toISOString(),
         expiresAt: new Date(expiresAt).toISOString(),
       });
+      const stored = storedSessionSchema.parse({
+        revision: opaqueValue(),
+        session,
+      });
       const handle = await this.storeRandomValue(
         "session",
-        JSON.stringify(session),
+        JSON.stringify(stored),
         ttl,
       );
       return { handle, session };
@@ -326,55 +381,77 @@ export class TfSessionStore {
     }
   }
 
+  async observeSession(handle: string): Promise<TfSessionObservation | null> {
+    if (!OPAQUE_PATTERN.test(handle)) return null;
+    try {
+      const stored = await this.readSession(handle);
+      return stored === null
+        ? null
+        : { revision: stored.revision, session: stored.session };
+    } catch {
+      throw new TfSessionStoreUnavailableError();
+    }
+  }
+
   async refreshSession(
     handle: string,
+    observedRevision: string,
     input: PolicyIntrospectionResponse,
   ): Promise<TfSession | null> {
     if (!OPAQUE_PATTERN.test(handle)) return null;
+    if (!OPAQUE_PATTERN.test(observedRevision)) {
+      throw new TfSessionStoreUnavailableError();
+    }
     try {
       const introspection = policyIntrospectionResponseSchema.parse(input);
       if (!introspection.active) throw new Error("inactive session");
 
-      for (let attempt = 0; attempt < CAS_ATTEMPTS; attempt += 1) {
-        const stored = await this.readSession(handle);
-        if (stored === null) return null;
-        const now = this.checkedNow();
-        const platformExpiresAt = finiteTimestamp(introspection.expiresAt);
-        const currentExpiresAt = finiteTimestamp(stored.session.expiresAt);
-        if (
-          introspection.accountId !== stored.session.accountId ||
-          introspection.sessionId !== stored.session.platformSessionId ||
-          introspection.installationId !== stored.session.installationId ||
-          platformExpiresAt < currentExpiresAt ||
-          platformExpiresAt <= now
-        ) {
-          throw new Error("invalid refresh binding");
-        }
-        const assertionExpiresAt = Math.min(
-          now + POLICY_REFRESH_SECONDS * 1_000,
-          platformExpiresAt,
-          currentExpiresAt,
-        );
-        positiveTtl(assertionExpiresAt, now);
-        const refreshed = tfSessionSchema.parse({
-          ...stored.session,
-          entitlements: sortedEntitlements(introspection.entitlements),
-          assertionExpiresAt: new Date(assertionExpiresAt).toISOString(),
-        });
-        const result = parseScriptInteger(
-          await this.redis.eval(
-            COMPARE_AND_REPLACE_SCRIPT,
-            1,
-            sessionKey(handle),
-            stored.raw,
-            JSON.stringify(refreshed),
-          ),
-        );
-        if (result === 1) return refreshed;
-        if (result === -1) return null;
-        if (result !== 0) throw new Error("invalid refresh result");
+      const stored = await this.readSession(handle);
+      if (stored === null) return null;
+      if (stored.revision !== observedRevision) {
+        throw new Error("stale session revision");
       }
-      throw new Error("refresh contention");
+      const now = this.checkedNow();
+      const platformExpiresAt = finiteTimestamp(introspection.expiresAt);
+      const currentExpiresAt = finiteTimestamp(stored.session.expiresAt);
+      if (
+        introspection.accountId !== stored.session.accountId ||
+        introspection.sessionId !== stored.session.platformSessionId ||
+        introspection.installationId !== stored.session.installationId ||
+        platformExpiresAt <= now
+      ) {
+        throw new Error("invalid refresh binding");
+      }
+      const expiresAt = Math.min(platformExpiresAt, currentExpiresAt);
+      const assertionExpiresAt = Math.min(
+        now + POLICY_REFRESH_SECONDS * 1_000,
+        expiresAt,
+      );
+      positiveTtl(assertionExpiresAt, now);
+      const refreshed = tfSessionSchema.parse({
+        ...stored.session,
+        entitlements: sortedEntitlements(introspection.entitlements),
+        assertionExpiresAt: new Date(assertionExpiresAt).toISOString(),
+        expiresAt: new Date(expiresAt).toISOString(),
+      });
+      const replacement = storedSessionSchema.parse({
+        revision: opaqueValue(),
+        session: refreshed,
+      });
+      positiveTtlMilliseconds(expiresAt, now);
+      const result = parseScriptInteger(
+        await this.redis.eval(
+          COMPARE_REVISION_AND_REPLACE_SCRIPT,
+          1,
+          sessionKey(handle),
+          observedRevision,
+          JSON.stringify(replacement),
+          expiresAt,
+        ),
+      );
+      if (result === 1) return refreshed;
+      if (result === -1) return null;
+      throw new Error("stale or invalid refresh result");
     } catch {
       throw new TfSessionStoreUnavailableError();
     }
@@ -490,16 +567,11 @@ export class TfSessionStore {
   private async readSession(handle: string): Promise<StoredSession | null> {
     const raw = await this.redis.get(sessionKey(handle));
     if (raw === null) return null;
-    const session = tfSessionSchema.parse(JSON.parse(raw) as unknown);
+    const stored = storedSessionSchema.parse(JSON.parse(raw) as unknown);
     const now = this.checkedNow();
-    if (
-      finiteTimestamp(session.expiresAt) <= now ||
-      finiteTimestamp(session.assertionExpiresAt) >
-        finiteTimestamp(session.expiresAt)
-    ) {
-      return null;
-    }
-    return { raw, session };
+    if (finiteTimestamp(stored.session.expiresAt) <= now) return null;
+    validateSessionSemantics(stored.session, now);
+    return { raw, revision: stored.revision, session: stored.session };
   }
 
   private async storeRandomValue(

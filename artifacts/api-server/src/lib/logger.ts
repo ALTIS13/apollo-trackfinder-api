@@ -20,14 +20,34 @@ const SENSITIVE_FIELD_NAMES = new Set(
     "rawsessiontoken",
     "platformsessionid",
     "tfsession",
+    "sessionhandle",
+    "rawsessionhandle",
+    "tfsessionhandle",
+    "sessiondigest",
+    "tfsessiondigest",
     "transaction",
     "transactionhandle",
     "tx",
     "ticket",
+    "rawticket",
+    "tickethandle",
+    "ticketdigest",
     "websocketticket",
+    "websockettickethandle",
+    "websocketticketdigest",
     "assertion",
     "accesstoken",
+    "rawtoken",
+    "tokendigest",
+    "refreshtoken",
+    "provideraccesstoken",
+    "providerrefreshtoken",
     "code",
+    "rawcode",
+    "authorizationcode",
+    "rawauthorizationcode",
+    "authorizationcodedigest",
+    "codedigest",
     "state",
     "verifier",
     "codeverifier",
@@ -36,6 +56,8 @@ const SENSITIVE_FIELD_NAMES = new Set(
     "clientsecret",
     "clientsecretdigest",
     "rawclientsecret",
+    "password",
+    "passphrase",
     "basicauthorization",
     "jwk",
     "jwks",
@@ -60,6 +82,28 @@ interface SanitizeState {
 
 function normalizeFieldName(field: string): string {
   return field.toLowerCase().replace(/[-_.]/g, "");
+}
+
+function ownDataValue(value: object, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor !== undefined && "value" in descriptor
+    ? descriptor.value
+    : undefined;
+}
+
+function sanitizeHttpBinding(
+  kind: "req" | "res",
+  value: object,
+): Record<string, unknown> {
+  if (kind === "res") {
+    return { statusCode: ownDataValue(value, "statusCode") };
+  }
+  const url = ownDataValue(value, "url");
+  return {
+    id: ownDataValue(value, "id"),
+    method: ownDataValue(value, "method"),
+    url: typeof url === "string" ? url.split("?", 1)[0] : undefined,
+  };
 }
 
 function sanitizeLoggingValue(
@@ -104,10 +148,19 @@ function sanitizeLoggingValue(
         continue;
       }
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      sanitized[key] =
-        descriptor !== undefined && "value" in descriptor
-          ? sanitizeLoggingValue(descriptor.value, state, depth + 1)
-          : "[Accessor]";
+      if (descriptor === undefined || !("value" in descriptor)) {
+        sanitized[key] = "[Accessor]";
+        continue;
+      }
+      if (
+        (key === "req" || key === "res") &&
+        typeof descriptor.value === "object" &&
+        descriptor.value !== null
+      ) {
+        sanitized[key] = sanitizeHttpBinding(key, descriptor.value);
+        continue;
+      }
+      sanitized[key] = sanitizeLoggingValue(descriptor.value, state, depth + 1);
     }
     return sanitized;
   } finally {
@@ -126,6 +179,47 @@ function sanitizeLogObject(value: object): Record<string, unknown> {
   }
 }
 
+function sanitizeChildBindingObject(
+  bindings: object,
+  _options: unknown,
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = Object.create(null);
+  const state: SanitizeState = { ancestors: new WeakSet(), nodes: 0 };
+  for (const key of Object.keys(bindings)) {
+    if (SENSITIVE_FIELD_NAMES.has(normalizeFieldName(key))) {
+      sanitized[key] = REDACTED;
+      continue;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(bindings, key);
+    if (descriptor === undefined || !("value" in descriptor)) {
+      sanitized[key] = "[Accessor]";
+      continue;
+    }
+    if (
+      (key === "req" || key === "res") &&
+      typeof descriptor.value === "object" &&
+      descriptor.value !== null
+    ) {
+      sanitized[key] = sanitizeHttpBinding(key, descriptor.value);
+      continue;
+    }
+    sanitized[key] = sanitizeLoggingValue(descriptor.value, state, 1);
+  }
+  return sanitized;
+}
+
+function sanitizeChildBindings(instance: Logger): Logger {
+  const createChild = instance.child.bind(instance);
+  instance.child = ((bindings, options) =>
+    sanitizeChildBindings(
+      createChild(
+        { ...sanitizeChildBindingObject(bindings, options) },
+        options,
+      ),
+    )) as Logger["child"];
+  return instance;
+}
+
 export function createTfLogger(destination?: DestinationStream): Logger {
   const isProduction = process.env.NODE_ENV === "production";
   const options: LoggerOptions = {
@@ -138,6 +232,11 @@ export function createTfLogger(destination?: DestinationStream): Logger {
             : argument,
         );
         method.apply(this, sanitized as Parameters<LogFn>);
+      },
+    },
+    formatters: {
+      bindings(bindings) {
+        return { ...sanitizeLogObject(bindings) };
       },
     },
     redact: {
@@ -161,7 +260,9 @@ export function createTfLogger(destination?: DestinationStream): Logger {
           },
         }),
   };
-  return destination === undefined ? pino(options) : pino(options, destination);
+  const instance =
+    destination === undefined ? pino(options) : pino(options, destination);
+  return sanitizeChildBindings(instance);
 }
 
 export const logger = createTfLogger();

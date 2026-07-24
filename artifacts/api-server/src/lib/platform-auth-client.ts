@@ -329,6 +329,7 @@ export class PlatformAuthClient {
         audience: ASSERTION_AUDIENCE,
         algorithms: ["EdDSA"],
         clockTolerance: 5,
+        maxTokenAge: 300,
       });
       const claims = platformAssertionClaimsSchema.parse(verified.payload);
       if (!fixedLengthEqual(claims.nonce, parsed.expectedNonce)) {
@@ -406,9 +407,33 @@ function requiredEnvironment(
   return value;
 }
 
-async function readClientSecret(path: string): Promise<string> {
+interface SecretFileHandle {
+  stat(): Promise<{
+    isFile(): boolean;
+    readonly size: number;
+  }>;
+  read(
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position: null,
+  ): Promise<{ readonly bytesRead: number }>;
+  close(): Promise<void>;
+}
+
+export interface TfAuthRuntimeDependencies {
+  readonly openSecretFile?: (
+    path: string,
+    flags: "r",
+  ) => Promise<SecretFileHandle>;
+}
+
+async function readClientSecret(
+  path: string,
+  openSecretFile: NonNullable<TfAuthRuntimeDependencies["openSecretFile"]>,
+): Promise<string> {
   if (!isAbsolute(path)) throw new Error("invalid secret");
-  const handle = await open(path, "r");
+  const handle = await openSecretFile(path, "r");
   try {
     const metadata = await handle.stat();
     if (
@@ -418,7 +443,35 @@ async function readClientSecret(path: string): Promise<string> {
     ) {
       throw new Error("invalid secret");
     }
-    const bytes = await handle.readFile();
+    const buffer = new Uint8Array(MAX_SECRET_FILE_BYTES + 1);
+    let total = 0;
+    while (total < buffer.byteLength) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        total,
+        buffer.byteLength - total,
+        null,
+      );
+      if (
+        !Number.isSafeInteger(bytesRead) ||
+        bytesRead < 0 ||
+        bytesRead > buffer.byteLength - total
+      ) {
+        throw new Error("invalid secret");
+      }
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    const finalMetadata = await handle.stat();
+    if (
+      total < 1 ||
+      total > MAX_SECRET_FILE_BYTES ||
+      !finalMetadata.isFile() ||
+      finalMetadata.size !== total
+    ) {
+      throw new Error("invalid secret");
+    }
+    const bytes = buffer.subarray(0, total);
     const secret = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     if (
       secret.length < 1 ||
@@ -448,6 +501,7 @@ function parseRedisUrl(value: string): string {
 
 export async function parseTfAuthRuntimeConfig(
   environment: NodeJS.ProcessEnv,
+  dependencies: TfAuthRuntimeDependencies = {},
 ): Promise<TfAuthRuntimeConfig> {
   try {
     const nodeEnv = environment.NODE_ENV ?? "development";
@@ -475,6 +529,7 @@ export async function parseTfAuthRuntimeConfig(
     );
     const clientSecret = await readClientSecret(
       requiredEnvironment(environment, "APOLLO_TF_CLIENT_SECRET_FILE"),
+      dependencies.openSecretFile ?? open,
     );
     return {
       nodeEnv: nodeEnv as TfAuthRuntimeConfig["nodeEnv"],

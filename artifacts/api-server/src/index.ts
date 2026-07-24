@@ -16,6 +16,7 @@ import {
   TfSessionStore,
   createStrictRedisClient,
 } from "./lib/tf-session-store.js";
+import { startApiListener } from "./lib/server-startup.js";
 import { attachWebSocketServer } from "./ws.js";
 
 async function start(): Promise<void> {
@@ -42,6 +43,14 @@ async function start(): Promise<void> {
       "TF authentication storage unavailable",
     );
   });
+  let cacheRedis: Redis | null = null;
+  let redisClosed = false;
+  const closeRedisResources = async (): Promise<void> => {
+    if (redisClosed) return;
+    redisClosed = true;
+    cacheRedis?.disconnect(false);
+    authRedis.disconnect(false);
+  };
 
   try {
     await authRedis.connect();
@@ -62,32 +71,38 @@ async function start(): Promise<void> {
       },
     });
 
-    getRedis();
+    cacheRedis = getRedis();
     await runMigrations();
-    const server = app.listen(port, () => {
-      logger.info({ port }, "Server listening");
+    const server = await startApiListener({
+      listen: () => app.listen(port),
+      initialize: async (listeningServer) => {
+        attachWebSocketServer(listeningServer);
+        await initBackgroundQueues();
+      },
+      closeQueues: shutdownBackgroundQueues,
+      closeRedis: closeRedisResources,
     });
-    attachWebSocketServer(server);
-    await initBackgroundQueues();
+    logger.info({ port }, "Server listening");
 
     let shuttingDown = false;
     const shutdown = (): void => {
       if (shuttingDown) return;
       shuttingDown = true;
       server.close(() => {
-        void shutdownBackgroundQueues()
-          .then(() => authRedis.quit())
-          .catch(() => {
-            authRedis.disconnect(false);
-          })
-          .finally(() => process.exit(0));
+        void Promise.allSettled([
+          shutdownBackgroundQueues(),
+          closeRedisResources(),
+        ]).finally(() => process.exit(0));
       });
     };
     process.once("SIGTERM", shutdown);
     process.once("SIGINT", shutdown);
-  } catch (error) {
-    authRedis.disconnect(false);
-    throw error;
+  } catch {
+    await Promise.allSettled([
+      shutdownBackgroundQueues(),
+      closeRedisResources(),
+    ]);
+    throw new Error("TF API startup failed");
   }
 }
 
