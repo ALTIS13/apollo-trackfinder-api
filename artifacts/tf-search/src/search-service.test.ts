@@ -321,6 +321,62 @@ describe("search service", () => {
     ]);
   });
 
+  it("does not match cache mode or result-limit metadata in suggestions", async () => {
+    const service = createSearchService({ providers: providers() });
+
+    await service.search(command({
+      artist: "Visible Artist",
+      title: "Visible Track",
+      mode: "manual",
+      maxResults: 7,
+    }));
+
+    const modeMatches = await service.suggestions({
+      schemaVersion: 1,
+      requestId: "10000000-0000-4000-8000-000000000002",
+      query: "manual",
+      limit: 5,
+    });
+    const limitMatches = await service.suggestions({
+      schemaVersion: 1,
+      requestId: "10000000-0000-4000-8000-000000000003",
+      query: "7",
+      limit: 5,
+    });
+
+    expect(modeMatches.suggestions).toEqual([]);
+    expect(limitMatches.suggestions).toEqual([]);
+  });
+
+  it("projects one suggestion for duplicate artist and title cache variants", async () => {
+    const service = createSearchService({ providers: providers() });
+
+    await service.search(command({
+      artist: "Shared Artist",
+      title: "Shared Track",
+      mode: "manual",
+      maxResults: 7,
+    }));
+    await service.search(command({
+      requestId: "10000000-0000-4000-8000-000000000002",
+      artist: "Shared Artist",
+      title: "Shared Track",
+      mode: "auto",
+      maxResults: 8,
+    }));
+
+    const suggestions = await service.suggestions({
+      schemaVersion: 1,
+      requestId: "10000000-0000-4000-8000-000000000003",
+      query: "shared",
+      limit: 5,
+    });
+
+    expect(suggestions.suggestions).toEqual([
+      { artist: "shared artist", title: "shared track" },
+    ]);
+  });
+
   it("does not cache an incomplete all-source provider fan-out", async () => {
     let partialCalls = 0;
     const partialProviders = allSources.map((source): SearchProvider => ({

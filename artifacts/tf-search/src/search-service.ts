@@ -8,7 +8,7 @@ import type {
   TfSearchSuggestionsCommand,
   TfSearchSuggestionsResponse,
 } from "@workspace/tf-search-contract";
-import { BoundedSearchCache } from "./cache.js";
+import { BoundedSearchCache, type SearchCacheIdentity } from "./cache.js";
 import { rank } from "./ranker.js";
 
 export type InternalTrack = TfSearchResult;
@@ -43,31 +43,16 @@ interface SearchServiceOptions {
 
 const ALL_SOURCES: readonly TfSearchSource[] = ["yt", "sc", "bc", "dz"];
 const ROLLING_WINDOW_SECONDS = 60;
-const CACHE_IDENTITY_PREFIX = "tf-search-v1:";
 type ProviderStatus = "ok" | "failed" | "skipped";
 
-function normalizeCacheValue(value: string): string {
-  return value.trim().toLowerCase();
-}
-
-function cacheIdentityTitle(command: TfSearchCommand): string {
-  const canonicalSources = ALL_SOURCES.filter((source) => command.sources.includes(source));
-  return `${CACHE_IDENTITY_PREFIX}${JSON.stringify([
-    normalizeCacheValue(command.title),
-    command.mode,
-    canonicalSources,
-    command.maxResults,
-  ])}`;
-}
-
-function suggestionTitle(value: string): string {
-  if (!value.startsWith(CACHE_IDENTITY_PREFIX)) return value;
-  try {
-    const parsed = JSON.parse(value.slice(CACHE_IDENTITY_PREFIX.length)) as unknown;
-    return Array.isArray(parsed) && typeof parsed[0] === "string" ? parsed[0] : value;
-  } catch {
-    return value;
-  }
+function cacheIdentity(command: TfSearchCommand): SearchCacheIdentity {
+  return {
+    artist: command.artist,
+    title: command.title,
+    mode: command.mode,
+    sources: command.sources,
+    maxResults: command.maxResults,
+  };
 }
 
 function isCacheable(command: TfSearchCommand): boolean {
@@ -120,7 +105,7 @@ class SearchServiceImpl implements SearchService {
     const cacheable = isCacheable(command);
 
     if (cacheable) {
-      const cached = this.cache.get(command.artist, cacheIdentityTitle(command));
+      const cached = this.cache.get(cacheIdentity(command));
       if (cached) {
         return {
           schemaVersion: 1,
@@ -168,7 +153,7 @@ class SearchServiceImpl implements SearchService {
     }).slice(0, command.maxResults);
 
     if (cacheable && failedProviders === 0) {
-      this.cache.set(command.artist, cacheIdentityTitle(command), ranked);
+      this.cache.set(cacheIdentity(command), ranked);
     }
 
     return {
@@ -236,10 +221,7 @@ class SearchServiceImpl implements SearchService {
     return {
       schemaVersion: 1,
       requestId: command.requestId,
-      suggestions: this.cache.suggestions(command.query, command.limit).map((suggestion) => ({
-        artist: suggestion.artist,
-        title: suggestionTitle(suggestion.title),
-      })),
+      suggestions: [...this.cache.suggestions(command.query, command.limit)],
     };
   }
 
