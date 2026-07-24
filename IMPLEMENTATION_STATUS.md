@@ -197,7 +197,7 @@ Last updated: 2026-07-25.
 - Локальная Apollo Platform Identity/Policy foundation и production-compatible container smoke завершены. Следующий feature stage должен начинаться только по отдельному binding brief; Task 8 не включает portal/TF client zone или дальнейшую платформенную функциональность.
 - Coolify/HomeNode rollout выполняется только после локальной реализации и validation всех web/server модулей, повторного read-only preflight и явного разрешения владельца непосредственно перед удалёнными изменениями.
 - Native Android APK decision remains separate: сохранить Expo-модули через native prebuild/Gradle либо выполнить отдельную миграцию на bare React Native.
-- Apollo TF web client подключён к Platform authorize/callback, cookie-backed session, CSRF boundary и одноразовым WebSocket tickets. Следующий server/web этап: выделить `tf-search`, `tf-integrations` и `tf-download-worker` в независимые least-privilege контейнеры, сохранить единый root Compose для локального полного стека и подготовить Coolify deployment contracts без удалённого rollout до read-only preflight и отдельного подтверждения владельца.
+- Apollo TF web client подключён к Platform authorize/callback, cookie-backed session, CSRF boundary и одноразовым WebSocket tickets. `tf-search` уже выделен и локально провалидирован; следующий server/web этап: выделить `tf-integrations`, затем `tf-download-worker` в независимые least-privilege контейнеры, сохранить единый root Compose для локального полного стека и подготовить Coolify deployment contracts без удалённого rollout до read-only preflight и отдельного подтверждения владельца.
 
 ## Notes
 
