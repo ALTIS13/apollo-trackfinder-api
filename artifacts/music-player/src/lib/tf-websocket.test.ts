@@ -38,10 +38,12 @@ class FakeSocket {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 async function flushPromises(): Promise<void> {
@@ -215,6 +217,77 @@ describe("TfWebSocketLifecycle", () => {
 
     expect(harness.createSocket).not.toHaveBeenCalled();
     expect(harness.schedule).not.toHaveBeenCalled();
+  });
+
+  it("ignores a delayed terminal ticket rejection after stop", async () => {
+    const pendingTicket = deferred<string>();
+    const harness = createHarness();
+    harness.createTicket.mockReset();
+    harness.createTicket.mockReturnValueOnce(pendingTicket.promise);
+
+    harness.lifecycle.start();
+    harness.lifecycle.stop();
+    pendingTicket.reject(new TfApiError(401, "unauthorized", "unauthenticated"));
+    await flushPromises();
+
+    expect(harness.onTerminalError).not.toHaveBeenCalled();
+    expect(harness.schedule).not.toHaveBeenCalled();
+    expect(harness.createSocket).not.toHaveBeenCalled();
+  });
+
+  it("ignores an old generation rejection without stopping the replacement", async () => {
+    const oldTicket = deferred<string>();
+    const harness = createHarness();
+    harness.createTicket.mockReset();
+    harness.createTicket
+      .mockReturnValueOnce(oldTicket.promise)
+      .mockResolvedValueOnce(SECOND_TICKET)
+      .mockResolvedValueOnce(THIRD_TICKET);
+
+    harness.lifecycle.start();
+    harness.lifecycle.stop();
+    harness.lifecycle.start();
+    await flushPromises();
+    const replacementSocket = harness.sockets[0];
+
+    oldTicket.reject(new TfApiError(403, "module_access_denied", "forbidden"));
+    await flushPromises();
+
+    expect(harness.onTerminalError).not.toHaveBeenCalled();
+    expect(harness.schedule).not.toHaveBeenCalled();
+    expect(harness.sockets).toHaveLength(1);
+
+    replacementSocket.emitClose();
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(harness.createTicket).toHaveBeenCalledTimes(3);
+    expect(harness.sockets).toHaveLength(2);
+  });
+
+  it("ignores duplicate close from a socket replaced by a new connection", async () => {
+    const harness = createHarness([FIRST_TICKET, SECOND_TICKET, THIRD_TICKET]);
+
+    harness.lifecycle.start();
+    await flushPromises();
+    const firstSocket = harness.sockets[0];
+    firstSocket.emitClose();
+    await vi.advanceTimersByTimeAsync(3_000);
+    const replacementSocket = harness.sockets[1];
+    replacementSocket.open();
+
+    firstSocket.emitClose();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(harness.schedule).toHaveBeenCalledTimes(1);
+    expect(harness.createTicket).toHaveBeenCalledTimes(2);
+    expect(harness.sockets).toHaveLength(2);
+
+    replacementSocket.emitClose();
+    expect(harness.schedule).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(harness.createTicket).toHaveBeenCalledTimes(3);
+    expect(harness.sockets).toHaveLength(3);
   });
 
   it("cancels reconnect timers after stop", async () => {

@@ -69,12 +69,12 @@ export class TfWebSocketLifecycle {
       socket.onmessage = this.options.onMessage;
       socket.onerror = () => socket.close();
       socket.onclose = () => {
-        if (this.socket === socket) {
-          this.socket = null;
-        }
+        if (this.socket !== socket) return;
+        this.socket = null;
         this.scheduleReconnect();
       };
     } catch (error) {
+      if (!this.running || attempt !== this.attempt) return;
       const apiError = normalizeTfApiError(error);
       if (TERMINAL_ERROR_KINDS.has(apiError.kind)) {
         this.running = false;
