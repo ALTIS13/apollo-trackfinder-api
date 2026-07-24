@@ -616,7 +616,7 @@ git commit -m "feat(tf-api): dispatch search to module"
   `tf_search_internal_auth_secret`, `tf_search_heartbeat_secret`,
   `tf_module_heartbeat_keys`.
 
-- [ ] **Step 1: Write RED Compose contract tests**
+- [x] **Step 1: Write RED Compose contract tests**
 
 Parse both YAML templates and assert:
 
@@ -635,14 +635,14 @@ Assert exact secret ownership, no literal value/digest in rendered config, no
 DB/Redis/Platform/provider/control-plane env, UID 10001, read-only/init/cap-drop,
 tmpfs, PID/resource/stop limits, healthcheck, and no volume.
 
-- [ ] **Step 2: Write RED startup/file-secret tests**
+- [x] **Step 2: Write RED startup/file-secret tests**
 
 Test `start-tf.sh` with disposable files. It must load the heartbeat map only from
 the configured file, reject unreadable/empty/oversized content, and avoid printing
 it. Existing database URL loading remains unchanged. Search startup must similarly
 load only its two owning secrets without exposing them.
 
-- [ ] **Step 3: Write the RED smoke contract**
+- [x] **Step 3: Write the RED smoke contract**
 
 The smoke script must:
 
@@ -664,7 +664,7 @@ The smoke script must:
 Container execution remains gated behind an explicit environment flag in unit
 tests; fake-Docker behavior runs by default.
 
-- [ ] **Step 4: Run focused tests and verify RED**
+- [x] **Step 4: Run focused tests and verify RED**
 
 ```bash
 pnpm --filter @workspace/api-server test -- src/deployment-contract.test.ts src/admin-config-contract.test.ts
@@ -673,7 +673,7 @@ pnpm --filter @workspace/tf-search test -- src/deployment-contract.test.ts src/s
 
 Expected: fail because service/secrets/networks/smoke are absent.
 
-- [ ] **Step 5: Implement Compose and smoke delivery**
+- [x] **Step 5: Implement Compose and smoke delivery**
 
 Add `tf-search-control` as internal and `tf-search-egress` only for the module.
 Pass local-only flags explicitly. Add health-dependent API startup only where it
@@ -684,7 +684,7 @@ Document one-replica/cache/replay limitations, exact secrets, same-node DNS,
 HTTPS-only cross-node mode, clock synchronization, and the no-domain/no-remote
 mutation status.
 
-- [ ] **Step 6: Run Task 5 validation**
+- [x] **Step 6: Run Task 5 validation**
 
 ```bash
 pnpm --filter @workspace/api-server test -- src/deployment-contract.test.ts src/admin-config-contract.test.ts
@@ -699,7 +699,7 @@ Use disposable canary secret files for both Compose renders and remove them afte
 absolute-path containment checks. Then run the explicit local smoke and verify its
 cleanup audit.
 
-- [ ] **Step 7: Commit Task 5**
+- [x] **Step 7: Commit Task 5**
 
 ```bash
 git add docker-compose.yml artifacts/api-server/docker-compose.yml artifacts/api-server/container/start-tf.sh artifacts/api-server/src/deployment-contract.test.ts artifacts/api-server/src/admin-config-contract.test.ts artifacts/tf-search .dockerignore MODULES.md
