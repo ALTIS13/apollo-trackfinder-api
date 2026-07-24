@@ -63,13 +63,18 @@ Last updated: 2026-07-24.
 - Browser auth: Platform PKCE through `api.tf.apollot.ru`, host-only TF cookie
 - CSRF: `/api/auth/me` token retained in memory and sent on unsafe requests
 - Policy: `tf.search` gates application mount; server remains authoritative for every capability
-- WebSocket: one-time ticket acquired before every connection attempt
+- Runtime invalidation: confirmed `401` clears CSRF and query state; core WebSocket/search policy failures revalidate `/auth/me` and unmount protected providers while pending
+- Search: generated `searchTracks` receives current credential/CSRF options at mutation time
+- WebSocket: one-time ticket acquired before every connection attempt; exact terminal close pairs and stale handlers are fail-closed
+- Yandex: browser token entry/transport removed; new onboarding is deferred to server-side OAuth while existing server-backed connections remain readable and logout-capable
 - Legacy browser UUID: removed
 - Remote infrastructure: unchanged; domains/Caddy/Coolify deployment still requires preflight and explicit approval
 
 ## Validation
 
-- TF web-session local release validation (2026-07-24): music-player suite `41/41`, selected API browser-contract suite `100/100`, player/root typechecks and player production build passed. Controller validation set `TF_SECRET_DIRECTORY` to a disposable verified workspace-local directory containing only canary paths `tf_client_secret`, `tf_database_url`, and `tf_postgres_password`; `docker compose config --quiet` exited `0`. After absolute-path containment checks, all three files and the directory were individually deleted (`TEMP_CLEAN=True`). No real secret, Compose configuration, or remote infrastructure was changed. The exact legacy scan found three test-only assertions in `tf-api-migration.test.ts`; the runtime-only scan was clean. The exact secret-boundary scan was clean.
+- TF web-session consolidated final-review fix wave (2026-07-24): focused and full music-player suites passed `66/66`; selected API auth/boundary/ticket/policy/WebSocket tests passed `100/100`; player/root typechecks and player production build passed; exact runtime legacy/provider-secret scans and `git diff --check` were clean. `pnpm 10.33.2` regenerated `pnpm-lock.yaml` unchanged and `pnpm install --frozen-lockfile` passed. The required music-player test importer entries were retained together with pnpm's normalized shared Vitest peer snapshots and `path-scurry` deduplication to the already locked `lru-cache@11.5.2`. No tracked Compose file changed, so Compose was not rerun and no remote service or infrastructure was touched.
+
+- TF web-session local release validation (2026-07-24): music-player suite `41/41`, selected API browser-contract suite `100/100`, player/root typechecks and player production build passed. Controller validation set `TF_SECRET_DIRECTORY` to a disposable verified workspace-local directory containing only canary paths `tf_client_secret`, `tf_database_url`, and `tf_postgres_password`; exact `docker compose config` exited `0`. After absolute-path containment checks, all three files and the directory were individually deleted (`TEMP_CLEAN=True`). No real secret, Compose configuration, or remote infrastructure was changed. The exact legacy scan found three test-only assertions in `tf-api-migration.test.ts`; the runtime-only scan was clean. The exact secret-boundary scan was clean.
 
 - Baseline 2026-06-23: `pnpm install`, full typecheck и build прошли до изменения mobile delivery target.
 - Residual search: активных Replit/Cursor артефактов в коде не найдено; оставшиеся `cursor` совпадения относятся к CSS/Redis cursor, не к Cursor IDE.

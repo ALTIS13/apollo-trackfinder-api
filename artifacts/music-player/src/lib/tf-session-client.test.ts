@@ -9,12 +9,13 @@ import {
   tfRequestInit,
 } from "./tf-session-client";
 
+const CSRF_TOKEN = "c".repeat(42) + "A";
 const session = {
   accountId: "10000000-0000-4000-8000-000000000001",
   installationId: "20000000-0000-4000-8000-000000000002",
   entitlements: ["tf.search", "tf.downloads"],
-  expiresAt: "2026-07-25T12:00:00.000Z",
-  csrfToken: "csrf-canary",
+  expiresAt: "2099-01-01T00:00:00.000Z",
+  csrfToken: CSRF_TOKEN,
 };
 
 describe("TF browser session client", () => {
@@ -44,7 +45,7 @@ describe("TF browser session client", () => {
       credentials: "include",
       headers: {
         "content-type": "application/json",
-        "x-csrf-token": "csrf-canary",
+        "x-csrf-token": CSRF_TOKEN,
       },
     });
     expect(localStorage.length).toBe(0);
@@ -147,13 +148,42 @@ describe("TF browser session client", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
-  it("clears CSRF after an invalid session payload", async () => {
+  it.each([
+    [
+      "non-canonical accountId",
+      { ...session, accountId: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA" },
+    ],
+    [
+      "non-canonical installationId",
+      { ...session, installationId: "bbbbbbbb-bbbb-4bbb-cbbb-bbbbbbbbbbbb" },
+    ],
+    [
+      "short CSRF token",
+      { ...session, csrfToken: "short" },
+    ],
+    [
+      "non-canonical base64url CSRF token",
+      { ...session, csrfToken: "c".repeat(42) + "B" },
+    ],
+    [
+      "non-string entitlement",
+      { ...session, entitlements: ["tf.search", 1] },
+    ],
+    [
+      "invalid expiry",
+      { ...session, expiresAt: "not-a-date" },
+    ],
+    [
+      "expired session",
+      { ...session, expiresAt: "2020-01-01T00:00:00.000Z" },
+    ],
+  ])("clears CSRF after an invalid session payload: %s", async (_label, invalidSession) => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(new Response(JSON.stringify(session), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ accountId: session.accountId }), {
+      .mockResolvedValueOnce(new Response(JSON.stringify(invalidSession), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }));
@@ -180,7 +210,7 @@ describe("TF browser session client", () => {
     await loadTfSession();
     await expect(tfFetch("/auth/me")).rejects.toMatchObject({ status: 503 });
     expect(tfRequestInit({ method: "POST" })).toMatchObject({
-      headers: { "x-csrf-token": "csrf-canary" },
+      headers: { "x-csrf-token": CSRF_TOKEN },
     });
   });
 });

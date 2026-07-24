@@ -14,9 +14,6 @@ import {
   AlertCircle,
   ExternalLink,
   Play,
-  Key,
-  Eye,
-  EyeOff,
 } from "lucide-react";
 import {
   useSpotifyStatus,
@@ -31,7 +28,6 @@ import {
 } from "@/hooks/use-spotify";
 import {
   useYandexStatus,
-  useYandexSaveToken,
   useYandexLogout,
   useYandexLiked,
   useYandexPlaylists,
@@ -201,27 +197,7 @@ function SpotifyConnectPrompt() {
   );
 }
 
-function YandexConnectPrompt({ onConnected }: { onConnected: () => void }) {
-  const [token, setToken] = useState("");
-  const [showToken, setShowToken] = useState(false);
-  const saveToken = useYandexSaveToken();
-  const { toast } = useToast();
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    try {
-      await saveToken.mutateAsync(token);
-      toast({ title: "Yandex Music connected!", description: "Your library is ready to browse." });
-      onConnected();
-    } catch (err) {
-      toast({
-        title: "Connection failed",
-        description: (err as Error).message ?? "Check your token and try again.",
-        variant: "destructive",
-      });
-    }
-  };
-
+function YandexConnectPrompt() {
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
@@ -236,47 +212,11 @@ function YandexConnectPrompt({ onConnected }: { onConnected: () => void }) {
       </div>
 
       <div className="text-center max-w-sm">
-        <h2 className="text-2xl font-bold text-white mb-2">Connect Yandex Music</h2>
-        <p className="text-white/55 text-base">Paste your OAuth token to browse your Yandex Music library.</p>
-      </div>
-
-      <div className="w-full max-w-md space-y-3">
-        <div className="bg-white/5 rounded-xl p-4 text-xs text-white/55 space-y-2 border border-white/8">
-          <p className="font-semibold text-white/70 flex items-center gap-1.5"><Key className="w-3.5 h-3.5" />How to get your token:</p>
-          <ol className="space-y-1 list-decimal list-inside">
-            <li>Open <a href="https://oauth.yandex.ru/authorize?response_type=token&client_id=23cabbbdc6cd418abb4b39c32c41195d" target="_blank" rel="noopener noreferrer" className="underline hover:text-white/80">this Yandex OAuth link</a></li>
-            <li>Log in and grant access</li>
-            <li>Copy the <code className="bg-white/10 px-1 rounded">access_token</code> from the URL</li>
-          </ol>
-        </div>
-
-        <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          <div className="relative">
-            <input
-              type={showToken ? "text" : "password"}
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              placeholder="Paste your OAuth token here..."
-              className="w-full bg-white/8 border border-white/12 rounded-xl px-4 py-3 text-white text-sm placeholder-white/30 focus:outline-none focus:border-white/30 pr-10"
-            />
-            <button
-              type="button"
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-white/35 hover:text-white/70"
-              onClick={() => setShowToken(!showToken)}
-            >
-              {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-            </button>
-          </div>
-          <button
-            type="submit"
-            disabled={!token.trim() || saveToken.isPending}
-            className="flex items-center justify-center gap-2 py-3 rounded-xl font-semibold text-black disabled:opacity-50 disabled:cursor-not-allowed transition-all hover:brightness-110 active:scale-98"
-            style={{ background: YANDEX_YELLOW }}
-          >
-            {saveToken.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <LogIn className="w-4 h-4" />}
-            Connect Yandex Music
-          </button>
-        </form>
+        <h2 className="text-xl font-bold text-white mb-2">Yandex Music connection unavailable</h2>
+        <p className="text-white/55 text-sm leading-relaxed">
+          Secure connection is temporarily unavailable while server-side OAuth onboarding is being prepared.
+          Existing connected accounts remain accessible.
+        </p>
       </div>
     </motion.div>
   );
@@ -688,7 +628,7 @@ export default function Favorites() {
             ) : (
               yandexStatus?.connected
                 ? <YandexCatalog onSearchVariants={handleSearchVariants} />
-                : <YandexConnectPrompt onConnected={() => queryClient.invalidateQueries({ queryKey: ["yandex"] })} />
+                : <YandexConnectPrompt />
             )}
           </motion.div>
         </AnimatePresence>

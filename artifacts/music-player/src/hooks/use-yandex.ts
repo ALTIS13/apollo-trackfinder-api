@@ -36,21 +36,6 @@ export function useYandexStatus() {
   });
 }
 
-export function useYandexSaveToken() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (token: string) =>
-      tfFetch("/yandex/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token }),
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["yandex"] });
-    },
-  });
-}
-
 export function useYandexLogout() {
   const queryClient = useQueryClient();
   return useMutation({

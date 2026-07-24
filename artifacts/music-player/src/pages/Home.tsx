@@ -1,14 +1,19 @@
 import { useState, useEffect, useCallback } from "react";
-import { useSearchTracks } from "@workspace/api-client-react";
-import type { TrackType, TrackResult } from "@workspace/api-client-react";
+import { useMutation } from "@tanstack/react-query";
+import { searchTracks } from "@workspace/api-client-react";
+import type { SearchRequest, TrackType, TrackResult } from "@workspace/api-client-react";
 import { TrackCard } from "@/components/TrackCard";
-import { tfRequestInit } from "@/lib/tf-session-client";
+import { reportTfAuthError, tfRequestInit } from "@/lib/tf-session-client";
 import { Search, Music2, Loader2, Sparkles } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 type FilterType = TrackType | "all";
 type SourceKey = "yt" | "sc" | "bc" | "dz";
 type SourceMode = "auto" | "manual";
+type HomeSearchRequest = SearchRequest & {
+  mode: SourceMode;
+  sources?: SourceKey[];
+};
 
 const SOURCE_INFO: { key: SourceKey; label: string; color: string; dot: string }[] = [
   { key: "yt", label: "YouTube", color: "text-red-400 bg-red-400/10 border-red-400/30", dot: "bg-red-400" },
@@ -59,19 +64,19 @@ export default function Home() {
     saveSourcePrefs("auto", next);
   }, []);
 
-  const searchMutation = useSearchTracks({
-    request: tfRequestInit({ method: "POST" }),
+  const searchMutation = useMutation({
+    mutationFn: (data: SearchRequest) =>
+      searchTracks(data, tfRequestInit({ method: "POST" })),
+    onError: (error) => {
+      reportTfAuthError(error);
+    },
   });
 
-  function buildSearchData(a: string, t: string) {
-    const data: Record<string, unknown> = { artist: a, title: t };
+  function buildSearchData(a: string, t: string): HomeSearchRequest {
     if (sourceMode === "manual" && enabledSources.length > 0 && enabledSources.length < 4) {
-      data.mode = "manual";
-      data.sources = enabledSources;
-    } else {
-      data.mode = "auto";
+      return { artist: a, title: t, mode: "manual", sources: enabledSources };
     }
-    return data;
+    return { artist: a, title: t, mode: "auto" };
   }
 
   useEffect(() => {
@@ -80,7 +85,7 @@ export default function Home() {
     const t = p.get("title");
     if (a && t) {
       setHasSearched(true);
-      searchMutation.mutate({ data: buildSearchData(a, t) as any });
+      searchMutation.mutate(buildSearchData(a, t));
       window.history.replaceState({}, "", window.location.pathname);
     }
   }, []);
@@ -90,7 +95,7 @@ export default function Home() {
     if (!artist.trim() || !title.trim()) return;
     
     setHasSearched(true);
-    searchMutation.mutate({ data: buildSearchData(artist, title) as any });
+    searchMutation.mutate(buildSearchData(artist, title));
   };
 
   const results = searchMutation.data?.results || [];

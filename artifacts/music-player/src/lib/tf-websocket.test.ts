@@ -30,9 +30,12 @@ class FakeSocket {
     this.onopen?.call(this as unknown as WebSocket, new Event("open"));
   }
 
-  emitClose(): void {
+  emitClose(code = 1000, reason = ""): void {
     this.readyState = WebSocket.CLOSED;
-    this.onclose?.call(this as unknown as WebSocket, new CloseEvent("close"));
+    this.onclose?.call(
+      this as unknown as WebSocket,
+      new CloseEvent("close", { code, reason }),
+    );
   }
 }
 
@@ -123,11 +126,13 @@ describe("TfWebSocketLifecycle", () => {
 
     harness.lifecycle.start();
     await flushPromises();
+    harness.sockets[0].open();
     harness.sockets[0].emitClose();
 
     await vi.advanceTimersByTimeAsync(3_000);
+    harness.sockets[1].open();
     harness.sockets[1].emitClose();
-    await vi.advanceTimersByTimeAsync(6_000);
+    await vi.advanceTimersByTimeAsync(3_000);
 
     expect(harness.createTicket).toHaveBeenCalledTimes(3);
     expect(harness.buildUrl.mock.calls.map(([ticket]) => ticket)).toEqual([
@@ -164,7 +169,7 @@ describe("TfWebSocketLifecycle", () => {
     await flushPromises();
 
     for (const delay of expectedDelays) {
-      harness.sockets.at(-1)?.emitClose();
+      harness.sockets.at(-1)?.emitClose(1013, "buffer_unavailable");
       expect(harness.schedule).toHaveBeenLastCalledWith(expect.any(Function), delay);
       await vi.advanceTimersByTimeAsync(delay);
     }
@@ -177,7 +182,7 @@ describe("TfWebSocketLifecycle", () => {
 
     harness.lifecycle.start();
     await flushPromises();
-    harness.sockets[0].emitClose();
+    harness.sockets[0].emitClose(1013, "buffer_unavailable");
     await vi.advanceTimersByTimeAsync(3_000);
     harness.sockets[1].open();
     harness.sockets[1].emitClose();
@@ -200,6 +205,81 @@ describe("TfWebSocketLifecycle", () => {
 
     expect(harness.onTerminalError).toHaveBeenCalledOnce();
     expect(harness.onTerminalError).toHaveBeenCalledWith(error);
+    expect(harness.schedule).not.toHaveBeenCalled();
+    expect(harness.createTicket).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [4403, "policy_revoked", 403, "forbidden"],
+    [1013, "policy_unavailable", 503, "unavailable"],
+  ])(
+    "treats close %s/%s as terminal %s",
+    async (code, reason, status, kind) => {
+      const harness = createHarness([FIRST_TICKET, SECOND_TICKET]);
+
+      harness.lifecycle.start();
+      await flushPromises();
+      const socket = harness.sockets[0];
+      const staleClose = socket.onclose;
+      socket.open();
+      socket.emitClose(code, reason);
+      staleClose?.call(
+        socket as unknown as WebSocket,
+        new CloseEvent("close", { code, reason }),
+      );
+      await vi.runAllTimersAsync();
+
+      expect(harness.onTerminalError).toHaveBeenCalledOnce();
+      expect(harness.onTerminalError).toHaveBeenCalledWith(expect.objectContaining({
+        status,
+        code: reason,
+        kind,
+      }));
+      expect(harness.schedule).not.toHaveBeenCalled();
+      expect(harness.createTicket).toHaveBeenCalledOnce();
+      expect(socket.onopen).toBeNull();
+      expect(socket.onmessage).toBeNull();
+      expect(socket.onerror).toBeNull();
+      expect(socket.onclose).toBeNull();
+    },
+  );
+
+  it("keeps 1013/buffer_unavailable transient and reconnectable", async () => {
+    const harness = createHarness([FIRST_TICKET, SECOND_TICKET]);
+
+    harness.lifecycle.start();
+    await flushPromises();
+    harness.sockets[0].open();
+    harness.sockets[0].emitClose(1013, "buffer_unavailable");
+
+    expect(harness.onTerminalError).not.toHaveBeenCalled();
+    expect(harness.schedule).toHaveBeenCalledWith(expect.any(Function), 3_000);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(harness.createTicket).toHaveBeenCalledTimes(2);
+    expect(harness.sockets).toHaveLength(2);
+  });
+
+  it("terminates once when an abnormal close happens before open", async () => {
+    const harness = createHarness([FIRST_TICKET, SECOND_TICKET]);
+
+    harness.lifecycle.start();
+    await flushPromises();
+    const socket = harness.sockets[0];
+    const staleClose = socket.onclose;
+    socket.emitClose(1006);
+    staleClose?.call(
+      socket as unknown as WebSocket,
+      new CloseEvent("close", { code: 1006 }),
+    );
+    await vi.runAllTimersAsync();
+
+    expect(harness.onTerminalError).toHaveBeenCalledOnce();
+    expect(harness.onTerminalError).toHaveBeenCalledWith(expect.objectContaining({
+      status: 503,
+      code: "websocket_unavailable",
+      kind: "unavailable",
+    }));
     expect(harness.schedule).not.toHaveBeenCalled();
     expect(harness.createTicket).toHaveBeenCalledOnce();
   });
@@ -257,6 +337,7 @@ describe("TfWebSocketLifecycle", () => {
     expect(harness.schedule).not.toHaveBeenCalled();
     expect(harness.sockets).toHaveLength(1);
 
+    replacementSocket.open();
     replacementSocket.emitClose();
     await vi.advanceTimersByTimeAsync(3_000);
 
@@ -270,6 +351,7 @@ describe("TfWebSocketLifecycle", () => {
     harness.lifecycle.start();
     await flushPromises();
     const firstSocket = harness.sockets[0];
+    firstSocket.open();
     firstSocket.emitClose();
     await vi.advanceTimersByTimeAsync(3_000);
     const replacementSocket = harness.sockets[1];
@@ -295,6 +377,7 @@ describe("TfWebSocketLifecycle", () => {
 
     harness.lifecycle.start();
     await flushPromises();
+    harness.sockets[0].open();
     harness.sockets[0].emitClose();
     harness.lifecycle.stop();
     await vi.runAllTimersAsync();
@@ -311,8 +394,92 @@ describe("TfWebSocketLifecycle", () => {
     const socket = harness.sockets[0];
     harness.lifecycle.stop();
 
+    expect(socket.onopen).toBeNull();
+    expect(socket.onmessage).toBeNull();
+    expect(socket.onerror).toBeNull();
     expect(socket.onclose).toBeNull();
     expect(socket.close).toHaveBeenCalledOnce();
+  });
+
+  it("ignores captured handlers from a stopped generation after restart", async () => {
+    const harness = createHarness([FIRST_TICKET, SECOND_TICKET]);
+
+    harness.lifecycle.start();
+    await flushPromises();
+    const staleSocket = harness.sockets[0];
+    const staleHandlers = {
+      open: staleSocket.onopen,
+      message: staleSocket.onmessage,
+      error: staleSocket.onerror,
+      close: staleSocket.onclose,
+    };
+
+    harness.lifecycle.stop();
+    harness.lifecycle.start();
+    await flushPromises();
+    const replacementSocket = harness.sockets[1];
+
+    staleHandlers.open?.call(staleSocket as unknown as WebSocket, new Event("open"));
+    staleHandlers.message?.call(
+      staleSocket as unknown as WebSocket,
+      new MessageEvent("message", { data: "stale" }),
+    );
+    staleHandlers.error?.call(staleSocket as unknown as WebSocket, new Event("error"));
+    staleHandlers.close?.call(
+      staleSocket as unknown as WebSocket,
+      new CloseEvent("close", { code: 4403, reason: "policy_revoked" }),
+    );
+    await vi.runAllTimersAsync();
+
+    expect(harness.onMessage).not.toHaveBeenCalled();
+    expect(staleSocket.close).toHaveBeenCalledOnce();
+    expect(harness.schedule).not.toHaveBeenCalled();
+    expect(harness.createTicket).toHaveBeenCalledTimes(2);
+    expect(harness.sockets).toHaveLength(2);
+    expect(harness.onTerminalError).not.toHaveBeenCalled();
+    expect(replacementSocket.readyState).toBe(WebSocket.CONNECTING);
+  });
+
+  it("detaches replaced handlers and stale callbacks cannot act or reset backoff", async () => {
+    const harness = createHarness([FIRST_TICKET, SECOND_TICKET, THIRD_TICKET]);
+
+    harness.lifecycle.start();
+    await flushPromises();
+    const staleSocket = harness.sockets[0];
+    const staleHandlers = {
+      open: staleSocket.onopen,
+      message: staleSocket.onmessage,
+      error: staleSocket.onerror,
+      close: staleSocket.onclose,
+    };
+    staleSocket.emitClose(1013, "buffer_unavailable");
+
+    expect(staleSocket.onopen).toBeNull();
+    expect(staleSocket.onmessage).toBeNull();
+    expect(staleSocket.onerror).toBeNull();
+    expect(staleSocket.onclose).toBeNull();
+    await vi.advanceTimersByTimeAsync(3_000);
+    const replacementSocket = harness.sockets[1];
+
+    staleHandlers.open?.call(staleSocket as unknown as WebSocket, new Event("open"));
+    staleHandlers.message?.call(
+      staleSocket as unknown as WebSocket,
+      new MessageEvent("message", { data: "stale" }),
+    );
+    staleHandlers.error?.call(staleSocket as unknown as WebSocket, new Event("error"));
+    staleHandlers.close?.call(
+      staleSocket as unknown as WebSocket,
+      new CloseEvent("close", { code: 4403, reason: "policy_revoked" }),
+    );
+
+    expect(harness.onMessage).not.toHaveBeenCalled();
+    expect(staleSocket.close).not.toHaveBeenCalled();
+    expect(harness.schedule).toHaveBeenCalledTimes(1);
+    expect(harness.createTicket).toHaveBeenCalledTimes(2);
+    expect(harness.onTerminalError).not.toHaveBeenCalled();
+
+    replacementSocket.emitClose(1013, "buffer_unavailable");
+    expect(harness.schedule).toHaveBeenLastCalledWith(expect.any(Function), 6_000);
   });
 
   it("starts only one connection attempt while already running", async () => {

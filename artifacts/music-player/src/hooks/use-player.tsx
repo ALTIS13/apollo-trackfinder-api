@@ -6,6 +6,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   buildTfWebSocketUrl,
   createWebSocketTicket,
+  reportTfAuthError,
   tfFetch,
   tfRequestInit,
 } from "@/lib/tf-session-client";
@@ -369,8 +370,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         return socket;
       },
       onMessage: handleWsMessage,
-      onTerminalError: () => {
+      onTerminalError: (error) => {
         wsRef.current = null;
+        reportTfAuthError(error);
         toast({
           title: "Синхронизация недоступна",
           description: "Обновите авторизацию Apollo TF и повторите попытку.",

@@ -3,29 +3,31 @@ import path from "node:path";
 import { createElement, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { searchTracks } from "@workspace/api-client-react";
-import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Discover from "@/pages/Discover";
+import Favorites from "@/pages/Favorites";
+import Home from "@/pages/Home";
 import {
   useSpotifyLogout,
   spotifyLoginUrl,
 } from "@/hooks/use-spotify";
-import {
-  useYandexLogout,
-  useYandexSaveToken,
-} from "@/hooks/use-yandex";
+import { useYandexLogout } from "@/hooks/use-yandex";
 import {
   clearTfSessionSecurityState,
   loadTfSession,
+  subscribeTfAuthSecurityEvents,
   tfRequestInit,
 } from "./tf-session-client";
 
+const CSRF_TOKEN = "c".repeat(42) + "A";
 const session = {
   accountId: "10000000-0000-4000-8000-000000000001",
   installationId: "20000000-0000-4000-8000-000000000002",
   entitlements: ["tf.search", "tf.downloads"],
-  expiresAt: "2026-07-25T12:00:00.000Z",
-  csrfToken: "csrf-canary",
+  expiresAt: "2099-01-01T00:00:00.000Z",
+  csrfToken: CSRF_TOKEN,
 };
 
 function jsonResponse(body: unknown): Response {
@@ -51,6 +53,8 @@ async function loadSessionForUnsafeRequest() {
 describe("TF API migration", () => {
   beforeEach(() => {
     clearTfSessionSecurityState();
+    localStorage.clear();
+    window.history.replaceState({}, "", "/");
     vi.stubGlobal("fetch", vi.fn());
   });
 
@@ -104,7 +108,7 @@ describe("TF API migration", () => {
       }),
     );
     for (const [, request] of vi.mocked(fetch).mock.calls) {
-      expect(new Headers(request?.headers).get("X-CSRF-Token")).toBe("csrf-canary");
+      expect(new Headers(request?.headers).get("X-CSRF-Token")).toBe(CSRF_TOKEN);
     }
   });
 
@@ -115,26 +119,17 @@ describe("TF API migration", () => {
     expect(url.searchParams.has("sid")).toBe(false);
   });
 
-  it("posts the Yandex token through the CSRF adapter", async () => {
-    await loadSessionForUnsafeRequest();
-    vi.mocked(fetch).mockResolvedValue(jsonResponse({}));
-    const { result } = renderHook(() => useYandexSaveToken(), { wrapper: queryWrapper });
+  it("renders Yandex disconnected without accepting or transporting a provider token", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({ connected: false }));
+    const user = userEvent.setup();
 
-    await act(async () => {
-      await result.current.mutateAsync("yandex-token");
-    });
+    render(createElement(Favorites), { wrapper: queryWrapper });
+    await user.click(await screen.findByRole("button", { name: "Yandex Music" }));
 
-    expect(fetch).toHaveBeenCalledWith(
-      "/api/yandex/token",
-      expect.objectContaining({
-        method: "POST",
-        credentials: "include",
-        body: JSON.stringify({ token: "yandex-token" }),
-      }),
-    );
-    const request = vi.mocked(fetch).mock.calls[0][1];
-    expect(new Headers(request?.headers).get("Content-Type")).toBe("application/json");
-    expect(new Headers(request?.headers).get("X-CSRF-Token")).toBe("csrf-canary");
+    expect(await screen.findByText(/Secure connection is temporarily unavailable/i)).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/token/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect Yandex Music" })).not.toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).not.toContain("/api/yandex/token");
   });
 
   it("preserves CSRF headers through generated searchTracks request options", async () => {
@@ -152,7 +147,92 @@ describe("TF API migration", () => {
     );
     const request = vi.mocked(fetch).mock.calls[0][1];
     expect(new Headers(request?.headers).get("Content-Type")).toBe("application/json");
-    expect(new Headers(request?.headers).get("X-CSRF-Token")).toBe("csrf-canary");
+    expect(new Headers(request?.headers).get("X-CSRF-Token")).toBe(CSRF_TOKEN);
+  });
+
+  it("reads CSRF at Home search mutation time instead of reusing a render snapshot", async () => {
+    const firstToken = "a".repeat(42) + "A";
+    const nextToken = "b".repeat(42) + "A";
+    const firstSession = { ...session, csrfToken: firstToken };
+    const nextSession = { ...session, csrfToken: nextToken };
+    const user = userEvent.setup();
+
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(firstSession));
+    await loadTfSession();
+    vi.mocked(fetch).mockClear();
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({
+      query: "Artist Track",
+      results: [],
+      cached: false,
+    }));
+
+    render(createElement(Home), { wrapper: queryWrapper });
+    clearTfSessionSecurityState();
+    await user.type(screen.getByPlaceholderText("Artist name..."), "Artist");
+    await user.type(screen.getByPlaceholderText("Track title..."), "Track");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+
+    expect(await screen.findByText("Search Failed")).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(nextSession));
+    await loadTfSession();
+    vi.mocked(fetch).mockClear();
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
+      query: "Artist Track",
+      results: [],
+      cached: false,
+    }));
+
+    await user.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    const request = vi.mocked(fetch).mock.calls[0][1];
+    expect(new Headers(request?.headers).get("X-CSRF-Token")).toBe(nextToken);
+  });
+
+  it.each([
+    [401, "unauthorized", "invalidated"],
+    [403, "module_access_denied", "revalidate"],
+    [503, "policy_unavailable", "revalidate"],
+  ])("forwards generated search %s %s into the auth channel", async (status, code, eventType) => {
+    await loadSessionForUnsafeRequest();
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ error: code }), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    }));
+    const events: Array<{ type: string; error: { code: string } }> = [];
+    const unsubscribe = subscribeTfAuthSecurityEvents((event) => {
+      events.push(event);
+    });
+    const user = userEvent.setup();
+
+    render(createElement(Home), { wrapper: queryWrapper });
+    await user.type(screen.getByPlaceholderText("Artist name..."), "Artist");
+    await user.type(screen.getByPlaceholderText("Track title..."), "Track");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+
+    expect(await screen.findByText("Search Failed")).toBeInTheDocument();
+    await waitFor(() => expect(events).toHaveLength(1));
+    expect(events[0]).toMatchObject({
+      type: eventType,
+      error: { status, code },
+    });
+    unsubscribe();
+  });
+
+  it("uses the generated search function without render-time request options", () => {
+    const homeSource = readFileSync(path.resolve(import.meta.dirname, "../pages/Home.tsx"), "utf8");
+
+    expect(homeSource).not.toMatch(/\buseSearchTracks\b/);
+    expect(homeSource).toMatch(/searchTracks\(data,\s*tfRequestInit\(\{\s*method:\s*"POST"\s*\}\)\)/s);
+  });
+
+  it("forwards WebSocket terminal errors into the auth channel", () => {
+    const playerSource = readFileSync(path.resolve(import.meta.dirname, "../hooks/use-player.tsx"), "utf8");
+
+    expect(playerSource).toMatch(/onTerminalError:\s*\(error\)\s*=>\s*\{/);
+    expect(playerSource).toMatch(/reportTfAuthError\(error\)/);
   });
 
   it("contains no legacy identity transport in runtime TypeScript", () => {
@@ -175,6 +255,29 @@ describe("TF API migration", () => {
       const source = readFileSync(file, "utf8");
       for (const identity of legacyIdentity) {
         expect(source, `${path.relative(srcDir, file)} contains ${identity}`).not.toMatch(identity);
+      }
+    }
+  });
+
+  it("contains no browser-managed Yandex provider-token flow in runtime TypeScript", () => {
+    const srcDir = path.resolve(import.meta.dirname, "..");
+    const runtimeFiles = readdirSync(srcDir, { recursive: true, withFileTypes: true })
+      .filter((entry) =>
+        entry.isFile()
+        && /\.tsx?$/.test(entry.name)
+        && !entry.name.includes(".test."))
+      .map((entry) => path.join(entry.parentPath, entry.name));
+    const providerTokenFlow = [
+      /\/yandex\/token/i,
+      /useYandexSaveToken/,
+      /response_type=token/i,
+      /(?:yandex.{0,40}token|token.{0,40}yandex)/i,
+    ];
+
+    for (const file of runtimeFiles) {
+      const source = readFileSync(file, "utf8");
+      for (const pattern of providerTokenFlow) {
+        expect(source, `${path.relative(srcDir, file)} contains ${pattern}`).not.toMatch(pattern);
       }
     }
   });
