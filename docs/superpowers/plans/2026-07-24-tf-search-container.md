@@ -357,7 +357,7 @@ export function startSearchHeartbeat(options: HeartbeatOptions): {
 };
 ```
 
-- [ ] **Step 1: Write RED config and transport tests**
+- [x] **Step 1: Write RED config and transport tests**
 
 Assert:
 
@@ -370,14 +370,14 @@ Assert:
 - HTTPS remains valid without the flag;
 - deployed time is valid offset RFC3339 when present.
 
-- [ ] **Step 2: Write RED internal-auth tests**
+- [x] **Step 2: Write RED internal-auth tests**
 
 Use exact raw bodies and cover valid auth, every signature-field mutation,
 timestamp `-61/+61` seconds, malformed timestamp, nonce shape, replay, expiry,
 256-nonce saturation, distinct endpoint paths, constant generic unauthorized
 responses, identity encoding, JSON content type, and 16 KiB body limit.
 
-- [ ] **Step 3: Write RED app and logger tests**
+- [x] **Step 3: Write RED app and logger tests**
 
 Assert:
 
@@ -395,7 +395,7 @@ Verify adapters are never invoked after failed authentication. Capture logs and
 assert query, source URL, body, signatures, headers, and raw provider errors are
 absent.
 
-- [ ] **Step 4: Write RED heartbeat tests**
+- [x] **Step 4: Write RED heartbeat tests**
 
 Use fake timers and a real `createModuleHeartbeatSignature` verifier. Assert:
 
@@ -408,7 +408,7 @@ Use fake timers and a real `createModuleHeartbeatSignature` verifier. Assert:
 - failures do not change readiness or stop later attempts;
 - `stop()` aborts/waits and leaves no timer.
 
-- [ ] **Step 5: Run Task 3 tests and verify RED**
+- [x] **Step 5: Run Task 3 tests and verify RED**
 
 ```bash
 pnpm --filter @workspace/tf-search test -- src/config.test.ts src/internal-auth.test.ts src/app.test.ts src/logger.test.ts src/heartbeat.test.ts
@@ -416,7 +416,7 @@ pnpm --filter @workspace/tf-search test -- src/config.test.ts src/internal-auth.
 
 Expected: fail because the service boundary is not implemented.
 
-- [ ] **Step 6: Implement the runtime boundary and image**
+- [x] **Step 6: Implement the runtime boundary and image**
 
 Mount raw parsers only on signed command endpoints before JSON parsing. Use
 case-sensitive/strict routing, `Cache-Control: no-store`, `X-Content-Type-Options:
@@ -426,7 +426,7 @@ The Docker build uses pinned `pnpm@10.33.2`, builds only required workspace
 packages, installs Python plus `yt-dlp`, creates UID/GID 10001, copies only the
 bundle/start script, removes write permission, exposes 8080, and runs as 10001.
 
-- [ ] **Step 7: Run Task 3 validation**
+- [x] **Step 7: Run Task 3 validation**
 
 ```bash
 pnpm --filter @workspace/tf-search test
@@ -437,7 +437,7 @@ node --check artifacts/tf-search/dist/index.mjs
 
 Expected: all tests and checks pass.
 
-- [ ] **Step 8: Commit Task 3**
+- [x] **Step 8: Commit Task 3**
 
 ```bash
 git add artifacts/tf-search
