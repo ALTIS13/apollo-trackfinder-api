@@ -52,7 +52,12 @@ export function tfRequestInit(init: RequestInit = {}): RequestInit {
     headers.set("X-CSRF-Token", csrfToken);
   }
 
-  return { ...init, method, credentials: "include", headers };
+  return {
+    ...init,
+    method,
+    credentials: "include",
+    headers: Object.fromEntries(headers.entries()),
+  };
 }
 
 export async function tfFetch<T>(path: string, init?: RequestInit): Promise<T> {

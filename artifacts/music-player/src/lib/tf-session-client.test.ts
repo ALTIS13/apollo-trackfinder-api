@@ -25,7 +25,7 @@ describe("TF browser session client", () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
-  it("loads the session with credentials and retains CSRF only in memory", async () => {
+  it("loads the session with credentials and retains spread-safe CSRF headers only in memory", async () => {
     vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify(session), {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -36,7 +36,17 @@ describe("TF browser session client", () => {
       expect.stringMatching(/\/api\/auth\/me$/),
       expect.objectContaining({ method: "GET", credentials: "include" }),
     );
-    expect(new Headers(tfRequestInit({ method: "POST" }).headers).get("X-CSRF-Token")).toBe("csrf-canary");
+    expect(tfRequestInit({
+      method: "post",
+      headers: { "Content-Type": "application/json", "x-csrf-token": "caller-token" },
+    })).toMatchObject({
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "content-type": "application/json",
+        "x-csrf-token": "csrf-canary",
+      },
+    });
     expect(localStorage.length).toBe(0);
   });
 
@@ -169,6 +179,8 @@ describe("TF browser session client", () => {
 
     await loadTfSession();
     await expect(tfFetch("/auth/me")).rejects.toMatchObject({ status: 503 });
-    expect(new Headers(tfRequestInit({ method: "POST" }).headers).get("X-CSRF-Token")).toBe("csrf-canary");
+    expect(tfRequestInit({ method: "POST" })).toMatchObject({
+      headers: { "x-csrf-token": "csrf-canary" },
+    });
   });
 });

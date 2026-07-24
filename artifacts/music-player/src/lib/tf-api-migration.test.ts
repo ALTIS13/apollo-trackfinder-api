@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { createElement, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { searchTracks } from "@workspace/api-client-react";
 import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Discover from "@/pages/Discover";
@@ -16,6 +17,7 @@ import {
 import {
   clearTfSessionSecurityState,
   loadTfSession,
+  tfRequestInit,
 } from "./tf-session-client";
 
 const session = {
@@ -91,7 +93,6 @@ describe("TF API migration", () => {
       expect.objectContaining({
         method: "POST",
         credentials: "include",
-        headers: expect.any(Headers),
       }),
     );
     expect(fetch).toHaveBeenNthCalledWith(
@@ -100,7 +101,6 @@ describe("TF API migration", () => {
       expect.objectContaining({
         method: "POST",
         credentials: "include",
-        headers: expect.any(Headers),
       }),
     );
     for (const [, request] of vi.mocked(fetch).mock.calls) {
@@ -129,9 +129,26 @@ describe("TF API migration", () => {
       expect.objectContaining({
         method: "POST",
         credentials: "include",
-        headers: expect.any(Headers),
         body: JSON.stringify({ token: "yandex-token" }),
       }),
+    );
+    const request = vi.mocked(fetch).mock.calls[0][1];
+    expect(new Headers(request?.headers).get("Content-Type")).toBe("application/json");
+    expect(new Headers(request?.headers).get("X-CSRF-Token")).toBe("csrf-canary");
+  });
+
+  it("preserves CSRF headers through generated searchTracks request options", async () => {
+    await loadSessionForUnsafeRequest();
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({ query: "Artist Track", results: [], cached: false }));
+
+    await searchTracks(
+      { artist: "Artist", title: "Track" },
+      tfRequestInit({ method: "POST" }),
+    );
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/tracks/search",
+      expect.objectContaining({ credentials: "include" }),
     );
     const request = vi.mocked(fetch).mock.calls[0][1];
     expect(new Headers(request?.headers).get("Content-Type")).toBe("application/json");
