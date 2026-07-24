@@ -5,6 +5,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { PlayerProvider, usePlayer } from "@/hooks/use-player";
 import { Player } from "@/components/Player";
 import { Sidebar } from "@/components/Sidebar";
+import { TfAuthProvider } from "@/auth/tf-auth";
+import { TfSessionBoundary } from "@/auth/TfSessionBoundary";
 import { useState, useEffect } from "react";
 import { Menu } from "lucide-react";
 import Home from "@/pages/Home";
@@ -136,12 +138,16 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <PlayerProvider>
-          <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-            <AppLayout />
-          </WouterRouter>
-          <Toaster />
-        </PlayerProvider>
+        <TfAuthProvider>
+          <TfSessionBoundary>
+            <PlayerProvider>
+              <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+                <AppLayout />
+              </WouterRouter>
+              <Toaster />
+            </PlayerProvider>
+          </TfSessionBoundary>
+        </TfAuthProvider>
       </TooltipProvider>
     </QueryClientProvider>
   );

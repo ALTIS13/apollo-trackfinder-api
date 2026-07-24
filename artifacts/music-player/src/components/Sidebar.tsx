@@ -1,5 +1,6 @@
 import { Link, useLocation } from "wouter";
-import { Music2, Search, Heart, ListMusic, X, Sparkles } from "lucide-react";
+import { Music2, Search, Heart, ListMusic, X, Sparkles, LogOut } from "lucide-react";
+import { useTfAuth } from "@/auth/tf-auth";
 import { usePlayer } from "@/hooks/use-player";
 import { formatDuration } from "@/lib/utils";
 
@@ -10,6 +11,7 @@ interface SidebarProps {
 export function Sidebar({ onClose }: SidebarProps) {
   const [location] = useLocation();
   const { queue, queueIndex, currentTrack, playFromQueue, removeFromQueue } = usePlayer();
+  const { session, logout } = useTfAuth();
 
   const navItems = [
     { to: "/", label: "Поиск", icon: <Search className="w-4 h-4" />, exact: true },
@@ -115,6 +117,21 @@ export function Sidebar({ onClose }: SidebarProps) {
             })}
           </div>
         )}
+      </div>
+
+      <div className="mt-4 border-t border-white/5 px-4 pt-3 flex items-center justify-between gap-3">
+        <span className="min-w-0 truncate text-[10px] text-white/30">
+          {session?.accountId.slice(0, 8)}...
+        </span>
+        <button
+          type="button"
+          title="Выйти"
+          aria-label="Выйти"
+          onClick={() => void logout()}
+          className="flex h-8 w-8 flex-shrink-0 items-center justify-center text-white/40 transition-colors hover:text-white"
+        >
+          <LogOut className="h-4 w-4" />
+        </button>
       </div>
     </div>
   );
