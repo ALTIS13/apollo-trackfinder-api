@@ -878,6 +878,10 @@ describe("TF auth logger hygiene", () => {
       authorizationCodeDigest: opaque(),
       rawToken: opaque(),
       tokenDigest: opaque(),
+      token: opaque(),
+      oauthToken: opaque(),
+      rawOauthToken: opaque(),
+      oauthTokenDigest: opaque(),
       refreshToken: opaque(),
       providerAccessToken: opaque(),
       providerRefreshToken: opaque(),
@@ -898,12 +902,107 @@ describe("TF auth logger hygiene", () => {
     });
 
     logger.error({ nested: canaries }, "alias canaries");
+    logger.info({ tokenCount: 3 }, "safe token metadata");
     child.info({ event: "child-canary" }, "child binding canary");
 
     for (const canary of [...Object.values(canaries), childSecret]) {
       expect(output).not.toContain(canary);
     }
+    expect(output).toContain('"tokenCount":3');
     expect(output).toContain("[REDACTED]");
+  });
+
+  it("drops child serializer overrides without invoking or mutating caller data", () => {
+    let output = "";
+    let serializerInvoked = false;
+    const destination = new Writable({
+      write(chunk, _encoding, callback) {
+        output += chunk.toString();
+        callback();
+      },
+    });
+    const logger = createTfLogger(destination);
+    const serializerCanary = opaque();
+    const serializer = () => {
+      serializerInvoked = true;
+      return { clientSecret: serializerCanary };
+    };
+    const bindings = Object.freeze({ safe: "bound" });
+    const serializers = Object.freeze({ safe: serializer });
+    const childOptions = Object.freeze({ serializers });
+
+    const child = logger.child(bindings, childOptions);
+    child.info({ event: "child-serializer-canary" }, "child serializer canary");
+
+    expect(serializerInvoked).toBe(false);
+    expect(output).not.toContain(serializerCanary);
+    expect(output).toContain('"safe":"bound"');
+    expect(bindings).toEqual({ safe: "bound" });
+    expect(childOptions.serializers).toBe(serializers);
+    expect(serializers.safe).toBe(serializer);
+  });
+
+  it("projects HTTP bindings to inert primitives without invoking or mutating hooks", () => {
+    let output = "";
+    const destination = new Writable({
+      write(chunk, _encoding, callback) {
+        output += chunk.toString();
+        callback();
+      },
+    });
+    const logger = createTfLogger(destination);
+    const canaries = {
+      requestId: opaque(),
+      method: opaque(),
+      url: opaque(),
+      statusCode: opaque(),
+    };
+    const invocations = {
+      requestId: 0,
+      method: 0,
+      url: 0,
+      statusCode: 0,
+    };
+    const requestId = Object.freeze({
+      toJSON() {
+        invocations.requestId += 1;
+        return canaries.requestId;
+      },
+    });
+    const method = () => {
+      invocations.method += 1;
+      return canaries.method;
+    };
+    const url = Object.freeze({
+      toJSON() {
+        invocations.url += 1;
+        return canaries.url;
+      },
+    });
+    const statusCode = Object.freeze({
+      toJSON() {
+        invocations.statusCode += 1;
+        return canaries.statusCode;
+      },
+    });
+    const req = Object.freeze({ id: requestId, method, url });
+    const res = Object.freeze({ statusCode });
+
+    logger.info({ req, res }, "malicious HTTP projections");
+
+    expect(invocations).toEqual({
+      requestId: 0,
+      method: 0,
+      url: 0,
+      statusCode: 0,
+    });
+    for (const canary of Object.values(canaries)) {
+      expect(output).not.toContain(canary);
+    }
+    expect(req.id).toBe(requestId);
+    expect(req.method).toBe(method);
+    expect(req.url).toBe(url);
+    expect(res.statusCode).toBe(statusCode);
   });
 
   it("mounts injected auth routes and omits auth query values from request logs", async () => {

@@ -36,9 +36,13 @@ const SENSITIVE_FIELD_NAMES = new Set(
     "websockettickethandle",
     "websocketticketdigest",
     "assertion",
+    "token",
     "accesstoken",
     "rawtoken",
     "tokendigest",
+    "oauthtoken",
+    "rawoauthtoken",
+    "oauthtokendigest",
     "refreshtoken",
     "provideraccesstoken",
     "providerrefreshtoken",
@@ -91,18 +95,36 @@ function ownDataValue(value: object, key: string): unknown {
     : undefined;
 }
 
+function ownStringValue(value: object, key: string): string | undefined {
+  const field = ownDataValue(value, key);
+  return typeof field === "string" ? field : undefined;
+}
+
+function ownFiniteNumberValue(value: object, key: string): number | undefined {
+  const field = ownDataValue(value, key);
+  return typeof field === "number" && Number.isFinite(field)
+    ? field
+    : undefined;
+}
+
 function sanitizeHttpBinding(
   kind: "req" | "res",
   value: object,
-): Record<string, unknown> {
+): Record<string, string | number | undefined> {
   if (kind === "res") {
-    return { statusCode: ownDataValue(value, "statusCode") };
+    return { statusCode: ownFiniteNumberValue(value, "statusCode") };
   }
-  const url = ownDataValue(value, "url");
+  const requestId = ownDataValue(value, "id");
+  const url = ownStringValue(value, "url");
   return {
-    id: ownDataValue(value, "id"),
-    method: ownDataValue(value, "method"),
-    url: typeof url === "string" ? url.split("?", 1)[0] : undefined,
+    id:
+      typeof requestId === "string"
+        ? requestId
+        : typeof requestId === "number" && Number.isFinite(requestId)
+          ? requestId
+          : undefined,
+    method: ownStringValue(value, "method"),
+    url: url?.split("?", 1)[0],
   };
 }
 
@@ -179,10 +201,7 @@ function sanitizeLogObject(value: object): Record<string, unknown> {
   }
 }
 
-function sanitizeChildBindingObject(
-  bindings: object,
-  _options: unknown,
-): Record<string, unknown> {
+function sanitizeChildBindingObject(bindings: object): Record<string, unknown> {
   const sanitized: Record<string, unknown> = Object.create(null);
   const state: SanitizeState = { ancestors: new WeakSet(), nodes: 0 };
   for (const key of Object.keys(bindings)) {
@@ -210,12 +229,9 @@ function sanitizeChildBindingObject(
 
 function sanitizeChildBindings(instance: Logger): Logger {
   const createChild = instance.child.bind(instance);
-  instance.child = ((bindings, options) =>
+  instance.child = ((bindings) =>
     sanitizeChildBindings(
-      createChild(
-        { ...sanitizeChildBindingObject(bindings, options) },
-        options,
-      ),
+      createChild({ ...sanitizeChildBindingObject(bindings) }),
     )) as Logger["child"];
   return instance;
 }
