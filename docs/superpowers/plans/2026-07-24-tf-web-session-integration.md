@@ -40,7 +40,7 @@
 - Consumes: `apiUrl(path: string): string` and `API_BASE` from `src/lib/api-config.ts`
 - Produces: `TfBrowserSession`, `TfApiError`, `normalizeTfApiError()`, `loadTfSession()`, `clearTfSessionSecurityState()`, `tfRequestInit()`, `tfFetch()`, `startTfLogin()`, `logoutTfSession()`, `createWebSocketTicket()`, and `buildTfWebSocketUrl()`
 
-- [ ] **Step 1: Add the player test harness and failing adapter tests**
+- [x] **Step 1: Add the player test harness and failing adapter tests**
 
 Add these package entries:
 
@@ -170,7 +170,7 @@ describe("TF browser session client", () => {
 });
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run:
 
@@ -180,7 +180,7 @@ pnpm --filter @workspace/music-player test -- src/lib/tf-session-client.test.ts
 
 Expected: FAIL because `tf-session-client.ts` does not exist.
 
-- [ ] **Step 3: Implement the browser session adapter**
+- [x] **Step 3: Implement the browser session adapter**
 
 Implement these exact public contracts:
 
@@ -261,7 +261,7 @@ export function normalizeTfApiError(error: unknown): TfApiError {
 }
 ```
 
-- [ ] **Step 4: Run focused tests, typecheck, and commit**
+- [x] **Step 4: Run focused tests, typecheck, and commit**
 
 Run:
 
@@ -294,7 +294,7 @@ git commit -m "feat(tf-web): add browser session client"
 - Consumes: `TfBrowserSession`, `TfApiError`, `loadTfSession()`, `startTfLogin()`, `logoutTfSession()`
 - Produces: `TfAuthProvider`, `useTfAuth()`, `TfSessionBoundary`
 
-- [ ] **Step 1: Write failing auth-state tests**
+- [x] **Step 1: Write failing auth-state tests**
 
 Test with Testing Library that:
 
@@ -308,7 +308,7 @@ it("clears query data and protected UI after logout");
 
 Mock only `@/lib/tf-session-client`; assert that a child canary is absent during loading and on unauthenticated/unavailable/locked states. For the successful fixture use the Task 1 `TfBrowserSession` shape. For logout assert `queryClient.getQueryCache().getAll()` is empty.
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run:
 
@@ -318,7 +318,7 @@ pnpm --filter @workspace/music-player test -- src/auth/tf-auth.test.tsx
 
 Expected: FAIL because the provider and boundary do not exist.
 
-- [ ] **Step 3: Implement the provider and boundary**
+- [x] **Step 3: Implement the provider and boundary**
 
 Expose this context:
 
@@ -394,7 +394,7 @@ Compose `App.tsx` in this order:
 
 Add a compact `LogOut` icon button at the bottom of `Sidebar`; call `useTfAuth().logout`, show the abbreviated account ID as non-sensitive session context, and use the icon's `title="Выйти"` tooltip.
 
-- [ ] **Step 4: Run tests, typecheck, and commit**
+- [x] **Step 4: Run tests, typecheck, and commit**
 
 Run:
 
@@ -429,7 +429,7 @@ git commit -m "feat(tf-web): gate player behind platform session"
 - Consumes: `tfFetch<T>()` and `tfRequestInit()` from Task 1
 - Produces: no new public interface; every existing data hook keeps its current return shape
 
-- [ ] **Step 1: Write failing request and legacy-removal tests**
+- [x] **Step 1: Write failing request and legacy-removal tests**
 
 Add tests using mocked `fetch` and source-file assertions:
 
@@ -443,7 +443,7 @@ it("contains no legacy identity transport in the migrated HTTP call sites");
 
 For the source scan, resolve `src` from `import.meta.dirname` and inspect `Home.tsx`, `Discover.tsx`, `TrackCard.tsx`, `use-spotify.ts`, and `use-yandex.ts`. Assert `getClientSessionId`, `X-Client-Session`, `trackfinder_session_id`, `sessionId`, and `sid` are absent from those migrated HTTP call sites. `use-player.tsx` may retain its existing WebSocket-only `getClientSessionId` reference until Task 4 replaces that lifecycle, but its HTTP `/tracks/play` body must not contain `sessionId`.
 
-- [ ] **Step 2: Run the migration test and verify RED**
+- [x] **Step 2: Run the migration test and verify RED**
 
 Run:
 
@@ -453,7 +453,7 @@ pnpm --filter @workspace/music-player test -- src/lib/tf-api-migration.test.ts
 
 Expected: FAIL on current `sessionId`, `X-Client-Session`, GET logout, and uncredentialed requests.
 
-- [ ] **Step 3: Migrate generated and manual HTTP calls**
+- [x] **Step 3: Migrate generated and manual HTTP calls**
 
 Use generated request options without changing `lib/api-client-react`:
 
@@ -497,7 +497,7 @@ export function spotifyLoginUrl(): string {
 
 Both provider logout mutations use `{ method: "POST" }`. Yandex token remains JSON POST. All provider GET calls preserve their existing query parameters and return types. Remove every HTTP use of `getClientSessionId`; leave only the pre-existing WebSocket reference for Task 4.
 
-- [ ] **Step 4: Run migration tests and the complete player suite**
+- [x] **Step 4: Run migration tests and the complete player suite**
 
 Run:
 
@@ -531,7 +531,7 @@ git commit -m "feat(tf-web): migrate protected api calls"
 - Consumes: `createWebSocketTicket()`, `buildTfWebSocketUrl()`, and `TfApiError`
 - Produces: `TfWebSocketLifecycle`
 
-- [ ] **Step 1: Write failing lifecycle tests**
+- [x] **Step 1: Write failing lifecycle tests**
 
 Use fake timers and injected dependencies to assert:
 
@@ -547,7 +547,7 @@ it("contains no runtime reference to getClientSessionId, X-Client-Session, track
 
 Use a fake socket implementing `onopen`, `onmessage`, `onclose`, `onerror`, `readyState`, and `close()`. The ticket dependency returns ordered values such as `"a".repeat(43)` and `"b".repeat(43)` so reuse is observable.
 
-- [ ] **Step 2: Run the lifecycle test and verify RED**
+- [x] **Step 2: Run the lifecycle test and verify RED**
 
 Run:
 
@@ -557,7 +557,7 @@ pnpm --filter @workspace/music-player test -- src/lib/tf-websocket.test.ts
 
 Expected: FAIL because `TfWebSocketLifecycle` does not exist.
 
-- [ ] **Step 3: Implement the isolated lifecycle**
+- [x] **Step 3: Implement the isolated lifecycle**
 
 Expose:
 
@@ -609,7 +609,7 @@ private async connect(attempt: number): Promise<void> {
 
 Move only socket creation/reconnect ownership out of `use-player.tsx`; retain its player-state message application and outgoing state serialization. Remove the final `getClientSessionId` import and delete `src/lib/client-session.ts`. Extend the migration test to scan all runtime `.ts`/`.tsx` files under `src`, excluding tests, and prove that no legacy identity transport remains. On terminal authentication/policy failure, show one destructive toast and leave reconnection stopped until `PlayerProvider` is remounted after auth refresh or relogin.
 
-- [ ] **Step 4: Run lifecycle and player tests, typecheck, and commit**
+- [x] **Step 4: Run lifecycle and player tests, typecheck, and commit**
 
 Run:
 
@@ -640,7 +640,7 @@ git commit -m "feat(tf-web): use one-time websocket tickets"
 - Consumes: all Task 1-4 behavior and merged API browser-contract tests
 - Produces: a validated branch ready for independent whole-branch review and merge into `main`
 
-- [ ] **Step 1: Run the complete local validation matrix**
+- [x] **Step 1: Run the complete local validation matrix**
 
 Run:
 
@@ -664,7 +664,7 @@ root typecheck: exit 0
 root Compose config: exit 0
 ```
 
-- [ ] **Step 2: Run exact legacy and secret-boundary scans**
+- [x] **Step 2: Run exact legacy and secret-boundary scans**
 
 Run:
 
@@ -675,7 +675,7 @@ rg -n "Bearer |APOLLO_PLATFORM_CLIENT_SECRET|SPOTIFY_CLIENT_SECRET|YANDEX_TOKEN"
 
 Expected: both commands produce no runtime matches.
 
-- [ ] **Step 3: Record implementation state**
+- [x] **Step 3: Record implementation state**
 
 Update `IMPLEMENTATION_STATUS.md` with:
 
@@ -693,7 +693,7 @@ Update `IMPLEMENTATION_STATUS.md` with:
 
 Mark every completed checkbox in this plan and ensure `.superpowers/sdd/progress.md` names the reviewed commit range for each task.
 
-- [ ] **Step 4: Commit the release record**
+- [x] **Step 4: Commit the release record**
 
 Run:
 

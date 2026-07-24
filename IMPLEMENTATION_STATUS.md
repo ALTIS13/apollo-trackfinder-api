@@ -57,7 +57,19 @@ Last updated: 2026-07-24.
 - Полный TLS browser-equivalent smoke доказал closed registration, operator bootstrap/login, invite-only регистрацию, verify/activate, PKCE S256 с exact replay verifier, single-use code equivalence, `tf.search`, deny/grant/revoke `tf.downloads`, одноразовый WebSocket ticket, replay reject и close `4403` после suspend. Rendered config, responses/projections, logs, command output и tracked bytes сканируются на raw values и SHA-256 digests; cleanup проверяет нулевые ресурсы и временные secret directories.
 - `MODULES.md` фиксирует будущие `tf-search`, `tf-integrations`, `tf-download-worker`: authenticated HTTP/heartbeat, least-privilege entitlements, собственные хранилища, отсутствие shared DB/Docker/SSH/control access, private Coolify DNS на одной ноде либо owner-approved TLS между нодами. Для локального этапа новый домен не нужен; HomeNode/Coolify/Caddy/UFW/DNS не менялись.
 
+### TF web Platform session
+
+- Status: implemented and locally validated
+- Browser auth: Platform PKCE through `api.tf.apollot.ru`, host-only TF cookie
+- CSRF: `/api/auth/me` token retained in memory and sent on unsafe requests
+- Policy: `tf.search` gates application mount; server remains authoritative for every capability
+- WebSocket: one-time ticket acquired before every connection attempt
+- Legacy browser UUID: removed
+- Remote infrastructure: unchanged; domains/Caddy/Coolify deployment still requires preflight and explicit approval
+
 ## Validation
+
+- TF web-session local release validation (2026-07-24): music-player suite `41/41`, selected API browser-contract suite `100/100`, player/root typechecks and player production build passed. `docker compose config` was run but could not render because required local variable `TF_SECRET_DIRECTORY` is unset; no Compose or infrastructure configuration was changed. The exact legacy scan found three test-only assertions in `tf-api-migration.test.ts`; the runtime-only scan was clean. The exact secret-boundary scan was clean.
 
 - Baseline 2026-06-23: `pnpm install`, full typecheck и build прошли до изменения mobile delivery target.
 - Residual search: активных Replit/Cursor артефактов в коде не найдено; оставшиеся `cursor` совпадения относятся к CSS/Redis cursor, не к Cursor IDE.
