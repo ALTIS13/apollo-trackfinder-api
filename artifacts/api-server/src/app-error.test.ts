@@ -134,6 +134,56 @@ describe("terminal API error sanitization", () => {
     expect(JSON.stringify(stderr.mock.calls)).not.toContain(canary);
   });
 
+  it("preserves a fixed sanitized 413 for too many URL-encoded parameters", async () => {
+    const canary = `parameter-limit-${randomBytes(24).toString("base64url")}`;
+    const logs = captureRequestLogs();
+    const stderr = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    const origin = await startApp(createApiApp({ requestLogger: logs.logger }));
+    const form = new URLSearchParams({ token: canary });
+    for (let index = 0; index < 1_000; index += 1) {
+      form.append(`p${index}`, "x");
+    }
+
+    const response = await fetch(`${origin}/api/yandex/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: form,
+    });
+    const body = await response.text();
+
+    expect(response.status).toBe(413);
+    expect(body).toBe('{"error":"request_too_large"}');
+    expect(body).not.toContain(canary);
+    expect(logs.read()).not.toContain(canary);
+    expect(JSON.stringify(stderr.mock.calls)).not.toContain(canary);
+  });
+
+  it("preserves a fixed sanitized 400 for excessive URL-encoded nesting", async () => {
+    const canary = `nesting-limit-${randomBytes(24).toString("base64url")}`;
+    const logs = captureRequestLogs();
+    const stderr = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    const origin = await startApp(createApiApp({ requestLogger: logs.logger }));
+    const nestedKey = `token${"[child]".repeat(33)}`;
+    const form = new URLSearchParams({ [nestedKey]: canary });
+
+    const response = await fetch(`${origin}/api/yandex/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: form,
+    });
+    const body = await response.text();
+
+    expect(response.status).toBe(400);
+    expect(body).toBe('{"error":"invalid_request"}');
+    expect(body).not.toContain(canary);
+    expect(logs.read()).not.toContain(canary);
+    expect(JSON.stringify(stderr.mock.calls)).not.toContain(canary);
+  });
+
   it("rejects a fully forged malformed-parser shape as an internal error", () => {
     const canary = `forged-parse-${randomBytes(24).toString("base64url")}`;
     const log = { error: vi.fn(), warn: vi.fn() };

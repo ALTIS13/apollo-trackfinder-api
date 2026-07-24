@@ -4,6 +4,7 @@ import express, {
   type Express,
   type NextFunction,
   type Request,
+  type RequestHandler,
   type Response,
 } from "express";
 import type { Logger } from "pino";
@@ -61,59 +62,6 @@ function hasExactParserStatus(error: object, status: 400 | 413): boolean {
   );
 }
 
-function safeBodySize(value: unknown): number | null {
-  return typeof value === "number" &&
-    Number.isSafeInteger(value) &&
-    value >= 0 &&
-    value <= Number.MAX_SAFE_INTEGER
-    ? value
-    : null;
-}
-
-function isMalformedJsonError(error: object): boolean {
-  if (
-    !(error instanceof SyntaxError) ||
-    dataProperty(error, "type") !== "entity.parse.failed" ||
-    !hasExactParserStatus(error, 400)
-  ) {
-    return false;
-  }
-  const body = dataProperty(error, "body");
-  if (
-    typeof body !== "string" ||
-    body.length === 0 ||
-    body.length > API_BODY_LIMIT_BYTES
-  ) {
-    return false;
-  }
-  const bodyBytes = Buffer.byteLength(body, "utf8");
-  return bodyBytes > 0 && bodyBytes <= API_BODY_LIMIT_BYTES;
-}
-
-function isOversizedBodyError(error: object): boolean {
-  if (
-    !(error instanceof Error) ||
-    dataProperty(error, "name") !== "PayloadTooLargeError" ||
-    dataProperty(error, "type") !== "entity.too.large" ||
-    !hasExactParserStatus(error, 413)
-  ) {
-    return false;
-  }
-  const limit = safeBodySize(dataProperty(error, "limit"));
-  if (limit !== API_BODY_LIMIT_BYTES) return false;
-
-  const length = safeBodySize(dataProperty(error, "length"));
-  const expected = safeBodySize(dataProperty(error, "expected"));
-  const received = safeBodySize(dataProperty(error, "received"));
-  return (
-    (length !== null &&
-      expected !== null &&
-      length === expected &&
-      length > limit) ||
-    (received !== null && received > limit)
-  );
-}
-
 function classifyApiError(error: unknown): SanitizedApiError {
   try {
     if (
@@ -121,14 +69,14 @@ function classifyApiError(error: unknown): SanitizedApiError {
       error !== null &&
       bodyParserErrors.delete(error)
     ) {
-      if (isMalformedJsonError(error)) {
+      if (hasExactParserStatus(error, 400)) {
         return {
           status: 400,
           body: { error: "invalid_request" },
           errorType: "MalformedRequestBody",
         };
       }
-      if (isOversizedBodyError(error)) {
+      if (hasExactParserStatus(error, 413)) {
         return {
           status: 413,
           body: { error: "request_too_large" },
@@ -146,16 +94,15 @@ function classifyApiError(error: unknown): SanitizedApiError {
   };
 }
 
-function markBodyParserError(
-  error: unknown,
-  _request: Request,
-  _response: Response,
-  next: NextFunction,
-): void {
-  if (typeof error === "object" && error !== null) {
-    bodyParserErrors.add(error);
-  }
-  next(error);
+function withParserProvenance(parser: RequestHandler): RequestHandler {
+  return (request, response, next) => {
+    parser(request, response, (error?: unknown) => {
+      if (typeof error === "object" && error !== null) {
+        bodyParserErrors.add(error);
+      }
+      next(error);
+    });
+  };
 }
 
 function isExactLoopbackOrigin(origin: string): boolean {
@@ -256,10 +203,21 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
     }),
   );
 
-  app.use(express.json({ limit: API_BODY_LIMIT_BYTES }));
-  app.use(markBodyParserError);
-  app.use(express.urlencoded({ extended: true, limit: API_BODY_LIMIT_BYTES }));
-  app.use(markBodyParserError);
+  app.use(
+    withParserProvenance(
+      express.json({
+        limit: API_BODY_LIMIT_BYTES,
+      }),
+    ),
+  );
+  app.use(
+    withParserProvenance(
+      express.urlencoded({
+        extended: true,
+        limit: API_BODY_LIMIT_BYTES,
+      }),
+    ),
+  );
   app.use(cookieParser());
 
   app.use("/api", createApiRouter(options));
