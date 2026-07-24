@@ -76,7 +76,12 @@ services:
       - "127.0.0.1:${PLATFORM_API_PORT:-8081}:8080"
     environment:
       APOLLO_ALLOWED_ORIGINS: ${PLATFORM_ALLOWED_ORIGINS:-}
+      APOLLO_ASSERTION_PRIVATE_JWK_FILE: /run/secrets/platform_assertion_private_jwk
+      APOLLO_ASSERTION_PUBLIC_JWKS_FILE: /run/secrets/platform_assertion_public_jwks
       APOLLO_DEVELOPMENT_TOKEN_ECHO: ${PLATFORM_DEVELOPMENT_TOKEN_ECHO:-false}
+      APOLLO_INTROSPECTION_CLIENT_ID: ${PLATFORM_INTROSPECTION_CLIENT_ID:-apollo-tf-api}
+      APOLLO_ISSUER: ${PLATFORM_ISSUER:-https://api.apollot.ru}
+      APOLLO_OAUTH_CLIENTS_FILE: /run/secrets/platform_oauth_clients
       APOLLO_OPERATOR_BOOTSTRAP_TOKEN_FILE: /run/secrets/platform_operator_bootstrap_token
       APOLLO_REDIS_URL: redis://platform-redis:6379
       APOLLO_TRUST_PROXY_HOPS: ${PLATFORM_TRUST_PROXY_HOPS:-0}
@@ -84,6 +89,12 @@ services:
       NODE_ENV: ${PLATFORM_NODE_ENV:-production}
       PORT: 8080
     secrets:
+      - source: platform_assertion_private_jwk
+        target: platform_assertion_private_jwk
+      - source: platform_assertion_public_jwks
+        target: platform_assertion_public_jwks
+      - source: platform_oauth_clients
+        target: platform_oauth_clients
       - source: platform_operator_bootstrap_token
         target: platform_operator_bootstrap_token
       - source: platform_runtime_database_url
@@ -130,6 +141,12 @@ services:
     restart: "no"
 
 secrets:
+  platform_assertion_private_jwk:
+    file: ${PLATFORM_SECRET_DIRECTORY:-}/platform_assertion_private_jwk
+  platform_assertion_public_jwks:
+    file: ${PLATFORM_SECRET_DIRECTORY:-}/platform_assertion_public_jwks
+  platform_oauth_clients:
+    file: ${PLATFORM_SECRET_DIRECTORY:-}/platform_oauth_clients
   platform_postgres_admin_password:
     environment: PLATFORM_POSTGRES_ADMIN_PASSWORD
   platform_migrator_password:

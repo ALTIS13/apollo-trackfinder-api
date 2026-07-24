@@ -24,18 +24,47 @@ export function rateLimitedError(retryAfterSeconds?: number): HttpError {
   return new HttpError(429, "rate_limited", retryAfterSeconds);
 }
 
+const DOMAIN_STATUS: Readonly<Record<PlatformDomainError["code"], number>> =
+  Object.freeze({
+    registration_not_available: 409,
+    invitation_not_available: 409,
+    invalid_credentials: 401,
+    module_access_denied: 403,
+    policy_unavailable: 503,
+    invalid_request: 400,
+    invalid_client: 401,
+    invalid_grant: 400,
+    account_access_denied: 403,
+  });
+
 function domainStatus(code: PlatformDomainError["code"]): number {
-  switch (code) {
-    case "registration_not_available":
-    case "invitation_not_available":
-      return 409;
-    case "invalid_credentials":
-      return 401;
-    case "module_access_denied":
-      return 403;
-    case "policy_unavailable":
-      return 503;
+  return DOMAIN_STATUS[code];
+}
+
+const BODY_PARSER_PAYLOAD_ERROR_TYPES = new Set([
+  "entity.too.large",
+  "parameters.too.many",
+  "querystring.parse.rangeError",
+]);
+const BODY_PARSER_VALIDATION_ERROR_TYPES = new Set([
+  "charset.unsupported",
+  "encoding.unsupported",
+  "entity.parse.failed",
+  "entity.verify.failed",
+  "request.aborted",
+  "request.size.invalid",
+]);
+
+function bodyParserErrorType(error: unknown): string | null {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("type" in error) ||
+    typeof error.type !== "string"
+  ) {
+    return null;
   }
+  return error.type;
 }
 
 export const platformErrorHandler: ErrorRequestHandler = (
@@ -45,6 +74,7 @@ export const platformErrorHandler: ErrorRequestHandler = (
   _next,
 ) => {
   const requestId = String(response.locals.requestId ?? "");
+  const parserErrorType = bodyParserErrorType(error);
   let status = 503;
   let code = "policy_unavailable";
 
@@ -58,13 +88,17 @@ export const platformErrorHandler: ErrorRequestHandler = (
       response.setHeader("Retry-After", String(error.retryAfterSeconds));
     }
   } else if (
-    typeof error === "object" &&
-    error !== null &&
-    "type" in error &&
-    error.type === "entity.too.large"
+    parserErrorType !== null &&
+    BODY_PARSER_PAYLOAD_ERROR_TYPES.has(parserErrorType)
   ) {
     status = 413;
     code = "payload_too_large";
+  } else if (
+    parserErrorType !== null &&
+    BODY_PARSER_VALIDATION_ERROR_TYPES.has(parserErrorType)
+  ) {
+    status = 400;
+    code = "validation_failed";
   } else if (
     error instanceof SyntaxError ||
     (typeof error === "object" &&

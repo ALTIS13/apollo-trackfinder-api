@@ -8,11 +8,14 @@ import {
 } from "@workspace/platform-db";
 
 import { createPlatformApp } from "./app.js";
+import { AuthorizationService } from "./domain/authorization.js";
+import { PlatformAssertionSigner } from "./domain/assertions.js";
 import { EntitlementService } from "./domain/entitlements.js";
 import { InvitationService } from "./domain/invitations.js";
 import { OperatorSessionService } from "./domain/operator-sessions.js";
 import { PostgresPlatformRepository } from "./domain/postgres-repository.js";
 import { RegistrationService } from "./domain/registration.js";
+import { UserSessionService } from "./domain/user-sessions.js";
 import { createPlatformLogger } from "./logger.js";
 import { RedisRateLimitStore, SharedRateLimiter } from "./http/rate-limit.js";
 import { createMigrationReadinessProbe } from "./readiness.js";
@@ -23,7 +26,15 @@ import {
 } from "./runtime-readiness.js";
 
 async function start(): Promise<void> {
-  const config = parsePlatformRuntimeConfig(process.env);
+  const config = await parsePlatformRuntimeConfig(process.env);
+  const clock = () => new Date();
+  const assertionSigner = new PlatformAssertionSigner({
+    issuer: config.issuer,
+    activePrivateJwk: config.assertionPrivateJwk,
+    publicJwks: config.assertionPublicJwks,
+    clock,
+  });
+  await assertionSigner.ready();
   const logger = createPlatformLogger();
   const pool = createPlatformPool(config.databaseUrl);
   const redis = new Redis(config.redisUrl, {
@@ -34,7 +45,15 @@ async function start(): Promise<void> {
     retryStrategy: (attempt) => Math.min(attempt * 200, 2_000),
   });
   const repository = new PostgresPlatformRepository();
-  const clock = () => new Date();
+  const userSessions = new UserSessionService(pool, repository, clock);
+  const authorization = new AuthorizationService(
+    pool,
+    repository,
+    config.oauthClients,
+    assertionSigner,
+    clock,
+    config.introspectionClientId,
+  );
   const redisReadiness = new RedisConnectionReadiness(redis, logger);
   redisReadiness.start();
   const readiness = combineRuntimeReadiness(
@@ -51,6 +70,10 @@ async function start(): Promise<void> {
       clock,
     ),
     entitlements: new EntitlementService(pool, repository, clock),
+    userSessions,
+    authorization,
+    assertionSigner,
+    introspectionClientId: config.introspectionClientId,
     readiness,
     rateLimiter: new SharedRateLimiter(new RedisRateLimitStore(redis), {
       limit: 10,
@@ -82,5 +105,4 @@ async function start(): Promise<void> {
 void start().catch((error: unknown) => {
   process.stderr.write("Platform API startup failed\n");
   process.exitCode = 1;
-  if (error instanceof Error) process.stderr.write(`${error.message}\n`);
 });

@@ -4,19 +4,25 @@ import cookieParser from "cookie-parser";
 import express, { type RequestHandler } from "express";
 
 import { platformDomainError } from "./domain/errors.js";
+import type { AuthorizationService } from "./domain/authorization.js";
+import type { PlatformAssertionSigner } from "./domain/assertions.js";
 import type { EntitlementService } from "./domain/entitlements.js";
 import type { InvitationService } from "./domain/invitations.js";
 import type { OperatorSessionService } from "./domain/operator-sessions.js";
 import type { RegistrationService } from "./domain/registration.js";
+import type { UserSessionService } from "./domain/user-sessions.js";
 import { assertProtectedOperatorRoutes } from "./domain/policy.js";
 import { platformErrorHandler, validationError } from "./http/errors.js";
 import type { RateLimiter } from "./http/rate-limit.js";
 import { type PlatformLogger } from "./logger.js";
+import { assertDuplicateFreeJson } from "./runtime-config.js";
 import {
   REGISTERED_PROTECTED_PLATFORM_ROUTES,
   registerOperatorRoutes,
 } from "./routes/operator.js";
+import { registerOAuthRoutes } from "./routes/oauth.js";
 import { registerPublicRegistrationRoutes } from "./routes/public-registration.js";
+import { registerUserSessionRoutes } from "./routes/user-sessions.js";
 
 export { REGISTERED_PROTECTED_PLATFORM_ROUTES } from "./routes/operator.js";
 
@@ -36,6 +42,16 @@ export interface PlatformApiDependencies {
     "bootstrap" | "login" | "authenticate" | "revoke"
   >;
   readonly entitlements: Pick<EntitlementService, "grant" | "revoke">;
+  readonly userSessions: Pick<
+    UserSessionService,
+    "login" | "authenticate" | "revoke"
+  >;
+  readonly authorization: Pick<
+    AuthorizationService,
+    "issueCode" | "exchangeCode" | "introspect"
+  >;
+  readonly assertionSigner: Pick<PlatformAssertionSigner, "publicJwks">;
+  readonly introspectionClientId: string;
   readonly readiness: () => Promise<boolean>;
   readonly rateLimiter: RateLimiter;
   readonly allowedOrigins: readonly string[];
@@ -60,7 +76,7 @@ function requestIdMiddleware(): RequestHandler {
   };
 }
 
-function jsonContentTypeMiddleware(): RequestHandler {
+function bodyContentTypeMiddleware(): RequestHandler {
   return (request, _response, next) => {
     const requiresJson = ["POST", "PATCH", "PUT"].includes(request.method);
     const contentLength = Number(request.get("content-length") ?? "0");
@@ -69,9 +85,13 @@ function jsonContentTypeMiddleware(): RequestHandler {
       (Number.isFinite(contentLength) && contentLength > 0);
     if (!requiresJson && !hasBody) return next();
     const contentType = request.get("content-type");
+    const expectedType =
+      request.path === "/v1/oauth/token"
+        ? "application/x-www-form-urlencoded"
+        : "application/json";
     if (
       contentType === undefined ||
-      contentType.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+      contentType.split(";", 1)[0]?.trim().toLowerCase() !== expectedType
     ) {
       return next(validationError());
     }
@@ -89,7 +109,7 @@ function corsMiddleware(allowedOrigins: readonly string[]): RequestHandler {
       if (request.method === "OPTIONS") {
         response.setHeader(
           "Access-Control-Allow-Headers",
-          "Content-Type, X-CSRF-Token, X-Request-ID",
+          "Authorization, Content-Type, X-CSRF-Token, X-Request-ID",
         );
         response.setHeader(
           "Access-Control-Allow-Methods",
@@ -124,12 +144,38 @@ export function createPlatformApp(
     if (request.path.startsWith("/v1/")) {
       response.setHeader("Cache-Control", "no-store");
     }
+    if (
+      request.path === "/v1/oauth/token" ||
+      request.path === "/v1/oauth/introspect"
+    ) {
+      response.setHeader("Pragma", "no-cache");
+    }
     next();
   });
   app.use(corsMiddleware(dependencies.allowedOrigins));
-  app.use(jsonContentTypeMiddleware());
+  app.use(bodyContentTypeMiddleware());
   app.use(
-    express.json({ limit: "64kb", strict: true, type: "application/json" }),
+    express.json({
+      limit: "16kb",
+      strict: true,
+      type: "application/json",
+      verify: (_request, _response, body) => {
+        try {
+          const source = new TextDecoder("utf-8", { fatal: true }).decode(body);
+          assertDuplicateFreeJson(source);
+        } catch {
+          throw validationError();
+        }
+      },
+    }),
+  );
+  app.use(
+    express.urlencoded({
+      extended: false,
+      limit: "8kb",
+      parameterLimit: 8,
+      type: "application/x-www-form-urlencoded",
+    }),
   );
   app.use(cookieParser());
   app.use((request, response, next) => {
@@ -165,6 +211,8 @@ export function createPlatformApp(
     rateLimiter: dependencies.rateLimiter,
     developmentTokenEcho: dependencies.developmentTokenEcho === true,
   });
+  registerUserSessionRoutes(app, dependencies);
+  registerOAuthRoutes(app, dependencies);
   registerOperatorRoutes(app, dependencies, protectedRouteMapping);
   app.use(platformErrorHandler);
   return app;

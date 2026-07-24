@@ -1,5 +1,10 @@
 import { execFile } from "node:child_process";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import {
+  createHash,
+  generateKeyPairSync,
+  randomBytes,
+  randomUUID,
+} from "node:crypto";
 import {
   chmod,
   mkdtemp,
@@ -105,11 +110,53 @@ export async function prepareSecretDirectory(environment) {
   const directory = await mkdtemp(join(tmpdir(), "apollo-platform-secrets-"));
   try {
     await chmod(directory, 0o700);
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const exportedPrivateJwk = privateKey.export({ format: "jwk" });
+    const exportedPublicJwk = publicKey.export({ format: "jwk" });
+    const assertionKeyId = `platform-smoke-${randomBytes(12).toString("hex")}`;
+    const assertionPrivateJwk = {
+      alg: "EdDSA",
+      crv: "Ed25519",
+      d: exportedPrivateJwk.d,
+      kid: assertionKeyId,
+      kty: "OKP",
+      use: "sig",
+      x: exportedPrivateJwk.x,
+    };
+    const assertionPublicJwk = {
+      alg: "EdDSA",
+      crv: "Ed25519",
+      kid: assertionKeyId,
+      kty: "OKP",
+      use: "sig",
+      x: exportedPublicJwk.x,
+    };
+    assert.equal(assertionPrivateJwk.x, assertionPublicJwk.x);
+    assert.equal(typeof assertionPrivateJwk.d, "string");
+    const oauthClientSecret = generatedSecret();
+    const oauthClients = [
+      {
+        audience: "apollo-tf",
+        clientId: "apollo-tf-api",
+        clientSecretDigest: digest(oauthClientSecret),
+        redirectUris: ["http://127.0.0.1/callback"],
+      },
+    ];
+    const rawSecretCanaries = Object.freeze({
+      assertionPrivateKey: assertionPrivateJwk.d,
+      oauthClientSecret,
+    });
     const secrets = [
+      ["platform_assertion_private_jwk", JSON.stringify(assertionPrivateJwk)],
+      [
+        "platform_assertion_public_jwks",
+        JSON.stringify({ keys: [assertionPublicJwk] }),
+      ],
       [
         "platform_migrator_database_url",
         environment.PLATFORM_MIGRATOR_DATABASE_URL,
       ],
+      ["platform_oauth_clients", JSON.stringify(oauthClients)],
       [
         "platform_runtime_database_url",
         environment.PLATFORM_RUNTIME_DATABASE_URL,
@@ -137,7 +184,7 @@ export async function prepareSecretDirectory(environment) {
       }
     }
     environment.PLATFORM_SECRET_DIRECTORY = directory;
-    return directory;
+    return Object.freeze({ directory, rawSecretCanaries });
   } catch (error) {
     await rm(directory, { force: true, recursive: true });
     throw error;
@@ -390,7 +437,7 @@ async function policyRun(environment, mode, accountId, sessionId) {
   return { result, output: `${stdout}\n${stderr}` };
 }
 
-async function runSmoke(environment) {
+async function runSmoke(environment, fixtureSecretCanaries) {
   const baseUrl = `http://127.0.0.1:${environment.PLATFORM_API_PORT}`;
   const state = {
     baseUrl,
@@ -412,6 +459,7 @@ async function runSmoke(environment) {
     environment.PLATFORM_SMOKE_SESSION_TOKEN,
     environment.PLATFORM_MIGRATOR_DATABASE_URL,
     environment.PLATFORM_RUNTIME_DATABASE_URL,
+    ...fixtureSecretCanaries,
     operatorPassword,
     memberPassword,
     unavailablePassword,
@@ -681,7 +729,11 @@ async function main() {
   const configured = configuredEnvironment();
   smokeStage = "docker-context";
   const environment = await resolveLocalDockerEnvironment(configured);
-  const ownedSecretDirectory = await prepareSecretDirectory(environment);
+  const preparedSecrets = await prepareSecretDirectory(environment);
+  const ownedSecretDirectory = preparedSecrets.directory;
+  const fixtureSecretCanaries = Object.values(
+    preparedSecrets.rawSecretCanaries,
+  );
   const secrets = [
     environment.PLATFORM_POSTGRES_ADMIN_PASSWORD,
     environment.PLATFORM_MIGRATOR_PASSWORD,
@@ -690,6 +742,7 @@ async function main() {
     environment.PLATFORM_SMOKE_SESSION_TOKEN,
     environment.PLATFORM_MIGRATOR_DATABASE_URL,
     environment.PLATFORM_RUNTIME_DATABASE_URL,
+    ...fixtureSecretCanaries,
   ];
   let failure;
 
@@ -705,7 +758,7 @@ async function main() {
     await compose(environment, ["up", "-d", "--build", "--wait"]);
     smokeStage = "readiness";
     await waitForReady(`http://127.0.0.1:${environment.PLATFORM_API_PORT}`);
-    await runSmoke(environment);
+    await runSmoke(environment, fixtureSecretCanaries);
     process.stdout.write(
       "Platform smoke passed: closed, bootstrap, login, invite, verify, grant, activate, allow, revoke, deny\n",
     );

@@ -1,5 +1,10 @@
 import { execFile } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  randomBytes,
+} from "node:crypto";
 import {
   access,
   chmod,
@@ -7,6 +12,7 @@ import {
   link,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -57,7 +63,10 @@ async function renderedCompose(): Promise<Record<string, unknown>> {
   try {
     await Promise.all(
       [
+        "platform_assertion_private_jwk",
+        "platform_assertion_public_jwks",
         "platform_migrator_database_url",
+        "platform_oauth_clients",
         "platform_operator_bootstrap_token",
         "platform_runtime_database_url",
         "platform_smoke_session_token",
@@ -553,7 +562,13 @@ try {
     const directSecretSources = new Map<string, readonly string[]>([
       [
         "platform-api",
-        ["platform_operator_bootstrap_token", "platform_runtime_database_url"],
+        [
+          "platform_assertion_private_jwk",
+          "platform_assertion_public_jwks",
+          "platform_oauth_clients",
+          "platform_operator_bootstrap_token",
+          "platform_runtime_database_url",
+        ],
       ],
       ["platform-migrate", ["platform_migrator_database_url"]],
       [
@@ -584,13 +599,30 @@ try {
     ).toEqual(["platform-postgres-data", "platform-redis-data"]);
     const secrets = config.secrets as Record<string, Record<string, unknown>>;
     for (const name of [
+      "platform_assertion_private_jwk",
+      "platform_assertion_public_jwks",
       "platform_migrator_database_url",
+      "platform_oauth_clients",
       "platform_operator_bootstrap_token",
       "platform_runtime_database_url",
       "platform_smoke_session_token",
     ]) {
       expect(secrets[name].file).toMatch(new RegExp(`${name}$`));
       expect(secrets[name]).not.toHaveProperty("environment");
+    }
+
+    expect(api.environment).toMatchObject({
+      APOLLO_ASSERTION_PRIVATE_JWK_FILE:
+        "/run/secrets/platform_assertion_private_jwk",
+      APOLLO_ASSERTION_PUBLIC_JWKS_FILE:
+        "/run/secrets/platform_assertion_public_jwks",
+      APOLLO_OAUTH_CLIENTS_FILE: "/run/secrets/platform_oauth_clients",
+    });
+    for (const name of ["platform-migrate", "platform-smoke"]) {
+      const serialized = JSON.stringify(service(config, name));
+      expect(serialized).not.toContain("platform_assertion_private_jwk");
+      expect(serialized).not.toContain("platform_assertion_public_jwks");
+      expect(serialized).not.toContain("platform_oauth_clients");
     }
 
     for (const value of Object.values(
@@ -601,7 +633,7 @@ try {
       expect(JSON.stringify(value)).not.toContain("docker.sock");
       expect(JSON.stringify(value)).not.toContain(".ops-private");
     }
-  });
+  }, 15_000);
 
   test("ships hardened role initialization and a one-shot migration entrypoint", async () => {
     const [roleInit, migrationEntrypoint, smoke] = await Promise.all([
@@ -621,6 +653,9 @@ try {
     expect(migrationEntrypoint).toContain('"/app/migrations"');
     expect(migrationEntrypoint).toContain("runPlatformMigrations");
     expect(migrationEntrypoint).toContain("finally");
+    expect(migrationEntrypoint).not.toContain("platform_assertion_private_jwk");
+    expect(migrationEntrypoint).not.toContain("platform_assertion_public_jwks");
+    expect(migrationEntrypoint).not.toContain("platform_oauth_clients");
     expect(smoke).not.toMatch(/\/v1\/[a-z0-9_/:.-]*policy[a-z0-9_/:.-]*/i);
     expect(smoke).toContain('const INVITATION_MODULE_KEY = "tf.integrations";');
     expect(smoke).toContain("invitation-entitlement-revoke");
@@ -695,7 +730,13 @@ try {
     )) as {
       prepareSecretDirectory?: (
         environment: Record<string, string>,
-      ) => Promise<string>;
+      ) => Promise<{
+        directory: string;
+        rawSecretCanaries: {
+          assertionPrivateKey: string;
+          oauthClientSecret: string;
+        };
+      }>;
     };
     expect(smokeModule.prepareSecretDirectory).toBeTypeOf("function");
     const environment: Record<string, string> = {
@@ -704,22 +745,93 @@ try {
       PLATFORM_RUNTIME_DATABASE_URL: "runtime-url",
       PLATFORM_SMOKE_SESSION_TOKEN: "session-token",
     };
-    const expected = new Map([
+    const expectedLegacy = new Map([
       ["platform_migrator_database_url", "migrator-url"],
       ["platform_operator_bootstrap_token", "bootstrap-token"],
       ["platform_runtime_database_url", "runtime-url"],
       ["platform_smoke_session_token", "session-token"],
     ]);
-    const directory = await smokeModule.prepareSecretDirectory!(environment);
+    const prepared = await smokeModule.prepareSecretDirectory!(environment);
+    const { directory, rawSecretCanaries } = prepared;
     try {
       expect(environment.PLATFORM_SECRET_DIRECTORY).toBe(directory);
+      expect((await readdir(directory)).sort()).toEqual([
+        "platform_assertion_private_jwk",
+        "platform_assertion_public_jwks",
+        "platform_migrator_database_url",
+        "platform_oauth_clients",
+        "platform_operator_bootstrap_token",
+        "platform_runtime_database_url",
+        "platform_smoke_session_token",
+      ]);
       if (process.platform !== "win32") {
         expect((await stat(directory)).mode & 0o777).toBe(0o700);
       }
-      for (const [name, value] of expected) {
+      for (const [name, value] of expectedLegacy) {
         const path = join(directory, name);
         expect((await stat(path)).mode & 0o777).toBe(0o444);
         expect(await readFile(path, "utf8")).toBe(value);
+      }
+
+      const privateJwk = JSON.parse(
+        await readFile(
+          join(directory, "platform_assertion_private_jwk"),
+          "utf8",
+        ),
+      ) as Record<string, unknown>;
+      const publicJwks = JSON.parse(
+        await readFile(
+          join(directory, "platform_assertion_public_jwks"),
+          "utf8",
+        ),
+      ) as { keys: Array<Record<string, unknown>> };
+      const oauthClients = JSON.parse(
+        await readFile(join(directory, "platform_oauth_clients"), "utf8"),
+      ) as Array<Record<string, unknown>>;
+      const expectedPublicJwk = {
+        alg: "EdDSA",
+        crv: "Ed25519",
+        kid: privateJwk.kid,
+        kty: "OKP",
+        use: "sig",
+        x: privateJwk.x,
+      };
+
+      expect(privateJwk).toEqual({
+        ...expectedPublicJwk,
+        d: rawSecretCanaries.assertionPrivateKey,
+      });
+      expect(rawSecretCanaries.assertionPrivateKey).toMatch(
+        /^[A-Za-z0-9_-]{43}$/,
+      );
+      expect(publicJwks).toEqual({ keys: [expectedPublicJwk] });
+      expect(
+        createPublicKey(
+          createPrivateKey({ format: "jwk", key: privateJwk }),
+        ).export({ format: "jwk" }),
+      ).toMatchObject({ crv: "Ed25519", kty: "OKP", x: privateJwk.x });
+      expect(oauthClients).toEqual([
+        {
+          audience: "apollo-tf",
+          clientId: "apollo-tf-api",
+          clientSecretDigest: createHash("sha256")
+            .update(rawSecretCanaries.oauthClientSecret)
+            .digest("hex"),
+          redirectUris: ["http://127.0.0.1/callback"],
+        },
+      ]);
+      expect(rawSecretCanaries.oauthClientSecret).toMatch(
+        /^[A-Za-z0-9_-]{43}$/,
+      );
+      expect(JSON.stringify(oauthClients)).not.toContain(
+        rawSecretCanaries.oauthClientSecret,
+      );
+      for (const name of [
+        "platform_assertion_private_jwk",
+        "platform_assertion_public_jwks",
+        "platform_oauth_clients",
+      ]) {
+        expect((await stat(join(directory, name))).mode & 0o777).toBe(0o444);
       }
     } finally {
       await rm(directory, { force: true, recursive: true });

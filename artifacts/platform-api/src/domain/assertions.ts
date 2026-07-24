@@ -43,9 +43,9 @@ const signingInputSchema = z
     installationId: z.string().uuid(),
     nonce: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
     audience: z.literal("apollo-tf"),
-    entitlements: z.array(z.enum(PLATFORM_MODULE_KEYS)).max(
-      PLATFORM_MODULE_KEYS.length,
-    ),
+    entitlements: z
+      .array(z.enum(PLATFORM_MODULE_KEYS))
+      .max(PLATFORM_MODULE_KEYS.length),
   })
   .strict()
   .superRefine(({ entitlements }, context) => {
@@ -120,7 +120,12 @@ export class PlatformAssertionSigner {
     this.#kid = parsed.activePrivateJwk.kid;
     this.#clock = parsed.clock;
     this.#privateKey = importJWK(parsed.activePrivateJwk, "EdDSA");
+    void this.#privateKey.catch(() => undefined);
     this.#publicJwks = deepFrozenPublicJwks(parsed.publicJwks);
+  }
+
+  async ready(): Promise<void> {
+    await this.#privateKey;
   }
 
   publicJwks(): Readonly<{ readonly keys: readonly JWK[] }> {

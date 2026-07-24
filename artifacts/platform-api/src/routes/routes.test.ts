@@ -9,12 +9,29 @@ import {
   type PlatformApiDependencies,
 } from "../app.js";
 import { platformDomainError } from "../domain/errors.js";
+import { createPlatformLogger } from "../logger.js";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const sessionId = "22222222-2222-4222-8222-222222222222";
 const requestId = "33333333-3333-4333-8333-333333333333";
 const origin = "https://admin.apollo.test";
 const now = new Date("2026-07-16T10:00:00.000Z");
+const portalSessionToken = "p".repeat(43);
+const portalCsrfToken = "c".repeat(43);
+const clientId = "apollo-tf-api";
+const clientSecret = "client-secret-\u03c0";
+const basicAuthorization = `Basic ${Buffer.from(
+  `${clientId}:${clientSecret}`,
+  "utf8",
+).toString("base64")}`;
+const registeredRedirectUri =
+  "https://api.tf.apollot.ru/api/auth/callback?registered=1";
+const authorizationState = "s".repeat(43);
+const authorizationNonce = "n".repeat(43);
+const codeChallenge = "A".repeat(43);
+const codeVerifier = "v".repeat(43);
+const authorizationCode = "o".repeat(32);
+const installationId = "77777777-7777-4777-8777-777777777777";
 
 const account = {
   id: accountId,
@@ -44,9 +61,26 @@ const entitlement = {
   updatedAt: now,
 };
 
+type TestPlatformApiDependencies = PlatformApiDependencies & {
+  readonly userSessions: {
+    login: ReturnType<typeof vi.fn>;
+    authenticate: ReturnType<typeof vi.fn>;
+    revoke: ReturnType<typeof vi.fn>;
+  };
+  readonly authorization: {
+    issueCode: ReturnType<typeof vi.fn>;
+    exchangeCode: ReturnType<typeof vi.fn>;
+    introspect: ReturnType<typeof vi.fn>;
+  };
+  readonly assertionSigner: {
+    publicJwks: ReturnType<typeof vi.fn>;
+  };
+  readonly introspectionClientId: string;
+};
+
 function createDependencies(
-  overrides: Partial<PlatformApiDependencies> = {},
-): PlatformApiDependencies {
+  overrides: Partial<TestPlatformApiDependencies> = {},
+): TestPlatformApiDependencies {
   return {
     registration: {
       getStatus: vi.fn().mockResolvedValue({ mode: "open_approval" }),
@@ -117,6 +151,84 @@ function createDependencies(
       grant: vi.fn().mockResolvedValue(entitlement),
       revoke: vi.fn().mockResolvedValue({ ...entitlement, revokedAt: now }),
     },
+    userSessions: {
+      login: vi.fn().mockResolvedValue({
+        account: {
+          ...account,
+          status: "active",
+          emailVerifiedAt: now,
+          activatedAt: now,
+        },
+        session: {
+          id: sessionId,
+          accountId,
+          installationId: null,
+          audience: "apollo-portal",
+          expiresAt: new Date("2026-07-16T18:00:00.000Z"),
+          revokedAt: null,
+          createdAt: now,
+          lastSeenAt: now,
+        },
+        rawToken: portalSessionToken,
+      }),
+      authenticate: vi.fn().mockResolvedValue({
+        accountId,
+        sessionId,
+        status: "active",
+        emailVerified: true,
+      }),
+      revoke: vi.fn().mockResolvedValue(undefined),
+    },
+    authorization: {
+      issueCode: vi.fn().mockResolvedValue({
+        rawCode: authorizationCode,
+        redirectUri: registeredRedirectUri,
+        state: authorizationState,
+      }),
+      exchangeCode: vi.fn().mockResolvedValue({
+        assertion: "signed-platform-assertion",
+        claims: {
+          iss: "https://api.apollot.ru",
+          aud: "apollo-tf",
+          sub: accountId,
+          sid: sessionId,
+          installation_id: installationId,
+          nonce: authorizationNonce,
+          account_status: "active",
+          entitlements: ["tf.search"],
+          jti: "88888888-8888-4888-8888-888888888888",
+          iat: 1,
+          nbf: 1,
+          exp: 301,
+        },
+        expiresIn: 300,
+        tokenType: "Bearer",
+      }),
+      introspect: vi.fn().mockResolvedValue({
+        active: true,
+        accountId,
+        sessionId,
+        installationId,
+        accountStatus: "active",
+        entitlements: ["tf.search"],
+        expiresAt: "2026-07-16T18:00:00.000Z",
+      }),
+    },
+    assertionSigner: {
+      publicJwks: vi.fn().mockReturnValue({
+        keys: [
+          {
+            kty: "OKP",
+            crv: "Ed25519",
+            alg: "EdDSA",
+            use: "sig",
+            kid: "current",
+            x: "x".repeat(43),
+          },
+        ],
+      }),
+    },
+    introspectionClientId: clientId,
     readiness: vi.fn().mockResolvedValue(true),
     rateLimiter: {
       consume: vi.fn().mockResolvedValue({ allowed: true }),
@@ -151,11 +263,12 @@ async function rawAppRequest(
   path: string,
   options: {
     readonly method: string;
-    readonly headers?: Record<string, string>;
+    readonly headers?: string[] | Record<string, string | string[]>;
     readonly body?: string;
   },
+  dependencies = createDependencies(),
 ) {
-  const app = await startApp();
+  const app = await startApp(dependencies);
   servers.push(app.server);
   return new Promise<{ readonly status: number; readonly body: string }>(
     (resolve, reject) => {
@@ -213,12 +326,55 @@ function json(body: unknown, headers: Record<string, string> = {}) {
   } satisfies RequestInit;
 }
 
+function form(body: string, headers: Record<string, string> = {}) {
+  return {
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      ...headers,
+    },
+    body,
+  } satisfies RequestInit;
+}
+
 function adminHeaders(csrf = "csrf-token") {
   return {
     origin,
     cookie: `__Host-apollo_admin=admin-session-secret; __Host-apollo_admin_csrf=${csrf}`,
     "x-csrf-token": csrf,
   };
+}
+
+function portalHeaders(csrf = portalCsrfToken) {
+  return {
+    origin,
+    cookie: `__Host-apollo_portal=${portalSessionToken}; __Host-apollo_portal_csrf=${csrf}`,
+    "x-csrf-token": csrf,
+  };
+}
+
+function authorizationQuery(overrides: Record<string, string> = {}): string {
+  return new URLSearchParams({
+    client_id: "apollo-tf-web",
+    redirect_uri: "https://untrusted-request.example/callback",
+    response_type: "code",
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
+    state: authorizationState,
+    nonce: authorizationNonce,
+    installation_id: installationId,
+    installation_label: "Firefox on Windows",
+    ...overrides,
+  }).toString();
+}
+
+function tokenForm(overrides: Record<string, string> = {}): string {
+  return new URLSearchParams({
+    grant_type: "authorization_code",
+    code: authorizationCode,
+    redirect_uri: registeredRedirectUri,
+    code_verifier: codeVerifier,
+    ...overrides,
+  }).toString();
 }
 
 describe("platform HTTP API", () => {
@@ -443,6 +599,817 @@ describe("platform HTTP API", () => {
       headers: { origin: "https://admin.apollo.test.evil" },
     });
     expect(rejected.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("creates and authenticates a portal session without exposing its token", async () => {
+    const dependencies = createDependencies();
+    const { response: missingOrigin } = await appRequest(
+      "/v1/sessions",
+      {
+        method: "POST",
+        ...json({
+          email: "member@example.test",
+          password: "password-secret",
+        }),
+      },
+      dependencies,
+    );
+    expect(missingOrigin.status).toBe(403);
+    expect(dependencies.userSessions.login).not.toHaveBeenCalled();
+
+    const { response } = await appRequest(
+      "/v1/sessions",
+      {
+        method: "POST",
+        ...json(
+          {
+            email: "MEMBER@example.test",
+            password: "password-secret",
+          },
+          { origin },
+        ),
+      },
+      dependencies,
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toEqual({
+      accountId,
+      sessionId,
+      status: "active",
+      emailVerified: true,
+      audience: "apollo-portal",
+      csrfToken: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
+    expect(JSON.stringify(body)).not.toContain(portalSessionToken);
+    expect(JSON.stringify(body)).not.toContain("password-secret");
+    expect(dependencies.rateLimiter.consume).toHaveBeenCalledWith({
+      bucket: "user-login",
+      ip: expect.any(String),
+      identity: "member@example.test",
+    });
+    const cookies = response.headers.getSetCookie();
+    expect(cookies).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          new RegExp(
+            `^__Host-apollo_portal=${portalSessionToken}; Path=/; HttpOnly; Secure; SameSite=Lax$`,
+          ),
+        ),
+        expect.stringMatching(
+          /^__Host-apollo_portal_csrf=[A-Za-z0-9_-]{43}; Path=\/; Secure; SameSite=Lax$/,
+        ),
+      ]),
+    );
+    expect(cookies.join(";")).not.toContain("Domain=");
+
+    const { response: current } = await appRequest(
+      "/v1/session",
+      {
+        headers: { cookie: `__Host-apollo_portal=${portalSessionToken}` },
+      },
+      dependencies,
+    );
+    expect(current.status).toBe(200);
+    expect(await current.json()).toEqual({
+      accountId,
+      sessionId,
+      status: "active",
+      emailVerified: true,
+      audience: "apollo-portal",
+    });
+    expect(dependencies.userSessions.authenticate).toHaveBeenCalledWith(
+      portalSessionToken,
+    );
+  });
+
+  it("requires exact origin and fixed-length portal CSRF before clearing a valid session", async () => {
+    const dependencies = createDependencies();
+    for (const headers of [
+      {
+        ...portalHeaders(),
+        origin: "https://admin.apollo.test.evil",
+      },
+      {
+        ...portalHeaders(),
+        "x-csrf-token": `${portalCsrfToken}x`,
+      },
+      {
+        ...portalHeaders(),
+        "x-csrf-token": `${"d".repeat(42)}c`,
+      },
+    ]) {
+      const { response } = await appRequest(
+        "/v1/session",
+        { method: "DELETE", headers },
+        dependencies,
+      );
+      expect(response.status).toBe(403);
+    }
+    expect(dependencies.userSessions.revoke).not.toHaveBeenCalled();
+
+    const { response } = await appRequest(
+      "/v1/session",
+      { method: "DELETE", headers: portalHeaders() },
+      dependencies,
+    );
+    expect(response.status).toBe(204);
+    expect(dependencies.userSessions.revoke).toHaveBeenCalledWith(
+      portalSessionToken,
+      { correlationId: expect.any(String) },
+    );
+    const cookies = response.headers.getSetCookie();
+    expect(cookies).toHaveLength(2);
+    expect(cookies[0]).toContain("__Host-apollo_portal=; Max-Age=0; Path=/;");
+    expect(cookies[0]).toContain("HttpOnly; Secure; SameSite=Lax");
+    expect(cookies[1]).toContain(
+      "__Host-apollo_portal_csrf=; Max-Age=0; Path=/;",
+    );
+    expect(cookies[1]).not.toContain("HttpOnly");
+    expect(cookies[1]).toContain("Secure; SameSite=Lax");
+    expect(cookies.join(";")).not.toContain("Domain=");
+  });
+
+  it("authorizes only active portal users and redirects from the issued registered URI", async () => {
+    const dependencies = createDependencies();
+    const { response } = await appRequest(
+      `/v1/oauth/authorize?${authorizationQuery()}`,
+      {
+        headers: { cookie: `__Host-apollo_portal=${portalSessionToken}` },
+        redirect: "manual",
+      },
+      dependencies,
+    );
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe(
+      `${registeredRedirectUri}&code=${authorizationCode}&state=${authorizationState}`,
+    );
+    expect(dependencies.authorization.issueCode).toHaveBeenCalledWith(
+      {
+        accountId,
+        sessionId,
+        status: "active",
+        emailVerified: true,
+      },
+      {
+        clientId: "apollo-tf-web",
+        redirectUri: "https://untrusted-request.example/callback",
+        responseType: "code",
+        codeChallenge,
+        codeChallengeMethod: "S256",
+        state: authorizationState,
+        nonce: authorizationNonce,
+        installationId,
+        installationLabel: "Firefox on Windows",
+      },
+      { correlationId: expect.any(String) },
+    );
+
+    const pending = createDependencies({
+      userSessions: {
+        ...createDependencies().userSessions,
+        authenticate: vi.fn().mockResolvedValue({
+          accountId,
+          sessionId,
+          status: "pending",
+          emailVerified: true,
+        }),
+      },
+    });
+    const { response: denied } = await appRequest(
+      `/v1/oauth/authorize?${authorizationQuery()}`,
+      { headers: { cookie: `__Host-apollo_portal=${portalSessionToken}` } },
+      pending,
+    );
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toEqual({
+      error: "account_access_denied",
+      requestId: expect.any(String),
+    });
+    expect(pending.authorization.issueCode).not.toHaveBeenCalled();
+  });
+
+  it("uses strict exact and bounded parsers for the new session and OAuth bodies", async () => {
+    const dependencies = createDependencies();
+    const { response: sessionText } = await appRequest(
+      "/v1/sessions",
+      {
+        method: "POST",
+        headers: { "content-type": "text/plain", origin },
+        body: "{}",
+      },
+      dependencies,
+    );
+    expect(sessionText.status).toBe(400);
+
+    const { response: tokenJson } = await appRequest(
+      "/v1/oauth/token",
+      {
+        method: "POST",
+        ...json(
+          {
+            grant_type: "authorization_code",
+            code: authorizationCode,
+            redirect_uri: registeredRedirectUri,
+            code_verifier: codeVerifier,
+          },
+          { authorization: basicAuthorization },
+        ),
+      },
+      dependencies,
+    );
+    expect(tokenJson.status).toBe(400);
+
+    const { response: introspectionForm } = await appRequest(
+      "/v1/oauth/introspect",
+      {
+        method: "POST",
+        ...form(
+          new URLSearchParams({
+            accountId,
+            sessionId,
+            installationId,
+            audience: "apollo-tf",
+          }).toString(),
+          { authorization: basicAuthorization },
+        ),
+      },
+      dependencies,
+    );
+    expect(introspectionForm.status).toBe(400);
+
+    const hugeBody = `code=${"a".repeat(9 * 1024)}`;
+    const oversized = await rawAppRequest("/v1/oauth/token", {
+      method: "POST",
+      headers: {
+        authorization: basicAuthorization,
+        "content-type": "application/x-www-form-urlencoded",
+        "content-length": String(Buffer.byteLength(hugeBody)),
+      },
+      body: hugeBody,
+    });
+    expect(oversized.status).toBe(413);
+    expect(dependencies.authorization.exchangeCode).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate raw JSON keys before session login", async () => {
+    const dependencies = createDependencies();
+    const sessionBody =
+      '{"email":"attacker@example.test","email":"member@example.test","password":"password-secret"}';
+    const session = await rawAppRequest(
+      "/v1/sessions",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(Buffer.byteLength(sessionBody)),
+          origin,
+        },
+        body: sessionBody,
+      },
+      dependencies,
+    );
+    expect(session.status).toBe(400);
+    expect(dependencies.userSessions.login).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate raw JSON keys before introspection", async () => {
+    const dependencies = createDependencies();
+    const introspectionBody = `{"accountId":"99999999-9999-4999-8999-999999999999","accountId":"${accountId}","sessionId":"${sessionId}","installationId":"${installationId}","audience":"apollo-tf"}`;
+    const introspection = await rawAppRequest(
+      "/v1/oauth/introspect",
+      {
+        method: "POST",
+        headers: {
+          authorization: basicAuthorization,
+          "content-type": "application/json",
+          "content-length": String(Buffer.byteLength(introspectionBody)),
+        },
+        body: introspectionBody,
+      },
+      dependencies,
+    );
+    expect(introspection.status).toBe(400);
+    expect(dependencies.authorization.introspect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "session JSON with an unsupported charset",
+      "/v1/sessions",
+      {
+        "content-type": "application/json; charset=iso-8859-1",
+        origin,
+      },
+      JSON.stringify({
+        email: "member@example.test",
+        password: "password-secret",
+      }),
+      "login",
+    ],
+    [
+      "introspection JSON with an unsupported charset",
+      "/v1/oauth/introspect",
+      {
+        authorization: basicAuthorization,
+        "content-type": "application/json; charset=iso-8859-1",
+      },
+      JSON.stringify({
+        accountId,
+        sessionId,
+        installationId,
+        audience: "apollo-tf",
+      }),
+      "introspect",
+    ],
+    [
+      "session JSON with an unsupported content encoding",
+      "/v1/sessions",
+      {
+        "content-encoding": "compress",
+        "content-type": "application/json",
+        origin,
+      },
+      JSON.stringify({
+        email: "member@example.test",
+        password: "password-secret",
+      }),
+      "login",
+    ],
+    [
+      "introspection JSON with an unsupported content encoding",
+      "/v1/oauth/introspect",
+      {
+        authorization: basicAuthorization,
+        "content-encoding": "compress",
+        "content-type": "application/json",
+      },
+      JSON.stringify({
+        accountId,
+        sessionId,
+        installationId,
+        audience: "apollo-tf",
+      }),
+      "introspect",
+    ],
+  ] as const)(
+    "maps %s to a generic validation failure",
+    async (_name, path, headers, body, serviceMethod) => {
+      const dependencies = createDependencies();
+      const result = await rawAppRequest(
+        path,
+        {
+          method: "POST",
+          headers: {
+            ...headers,
+            "content-length": String(Buffer.byteLength(body)),
+          },
+          body,
+        },
+        dependencies,
+      );
+
+      expect(result.status).toBe(400);
+      expect(JSON.parse(result.body)).toEqual({
+        error: "validation_failed",
+        requestId: expect.any(String),
+      });
+      expect(
+        serviceMethod === "login"
+          ? dependencies.userSessions.login
+          : dependencies.authorization.introspect,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps excessive form parameters mapped to payload too large", async () => {
+    const dependencies = createDependencies();
+    const body = Array.from(
+      { length: 9 },
+      (_value, index) => `field${index}=value`,
+    ).join("&");
+    const result = await rawAppRequest(
+      "/v1/oauth/token",
+      {
+        method: "POST",
+        headers: {
+          authorization: basicAuthorization,
+          "content-type": "application/x-www-form-urlencoded",
+          "content-length": String(Buffer.byteLength(body)),
+        },
+        body,
+      },
+      dependencies,
+    );
+
+    expect(result.status).toBe(413);
+    expect(JSON.parse(result.body)).toEqual({
+      error: "payload_too_large",
+      requestId: expect.any(String),
+    });
+    expect(dependencies.authorization.exchangeCode).not.toHaveBeenCalled();
+  });
+
+  it("exchanges an authorization code from exact form fields and Basic credentials", async () => {
+    const dependencies = createDependencies();
+    const { response } = await appRequest(
+      "/v1/oauth/token",
+      {
+        method: "POST",
+        ...form(tokenForm(), { authorization: basicAuthorization }),
+      },
+      dependencies,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("pragma")).toBe("no-cache");
+    expect(await response.json()).toEqual({
+      access_token: "signed-platform-assertion",
+      token_type: "Bearer",
+      expires_in: 300,
+    });
+    expect(dependencies.authorization.exchangeCode).toHaveBeenCalledWith(
+      {
+        grantType: "authorization_code",
+        clientId,
+        code: authorizationCode,
+        redirectUri: registeredRedirectUri,
+        codeVerifier,
+      },
+      clientSecret,
+      { correlationId: expect.any(String) },
+    );
+  });
+
+  it.each([
+    ["missing header", undefined],
+    ["wrong scheme", "Bearer not-basic"],
+    ["missing colon", `Basic ${Buffer.from("client").toString("base64")}`],
+    ["empty client ID", `Basic ${Buffer.from(":secret").toString("base64")}`],
+    ["empty secret", `Basic ${Buffer.from("client:").toString("base64")}`],
+    [
+      "non-canonical base64",
+      `Basic ${Buffer.from("client:secret").toString("base64").replace(/=+$/, "")}`,
+    ],
+    [
+      "fatal UTF-8",
+      `Basic ${Buffer.from([0x61, 0x3a, 0xc3, 0x28]).toString("base64")}`,
+    ],
+    [
+      "oversized secret",
+      `Basic ${Buffer.from(`client:${"x".repeat(513)}`).toString("base64")}`,
+    ],
+  ])(
+    "rejects %s generically in the strict Basic parser",
+    async (_name, value) => {
+      const headers: Record<string, string> = {
+        "content-type": "application/x-www-form-urlencoded",
+      };
+      if (value !== undefined) headers.authorization = value;
+      const result = await rawAppRequest("/v1/oauth/token", {
+        method: "POST",
+        headers,
+        body: tokenForm(),
+      });
+      expect(result.status).toBe(401);
+      expect(JSON.parse(result.body)).toEqual({
+        error: "invalid_client",
+        requestId: expect.any(String),
+      });
+    },
+  );
+
+  it("rejects duplicate raw Authorization headers before code exchange", async () => {
+    const dependencies = createDependencies();
+    const body = tokenForm();
+    const result = await rawAppRequest(
+      "/v1/oauth/token",
+      {
+        method: "POST",
+        headers: {
+          authorization: [basicAuthorization, basicAuthorization],
+          "content-type": "application/x-www-form-urlencoded",
+          "content-length": String(Buffer.byteLength(body)),
+        },
+        body,
+      },
+      dependencies,
+    );
+    expect(result.status).toBe(401);
+    expect(dependencies.authorization.exchangeCode).not.toHaveBeenCalled();
+  });
+
+  it("rejects client credentials and unknown fields in OAuth query or bodies", async () => {
+    const dependencies = createDependencies();
+    for (const [path, init] of [
+      [
+        "/v1/oauth/token?client_secret=query-secret",
+        {
+          method: "POST",
+          ...form(tokenForm(), { authorization: basicAuthorization }),
+        },
+      ],
+      [
+        "/v1/oauth/token",
+        {
+          method: "POST",
+          ...form(tokenForm({ client_secret: "body-secret" }), {
+            authorization: basicAuthorization,
+          }),
+        },
+      ],
+      [
+        "/v1/oauth/token",
+        {
+          method: "POST",
+          ...form(tokenForm({ client_id: clientId }), {
+            authorization: basicAuthorization,
+          }),
+        },
+      ],
+      [
+        "/v1/oauth/introspect",
+        {
+          method: "POST",
+          ...json(
+            {
+              accountId,
+              sessionId,
+              installationId,
+              audience: "apollo-tf",
+              clientSecret: "body-secret",
+            },
+            { authorization: basicAuthorization },
+          ),
+        },
+      ],
+    ] as const) {
+      const { response } = await appRequest(path, init, dependencies);
+      expect(response.status).toBe(400);
+    }
+    expect(dependencies.authorization.exchangeCode).not.toHaveBeenCalled();
+    expect(dependencies.authorization.introspect).not.toHaveBeenCalled();
+  });
+
+  it("binds introspection to the configured Basic client and returns only policy state", async () => {
+    const dependencies = createDependencies();
+    const requestBody = {
+      accountId,
+      sessionId,
+      installationId,
+      audience: "apollo-tf",
+    };
+    const { response } = await appRequest(
+      "/v1/oauth/introspect",
+      {
+        method: "POST",
+        ...json(requestBody, { authorization: basicAuthorization }),
+      },
+      dependencies,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("pragma")).toBe("no-cache");
+    expect(await response.json()).toEqual({
+      active: true,
+      accountId,
+      sessionId,
+      installationId,
+      accountStatus: "active",
+      entitlements: ["tf.search"],
+      expiresAt: "2026-07-16T18:00:00.000Z",
+    });
+    expect(dependencies.authorization.introspect).toHaveBeenCalledWith(
+      requestBody,
+      clientSecret,
+    );
+
+    const wrongClient = `Basic ${Buffer.from(
+      `another-client:${clientSecret}`,
+    ).toString("base64")}`;
+    const { response: rejected } = await appRequest(
+      "/v1/oauth/introspect",
+      {
+        method: "POST",
+        ...json(requestBody, { authorization: wrongClient }),
+      },
+      dependencies,
+    );
+    expect(rejected.status).toBe(401);
+    expect(dependencies.authorization.introspect).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["invalid_request", 400],
+    ["invalid_client", 401],
+    ["invalid_grant", 400],
+    ["account_access_denied", 403],
+  ] as const)(
+    "maps %s exhaustively to a sanitized OAuth response",
+    async (code, status) => {
+      const dependencies = createDependencies({
+        authorization: {
+          ...createDependencies().authorization,
+          exchangeCode: vi.fn().mockRejectedValue(platformDomainError(code)),
+        },
+      });
+      const { response } = await appRequest(
+        "/v1/oauth/token",
+        {
+          method: "POST",
+          ...form(tokenForm(), { authorization: basicAuthorization }),
+        },
+        dependencies,
+      );
+      expect(response.status).toBe(status);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(response.headers.get("pragma")).toBe("no-cache");
+      const serialized = JSON.stringify(await response.json());
+      expect(JSON.parse(serialized)).toEqual({
+        error: code,
+        requestId: expect.any(String),
+      });
+      for (const secret of [
+        authorizationCode,
+        authorizationState,
+        codeVerifier,
+        authorizationNonce,
+        portalSessionToken,
+        basicAuthorization,
+        clientSecret,
+      ]) {
+        expect(serialized).not.toContain(secret);
+      }
+    },
+  );
+
+  it("serves only the public JWKS with a bounded exact cache policy", async () => {
+    const privateCanary = "private-key-canary";
+    const dependencies = createDependencies({
+      assertionSigner: {
+        publicJwks: vi.fn().mockReturnValue({
+          keys: [
+            {
+              kty: "OKP",
+              crv: "Ed25519",
+              alg: "EdDSA",
+              use: "sig",
+              kid: "current",
+              x: "x".repeat(43),
+            },
+          ],
+        }),
+      },
+    });
+    const { response } = await appRequest(
+      "/.well-known/jwks.json",
+      undefined,
+      dependencies,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("public, max-age=300");
+    const body = await response.json();
+    expect(body).toEqual({
+      keys: [
+        {
+          kty: "OKP",
+          crv: "Ed25519",
+          alg: "EdDSA",
+          use: "sig",
+          kid: "current",
+          x: "x".repeat(43),
+        },
+      ],
+    });
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain('"d"');
+    expect(serialized).not.toContain(privateCanary);
+    expect(serialized).not.toContain("clientSecret");
+    expect(serialized).not.toContain("NODE_ENV");
+  });
+
+  it("redacts OAuth, cookie, JWK, and client-secret fields at the logger boundary", () => {
+    const output: string[] = [];
+    const logger = createPlatformLogger({
+      write: (chunk: string) => output.push(chunk),
+    });
+    logger.info({
+      code: "code-canary",
+      state: "state-canary",
+      assertion: "assertion-canary",
+      access_token: "access-canary",
+      code_verifier: "verifier-canary",
+      nonce: "nonce-canary",
+      cookies: "cookies-canary",
+      authorization: "authorization-canary",
+      jwk: { d: "private-jwk-canary" },
+      client: {
+        clientSecret: "client-secret-canary",
+        clientSecretDigest: "client-digest-canary",
+        client_secret_digest: "client-snake-digest-canary",
+        secretDigest: "secret-digest-canary",
+      },
+    });
+    const serialized = output.join("");
+    for (const canary of [
+      "code-canary",
+      "state-canary",
+      "assertion-canary",
+      "access-canary",
+      "verifier-canary",
+      "nonce-canary",
+      "cookies-canary",
+      "authorization-canary",
+      "private-jwk-canary",
+      "client-secret-canary",
+      "client-digest-canary",
+      "client-snake-digest-canary",
+      "secret-digest-canary",
+    ]) {
+      expect(serialized).not.toContain(canary);
+    }
+    expect(serialized).toContain("[REDACTED]");
+    expect(
+      serialized.match(/\[REDACTED\]/g)?.length ?? 0,
+    ).toBeGreaterThanOrEqual(11);
+  });
+
+  it("recursively redacts deeply nested logger fields without mutating input", () => {
+    const output: string[] = [];
+    const logger = createPlatformLogger({
+      write: (chunk: string) => output.push(chunk),
+    });
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const fields = {
+      level1: {
+        level2: {
+          level3: {
+            level4: {
+              rawToken: "deep-raw-session-token-canary",
+              clientSecret: "deep-client-secret-canary",
+            },
+          },
+        },
+      },
+      array: [{ raw_session_token: "array-session-token-canary" }],
+      cyclic,
+    };
+
+    logger.info(fields);
+
+    const serialized = output.join("");
+    expect(serialized).not.toContain("deep-raw-session-token-canary");
+    expect(serialized).not.toContain("deep-client-secret-canary");
+    expect(serialized).not.toContain("array-session-token-canary");
+    expect(serialized.match(/\[REDACTED\]/g)?.length).toBe(3);
+    expect(serialized).toContain("[Circular]");
+    expect(fields.level1.level2.level3.level4).toEqual({
+      rawToken: "deep-raw-session-token-canary",
+      clientSecret: "deep-client-secret-canary",
+    });
+    expect(cyclic.self).toBe(cyclic);
+  });
+
+  it("makes enumerable serialization hooks inert before Pino sees them", () => {
+    const output: string[] = [];
+    const logger = createPlatformLogger({
+      write: (chunk: string) => output.push(chunk),
+    });
+    let serializationHookCalls = 0;
+    const payload: { safe: string; toJSON?: () => unknown } = {
+      safe: "preserved",
+    };
+    Object.defineProperty(payload, "toJSON", {
+      enumerable: true,
+      value: () => {
+        serializationHookCalls += 1;
+        return {
+          a: {
+            b: {
+              clientSecret: "actual-logger-tojson-canary",
+            },
+          },
+        };
+      },
+    });
+    const fields = {
+      payload,
+      nested: {
+        callback: () => "function-secret-canary",
+      },
+    };
+
+    logger.info(fields);
+
+    const serialized = output.join("");
+    expect(serializationHookCalls).toBe(0);
+    expect(serialized).not.toContain("actual-logger-tojson-canary");
+    expect(serialized).not.toContain("function-secret-canary");
+    expect(serialized).toContain("[Function]");
+    expect(payload.safe).toBe("preserved");
+    expect(typeof payload.toJSON).toBe("function");
+    expect(typeof fields.nested.callback).toBe("function");
   });
 
   it("returns a CORS-readable CSRF token with secure host-only login cookies", async () => {
