@@ -14,7 +14,7 @@
 - Browser authorization is the host-only `__Host-apollo_tf` cookie. Do not store or transport a browser `sessionId`, bearer token, provider token, or Apollo Platform secret.
 - Browser-managed Yandex tokens are prohibited. New Yandex onboarding is deferred to server-side OAuth; already connected accounts retain server-backed status, read, and logout behavior.
 - JavaScript cannot read the API host's `__Host-apollo_tf_csrf` cookie. Keep only the `csrfToken` returned by `GET /api/auth/me` in memory.
-- `/api/auth/me` fetch/validation is separate from CSRF commit. Only the mounted auth provider may commit a validated response after confirming its request generation is current.
+- `/api/auth/me` uses an unmanaged credentialed GET whose success, HTTP error, malformed body, and transport paths never clear or commit CSRF and never publish auth events. Only the mounted auth provider may clear before its refresh and commit a validated response after confirming its request generation is current.
 - Every TF API request uses `credentials: "include"`.
 - `POST`, `PUT`, `PATCH`, and `DELETE` requests require the in-memory `X-CSRF-Token`; fail before `fetch` when the token is absent.
 - `GET /api/auth/start` is a top-level browser navigation. `POST /api/auth/logout` is a credentialed CSRF-protected request.
@@ -109,7 +109,7 @@ describe("TF browser session client", () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
-  it("loads the session with credentials and retains CSRF only in memory", async () => {
+  it("fetches the session without mutating CSRF until the provider accepts it", async () => {
     vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify(session), {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -257,7 +257,7 @@ const kind =
   : "invalid";
 ```
 
-Network failures become `new TfApiError(0, "transport_unavailable", "transport")`. `fetchTfSession` accepts only canonical UUID account/installation IDs, string entitlements, a valid future expiry, and a canonical unpadded 43-character base64url CSRF token, but does not assign module-scoped security state. Invalid responses clear CSRF. `commitTfSessionSecurityState` revalidates and commits only a provider-accepted session. Confirmed `401` responses and exact core policy/WebSocket unavailability errors clear CSRF and publish application-local invalidation or revalidation events. `startTfLogin` calls `window.location.assign(apiUrl("/auth/start"))`. `logoutTfSession` only starts and awaits the CSRF-protected remote POST; the provider starts it while the current token is available, then immediately performs local invalidation without waiting. `createWebSocketTicket` POSTs `/ws/tickets` without `body` or `Content-Type`, validates a 43-character base64url ticket, and returns it. `buildTfWebSocketUrl` converts `API_BASE` to `ws:` or `wss:` and appends only `/ws?ticket=<encoded ticket>`.
+Network failures become `new TfApiError(0, "transport_unavailable", "transport")`. `fetchTfSession` performs its own unmanaged `GET /api/auth/me` with credentials, classifies HTTP/body/transport failures as typed `TfApiError`, and accepts only canonical UUID account/installation IDs, string entitlements, a valid future expiry, and a canonical unpadded 43-character base64url CSRF token. No `fetchTfSession` outcome clears or commits module CSRF or publishes an auth event; invalid candidates only throw `invalid_session`. `commitTfSessionSecurityState` revalidates and commits only a provider-accepted session. Normal protected `tfFetch` calls preserve their side-effecting behavior: confirmed `401` responses and exact core policy/WebSocket unavailability errors clear CSRF and publish application-local invalidation or revalidation events. `startTfLogin` calls `window.location.assign(apiUrl("/auth/start"))`. `logoutTfSession` only starts and awaits the CSRF-protected remote POST; the provider starts it while the current token is available, then immediately performs local invalidation without waiting. `createWebSocketTicket` POSTs `/ws/tickets` without `body` or `Content-Type`, validates a 43-character base64url ticket, and returns it. `buildTfWebSocketUrl` converts `API_BASE` to `ws:` or `wss:` and appends only `/ws?ticket=<encoded ticket>`.
 
 Normalize unknown failures without discarding typed API failures:
 
@@ -351,7 +351,7 @@ export interface TfAuthContextValue {
 }
 ```
 
-Provider behavior is generation-guarded and single-flight. It subscribes before the initial `refresh()`: invalidation and policy replacement synchronously clear CSRF, cancel protected queries, clear the `QueryClient`, and unmount protected children. Policy events share one replacement `/auth/me` refresh, whose validated session is committed only after mounted/current-generation acceptance; an account A cache or delayed response cannot cross into account B. Logout starts its CSRF-protected server request before immediate local invalidation and suppresses the eventual remote result. Logout, invalidation, policy replacement, and cleanup invalidate pending generations, so late promises cannot repopulate CSRF or remount protected UI. `hasEntitlement` is a strict `session.entitlements.includes(capability)`.
+Provider behavior is generation-guarded and single-flight. It subscribes before the initial `refresh()`: invalidation and policy replacement synchronously clear CSRF, cancel protected queries, clear the `QueryClient`, and unmount protected children. Policy events share one replacement `/auth/me` refresh. The provider alone classifies a current generation's typed fetch failure into unauthenticated/unavailable UI, while stale failures are ignored without adapter side effects. A validated session is committed only after mounted/current-generation acceptance; an account A cache, success, error, or malformed response cannot cross into account B. Logout starts its CSRF-protected server request before immediate local invalidation and suppresses the eventual remote result. Logout, invalidation, policy replacement, and cleanup invalidate pending generations, so late promises cannot repopulate CSRF or remount protected UI. `hasEntitlement` is a strict `session.entitlements.includes(capability)`.
 
 The boundary uses existing typography, button, border, and background tokens. It renders:
 
@@ -667,13 +667,13 @@ Update `IMPLEMENTATION_STATUS.md` with:
 
 - Status: implemented and locally validated
 - Browser auth: Platform PKCE through `api.tf.apollot.ru`, host-only TF cookie
-- CSRF: `/api/auth/me` token retained in memory and sent on unsafe requests
+- CSRF: unmanaged `/api/auth/me` candidates never mutate security state; only the current provider generation commits a validated token for unsafe requests
 - Policy: `tf.search` gates application mount; server remains authoritative for every capability
 - WebSocket: one-time ticket acquired before every connection attempt
 - Search: generated `searchTracks` receives credential/CSRF options at mutation time
 - Generated media: stream/download auth and policy errors forward into the local auth channel before preserving existing user feedback
 - Runtime invalidation: confirmed 401 and policy replacement synchronously unmount, cancel/clear protected queries, and clear CSRF before any revalidation
-- Session commit: `/auth/me` fetch/validation is side-effect free; only a mounted current provider generation commits CSRF
+- Session commit: `/auth/me` success/error/malformed/transport outcomes never clear, commit, or publish; only a mounted current provider generation clears before refresh, decides typed failures, and commits CSRF
 - Logout: remote POST starts with the current CSRF token, then local auth/query state clears immediately without waiting
 - Yandex: new onboarding deferred to server-side OAuth; existing connected accounts retain server-backed reads and logout
 - Legacy browser UUID: removed

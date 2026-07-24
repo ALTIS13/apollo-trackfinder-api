@@ -134,9 +134,10 @@ describe("TF auth boundary", () => {
   });
 
   it.each([
+    new TfApiError(403, "module_access_denied", "forbidden"),
     new TfApiError(503, "policy_unavailable", "unavailable"),
-    new Error("network unavailable"),
-  ])("shows retry after a 503 or transport failure", async (error) => {
+    new TfApiError(0, "transport_unavailable", "transport"),
+  ])("shows retry after a current-generation typed $kind failure", async (error) => {
     fetchTfSessionMock.mockRejectedValueOnce(error);
 
     renderAuth();

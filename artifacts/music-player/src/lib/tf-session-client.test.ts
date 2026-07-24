@@ -6,6 +6,7 @@ import {
   commitTfSessionSecurityState,
   createWebSocketTicket,
   fetchTfSession,
+  subscribeTfAuthSecurityEvents,
   tfFetch,
   tfRequestInit,
 } from "./tf-session-client";
@@ -39,8 +40,11 @@ describe("TF browser session client", () => {
       headers: { "Content-Type": "application/json" },
     }));
 
+    const securityEvents = vi.fn();
+    const unsubscribe = subscribeTfAuthSecurityEvents(securityEvents);
     const fetchedSession = await fetchTfSession();
     expect(fetchedSession).toEqual(session);
+    expect(securityEvents).not.toHaveBeenCalled();
     expect(fetch).toHaveBeenCalledWith(
       expect.stringMatching(/\/api\/auth\/me$/),
       expect.objectContaining({ method: "GET", credentials: "include" }),
@@ -62,6 +66,7 @@ describe("TF browser session client", () => {
       },
     });
     expect(localStorage.length).toBe(0);
+    unsubscribe();
   });
 
   it("refuses unsafe requests before fetch when CSRF is absent", async () => {
@@ -190,7 +195,7 @@ describe("TF browser session client", () => {
       "expired session",
       { ...session, expiresAt: "2020-01-01T00:00:00.000Z" },
     ],
-  ])("clears CSRF after an invalid session payload: %s", async (_label, invalidSession) => {
+  ])("does not mutate committed CSRF after an invalid session candidate: %s", async (_label, invalidSession) => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(new Response(JSON.stringify(session), {
         status: 200,
@@ -203,8 +208,8 @@ describe("TF browser session client", () => {
 
     await fetchAndCommitSession();
     await expect(fetchTfSession()).rejects.toMatchObject({ code: "invalid_session" });
-    await expect(tfFetch("/tracks/play", { method: "POST" })).rejects.toMatchObject({
-      code: "csrf_unavailable",
+    expect(tfRequestInit({ method: "POST" })).toMatchObject({
+      headers: { "x-csrf-token": CSRF_TOKEN },
     });
     expect(fetch).toHaveBeenCalledTimes(2);
   });

@@ -171,10 +171,40 @@ export async function tfFetch<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export async function fetchTfSession(): Promise<TfBrowserSession> {
-  const session = await tfFetch<unknown>("/auth/me");
+  let response: Response;
+
+  try {
+    response = await fetch(apiUrl("/auth/me"), {
+      method: "GET",
+      credentials: "include",
+    });
+  } catch (error) {
+    throw normalizeTfApiError(error);
+  }
+
+  if (!response.ok) {
+    const body = await parseJson(response).catch(() => undefined);
+    const code = isRecord(body) && typeof body.error === "string"
+      ? body.error
+      : "invalid_response";
+    const kind = response.status === 401
+      ? "unauthenticated"
+      : response.status === 403
+        ? "forbidden"
+        : response.status === 503
+          ? "unavailable"
+          : "invalid";
+    throw new TfApiError(response.status, code, kind);
+  }
+
+  let session: unknown;
+  try {
+    session = await parseJson(response);
+  } catch (error) {
+    throw normalizeTfApiError(error);
+  }
 
   if (!isTfBrowserSession(session)) {
-    clearTfSessionSecurityState();
     throw new TfApiError(200, "invalid_session", "invalid");
   }
 
