@@ -36,7 +36,12 @@ const apiStartupScript = join(
   "start-tf.sh",
 );
 const temporaryDirectories: string[] = [];
-const temporaryRoot = join(repositoryRoot, ".tmp");
+const workspaceTemporaryRoot = join(repositoryRoot, ".tmp");
+const apiDeploymentTemporaryRoot = join(
+  workspaceTemporaryRoot,
+  "api-deployment-contract",
+);
+const temporaryRoot = apiDeploymentTemporaryRoot;
 
 type ComposeService = {
   readonly build?: {
@@ -142,6 +147,7 @@ async function runApiStartup(options: {
 }
 
 async function createTemporaryDirectory(prefix: string): Promise<string> {
+  await mkdir(workspaceTemporaryRoot, { recursive: true });
   await mkdir(temporaryRoot, { recursive: true });
   const directory = await mkdtemp(join(temporaryRoot, prefix));
   const fromRoot = relative(repositoryRoot, directory);
@@ -176,17 +182,29 @@ afterEach(async () => {
       .splice(0)
       .map((directory) => rm(directory, { force: true, recursive: true })),
   );
-  try {
-    await rmdir(temporaryRoot);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
-      throw error;
+  for (const directory of [temporaryRoot, workspaceTemporaryRoot]) {
+    try {
+      await rmdir(directory);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
+        throw error;
+      }
     }
   }
 });
 
 describe("TF deployment identity contract", () => {
+  it("keeps API deployment fixtures under the suite-owned parent", async () => {
+    const directory = await createTemporaryDirectory(
+      "apollo-tf-api-ownership-",
+    );
+    const fromOwner = relative(apiDeploymentTemporaryRoot, directory);
+
+    expect(fromOwner).not.toBe("..");
+    expect(fromOwner.startsWith(`..${sep}`)).toBe(false);
+  });
+
   it("preserves the root base identities while retaining Task 9 hardening", async () => {
     const template = await composeTemplate(rootComposePath);
 

@@ -26,6 +26,11 @@ const smokeScript = join(
   "scripts",
   "smoke.mjs",
 );
+const workspaceTemporaryRoot = resolve(repositoryRoot, ".tmp");
+const searchTestTemporaryParent = join(
+  workspaceTemporaryRoot,
+  "tf-search-smoke-test",
+);
 
 interface DockerCall {
   readonly args: readonly string[];
@@ -59,7 +64,10 @@ interface SmokeModule {
   ) => string;
   readonly prepareSecretDirectory: (
     environment: NodeJS.ProcessEnv,
-    options?: { readonly repositoryRoot?: string },
+    options?: {
+      readonly repositoryRoot?: string;
+      readonly temporaryParent?: string;
+    },
   ) => Promise<{
     readonly directory: string;
     readonly rawSecretCanaries: readonly string[];
@@ -67,7 +75,10 @@ interface SmokeModule {
   }>;
   readonly removeVerifiedDirectory: (
     directory: string,
-    options?: { readonly repositoryRoot?: string },
+    options?: {
+      readonly repositoryRoot?: string;
+      readonly temporaryParent?: string;
+    },
   ) => Promise<void>;
   readonly seedPolicySession: (
     compose: (
@@ -78,6 +89,7 @@ interface SmokeModule {
   readonly runTfSearchSmoke: (options: {
     readonly environment: NodeJS.ProcessEnv;
     readonly repositoryRoot?: string;
+    readonly temporaryParent?: string;
     readonly docker: (
       args: readonly string[],
       environment: NodeJS.ProcessEnv,
@@ -197,6 +209,7 @@ describe("tf-search disposable smoke contract", () => {
           DOCKER_HOST: "tcp://remote.example:2375",
         },
         repositoryRoot,
+        temporaryParent: searchTestTemporaryParent,
         docker: docker.run,
         exerciseStack: async () => successfulObservations(),
       }),
@@ -234,46 +247,82 @@ describe("tf-search disposable smoke contract", () => {
     ).toThrow("outside the worktree");
   });
 
-  it("creates exact per-run secrets under the worktree and removes them", async () => {
+  it("isolates per-run secrets from a concurrent API temp owner", async () => {
     const smoke = await loadSmokeModule();
     const environment = { ...process.env };
-    const prepared = await smoke.prepareSecretDirectory(environment, {
-      repositoryRoot,
-    });
+    const apiTemporaryParent = join(
+      workspaceTemporaryRoot,
+      "api-deployment-contract",
+    );
+    await mkdir(apiTemporaryParent, { recursive: true });
+    const apiRunDirectory = await mkdtemp(
+      join(apiTemporaryParent, "concurrent-api-owner-"),
+    );
+    const apiMarker = join(apiRunDirectory, "active");
+    await writeFile(apiMarker, "api-owner");
+    let prepared:
+      | Awaited<ReturnType<SmokeModule["prepareSecretDirectory"]>>
+      | undefined;
+    let removed = false;
 
-    expect(prepared.directory.startsWith(resolve(repositoryRoot, ".tmp"))).toBe(
-      true,
-    );
-    expect([...prepared.secretNames].sort()).toEqual([
-      "tf_client_secret",
-      "tf_database_url",
-      "tf_module_heartbeat_keys",
-      "tf_postgres_password",
-      "tf_search_heartbeat_secret",
-      "tf_search_internal_auth_secret",
-    ]);
-    expect(new Set(prepared.rawSecretCanaries).size).toBe(
-      prepared.rawSecretCanaries.length,
-    );
-    expect(environment.TF_SECRET_DIRECTORY).toBe(prepared.directory);
+    try {
+      prepared = await smoke.prepareSecretDirectory(environment, {
+        repositoryRoot,
+        temporaryParent: searchTestTemporaryParent,
+      });
 
-    const heartbeatSecret = await readFile(
-      join(prepared.directory, "tf_search_heartbeat_secret"),
-      "utf8",
-    );
-    const heartbeatMap = JSON.parse(
-      await readFile(
-        join(prepared.directory, "tf_module_heartbeat_keys"),
+      const fromOwner = prepared.directory.slice(
+        searchTestTemporaryParent.length,
+      );
+      expect(fromOwner.startsWith("\\") || fromOwner.startsWith("/")).toBe(
+        true,
+      );
+      expect([...prepared.secretNames].sort()).toEqual([
+        "tf_client_secret",
+        "tf_database_url",
+        "tf_module_heartbeat_keys",
+        "tf_postgres_password",
+        "tf_search_heartbeat_secret",
+        "tf_search_internal_auth_secret",
+      ]);
+      expect(new Set(prepared.rawSecretCanaries).size).toBe(
+        prepared.rawSecretCanaries.length,
+      );
+      expect(environment.TF_SECRET_DIRECTORY).toBe(prepared.directory);
+
+      const heartbeatSecret = await readFile(
+        join(prepared.directory, "tf_search_heartbeat_secret"),
         "utf8",
-      ),
-    ) as Record<string, string>;
-    expect(heartbeatMap).toEqual({ "search-media": heartbeatSecret });
+      );
+      const heartbeatMap = JSON.parse(
+        await readFile(
+          join(prepared.directory, "tf_module_heartbeat_keys"),
+          "utf8",
+        ),
+      ) as Record<string, string>;
+      expect(heartbeatMap).toEqual({ "search-media": heartbeatSecret });
 
-    await smoke.removeVerifiedDirectory(prepared.directory, {
-      repositoryRoot,
-    });
-    await expect(access(prepared.directory)).rejects.toBeDefined();
-    await expect(access(join(repositoryRoot, ".tmp"))).rejects.toBeDefined();
+      await smoke.removeVerifiedDirectory(prepared.directory, {
+        repositoryRoot,
+        temporaryParent: searchTestTemporaryParent,
+      });
+      removed = true;
+      await expect(access(prepared.directory)).rejects.toBeDefined();
+      await expect(access(searchTestTemporaryParent)).rejects.toBeDefined();
+      expect(await readFile(apiMarker, "utf8")).toBe("api-owner");
+    } finally {
+      if (prepared !== undefined && !removed) {
+        await smoke
+          .removeVerifiedDirectory(prepared.directory, {
+            repositoryRoot,
+            temporaryParent: searchTestTemporaryParent,
+          })
+          .catch(() => undefined);
+      }
+      await rm(apiRunDirectory, { force: true, recursive: true });
+      await rmdir(apiTemporaryParent).catch(() => undefined);
+      await rmdir(workspaceTemporaryRoot).catch(() => undefined);
+    }
   });
 
   it("rejects symlink or junction escapes before writing or deleting", async ({
@@ -293,13 +342,18 @@ describe("tf-search disposable smoke contract", () => {
     const workspace = join(fixtureRoot, "workspace");
     const outside = join(fixtureRoot, "outside");
     const linkedTemporaryRoot = join(workspace, ".tmp");
-    const linkedRunDirectory = join(
+    const linkedTemporaryParent = join(
       linkedTemporaryRoot,
+      "tf-search-smoke-test",
+    );
+    const linkedRunDirectory = join(
+      linkedTemporaryParent,
       `tf-search-smoke-${randomUUID()}`,
     );
     const sentinel = join(outside, "sentinel");
     const linkType = process.platform === "win32" ? "junction" : "dir";
     let temporaryRootIsLink = false;
+    let temporaryParentIsLink = false;
     let runDirectoryIsLink = false;
 
     await mkdir(workspace);
@@ -326,18 +380,39 @@ describe("tf-search disposable smoke contract", () => {
       await unlink(linkedTemporaryRoot);
       temporaryRootIsLink = false;
       await mkdir(linkedTemporaryRoot);
+      await symlink(outside, linkedTemporaryParent, linkType);
+      temporaryParentIsLink = true;
+
+      await expect(
+        smoke.prepareSecretDirectory(
+          {},
+          {
+            repositoryRoot: workspace,
+            temporaryParent: linkedTemporaryParent,
+          },
+        ),
+      ).rejects.toThrow(/symbolic|reparse|physical/i);
+      expect(await readFile(sentinel, "utf8")).toBe("preserve");
+
+      await unlink(linkedTemporaryParent);
+      temporaryParentIsLink = false;
+      await mkdir(linkedTemporaryParent);
       await symlink(outside, linkedRunDirectory, linkType);
       runDirectoryIsLink = true;
 
       await expect(
         smoke.removeVerifiedDirectory(linkedRunDirectory, {
           repositoryRoot: workspace,
+          temporaryParent: linkedTemporaryParent,
         }),
       ).rejects.toThrow(/symbolic|reparse|physical/i);
       expect(await readFile(sentinel, "utf8")).toBe("preserve");
     } finally {
       if (runDirectoryIsLink) {
         await unlink(linkedRunDirectory).catch(() => undefined);
+      }
+      if (temporaryParentIsLink) {
+        await unlink(linkedTemporaryParent).catch(() => undefined);
       }
       if (temporaryRootIsLink) {
         await unlink(linkedTemporaryRoot).catch(() => undefined);
@@ -363,6 +438,7 @@ describe("tf-search disposable smoke contract", () => {
         TF_SEARCH_SMOKE_API_PORT: "18088",
       },
       repositoryRoot,
+      temporaryParent: searchTestTemporaryParent,
       docker: docker.run,
       exerciseStack: async ({ restartApi }) => {
         await restartApi();
@@ -404,6 +480,11 @@ describe("tf-search disposable smoke contract", () => {
       expect(args[args.indexOf("-p") + 1]).toBe(result.project);
       expect(environment.COMPOSE_PROJECT_NAME).toBe(result.project);
       expect(environment.COMPOSE_BAKE).toBe("false");
+      expect(environment.TF_SECRET_DIRECTORY).toMatch(
+        new RegExp(
+          `^${searchTestTemporaryParent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\\\/]`,
+        ),
+      );
       expect(environment.DOCKER_HOST ?? "").not.toMatch(/^tcp:\/\//i);
     }
     const down = composeCalls.find(({ args }) => args.includes("down"));
@@ -453,6 +534,7 @@ describe("tf-search disposable smoke contract", () => {
       smoke.runTfSearchSmoke({
         environment: process.env,
         repositoryRoot,
+        temporaryParent: searchTestTemporaryParent,
         docker: docker.run,
         exerciseStack: async () => {
           throw new Error("runtime assertion failed");
@@ -506,6 +588,7 @@ describe("tf-search disposable smoke contract", () => {
       smoke.runTfSearchSmoke({
         environment: process.env,
         repositoryRoot,
+        temporaryParent: searchTestTemporaryParent,
         docker,
         exerciseStack: async () => successfulObservations(),
       }),
@@ -534,6 +617,7 @@ describe("tf-search disposable smoke contract", () => {
       await smoke.runTfSearchSmoke({
         environment: process.env,
         repositoryRoot,
+        temporaryParent: searchTestTemporaryParent,
         docker: docker.run,
         exerciseStack: async ({ registerLogCanaries }) => {
           registerLogCanaries([artist]);
@@ -580,6 +664,7 @@ describe("tf-search disposable smoke contract", () => {
       await smoke.runTfSearchSmoke({
         environment: process.env,
         repositoryRoot,
+        temporaryParent: searchTestTemporaryParent,
         docker: docker.run,
         exerciseStack: async ({ registerLogCanaries }) => {
           registerLogCanaries(canaries);

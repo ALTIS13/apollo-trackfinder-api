@@ -169,34 +169,120 @@ async function pathExists(path) {
   }
 }
 
-export async function removeVerifiedDirectory(directory, options = {}) {
-  const repositoryRoot = options.repositoryRoot ?? defaultRepositoryRoot;
-  const workspace = await verifiedWorkspaceRoot(repositoryRoot);
+function temporaryPaths(repositoryRoot, options) {
   const temporaryRootPath = assertWorkspaceContainedPath(
     join(repositoryRoot, ".tmp"),
     repositoryRoot,
+  );
+  const temporaryParentPath = assertWorkspaceContainedPath(
+    options.temporaryParent ?? temporaryRootPath,
+    repositoryRoot,
+  );
+  const fromTemporaryRoot = relative(temporaryRootPath, temporaryParentPath);
+  if (fromTemporaryRoot === ".." || fromTemporaryRoot.startsWith(`..${sep}`)) {
+    throw new Error("Temporary parent is outside the workspace temp root");
+  }
+  return { temporaryParentPath, temporaryRootPath };
+}
+
+async function ensureVerifiedDirectory(candidate, workspace) {
+  try {
+    return await verifiedPhysicalDirectory(candidate, workspace);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  try {
+    await mkdir(candidate);
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  }
+  return verifiedPhysicalDirectory(candidate, workspace);
+}
+
+async function prepareTemporaryContext(repositoryRoot, options) {
+  const workspace = await verifiedWorkspaceRoot(repositoryRoot);
+  const { temporaryParentPath, temporaryRootPath } = temporaryPaths(
+    repositoryRoot,
+    options,
+  );
+  const temporaryRoot = await ensureVerifiedDirectory(
+    temporaryRootPath,
+    workspace,
+  );
+  const temporaryParent =
+    temporaryParentPath === temporaryRootPath
+      ? temporaryRoot
+      : await ensureVerifiedDirectory(temporaryParentPath, workspace);
+  assertPhysicalContainment(
+    temporaryParent.physicalCandidate,
+    temporaryRoot.physicalCandidate,
+    true,
+  );
+  return { temporaryParent, temporaryRoot, workspace };
+}
+
+async function verifiedTemporaryContext(repositoryRoot, options) {
+  const workspace = await verifiedWorkspaceRoot(repositoryRoot);
+  const { temporaryParentPath, temporaryRootPath } = temporaryPaths(
+    repositoryRoot,
+    options,
   );
   const temporaryRoot = await verifiedPhysicalDirectory(
     temporaryRootPath,
     workspace,
   );
+  const temporaryParent =
+    temporaryParentPath === temporaryRootPath
+      ? temporaryRoot
+      : await verifiedPhysicalDirectory(temporaryParentPath, workspace);
+  assertPhysicalContainment(
+    temporaryParent.physicalCandidate,
+    temporaryRoot.physicalCandidate,
+    true,
+  );
+  return { temporaryParent, temporaryRoot, workspace };
+}
+
+export async function removeVerifiedDirectory(directory, options = {}) {
+  const repositoryRoot = options.repositoryRoot ?? defaultRepositoryRoot;
+  const { temporaryParent, temporaryRoot, workspace } =
+    await verifiedTemporaryContext(repositoryRoot, options);
   const verified = await verifiedPhysicalDirectory(directory, workspace);
   if (
-    verified.physicalCandidate === temporaryRoot.physicalCandidate ||
+    verified.physicalCandidate === temporaryParent.physicalCandidate ||
     !verified.physicalCandidate.startsWith(
-      `${temporaryRoot.physicalCandidate}${sep}`,
+      `${temporaryParent.physicalCandidate}${sep}`,
     )
   ) {
     throw new Error("Refusing to remove a non-smoke directory");
   }
   await verifiedWorkspaceRoot(repositoryRoot);
-  await verifiedPhysicalDirectory(temporaryRootPath, workspace);
+  await verifiedPhysicalDirectory(temporaryRoot.lexicalCandidate, workspace);
+  await verifiedPhysicalDirectory(temporaryParent.lexicalCandidate, workspace);
   await verifiedPhysicalDirectory(directory, workspace);
   await rm(verified.lexicalCandidate, { force: true, recursive: true });
+  if (temporaryParent.lexicalCandidate !== temporaryRoot.lexicalCandidate) {
+    try {
+      await verifiedWorkspaceRoot(repositoryRoot);
+      const refreshedTemporaryParent = await verifiedPhysicalDirectory(
+        temporaryParent.lexicalCandidate,
+        workspace,
+      );
+      await rmdir(refreshedTemporaryParent.lexicalCandidate);
+    } catch (error) {
+      if (
+        error?.code !== "ENOENT" &&
+        error?.code !== "ENOTEMPTY" &&
+        error?.code !== "EEXIST"
+      ) {
+        throw error;
+      }
+    }
+  }
   try {
     await verifiedWorkspaceRoot(repositoryRoot);
     const refreshedTemporaryRoot = await verifiedPhysicalDirectory(
-      temporaryRootPath,
+      temporaryRoot.lexicalCandidate,
       workspace,
     );
     await rmdir(refreshedTemporaryRoot.lexicalCandidate);
@@ -213,23 +299,12 @@ export async function removeVerifiedDirectory(directory, options = {}) {
 
 export async function prepareSecretDirectory(environment, options = {}) {
   const repositoryRoot = options.repositoryRoot ?? defaultRepositoryRoot;
-  const workspace = await verifiedWorkspaceRoot(repositoryRoot);
-  const temporaryRootPath = assertWorkspaceContainedPath(
-    join(repositoryRoot, ".tmp"),
+  const { temporaryParent, workspace } = await prepareTemporaryContext(
     repositoryRoot,
-  );
-  try {
-    await verifiedPhysicalDirectory(temporaryRootPath, workspace);
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-    await mkdir(temporaryRootPath);
-  }
-  const temporaryRoot = await verifiedPhysicalDirectory(
-    temporaryRootPath,
-    workspace,
+    options,
   );
   const directoryPath = assertWorkspaceContainedPath(
-    await mkdtemp(join(temporaryRoot.lexicalCandidate, "tf-search-smoke-")),
+    await mkdtemp(join(temporaryParent.lexicalCandidate, "tf-search-smoke-")),
     repositoryRoot,
   );
   const directory = await verifiedPhysicalDirectory(directoryPath, workspace);
@@ -292,6 +367,7 @@ export async function prepareSecretDirectory(environment, options = {}) {
   } catch (error) {
     await removeVerifiedDirectory(directory.lexicalCandidate, {
       repositoryRoot,
+      temporaryParent: options.temporaryParent,
     });
     throw error;
   }
@@ -599,7 +675,10 @@ export async function runTfSearchSmoke(options) {
     temporaryDirectories: -1,
   };
   try {
-    prepared = await prepareSecretDirectory(environment, { repositoryRoot });
+    prepared = await prepareSecretDirectory(environment, {
+      repositoryRoot,
+      temporaryParent: options.temporaryParent,
+    });
     const override = await writeSmokeOverride(
       environment,
       prepared.directory,
@@ -692,7 +771,10 @@ export async function runTfSearchSmoke(options) {
     try {
       const audited = await auditProject(docker, environment, project);
       if (prepared !== undefined) {
-        await removeVerifiedDirectory(prepared.directory, { repositoryRoot });
+        await removeVerifiedDirectory(prepared.directory, {
+          repositoryRoot,
+          temporaryParent: options.temporaryParent,
+        });
       }
       cleanup = {
         ...audited,
