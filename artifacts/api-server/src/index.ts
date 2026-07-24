@@ -19,6 +19,10 @@ import {
   createStrictRedisClient,
 } from "./lib/tf-session-store.js";
 import {
+  HttpTfSearchClient,
+  parseTfSearchClientConfig,
+} from "./lib/tf-search-client.js";
+import {
   initializeApiRuntime,
   startApiListener,
 } from "./lib/server-startup.js";
@@ -26,7 +30,10 @@ import { attachWebSocketServer } from "./ws.js";
 import type { WebSocketServerHandle } from "./ws.js";
 
 async function start(): Promise<void> {
-  const authConfig = await parseTfAuthRuntimeConfig(process.env);
+  const [authConfig, searchConfig] = await Promise.all([
+    parseTfAuthRuntimeConfig(process.env),
+    parseTfSearchClientConfig(process.env),
+  ]);
   const rawPort = process.env["PORT"];
   if (rawPort === undefined) {
     throw new Error("invalid runtime configuration");
@@ -72,6 +79,7 @@ async function start(): Promise<void> {
       clientSecret: authConfig.clientSecret,
     });
     const sessionStore = new TfSessionStore(createStrictRedisClient(authRedis));
+    const searchGateway = new HttpTfSearchClient(searchConfig);
     const app = createApiApp({
       nodeEnv: authConfig.nodeEnv,
       readiness: async () => {
@@ -94,6 +102,7 @@ async function start(): Promise<void> {
           ? {}
           : { pkceVerifier: () => authConfig.bridgePkceVerifier! }),
       },
+      tracks: { searchGateway },
     });
 
     cacheRedis = getRedis();

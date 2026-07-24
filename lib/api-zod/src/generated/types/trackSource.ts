@@ -11,4 +11,6 @@ export type TrackSource = (typeof TrackSource)[keyof typeof TrackSource];
 export const TrackSource = {
   youtube: "youtube",
   soundcloud: "soundcloud",
+  bandcamp: "bandcamp",
+  deezer: "deezer",
 } as const;

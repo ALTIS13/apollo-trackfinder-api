@@ -5,6 +5,7 @@
  * Music Player API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { SearchResponseSourcesItem } from "./searchResponseSourcesItem";
 import type { TrackResult } from "./trackResult";
 
 export interface SearchResponse {
@@ -13,4 +14,11 @@ export interface SearchResponse {
   results: TrackResult[];
   /** Whether results came from cache */
   cached: boolean;
+  /**
+   * @minItems 1
+   * @maxItems 4
+   */
+  sources: SearchResponseSourcesItem[];
+  /** Whether broadening a manual source selection may return results */
+  fallbackAvailable: boolean;
 }

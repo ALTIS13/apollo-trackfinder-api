@@ -164,6 +164,9 @@ importers:
       '@workspace/platform-contract':
         specifier: workspace:*
         version: link:../../lib/platform-contract
+      '@workspace/tf-search-contract':
+        specifier: workspace:*
+        version: link:../../lib/tf-search-contract
       bullmq:
         specifier: ^5.73.0
         version: 5.73.0

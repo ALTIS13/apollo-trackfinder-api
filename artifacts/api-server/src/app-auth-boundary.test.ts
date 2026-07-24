@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createApiApp } from "./app.js";
 import { createTfLogger } from "./lib/logger.js";
+import type { TfSearchGateway } from "./lib/tf-search-client.js";
 import type { TfSession } from "./lib/tf-session-store.js";
 import { AUTH_COOKIE_NAMES } from "./routes/auth.js";
 
@@ -28,20 +29,29 @@ function opaque(): string {
   return randomBytes(32).toString("base64url");
 }
 
-function session(): TfSession {
+interface AuthFixtureOptions {
+  readonly sessionEntitlements?: readonly string[];
+  readonly policyEntitlements?: readonly string[];
+  readonly snapshotFresh?: boolean;
+  readonly searchGateway?: TfSearchGateway;
+}
+
+function session(options: AuthFixtureOptions = {}): TfSession {
   return {
     id: TF_SESSION_ID,
     accountId: ACCOUNT_ID,
     platformSessionId: PLATFORM_SESSION_ID,
     installationId: INSTALLATION_ID,
-    entitlements: ["tf.search"],
-    assertionExpiresAt: new Date(Date.now() + 300_000).toISOString(),
+    entitlements: [...(options.sessionEntitlements ?? ["tf.search"])],
+    assertionExpiresAt: new Date(
+      Date.now() + (options.snapshotFresh === false ? -1_000 : 300_000),
+    ).toISOString(),
     expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
   };
 }
 
-function authDependencies() {
-  const currentSession = session();
+function authDependencies(options: AuthFixtureOptions = {}) {
+  const currentSession = session(options);
   const sessionHandle = opaque();
   const csrfToken = opaque();
   const ticket = opaque();
@@ -55,7 +65,7 @@ function authDependencies() {
     sessionId: PLATFORM_SESSION_ID,
     installationId: INSTALLATION_ID,
     accountStatus: "active" as const,
-    entitlements: ["tf.search"] as const,
+    entitlements: [...(options.policyEntitlements ?? ["tf.search"])],
     expiresAt: currentSession.expiresAt,
   };
   const platform = {
@@ -92,8 +102,8 @@ function authDependencies() {
   };
 }
 
-async function startAuthenticatedApp() {
-  const dependencies = authDependencies();
+async function startAuthenticatedApp(options: AuthFixtureOptions = {}) {
+  const dependencies = authDependencies(options);
   const sink = new Writable({
     write(_chunk, _encoding, callback) {
       callback();
@@ -103,6 +113,9 @@ async function startAuthenticatedApp() {
     auth: dependencies.auth,
     nodeEnv: "production",
     requestLogger: createTfLogger(sink),
+    ...(options.searchGateway === undefined
+      ? {}
+      : { tracks: { searchGateway: options.searchGateway } }),
   });
   const server = app.listen(0, "127.0.0.1");
   servers.push(server);
@@ -218,6 +231,42 @@ describe("credentialed TF browser boundary", () => {
     expect(current.sessionStore.issueWebSocketTicket).toHaveBeenCalledWith(
       current.sessionHandle,
     );
+  });
+
+  it("does not dispatch search when tf.search is absent or revoked", async () => {
+    const searchGateway = {
+      search: vi.fn(),
+      suggestions: vi.fn(),
+    } satisfies TfSearchGateway;
+    const absent = await startAuthenticatedApp({
+      sessionEntitlements: [],
+      searchGateway,
+    });
+    const revoked = await startAuthenticatedApp({
+      sessionEntitlements: ["tf.search"],
+      policyEntitlements: [],
+      snapshotFresh: false,
+      searchGateway,
+    });
+
+    for (const current of [absent, revoked]) {
+      const response = await fetch(`${current.origin}/api/tracks/search`, {
+        method: "POST",
+        headers: {
+          cookie: browserCookies(current.sessionHandle, current.csrfToken),
+          origin: WEB_ORIGIN,
+          "x-csrf-token": current.csrfToken,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ artist: "Artist", title: "Track" }),
+      });
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toEqual({
+        error: "module_access_denied",
+      });
+    }
+    expect(searchGateway.search).not.toHaveBeenCalled();
+    expect(searchGateway.suggestions).not.toHaveBeenCalled();
   });
 
   it("returns the current CSRF token from me and supports browser logout", async () => {

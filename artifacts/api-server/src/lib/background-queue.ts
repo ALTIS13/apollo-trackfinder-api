@@ -3,7 +3,6 @@ import type { RedisOptions } from "ioredis";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "./logger.js";
-import { purgeStaleCaches } from "./cache.js";
 import { spawnAudioDownload, type AudioQuality } from "./ytdlp.js";
 
 export const DOWNLOAD_DIR = process.env["DOWNLOAD_DIR"] ?? "/tmp/tf-downloads";
@@ -45,8 +44,6 @@ const inMemoryJobs = new Map<string, InMemoryJob>();
 let inMemoryWorkerRunning = false;
 let inMemoryQueue: InMemoryJob[] = [];
 
-let cleanupQueue: Queue | null = null;
-let cleanupWorker: Worker | null = null;
 let downloadQueue: Queue<DownloadJobData, DownloadJobResult> | null = null;
 let downloadTelemetryQueue: Queue<DownloadJobData, DownloadJobResult> | null =
   null;
@@ -161,45 +158,6 @@ export async function initBackgroundQueues(): Promise<void> {
   telemetryFailureCount = 0;
 
   try {
-    // Cache cleanup queue
-    cleanupQueue = new Queue("cache-cleanup", {
-      connection: producerConnection,
-    });
-    cleanupWorker = new Worker(
-      "cache-cleanup",
-      async (job) => {
-        if (job.name === "purge-stale") {
-          await purgeStaleCaches();
-          logger.info("BullMQ: purged stale cache entries");
-        }
-      },
-      { connection: workerConnection },
-    );
-    cleanupWorker.on("error", (error) => {
-      workerErrorCount += 1;
-      logger.warn({ err: error.message }, "BullMQ cache-cleanup worker error");
-    });
-    cleanupWorker.on("failed", (job, err) => {
-      logger.warn(
-        { jobId: job?.id, err: (err as Error).message },
-        "BullMQ cache-cleanup job failed",
-      );
-    });
-    const repeatables = await cleanupQueue.getRepeatableJobs();
-    if (!repeatables.some((r) => r.name === "purge-stale")) {
-      await cleanupQueue.add(
-        "purge-stale",
-        {},
-        {
-          repeat: { every: 60 * 60 * 1000 },
-          removeOnComplete: 5,
-          removeOnFail: 3,
-        },
-      );
-      logger.info("BullMQ: scheduled hourly cache cleanup");
-    }
-
-    // Download queue
     downloadQueue = new Queue<DownloadJobData, DownloadJobResult>(
       "track-downloads",
       {
@@ -241,21 +199,17 @@ export async function initBackgroundQueues(): Promise<void> {
     });
 
     redisAvailable = true;
-    logger.info("BullMQ background queues (cleanup + downloads) initialized");
+    logger.info("BullMQ download queues initialized");
   } catch (err) {
     logger.warn(
       { err: (err as Error).message },
       "BullMQ init failed — using in-memory download fallback",
     );
     await Promise.allSettled([
-      cleanupQueue?.close(),
-      cleanupWorker?.close(),
       downloadQueue?.close(),
       downloadTelemetryQueue?.close(),
       downloadWorker?.close(),
     ]);
-    cleanupQueue = null;
-    cleanupWorker = null;
     downloadQueue = null;
     downloadTelemetryQueue = null;
     downloadWorker = null;
@@ -268,8 +222,6 @@ export async function shutdownBackgroundQueues(): Promise<void> {
     await downloadWorker?.close();
     await downloadTelemetryQueue?.close();
     await downloadQueue?.close();
-    await cleanupWorker?.close();
-    await cleanupQueue?.close();
   } catch {}
   redisAvailable = false;
 }

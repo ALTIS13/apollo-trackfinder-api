@@ -1,11 +1,26 @@
 import { once } from "node:events";
+import { EventEmitter } from "node:events";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { PassThrough } from "node:stream";
 
 import express from "express";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type {
+  TfSearchGateway,
+} from "../lib/tf-search-client.js";
 import { createTracksRouter, type TrackRouteDependencies } from "./tracks.js";
+
+const ytdlpMocks = vi.hoisted(() => ({
+  getStreamUrl: vi.fn(),
+  spawnAudioDownload: vi.fn(),
+}));
+
+vi.mock("../lib/ytdlp.js", () => ({
+  getStreamUrl: ytdlpMocks.getStreamUrl,
+  spawnAudioDownload: ytdlpMocks.spawnAudioDownload,
+}));
 
 vi.hoisted(() => {
   process.env["DATABASE_URL"] ??= "postgres://unused:unused@127.0.0.1:1/unused";
@@ -28,8 +43,73 @@ const principal = {
 } as const;
 const servers: Server[] = [];
 
-function routeDependencies() {
+function result(
+  index = 0,
+  overrides: Partial<{
+    readonly id: string;
+    readonly score: number;
+    readonly source: "youtube" | "soundcloud" | "bandcamp" | "deezer";
+    readonly sourceUrl: string;
+  }> = {},
+) {
   return {
+    id: overrides.id ?? `yt_result_${index}`,
+    title: `Track ${index}`,
+    artist: "Artist",
+    type: "original" as const,
+    duration: 180,
+    source: overrides.source ?? ("youtube" as const),
+    thumbnailUrl: null,
+    quality: ["128", "320"],
+    viewCount: 42,
+    score: overrides.score ?? 90 - index,
+    sourceUrl:
+      overrides.sourceUrl ??
+      `https://www.youtube.com/watch?v=result-${index}`,
+  };
+}
+
+function searchResponse(
+  overrides: Partial<{
+    readonly results: ReturnType<typeof result>[];
+    readonly cached: boolean;
+    readonly sources: ("yt" | "sc" | "bc" | "dz")[];
+    readonly fallbackAvailable: boolean;
+  }> = {},
+) {
+  return {
+    schemaVersion: 1 as const,
+    requestId: "10000000-0000-4000-8000-000000000001",
+    query: "Artist Track",
+    results: overrides.results ?? [result()],
+    cached: overrides.cached ?? false,
+    sources: overrides.sources ?? ["yt", "sc", "bc", "dz"],
+    fallbackAvailable: overrides.fallbackAvailable ?? false,
+    providerStatus: {
+      yt: "ok" as const,
+      sc: "ok" as const,
+      bc: "ok" as const,
+      dz: "ok" as const,
+    },
+  };
+}
+
+function searchGateway() {
+  return {
+    search: vi.fn().mockResolvedValue(searchResponse()),
+    suggestions: vi.fn().mockResolvedValue({
+      schemaVersion: 1,
+      requestId: "10000000-0000-4000-8000-000000000001",
+      suggestions: [{ artist: "Artist", title: "Track" }],
+    }),
+  } satisfies TfSearchGateway;
+}
+
+function routeDependencies(
+  overrides: Partial<TrackRouteDependencies> = {},
+) {
+  const dependencies = {
+    searchGateway: searchGateway(),
     loadRecentTracks: vi.fn().mockResolvedValue([
       {
         trackId: "recent-track",
@@ -49,7 +129,11 @@ function routeDependencies() {
       state: "waiting",
     }),
     getDownloadFilePath: vi.fn().mockResolvedValue(null),
-  } satisfies TrackRouteDependencies;
+  };
+  return Object.assign(
+    dependencies,
+    overrides,
+  ) satisfies TrackRouteDependencies;
 }
 
 async function startTracksServer(
@@ -70,6 +154,7 @@ async function startTracksServer(
 }
 
 afterEach(async () => {
+  vi.clearAllMocks();
   await Promise.all(
     servers.splice(0).map(
       (server) =>
@@ -78,6 +163,309 @@ afterEach(async () => {
         }),
     ),
   );
+});
+
+describe("TF search module routing", () => {
+  it("preserves the public search response while stripping module-only fields", async () => {
+    const gateway = searchGateway();
+    gateway.search.mockResolvedValue(
+      searchResponse({
+        sources: ["yt"],
+        fallbackAvailable: true,
+      }),
+    );
+    const baseUrl = await startTracksServer(
+      routeDependencies({ searchGateway: gateway }),
+    );
+
+    const response = await fetch(`${baseUrl}/tracks/search`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        artist: "Artist",
+        title: "Track",
+        mode: "manual",
+        sources: ["yt"],
+        maxResults: 7,
+      }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(gateway.search).toHaveBeenCalledWith({
+      artist: "Artist",
+      title: "Track",
+      mode: "manual",
+      sources: ["yt"],
+      maxResults: 7,
+    });
+    expect(body).toEqual({
+      query: "Artist Track",
+      results: [
+        {
+          id: "yt_result_0",
+          title: "Track 0",
+          artist: "Artist",
+          type: "original",
+          duration: 180,
+          source: "youtube",
+          thumbnailUrl: null,
+          quality: ["128", "320"],
+          viewCount: 42,
+          score: 90,
+        },
+      ],
+      cached: false,
+      sources: ["yt"],
+      fallbackAvailable: true,
+    });
+    expect(JSON.stringify(body)).not.toContain("sourceUrl");
+    expect(JSON.stringify(body)).not.toContain("providerStatus");
+  });
+
+  it("maps a failed public search dispatch to the stable unavailable response", async () => {
+    const gateway = searchGateway();
+    gateway.search.mockRejectedValue(new Error("private module detail"));
+    const baseUrl = await startTracksServer(
+      routeDependencies({ searchGateway: gateway }),
+    );
+
+    const response = await fetch(`${baseUrl}/tracks/search`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ artist: "Artist", title: "Track" }),
+    });
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "search_unavailable",
+    });
+  });
+
+  it("rejects out-of-contract source and max-result bounds before dispatch", async () => {
+    const gateway = searchGateway();
+    const baseUrl = await startTracksServer(
+      routeDependencies({ searchGateway: gateway }),
+    );
+
+    for (const body of [
+      {
+        artist: "Artist",
+        title: "Track",
+        mode: "manual",
+        sources: ["yt", "yt"],
+      },
+      {
+        artist: "Artist",
+        title: "Track",
+        maxResults: 41,
+      },
+      {
+        artist: "Artist",
+        title: "Track",
+        maxResults: 1.5,
+      },
+    ]) {
+      const response = await fetch(`${baseUrl}/tracks/search`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
+    }
+    expect(gateway.search).not.toHaveBeenCalled();
+  });
+
+  it("keeps batch concurrency at eight, truncates to five, and applies the score threshold", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const gateway = searchGateway();
+    gateway.search.mockImplementation(async () => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      return searchResponse({
+        results: Array.from({ length: 6 }, (_, index) =>
+          result(index, { score: index === 0 ? 80 : 79 - index }),
+        ),
+      });
+    });
+    const baseUrl = await startTracksServer(
+      routeDependencies({ searchGateway: gateway }),
+    );
+    const tracks = Array.from({ length: 17 }, (_, index) => ({
+      artist: `Artist ${index}`,
+      title: `Track ${index}`,
+    }));
+
+    const response = await fetch(`${baseUrl}/tracks/batch-search`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tracks }),
+    });
+    const body = (await response.json()) as {
+      results: {
+        matches: Record<string, unknown>[];
+        bestScore: number;
+        autoSelected: boolean;
+      }[];
+    };
+
+    expect(response.status).toBe(200);
+    expect(gateway.search).toHaveBeenCalledTimes(17);
+    expect(maximumActive).toBe(8);
+    expect(body.results).toHaveLength(17);
+    expect(body.results[0]).toMatchObject({
+      bestScore: 80,
+      autoSelected: true,
+    });
+    expect(body.results[0]?.matches).toHaveLength(5);
+    expect(JSON.stringify(body)).not.toContain("sourceUrl");
+
+    gateway.search.mockClear();
+    const rejected = await fetch(`${baseUrl}/tracks/batch-search`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        tracks: Array.from({ length: 101 }, () => ({
+          artist: "Artist",
+          title: "Track",
+        })),
+      }),
+    });
+    expect(rejected.status).toBe(400);
+    expect(gateway.search).not.toHaveBeenCalled();
+  });
+
+  it("delegates suggestions to the module cache", async () => {
+    const gateway = searchGateway();
+    const baseUrl = await startTracksServer(
+      routeDependencies({ searchGateway: gateway }),
+    );
+
+    const response = await fetch(`${baseUrl}/tracks/suggest?q=%20ArTiSt%20`);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      suggestions: [{ artist: "Artist", title: "Track" }],
+    });
+    expect(gateway.suggestions).toHaveBeenCalledWith("artist", 5);
+  });
+
+  it("keeps recommendation personalization in the API and strips private candidates", async () => {
+    const gateway = searchGateway();
+    gateway.search
+      .mockResolvedValueOnce(
+        searchResponse({ results: [result(0), result(1)] }),
+      )
+      .mockResolvedValueOnce(
+        searchResponse({
+          results: [result(0), result(2, { id: "yt_unique" })],
+        }),
+      );
+    const baseUrl = await startTracksServer(
+      routeDependencies({
+        searchGateway: gateway,
+        loadTopArtists: vi.fn().mockResolvedValue(["Artist", "Second Artist"]),
+      }),
+    );
+
+    const response = await fetch(`${baseUrl}/tracks/recommendations`);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(gateway.search).toHaveBeenCalledTimes(2);
+    expect(body).toMatchObject({
+      results: [
+        { id: "yt_result_0" },
+        { id: "yt_result_1" },
+        { id: "yt_unique" },
+      ],
+    });
+    expect(JSON.stringify(body)).not.toContain("sourceUrl");
+    expect(JSON.stringify(body)).not.toContain("providerStatus");
+  });
+
+  it("keeps the empty recommendation fallback when the module is unavailable", async () => {
+    const gateway = searchGateway();
+    gateway.search.mockRejectedValue(new Error("private module detail"));
+    const baseUrl = await startTracksServer(
+      routeDependencies({
+        searchGateway: gateway,
+        loadTopArtists: vi.fn().mockResolvedValue(["Artist"]),
+      }),
+    );
+
+    const response = await fetch(`${baseUrl}/tracks/recommendations`);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ results: [] });
+  });
+
+  it("uses private module candidates for every Deezer playback and download fallback", async () => {
+    const gateway = searchGateway();
+    const sourceUrl = "https://www.youtube.com/watch?v=fallback";
+    gateway.search.mockResolvedValue(
+      searchResponse({
+        results: [result(0, { sourceUrl })],
+      }),
+    );
+    ytdlpMocks.getStreamUrl.mockResolvedValue({
+      url: "https://media.example.test/audio",
+      mimeType: "audio/mpeg",
+    });
+    ytdlpMocks.spawnAudioDownload.mockImplementation(() => {
+      const process = new EventEmitter() as EventEmitter & {
+        stdout: PassThrough;
+        stderr: PassThrough;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      process.stdout = new PassThrough();
+      process.stderr = new PassThrough();
+      process.kill = vi.fn();
+      queueMicrotask(() => {
+        process.stdout.end("audio");
+        process.emit("close", 0);
+      });
+      return process;
+    });
+    const baseUrl = await startTracksServer(
+      routeDependencies({ searchGateway: gateway }),
+    );
+    const deezerUrl =
+      "https://cdns-preview-e.dzcdn.net/stream/c-test-preview";
+    const trackId = `dz_${Buffer.from(deezerUrl).toString("base64url")}`;
+    const query = "artist=Artist&title=Track";
+
+    const stream = await fetch(
+      `${baseUrl}/tracks/${trackId}/stream?${query}`,
+    );
+    const download = await fetch(
+      `${baseUrl}/tracks/${trackId}/download?${query}`,
+    );
+    const audioStream = await fetch(
+      `${baseUrl}/tracks/${trackId}/audio-stream?${query}`,
+    );
+    await Promise.all([download.arrayBuffer(), audioStream.arrayBuffer()]);
+
+    expect(stream.status).toBe(200);
+    await expect(stream.json()).resolves.toMatchObject({
+      streamUrl: "https://media.example.test/audio",
+    });
+    expect(download.status).toBe(200);
+    expect(audioStream.status).toBe(200);
+    expect(gateway.search).toHaveBeenCalledTimes(3);
+    expect(ytdlpMocks.getStreamUrl).toHaveBeenCalledWith(sourceUrl);
+    expect(ytdlpMocks.spawnAudioDownload).toHaveBeenCalledWith(
+      sourceUrl,
+      "256",
+    );
+    expect(ytdlpMocks.spawnAudioDownload).toHaveBeenCalledWith(
+      sourceUrl,
+      "128",
+    );
+  });
 });
 
 describe("track account ownership", () => {

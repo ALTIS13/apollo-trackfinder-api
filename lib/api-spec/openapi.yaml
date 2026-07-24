@@ -31,7 +31,7 @@ paths:
       operationId: searchTracks
       tags: [tracks]
       summary: Search for track variants
-      description: Searches YouTube and SoundCloud for variants of a track. Returns all found variants (original, remix, live, cover) without auto-selecting.
+      description: Searches enabled open media sources for variants of a track. Returns all found variants (original, remix, live, cover) without auto-selecting.
       requestBody:
         required: true
         content:
@@ -144,6 +144,8 @@ components:
       enum:
         - youtube
         - soundcloud
+        - bandcamp
+        - deezer
 
     TrackResult:
       type: object
@@ -191,8 +193,33 @@ components:
       properties:
         artist:
           type: string
+          minLength: 1
+          maxLength: 200
         title:
           type: string
+          minLength: 1
+          maxLength: 300
+        mode:
+          type: string
+          enum:
+            - auto
+            - manual
+        sources:
+          type: array
+          minItems: 1
+          maxItems: 4
+          uniqueItems: true
+          items:
+            type: string
+            enum:
+              - yt
+              - sc
+              - bc
+              - dz
+        maxResults:
+          type: integer
+          minimum: 1
+          maximum: 40
       required:
         - artist
         - title
@@ -210,10 +237,27 @@ components:
         cached:
           type: boolean
           description: Whether results came from cache
+        sources:
+          type: array
+          minItems: 1
+          maxItems: 4
+          uniqueItems: true
+          items:
+            type: string
+            enum:
+              - yt
+              - sc
+              - bc
+              - dz
+        fallbackAvailable:
+          type: boolean
+          description: Whether broadening a manual source selection may return results
       required:
         - query
         - results
         - cached
+        - sources
+        - fallbackAvailable
 
     StreamResponse:
       type: object

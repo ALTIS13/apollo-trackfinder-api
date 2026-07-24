@@ -111,7 +111,7 @@ export function useHealthCheck<
 }
 
 /**
- * Searches YouTube and SoundCloud for variants of a track. Returns all found variants (original, remix, live, cover) without auto-selecting.
+ * Searches enabled open media sources for variants of a track. Returns all found variants (original, remix, live, cover) without auto-selecting.
  * @summary Search for track variants
  */
 export const getSearchTracksUrl = () => {

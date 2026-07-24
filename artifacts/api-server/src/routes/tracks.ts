@@ -1,18 +1,11 @@
 import { Router, type IRouter } from "express";
-import { searchYouTube } from "../adapters/youtube.js";
-import { searchSoundCloud } from "../adapters/soundcloud.js";
-import { rank, type SmartBoosts } from "../lib/ranker.js";
-import { getCached, setCached } from "../lib/cache.js";
 import {
   getStreamUrl,
   spawnAudioDownload,
   type AudioQuality,
 } from "../lib/ytdlp.js";
-import { searchBandcamp } from "../adapters/bandcamp.js";
-import { searchDeezer } from "../adapters/deezer.js";
 import { SearchTracksBody } from "@workspace/api-zod";
 import { getCachedStreamUrl, setCachedStreamUrl } from "../lib/stream-cache.js";
-import { isRedisAvailable, getRedis } from "../lib/redis.js";
 import {
   enqueueDownload,
   getDownloadJobStatus,
@@ -27,6 +20,14 @@ import { playHistoryTable } from "@workspace/db/schema";
 import { eq, sql } from "drizzle-orm";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
+import {
+  TfSearchUnavailableError,
+  type TfSearchGateway,
+} from "../lib/tf-search-client.js";
+import type {
+  TfSearchResult,
+  TfSearchSource,
+} from "@workspace/tf-search-contract";
 
 interface RecentTrack {
   readonly trackId: string;
@@ -42,6 +43,7 @@ interface RecordPlayInput {
 }
 
 export interface TrackRouteDependencies {
+  readonly searchGateway: TfSearchGateway;
   readonly loadRecentTracks: (
     accountId: string,
     limit: number,
@@ -54,6 +56,40 @@ export interface TrackRouteDependencies {
   readonly listDownloadJobs: typeof listSessionDownloadJobs;
   readonly getDownloadJobStatus: typeof getDownloadJobStatus;
   readonly getDownloadFilePath: typeof getDownloadFilePath;
+}
+
+const ALL_SEARCH_SOURCES: readonly TfSearchSource[] = ["yt", "sc", "bc", "dz"];
+
+function unavailableGateway(): TfSearchGateway {
+  const unavailable = async (): Promise<never> => {
+    throw new TfSearchUnavailableError();
+  };
+  return {
+    search: unavailable,
+    suggestions: unavailable,
+  };
+}
+
+function publicSearchResult({
+  sourceUrl: _sourceUrl,
+  ...result
+}: TfSearchResult): Omit<TfSearchResult, "sourceUrl"> {
+  return result;
+}
+
+function preferredSourceUrl(
+  results: readonly TfSearchResult[],
+  sources: readonly TfSearchResult["source"][],
+): string | null {
+  for (const source of sources) {
+    const match = results.find((result) => result.source === source);
+    if (match !== undefined) return match.sourceUrl;
+  }
+  return null;
+}
+
+function hasTfSearchAccess(entitlements: readonly string[]): boolean {
+  return entitlements.includes("tf.search");
 }
 
 const ALLOWED_HOSTS: Record<string, string[]> = {
@@ -107,6 +143,7 @@ function decodeTrackUrl(id: string): { source: string; url: string } | null {
 }
 
 const defaultTrackRouteDependencies: TrackRouteDependencies = {
+  searchGateway: unavailableGateway(),
   async loadRecentTracks(accountId, limit) {
     const result = await db.execute(sql`
       SELECT t.track_id, t.artist, t.title
@@ -178,107 +215,42 @@ export function createTracksRouter(
     }
 
     const { artist, title, mode, sources } = parseResult.data;
-    const query = `${artist} ${title}`.trim();
-    const maxResults = Math.min(
-      Math.max(
-        Number((req.body as Record<string, unknown>).maxResults ?? 20),
-        5,
-      ),
-      40,
-    );
-    const isExtendedSearch = maxResults > 20;
-
-    const ALL_SOURCES = ["yt", "sc", "bc", "dz"] as const;
-    type SourceKey = (typeof ALL_SOURCES)[number];
-    const enabledSources: SourceKey[] =
+    if (
+      (sources !== undefined &&
+        new Set(sources).size !== sources.length) ||
+      (parseResult.data.maxResults !== undefined &&
+        !Number.isSafeInteger(parseResult.data.maxResults))
+    ) {
+      res.status(400).json({
+        error: "bad_request",
+        message: "invalid search options",
+      });
+      return;
+    }
+    const maxResults = parseResult.data.maxResults ?? 20;
+    const enabledSources: TfSearchSource[] =
       mode === "manual" && sources && sources.length > 0
         ? sources
-        : [...ALL_SOURCES];
+        : [...ALL_SEARCH_SOURCES];
 
-    if (!isExtendedSearch && enabledSources.length === ALL_SOURCES.length) {
-      const cached = await getCached<Record<string, unknown>>(artist, title);
-      if (cached) {
-        res.json({ query, results: cached, cached: true });
-        return;
-      }
-    }
-
-    const perSource = Math.ceil(maxResults / 2);
-
-    const searchPromises: Promise<unknown>[] = [];
-    const searchLabels: string[] = [];
-
-    if (enabledSources.includes("yt")) {
-      searchPromises.push(searchYouTube(query, maxResults));
-      searchLabels.push("YouTube");
-    }
-    if (enabledSources.includes("sc")) {
-      searchPromises.push(searchSoundCloud(query, maxResults));
-      searchLabels.push("SoundCloud");
-    }
-    if (enabledSources.includes("bc")) {
-      searchPromises.push(searchBandcamp(query, perSource));
-      searchLabels.push("Bandcamp");
-    }
-    if (enabledSources.includes("dz")) {
-      searchPromises.push(searchDeezer(query, perSource));
-      searchLabels.push("Deezer");
-    }
-
-    const settled = await Promise.allSettled(searchPromises);
-
-    const allResults: any[] = [];
-
-    for (let i = 0; i < settled.length; i++) {
-      const result = settled[i];
-      if (result.status === "fulfilled") {
-        allResults.push(...(result.value as any[]));
-      } else {
-        req.log.warn(
-          { err: result.reason },
-          `${searchLabels[i]} search failed`,
-        );
-      }
-    }
-
-    const smart: SmartBoosts = { mode: mode ?? "auto", queryText: query };
-
-    const origDurations = allResults
-      .filter((r: any) => r.type === "original" && r.duration > 0)
-      .map((r: any) => r.duration as number)
-      .sort((a: number, b: number) => a - b);
-    const referenceDuration =
-      origDurations.length > 0
-        ? origDurations[Math.floor(origDurations.length / 2)]
-        : undefined;
-
-    const ranked = rank(
-      allResults,
-      { artist, title },
-      referenceDuration,
-      smart,
-    );
-
-    const apiResults = ranked.map(({ _sourceUrl: _, ...r }: any) => r);
-
-    if (!isExtendedSearch && enabledSources.length === ALL_SOURCES.length) {
-      await setCached(artist, title, apiResults).catch((err: unknown) => {
-        req.log.warn({ err }, "Failed to save to cache");
+    try {
+      const response = await routeDependencies.searchGateway.search({
+        artist,
+        title,
+        mode: mode ?? "auto",
+        sources: enabledSources,
+        maxResults,
       });
+      res.json({
+        query: response.query,
+        results: response.results.map(publicSearchResult),
+        cached: response.cached,
+        sources: response.sources,
+        fallbackAvailable: response.fallbackAvailable,
+      });
+    } catch {
+      res.status(503).json({ error: "search_unavailable" });
     }
-
-    const fallbackAvailable =
-      mode === "manual" &&
-      apiResults.length === 0 &&
-      enabledSources.length < ALL_SOURCES.length;
-
-    res.json({
-      query,
-      results: apiResults,
-      cached: false,
-      sources: enabledSources,
-      fallbackAvailable,
-    });
   });
 
   router.post("/tracks/batch-search", async (req, res) => {
@@ -306,43 +278,17 @@ export function createTracksRouter(
       artist: string,
       title: string,
     ): Promise<{ matches: Record<string, unknown>[]; cached: boolean }> {
-      const cached = await getCached<Record<string, unknown>>(artist, title);
-      if (cached)
-        return { matches: cached as Record<string, unknown>[], cached: true };
-
-      const query = `${artist} ${title}`.trim();
-      const [ytResults, scResults, bcResults, dzResults] =
-        await Promise.allSettled([
-          searchYouTube(query, 8),
-          searchSoundCloud(query, 8),
-          searchBandcamp(query, 4),
-          searchDeezer(query, 8),
-        ]);
-
-      const allResults = [
-        ...(ytResults.status === "fulfilled" ? ytResults.value : []),
-        ...(scResults.status === "fulfilled" ? scResults.value : []),
-        ...(bcResults.status === "fulfilled" ? bcResults.value : []),
-        ...(dzResults.status === "fulfilled" ? dzResults.value : []),
-      ];
-
-      const origDurations = allResults
-        .filter((r) => r.type === "original" && r.duration > 0)
-        .map((r) => r.duration)
-        .sort((a, b) => a - b);
-      const referenceDuration =
-        origDurations.length > 0
-          ? origDurations[Math.floor(origDurations.length / 2)]
-          : undefined;
-
-      const ranked = rank(allResults, { artist, title }, referenceDuration);
-      const apiResults = ranked.map(({ _sourceUrl: _, ...r }) => r) as Record<
-        string,
-        unknown
-      >[];
-
-      await setCached(artist, title, apiResults).catch(() => null);
-      return { matches: apiResults, cached: false };
+      const response = await routeDependencies.searchGateway.search({
+        artist,
+        title,
+        mode: "auto",
+        sources: [...ALL_SEARCH_SOURCES],
+        maxResults: 20,
+      });
+      return {
+        matches: response.results.map(publicSearchResult),
+        cached: response.cached,
+      };
     }
 
     const results: {
@@ -419,10 +365,22 @@ export function createTracksRouter(
 
         if (dzArtist && dzTitle) {
           try {
-            const ytResults = await searchYouTube(`${dzArtist} ${dzTitle}`, 3);
-            const ytTrack = ytResults.find((r) => r._sourceUrl) ?? ytResults[0];
-            if (ytTrack?._sourceUrl) {
-              const { url, mimeType } = await getStreamUrl(ytTrack._sourceUrl);
+            if (!hasTfSearchAccess(req.tfPrincipal!.entitlements)) {
+              res.status(403).json({ error: "module_access_denied" });
+              return;
+            }
+            const candidates = await routeDependencies.searchGateway.search({
+              artist: dzArtist,
+              title: dzTitle,
+              mode: "manual",
+              sources: ["yt"],
+              maxResults: 3,
+            });
+            const sourceUrl = preferredSourceUrl(candidates.results, [
+              "youtube",
+            ]);
+            if (sourceUrl !== null) {
+              const { url, mimeType } = await getStreamUrl(sourceUrl);
               await setCachedStreamUrl(id, url, mimeType ?? "audio/mpeg");
               res.json({
                 id,
@@ -431,10 +389,9 @@ export function createTracksRouter(
               });
               return;
             }
-          } catch (e) {
-            req.log.warn(
-              { e },
-              "Deezer→YouTube stream fallback failed, using preview",
+          } catch {
+            req.log?.warn(
+              "Deezer stream fallback unavailable; using preview",
             );
           }
         }
@@ -492,7 +449,7 @@ export function createTracksRouter(
         const query = `${dzArtist} ${dzTitle}`.trim();
 
         const pipeFallback = (sourceUrl: string, label: string) => {
-          req.log.info(
+          req.log?.info(
             { id, artist: dzArtist, title: dzTitle },
             `Deezer→${label} download fallback`,
           );
@@ -516,31 +473,34 @@ export function createTracksRouter(
         };
 
         if (query) {
-          // Try YouTube first
           try {
-            const ytResults = await searchYouTube(query, 3);
-            const ytTrack = ytResults.find((r) => r._sourceUrl) ?? ytResults[0];
-            if (ytTrack?._sourceUrl) {
-              pipeFallback(ytTrack._sourceUrl, "YouTube");
+            if (!hasTfSearchAccess(req.tfPrincipal!.entitlements)) {
+              res.status(403).json({ error: "module_access_denied" });
               return;
             }
-          } catch (e) {
-            req.log.warn(
-              { e },
-              "Deezer→YouTube fallback failed, trying SoundCloud",
-            );
-          }
-
-          // Try SoundCloud as secondary fallback
-          try {
-            const scResults = await searchSoundCloud(query, 3);
-            const scTrack = scResults.find((r) => r._sourceUrl) ?? scResults[0];
-            if (scTrack?._sourceUrl) {
-              pipeFallback(scTrack._sourceUrl, "SoundCloud");
+            const candidates = await routeDependencies.searchGateway.search({
+              artist: dzArtist,
+              title: dzTitle,
+              mode: "manual",
+              sources: ["yt", "sc"],
+              maxResults: 6,
+            });
+            const sourceUrl = preferredSourceUrl(candidates.results, [
+              "youtube",
+              "soundcloud",
+            ]);
+            if (sourceUrl !== null) {
+              const source = candidates.results.find(
+                (candidate) => candidate.sourceUrl === sourceUrl,
+              )?.source;
+              pipeFallback(
+                sourceUrl,
+                source === "soundcloud" ? "SoundCloud" : "YouTube",
+              );
               return;
             }
-          } catch (e) {
-            req.log.warn({ e }, "Deezer→SoundCloud fallback also failed");
+          } catch {
+            req.log?.warn("Deezer download fallback unavailable");
           }
         }
 
@@ -630,42 +590,32 @@ export function createTracksRouter(
         const query = `${dzArtist} ${dzTitle}`.trim();
 
         if (query) {
-          // Try YouTube first
           try {
-            const ytResults = await searchYouTube(query, 3);
-            const ytTrack = ytResults.find((r) => r._sourceUrl) ?? ytResults[0];
-            if (ytTrack?._sourceUrl) {
-              req.log.info(
-                { id, artist: dzArtist, title: dzTitle },
-                "Deezer→YouTube audio-stream fallback",
-              );
-              pipeProc(ytTrack._sourceUrl);
+            if (!hasTfSearchAccess(req.tfPrincipal!.entitlements)) {
+              res.status(403).json({ error: "module_access_denied" });
               return;
             }
-          } catch (e) {
-            req.log.warn(
-              { e },
-              "Deezer→YouTube audio-stream fallback failed, trying SoundCloud",
-            );
-          }
-
-          // Try SoundCloud as secondary fallback
-          try {
-            const scResults = await searchSoundCloud(query, 3);
-            const scTrack = scResults.find((r) => r._sourceUrl) ?? scResults[0];
-            if (scTrack?._sourceUrl) {
-              req.log.info(
+            const candidates = await routeDependencies.searchGateway.search({
+              artist: dzArtist,
+              title: dzTitle,
+              mode: "manual",
+              sources: ["yt", "sc"],
+              maxResults: 6,
+            });
+            const sourceUrl = preferredSourceUrl(candidates.results, [
+              "youtube",
+              "soundcloud",
+            ]);
+            if (sourceUrl !== null) {
+              req.log?.info(
                 { id, artist: dzArtist, title: dzTitle },
-                "Deezer→SoundCloud audio-stream fallback",
+                "Deezer audio-stream fallback",
               );
-              pipeProc(scTrack._sourceUrl);
+              pipeProc(sourceUrl);
               return;
             }
-          } catch (e) {
-            req.log.warn(
-              { e },
-              "Deezer→SoundCloud audio-stream fallback also failed",
-            );
+          } catch {
+            req.log?.warn("Deezer audio-stream fallback unavailable");
           }
         }
 
@@ -834,15 +784,21 @@ export function createTracksRouter(
         res.json({ results: [] });
         return;
       }
+      if (!hasTfSearchAccess(req.tfPrincipal!.entitlements)) {
+        res.status(403).json({ error: "module_access_denied" });
+        return;
+      }
 
       const searchPromises = artists.map((artist) =>
-        Promise.allSettled([
-          searchYouTube(artist, 6),
-          searchSoundCloud(artist, 6),
-        ]).then(([yt, sc]) => [
-          ...(yt.status === "fulfilled" ? yt.value : []),
-          ...(sc.status === "fulfilled" ? sc.value : []),
-        ]),
+        routeDependencies.searchGateway
+          .search({
+            artist,
+            title: artist,
+            mode: "manual",
+            sources: ["yt", "sc"],
+            maxResults: 12,
+          })
+          .then((response) => response.results),
       );
 
       const nested = await Promise.all(searchPromises);
@@ -855,11 +811,11 @@ export function createTracksRouter(
         return true;
       });
 
-      const limited = deduped.slice(0, 20).map(({ _sourceUrl: _, ...r }) => r);
+      const limited = deduped.slice(0, 20).map(publicSearchResult);
 
       res.json({ results: limited });
-    } catch (err) {
-      req.log.warn({ err }, "Failed to generate recommendations");
+    } catch {
+      req.log?.warn("Failed to generate recommendations");
       res.json({ results: [] });
     }
   });
@@ -874,71 +830,10 @@ export function createTracksRouter(
     }
 
     try {
-      // Try Redis SCAN (non-blocking O(1) per call) — keys are `search:<artist>::<title>`
-      if (isRedisAvailable()) {
-        const redis = getRedis();
-        if (redis) {
-          const pattern = `search:*${q}*`;
-          const found: string[] = [];
-          let cursor = "0";
-          let scanIterations = 0;
-          const MAX_SCAN_ITERATIONS = 20; // cap scans at ~1000 keys max to avoid large-keyspace latency
-          do {
-            const [nextCursor, keys] = await redis.scan(
-              cursor,
-              "MATCH",
-              pattern,
-              "COUNT",
-              50,
-            );
-            cursor = nextCursor;
-            scanIterations++;
-            for (const key of keys) {
-              if (found.length >= 5) break;
-              found.push(key);
-            }
-          } while (
-            cursor !== "0" &&
-            found.length < 5 &&
-            scanIterations < MAX_SCAN_ITERATIONS
-          );
-
-          const suggestions = found
-            .map((key: string) => {
-              const cacheKey = key.replace(/^search:/, "");
-              const sep = cacheKey.indexOf("::");
-              if (sep === -1) return null;
-              return {
-                artist: cacheKey.slice(0, sep),
-                title: cacheKey.slice(sep + 2),
-              };
-            })
-            .filter(Boolean);
-          res.json({ suggestions });
-          return;
-        }
-      }
-
-      // PostgreSQL path (indexed on cache_key)
-      const rows = await db.execute(
-        sql`SELECT cache_key FROM track_search_cache WHERE cache_key LIKE ${"%" + q + "%"} AND expires_at > NOW() ORDER BY id DESC LIMIT 5`,
-      );
-      const resultRows = (rows.rows ?? rows) as { cache_key: string }[];
-      const suggestions = resultRows
-        .map((r) => {
-          const sep = r.cache_key.indexOf("::");
-          if (sep === -1) return null;
-          return {
-            artist: r.cache_key.slice(0, sep),
-            title: r.cache_key.slice(sep + 2),
-          };
-        })
-        .filter(Boolean);
-
-      res.json({ suggestions });
-    } catch (err) {
-      req.log.warn({ err }, "Suggest query failed");
-      res.json({ suggestions: [] });
+      const response = await routeDependencies.searchGateway.suggestions(q, 5);
+      res.json({ suggestions: response.suggestions });
+    } catch {
+      res.status(503).json({ error: "search_unavailable" });
     }
   });
 

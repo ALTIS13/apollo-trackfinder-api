@@ -11,6 +11,9 @@
       "path": "../../lib/module-runtime-contract"
     },
     {
+      "path": "../../lib/tf-search-contract"
+    },
+    {
       "path": "../../lib/admin-dashboard-contract"
     },
     {

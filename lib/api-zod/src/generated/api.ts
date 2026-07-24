@@ -16,15 +16,30 @@ export const HealthCheckResponse = zod.object({
 });
 
 /**
- * Searches YouTube and SoundCloud for variants of a track. Returns all found variants (original, remix, live, cover) without auto-selecting.
+ * Searches enabled open media sources for variants of a track. Returns all found variants (original, remix, live, cover) without auto-selecting.
  * @summary Search for track variants
  */
+export const searchTracksBodyArtistMax = 200;
+
+export const searchTracksBodyTitleMax = 300;
+
+export const searchTracksBodySourcesMax = 4;
+
+export const searchTracksBodyMaxResultsMax = 40;
+
 export const SearchTracksBody = zod.object({
-  artist: zod.string(),
-  title: zod.string(),
+  artist: zod.string().min(1).max(searchTracksBodyArtistMax),
+  title: zod.string().min(1).max(searchTracksBodyTitleMax),
   mode: zod.enum(["auto", "manual"]).optional(),
-  sources: zod.array(zod.enum(["yt", "sc", "bc", "dz"])).optional(),
+  sources: zod
+    .array(zod.enum(["yt", "sc", "bc", "dz"]))
+    .min(1)
+    .max(searchTracksBodySourcesMax)
+    .optional(),
+  maxResults: zod.number().min(1).max(searchTracksBodyMaxResultsMax).optional(),
 });
+
+export const searchTracksResponseSourcesMax = 4;
 
 export const SearchTracksResponse = zod.object({
   query: zod.string().describe("The normalized search query used"),
@@ -39,7 +54,7 @@ export const SearchTracksResponse = zod.object({
       artist: zod.string(),
       type: zod.enum(["original", "remix", "live", "cover"]),
       duration: zod.number().describe("Duration in seconds"),
-      source: zod.enum(["youtube", "soundcloud"]),
+      source: zod.enum(["youtube", "soundcloud", "bandcamp", "deezer"]),
       thumbnailUrl: zod.string().nullish(),
       quality: zod
         .array(zod.string())
@@ -49,6 +64,15 @@ export const SearchTracksResponse = zod.object({
     }),
   ),
   cached: zod.boolean().describe("Whether results came from cache"),
+  sources: zod
+    .array(zod.enum(["yt", "sc", "bc", "dz"]))
+    .min(1)
+    .max(searchTracksResponseSourcesMax),
+  fallbackAvailable: zod
+    .boolean()
+    .describe(
+      "Whether broadening a manual source selection may return results",
+    ),
 });
 
 /**

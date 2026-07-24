@@ -1,18 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 
-export interface YtDlpEntry {
-  id: string;
-  title: string;
-  uploader?: string;
-  duration?: number;
-  thumbnail?: string;
-  view_count?: number;
-  webpage_url?: string;
-  url?: string;
-  formats?: Array<{ format_id: string; ext: string; abr?: number; vcodec?: string }>;
-  _type?: string;
-}
-
 function runYtDlp(args: string[], timeoutMs = 30000): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -45,66 +32,6 @@ function runYtDlp(args: string[], timeoutMs = 30000): Promise<string> {
       reject(err);
     });
   });
-}
-
-export async function ytdlpSearch(query: string, maxResults = 10): Promise<YtDlpEntry[]> {
-  const prefix = `ytsearch${maxResults}:${query}`;
-  const output = await runYtDlp(
-    [prefix, "--no-download", "--dump-json", "--no-warnings", "--no-playlist"],
-    45000,
-  );
-
-  const entries: YtDlpEntry[] = [];
-  for (const line of output.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      entries.push(JSON.parse(trimmed) as YtDlpEntry);
-    } catch {
-      // skip malformed lines
-    }
-  }
-  return entries;
-}
-
-export async function scdlpSearch(query: string, maxResults = 10): Promise<YtDlpEntry[]> {
-  const prefix = `scsearch${maxResults}:${query}`;
-  const output = await runYtDlp(
-    [prefix, "--no-download", "--dump-json", "--no-warnings", "--no-playlist"],
-    45000,
-  );
-
-  const entries: YtDlpEntry[] = [];
-  for (const line of output.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      entries.push(JSON.parse(trimmed) as YtDlpEntry);
-    } catch {
-      // skip malformed lines
-    }
-  }
-  return entries;
-}
-
-export async function bcdlpSearch(query: string, maxResults = 10): Promise<YtDlpEntry[]> {
-  const prefix = `bcsearch${maxResults}:${query}`;
-  const output = await runYtDlp(
-    [prefix, "--no-download", "--dump-json", "--no-warnings", "--no-playlist"],
-    45000,
-  );
-
-  const entries: YtDlpEntry[] = [];
-  for (const line of output.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      entries.push(JSON.parse(trimmed) as YtDlpEntry);
-    } catch {
-      // skip malformed lines
-    }
-  }
-  return entries;
 }
 
 /**

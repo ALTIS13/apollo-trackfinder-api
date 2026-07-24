@@ -5,8 +5,29 @@
  * Music Player API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { SearchRequestMode } from "./searchRequestMode";
+import type { SearchRequestSourcesItem } from "./searchRequestSourcesItem";
 
 export interface SearchRequest {
+  /**
+   * @minLength 1
+   * @maxLength 200
+   */
   artist: string;
+  /**
+   * @minLength 1
+   * @maxLength 300
+   */
   title: string;
+  mode?: SearchRequestMode;
+  /**
+   * @minItems 1
+   * @maxItems 4
+   */
+  sources?: SearchRequestSourcesItem[];
+  /**
+   * @minimum 1
+   * @maximum 40
+   */
+  maxResults?: number;
 }

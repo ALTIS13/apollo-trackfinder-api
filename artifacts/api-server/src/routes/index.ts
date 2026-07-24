@@ -1,6 +1,9 @@
 import { Router, type IRouter } from "express";
 import { createHealthRouter } from "./health.js";
-import tracksRouter from "./tracks.js";
+import {
+  createTracksRouter,
+  type TrackRouteDependencies,
+} from "./tracks.js";
 import {
   createSpotifyRouter,
   type SpotifyRouteDependencies,
@@ -18,6 +21,7 @@ export interface ApiRouterOptions {
     "providerOAuthStateStore"
   >;
   readonly yandex?: Partial<YandexRouteDependencies>;
+  readonly tracks?: Partial<TrackRouteDependencies>;
   readonly readiness?: () => Promise<boolean>;
 }
 
@@ -51,7 +55,7 @@ export function createApiRouter(options: ApiRouterOptions = {}): IRouter {
       }),
     );
   }
-  router.use(tracksRouter);
+  router.use(createTracksRouter(options.tracks));
   router.use(
     createSpotifyRouter({
       ...options.spotify,

@@ -23,6 +23,8 @@ export type TrackSource = (typeof TrackSource)[keyof typeof TrackSource];
 export const TrackSource = {
   youtube: "youtube",
   soundcloud: "soundcloud",
+  bandcamp: "bandcamp",
+  deezer: "deezer",
 } as const;
 
 export interface TrackResult {
@@ -42,10 +44,57 @@ export interface TrackResult {
   score: number;
 }
 
+export type SearchRequestMode =
+  (typeof SearchRequestMode)[keyof typeof SearchRequestMode];
+
+export const SearchRequestMode = {
+  auto: "auto",
+  manual: "manual",
+} as const;
+
+export type SearchRequestSourcesItem =
+  (typeof SearchRequestSourcesItem)[keyof typeof SearchRequestSourcesItem];
+
+export const SearchRequestSourcesItem = {
+  yt: "yt",
+  sc: "sc",
+  bc: "bc",
+  dz: "dz",
+} as const;
+
 export interface SearchRequest {
+  /**
+   * @minLength 1
+   * @maxLength 200
+   */
   artist: string;
+  /**
+   * @minLength 1
+   * @maxLength 300
+   */
   title: string;
+  mode?: SearchRequestMode;
+  /**
+   * @minItems 1
+   * @maxItems 4
+   */
+  sources?: SearchRequestSourcesItem[];
+  /**
+   * @minimum 1
+   * @maximum 40
+   */
+  maxResults?: number;
 }
+
+export type SearchResponseSourcesItem =
+  (typeof SearchResponseSourcesItem)[keyof typeof SearchResponseSourcesItem];
+
+export const SearchResponseSourcesItem = {
+  yt: "yt",
+  sc: "sc",
+  bc: "bc",
+  dz: "dz",
+} as const;
 
 export interface SearchResponse {
   /** The normalized search query used */
@@ -53,6 +102,13 @@ export interface SearchResponse {
   results: TrackResult[];
   /** Whether results came from cache */
   cached: boolean;
+  /**
+   * @minItems 1
+   * @maxItems 4
+   */
+  sources: SearchResponseSourcesItem[];
+  /** Whether broadening a manual source selection may return results */
+  fallbackAvailable: boolean;
 }
 
 export interface StreamResponse {
