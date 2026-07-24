@@ -1,5 +1,6 @@
+import { useEffect } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TfApiError, loadTfSession, logoutTfSession, startTfLogin } from "@/lib/tf-session-client";
@@ -39,14 +40,23 @@ function ProtectedCanary() {
   );
 }
 
+function LogoutActionProbe({ onReady }: { onReady: (logout: () => Promise<void>) => void }) {
+  const { logout } = useTfAuth();
+  useEffect(() => {
+    onReady(logout);
+  }, [logout, onReady]);
+
+  return <div data-testid="protected-canary">protected player</div>;
+}
+
 function renderAuth(queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false } },
-})) {
+}), children = <ProtectedCanary />) {
   const view = render(
     <QueryClientProvider client={queryClient}>
       <TfAuthProvider>
         <TfSessionBoundary>
-          <ProtectedCanary />
+          {children}
         </TfSessionBoundary>
       </TfAuthProvider>
     </QueryClientProvider>,
@@ -122,5 +132,27 @@ describe("TF auth boundary", () => {
       expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
       expect(screen.queryByTestId("protected-canary")).not.toBeInTheDocument();
     });
+  });
+
+  it("resolves and clears local state when the logout request fails", async () => {
+    loadTfSessionMock.mockResolvedValueOnce(session);
+    logoutTfSessionMock.mockRejectedValueOnce(new Error("logout unavailable"));
+    let logoutAction: (() => Promise<void>) | undefined;
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    renderAuth(queryClient, <LogoutActionProbe onReady={(logout) => { logoutAction = logout; }} />);
+
+    expect(await screen.findByTestId("protected-canary")).toBeInTheDocument();
+    queryClient.setQueryData(["protected"], "cached");
+
+    await act(async () => {
+      await expect(logoutAction!()).resolves.toBeUndefined();
+    });
+
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
+    expect(screen.queryByTestId("protected-canary")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Требуется вход" })).toBeInTheDocument();
   });
 });

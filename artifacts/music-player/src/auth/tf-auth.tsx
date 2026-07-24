@@ -66,10 +66,14 @@ export function TfAuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(async () => {
     try {
-      await logoutTfSession();
-    } finally {
-      queryClient.clear();
-      setState({ status: "unauthenticated", session: null, error: null });
+      try {
+        await logoutTfSession();
+      } finally {
+        queryClient.clear();
+        setState({ status: "unauthenticated", session: null, error: null });
+      }
+    } catch {
+      // The local session is already cleared; logout must be safe for every caller.
     }
   }, [queryClient]);
 
