@@ -53,6 +53,7 @@ export interface AuthRouteDependencies {
     | "revokeSession"
     | "issueProviderOAuthState"
     | "consumeProviderOAuthState"
+    | "issueWebSocketTicket"
   >;
   readonly webOrigin: string;
   readonly secureCookies: boolean;

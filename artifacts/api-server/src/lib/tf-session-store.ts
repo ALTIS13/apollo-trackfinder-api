@@ -132,8 +132,11 @@ return 1
 
 const ISSUE_TICKET_SCRIPT = `
 local current = redis.call("GET", KEYS[1])
-if not current or current ~= ARGV[1] then
+if not current then
   return -1
+end
+if current ~= ARGV[1] then
+  return -2
 end
 local result = redis.call("SET", KEYS[2], ARGV[2], "EX", ARGV[3], "NX")
 if result then
@@ -204,6 +207,13 @@ export class TfSessionStoreUnavailableError extends Error {
   constructor() {
     super("TF authentication storage unavailable");
     this.name = "TfSessionStoreUnavailableError";
+  }
+}
+
+export class TfSessionNotFoundError extends Error {
+  constructor() {
+    super("TF session unavailable");
+    this.name = "TfSessionNotFoundError";
   }
 }
 
@@ -568,12 +578,12 @@ export class TfSessionStore {
   }
 
   async issueWebSocketTicket(sessionHandle: string): Promise<string> {
-    if (!OPAQUE_PATTERN.test(sessionHandle)) {
-      throw new TfSessionStoreUnavailableError();
+    if (!isCanonicalOpaque(sessionHandle)) {
+      throw new TfSessionNotFoundError();
     }
     try {
       const stored = await this.readSession(sessionHandle);
-      if (stored === null) throw new Error("missing session");
+      if (stored === null) throw new TfSessionNotFoundError();
       const now = this.checkedNow();
       const sessionDigest = digest(sessionHandle);
       for (let attempt = 0; attempt < RANDOM_WRITE_ATTEMPTS; attempt += 1) {
@@ -600,11 +610,12 @@ export class TfSessionStore {
           ),
         );
         if (result === 1) return ticket;
-        if (result === -1) throw new Error("missing session");
+        if (result === -1) throw new TfSessionNotFoundError();
         if (result !== 0) throw new Error("invalid ticket result");
       }
       throw new Error("ticket collision");
-    } catch {
+    } catch (error) {
+      if (error instanceof TfSessionNotFoundError) throw error;
       throw new TfSessionStoreUnavailableError();
     }
   }
@@ -612,7 +623,7 @@ export class TfSessionStore {
   async consumeWebSocketTicket(
     ticket: string,
   ): Promise<WebSocketTicket | null> {
-    if (!OPAQUE_PATTERN.test(ticket)) return null;
+    if (!isCanonicalOpaque(ticket)) return null;
     try {
       const raw = await this.redis.eval(CONSUME_SCRIPT, 1, ticketKey(ticket));
       if (raw === null) return null;

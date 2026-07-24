@@ -162,14 +162,14 @@ afterEach(async () => {
 });
 
 describe("TF route policy map", () => {
-  it("contains the exact 29 anchored capability policies", () => {
-    expect(TF_ROUTE_POLICIES).toHaveLength(29);
+  it("contains the exact 30 anchored capability policies", () => {
+    expect(TF_ROUTE_POLICIES).toHaveLength(30);
     expect(
       TF_ROUTE_POLICIES.filter((policy) => policy.live === false),
     ).toHaveLength(6);
     expect(
       TF_ROUTE_POLICIES.filter((policy) => policy.live === true),
-    ).toHaveLength(23);
+    ).toHaveLength(24);
 
     expect(
       requiredPolicyForRequest("POST", "/api/tracks/search?ignored=1"),
@@ -183,6 +183,9 @@ describe("TF route policy map", () => {
     expect(
       requiredPolicyForRequest("POST", "/api/yandex/logout"),
     ).toMatchObject({ capability: "tf.integrations", live: true });
+    expect(
+      requiredPolicyForRequest("POST", "/api/ws/tickets"),
+    ).toMatchObject({ capability: "tf.search", live: true });
   });
 
   it.each([

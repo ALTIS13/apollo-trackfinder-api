@@ -18,6 +18,7 @@ import {
 } from "./lib/tf-session-store.js";
 import { startApiListener } from "./lib/server-startup.js";
 import { attachWebSocketServer } from "./ws.js";
+import type { WebSocketServerHandle } from "./ws.js";
 
 async function start(): Promise<void> {
   const authConfig = await parseTfAuthRuntimeConfig(process.env);
@@ -44,6 +45,7 @@ async function start(): Promise<void> {
     );
   });
   let cacheRedis: Redis | null = null;
+  let webSocketHandle: WebSocketServerHandle | null = null;
   let redisClosed = false;
   const closeRedisResources = async (): Promise<void> => {
     if (redisClosed) return;
@@ -76,8 +78,17 @@ async function start(): Promise<void> {
     const server = await startApiListener({
       listen: () => app.listen(port),
       initialize: async (listeningServer) => {
-        attachWebSocketServer(listeningServer);
-        await initBackgroundQueues();
+        webSocketHandle = attachWebSocketServer(listeningServer, {
+          platform,
+          sessionStore,
+        });
+        try {
+          await initBackgroundQueues();
+        } catch {
+          await webSocketHandle.close();
+          webSocketHandle = null;
+          throw new Error("TF API initialization failed");
+        }
       },
       closeQueues: shutdownBackgroundQueues,
       closeRedis: closeRedisResources,
@@ -88,12 +99,17 @@ async function start(): Promise<void> {
     const shutdown = (): void => {
       if (shuttingDown) return;
       shuttingDown = true;
-      server.close(() => {
-        void Promise.allSettled([
+      void (async () => {
+        await webSocketHandle?.close();
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+        });
+        await Promise.allSettled([
           shutdownBackgroundQueues(),
           closeRedisResources(),
-        ]).finally(() => process.exit(0));
-      });
+        ]);
+        process.exit(0);
+      })();
     };
     process.once("SIGTERM", shutdown);
     process.once("SIGINT", shutdown);

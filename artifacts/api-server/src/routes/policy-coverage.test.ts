@@ -76,6 +76,7 @@ function exactInventory(): TfProtectedRoute[] {
     { method: "GET", path: "/api/yandex/liked" },
     { method: "GET", path: "/api/yandex/playlists" },
     { method: "GET", path: "/api/yandex/playlists/:uid/:kind/tracks" },
+    { method: "POST", path: "/api/ws/tickets" },
   ];
 }
 
@@ -96,6 +97,8 @@ function policyAuthDependencies() {
       revokeSession: vi.fn(),
       issueProviderOAuthState: vi.fn(),
       consumeProviderOAuthState: vi.fn(),
+      issueWebSocketTicket: vi.fn(),
+      consumeWebSocketTicket: vi.fn(),
     },
     webOrigin: "https://tf.apollot.ru",
     secureCookies: true,
@@ -130,15 +133,29 @@ afterEach(async () => {
 });
 
 describe("protected route policy coverage", () => {
-  it("discovers exactly 14 track, 9 Spotify, and 6 Yandex routes", () => {
+  it("discovers exactly 14 track, 9 Spotify, 6 Yandex, and 1 WebSocket ticket route", async () => {
     const trackRoutes = discoverRoutes(createTracksRouter());
     const spotifyRoutes = discoverRoutes(createSpotifyRouter());
     const yandexRoutes = discoverRoutes(createYandexRouter());
-    const discovered = [...trackRoutes, ...spotifyRoutes, ...yandexRoutes];
+    const { createWebSocketTicketRouter } = await import(
+      "./websocket-tickets.js"
+    );
+    const websocketTicketRoutes = discoverRoutes(
+      createWebSocketTicketRouter({
+        issueWebSocketTicket: vi.fn(),
+      }),
+    );
+    const discovered = [
+      ...trackRoutes,
+      ...spotifyRoutes,
+      ...yandexRoutes,
+      ...websocketTicketRoutes,
+    ];
 
     expect(trackRoutes).toHaveLength(14);
     expect(spotifyRoutes).toHaveLength(9);
     expect(yandexRoutes).toHaveLength(6);
+    expect(websocketTicketRoutes).toHaveLength(1);
     expect(
       [...discovered].sort((left, right) =>
         `${left.method} ${left.path}`.localeCompare(

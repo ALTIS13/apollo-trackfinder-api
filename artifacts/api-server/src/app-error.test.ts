@@ -372,6 +372,7 @@ describe("terminal API error sanitization", () => {
           revokeSession: vi.fn(),
           issueProviderOAuthState: vi.fn(),
           consumeProviderOAuthState: vi.fn(),
+          issueWebSocketTicket: vi.fn(),
         },
         webOrigin: "https://tf.apollot.ru",
         secureCookies: true,

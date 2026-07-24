@@ -9,6 +9,7 @@ import { createYandexRouter, type YandexRouteDependencies } from "./yandex.js";
 import { adminRouter } from "./admin.js";
 import { createAuthRouter, type AuthRouteDependencies } from "./auth.js";
 import { requireTfCapability } from "../lib/tf-policy.js";
+import { createWebSocketTicketRouter } from "./websocket-tickets.js";
 
 export interface ApiRouterOptions {
   readonly auth?: AuthRouteDependencies;
@@ -26,15 +27,26 @@ export function createApiRouter(options: ApiRouterOptions = {}): IRouter {
   }
   router.use(healthRouter);
   if (options.auth === undefined) {
-    router.use(["/tracks", "/spotify", "/yandex"], (_request, response) => {
-      response.status(503).json({ error: "policy_unavailable" });
-    });
+    router.use(
+      ["/tracks", "/spotify", "/yandex", "/ws/tickets"],
+      (_request, response) => {
+        response.status(503).json({ error: "policy_unavailable" });
+      },
+    );
   } else {
     router.use(
-      ["/tracks", "/spotify", "/yandex"],
+      ["/tracks", "/spotify", "/yandex", "/ws/tickets"],
       requireTfCapability({
         platform: options.auth.platform,
         sessionStore: options.auth.sessionStore,
+      }),
+    );
+  }
+  if (options.auth !== undefined) {
+    router.use(
+      createWebSocketTicketRouter({
+        issueWebSocketTicket: (handle) =>
+          options.auth!.sessionStore.issueWebSocketTicket(handle),
       }),
     );
   }

@@ -10,9 +10,11 @@ import type {
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  TfSessionNotFoundError,
   TfSessionStore,
   TfSessionStoreUnavailableError,
   createStrictRedisClient,
+  type StrictRedisClient,
   type TfAuthTransaction,
 } from "./tf-session-store.js";
 
@@ -718,9 +720,9 @@ describe("TfSessionStore WebSocket tickets", () => {
     await expect(store.consumeWebSocketTicket(ticket)).resolves.toBeNull();
   });
 
-  it("fails closed when ticket storage is malformed or the backing session is absent", async () => {
-    await expect(store.issueWebSocketTicket(opaque())).rejects.toThrow(
-      "TF authentication storage unavailable",
+  it("distinguishes an absent backing session from unavailable ticket storage", async () => {
+    await expect(store.issueWebSocketTicket(opaque())).rejects.toBeInstanceOf(
+      TfSessionNotFoundError,
     );
 
     const ticket = opaque();
@@ -733,5 +735,32 @@ describe("TfSessionStore WebSocket tickets", () => {
     await expect(store.consumeWebSocketTicket(ticket)).rejects.toThrow(
       "TF authentication storage unavailable",
     );
+  });
+
+  it("treats a concurrent backing-session revision change as unavailable", async () => {
+    const created = await store.createSession({
+      assertionClaims: assertionClaims(),
+      introspection: activeIntrospection(),
+    });
+    const strict = createStrictRedisClient(redis);
+    const racingRedis: StrictRedisClient = {
+      ...strict,
+      get: async (key) => {
+        const raw = await strict.get(key);
+        if (raw !== null && key.startsWith("tf-auth:session:")) {
+          const changed = {
+            ...(JSON.parse(raw) as Record<string, unknown>),
+            revision: opaque(),
+          };
+          await redis.set(key, JSON.stringify(changed), "KEEPTTL");
+        }
+        return raw;
+      },
+    };
+    const racingStore = new TfSessionStore(racingRedis);
+
+    await expect(
+      racingStore.issueWebSocketTicket(created.handle),
+    ).rejects.toBeInstanceOf(TfSessionStoreUnavailableError);
   });
 });

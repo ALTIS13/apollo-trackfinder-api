@@ -253,6 +253,13 @@ export const TF_ROUTE_POLICIES: readonly TfRoutePolicy[] = Object.freeze([
     capability: "tf.integrations",
     live: true,
   },
+  {
+    method: "POST",
+    path: "/api/ws/tickets",
+    pattern: /^\/api\/ws\/tickets$/,
+    capability: "tf.search",
+    live: true,
+  },
 ]);
 
 function pathWithoutQuery(path: string): string {
