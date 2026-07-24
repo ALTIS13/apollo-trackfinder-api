@@ -693,6 +693,6 @@ git commit -m "docs: record tf web session integration"
 
 Expected: commit succeeds and `git status --short` is empty.
 
-- [ ] **Step 5: Independent final review and merge preparation**
+- [x] **Step 5: Independent final review and merge preparation**
 
 Generate a whole-branch review package from merge base to HEAD. The final reviewer must return both `SPEC PASS` and `QUALITY APPROVED`; Critical and Important findings require one consolidated fix pass followed by re-review. After approval, merge the feature branch into `main`, rerun the Task 5 validation matrix on `main`, push both branch and `main`, and confirm both remote refs.
