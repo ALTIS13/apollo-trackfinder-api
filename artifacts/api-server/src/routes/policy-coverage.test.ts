@@ -137,9 +137,8 @@ describe("protected route policy coverage", () => {
     const trackRoutes = discoverRoutes(createTracksRouter());
     const spotifyRoutes = discoverRoutes(createSpotifyRouter());
     const yandexRoutes = discoverRoutes(createYandexRouter());
-    const { createWebSocketTicketRouter } = await import(
-      "./websocket-tickets.js"
-    );
+    const { createWebSocketTicketRouter } =
+      await import("./websocket-tickets.js");
     const websocketTicketRoutes = discoverRoutes(
       createWebSocketTicketRouter({
         issueWebSocketTicket: vi.fn(),
@@ -233,12 +232,12 @@ describe("direct protected endpoints", () => {
     ]);
 
     expect(responses.map((response) => response.status)).toEqual([
-      401, 401, 401,
+      403, 401, 401,
     ]);
     await expect(
       Promise.all(responses.map((response) => response.json())),
     ).resolves.toEqual([
-      { error: "unauthorized" },
+      { error: "forbidden" },
       { error: "unauthorized" },
       { error: "unauthorized" },
     ]);

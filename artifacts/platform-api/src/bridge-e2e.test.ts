@@ -575,6 +575,20 @@ describe("Platform-TF bridge container contract", () => {
     expect(smoke).toContain("upstream.setTimeout(0);");
   });
 
+  test("redacts the TF CSRF token and sends it on browser mutations", async () => {
+    const smoke = await readFile(smokeScript, "utf8");
+    expect(smoke).toMatch(
+      /label:\s*"tf-session",[\s\S]{0,120}redact:\s*\["csrfToken"\]/,
+    );
+    expect(smoke).toMatch(
+      /const tfCsrfToken = me\.json\.csrfToken;[\s\S]{0,160}state\.rawSecrets\.push\(tfCsrfToken\)/,
+    );
+    expect(smoke.match(/headers:\s*protectedTfHeaders\(state\)/g)).toHaveLength(
+      1,
+    );
+    expect(smoke.match(/\.\.\.protectedTfHeaders\(state\)/g)).toHaveLength(1);
+  });
+
   test("keeps root and TF deployment templates loopback-bound and secret-backed", async () => {
     const [rootCompose, tfCompose] = await Promise.all([
       readFile(new URL("../../../docker-compose.yml", import.meta.url), "utf8"),

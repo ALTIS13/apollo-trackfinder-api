@@ -902,14 +902,55 @@ describePostgres("apollo_platform PostgreSQL migration", () => {
         },
       );
 
+      await expect(runPlatformMigrations(migrator)).rejects.toThrow(
+        "authorization code drain required before migration 0004",
+      );
+      await expect(
+        withPlatformTransaction(migrator, async (client) => {
+          await setAccountContext(client, firstAccountId);
+          const result = await client.query<{ code_digest: string }>(
+            `
+              select code_digest
+              from apollo_platform.authorization_codes
+            `,
+          );
+          return result.rows.map(({ code_digest }) => code_digest);
+        }),
+      ).resolves.toEqual(["sha256:pre-0004-authorization-code"]);
+      await expect(
+        scalar(
+          migrator,
+          `
+            select relforcerowsecurity::text as value
+            from pg_class
+            where oid = 'apollo_platform.authorization_codes'::regclass
+          `,
+        ),
+      ).resolves.toBe("true");
+
+      await withPlatformTransaction(migrator, async (client) => {
+        await setAccountContext(client, firstAccountId);
+        await client.query("delete from apollo_platform.authorization_codes");
+      });
+      await expect(
+        withPlatformTransaction(migrator, async (client) => {
+          await setAccountContext(client, firstAccountId);
+          const result = await client.query(
+            "select id from apollo_platform.authorization_codes",
+          );
+          return result.rowCount;
+        }),
+      ).resolves.toBe(0);
       await expect(runPlatformMigrations(migrator)).resolves.toEqual({
         applied: [
-          "0002_operator_bootstrap_guard.sql",
-          "0003_runtime_migration_history_read.sql",
           "0004_authorization_code_binding.sql",
           "0005_authorization_code_digest_read.sql",
         ],
-        alreadyApplied: ["0001_platform_identity.sql"],
+        alreadyApplied: [
+          "0001_platform_identity.sql",
+          "0002_operator_bootstrap_guard.sql",
+          "0003_runtime_migration_history_read.sql",
+        ],
       });
       await expect(
         scalar(

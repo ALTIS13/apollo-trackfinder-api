@@ -73,6 +73,7 @@ async function start(): Promise<void> {
     });
     const sessionStore = new TfSessionStore(createStrictRedisClient(authRedis));
     const app = createApiApp({
+      nodeEnv: authConfig.nodeEnv,
       readiness: async () => {
         try {
           const [redisReady, databaseReady] = await Promise.all([

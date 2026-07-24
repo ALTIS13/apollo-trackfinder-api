@@ -1,5 +1,19 @@
 lock table apollo_platform.authorization_codes in access exclusive mode;
-truncate table apollo_platform.authorization_codes;
+
+alter table apollo_platform.authorization_codes no force row level security;
+
+do $$
+begin
+  if exists (
+    select 1 from apollo_platform.authorization_codes
+  ) then
+    raise exception 'authorization code drain required before migration 0004'
+      using errcode = '55000';
+  end if;
+end
+$$;
+
+alter table apollo_platform.authorization_codes force row level security;
 
 alter table apollo_platform.auth_sessions
   add constraint auth_sessions_id_account_key unique (id, account_id);

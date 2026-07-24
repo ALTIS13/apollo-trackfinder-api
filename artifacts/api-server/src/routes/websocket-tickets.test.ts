@@ -22,6 +22,7 @@ const INSTALLATION_ID = "30000000-0000-4000-8000-000000000003";
 const HANDLE = randomBytes(32).toString("base64url");
 const TICKET = randomBytes(32).toString("base64url");
 const REVISION = randomBytes(32).toString("base64url");
+const CSRF = randomBytes(32).toString("base64url");
 const servers: Server[] = [];
 
 function session(
@@ -75,9 +76,7 @@ function dependencies(entitlements?: readonly string[]) {
   };
 }
 
-async function start(
-  auth = dependencies(),
-): Promise<{
+async function start(auth = dependencies()): Promise<{
   readonly origin: string;
   readonly auth: ReturnType<typeof dependencies>;
 }> {
@@ -94,24 +93,31 @@ async function rawPost(
 ): Promise<{ readonly status: number; readonly body: unknown }> {
   const url = new URL("/api/ws/tickets", origin);
   return new Promise((resolve, reject) => {
-    const outgoing = request(
-      url,
-      { method: "POST", headers },
-      (response) => {
-        const chunks: Buffer[] = [];
-        response.on("data", (chunk: Buffer) => chunks.push(chunk));
-        response.on("end", () => {
-          const source = Buffer.concat(chunks).toString("utf8");
-          resolve({
-            status: response.statusCode ?? 0,
-            body: source.length === 0 ? null : JSON.parse(source),
-          });
+    const outgoing = request(url, { method: "POST", headers }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => {
+        const source = Buffer.concat(chunks).toString("utf8");
+        resolve({
+          status: response.statusCode ?? 0,
+          body: source.length === 0 ? null : JSON.parse(source),
         });
-      },
-    );
+      });
+    });
     outgoing.once("error", reject);
     outgoing.end();
   });
+}
+
+function browserHeaders(
+  additional: Readonly<Record<string, string>> = {},
+): Record<string, string> {
+  return {
+    cookie: `__Host-apollo_tf=${HANDLE}; __Host-apollo_tf_csrf=${CSRF}`,
+    origin: "https://tf.apollot.ru",
+    "x-csrf-token": CSRF,
+    ...additional,
+  };
 }
 
 afterEach(async () => {
@@ -132,7 +138,7 @@ describe("POST /api/ws/tickets", () => {
 
     const response = await fetch(`${origin}/api/ws/tickets`, {
       method: "POST",
-      headers: { cookie: `__Host-apollo_tf=${HANDLE}` },
+      headers: browserHeaders(),
     });
 
     expect(response.status).toBe(201);
@@ -148,15 +154,19 @@ describe("POST /api/ws/tickets", () => {
 
     const missingCookie = await fetch(`${origin}/api/ws/tickets`, {
       method: "POST",
+      headers: {
+        origin: "https://tf.apollot.ru",
+        "x-csrf-token": CSRF,
+      },
     });
     const missingEntitlement = await fetch(`${origin}/api/ws/tickets`, {
       method: "POST",
-      headers: { cookie: `__Host-apollo_tf=${HANDLE}` },
+      headers: browserHeaders(),
     });
 
-    expect(missingCookie.status).toBe(401);
+    expect(missingCookie.status).toBe(403);
     await expect(missingCookie.json()).resolves.toEqual({
-      error: "unauthorized",
+      error: "forbidden",
     });
     expect(missingEntitlement.status).toBe(403);
     await expect(missingEntitlement.json()).resolves.toEqual({
@@ -173,22 +183,20 @@ describe("POST /api/ws/tickets", () => {
     const responses = await Promise.all([
       fetch(`${origin}/api/ws/tickets?extra=1`, {
         method: "POST",
-        headers: { cookie: `__Host-apollo_tf=${HANDLE}` },
+        headers: browserHeaders(),
       }),
       fetch(`${origin}/api/ws/tickets`, {
         method: "POST",
-        headers: {
-          cookie: `__Host-apollo_tf=${HANDLE}`,
+        headers: browserHeaders({
           "content-type": "application/json",
-        },
+        }),
         body: JSON.stringify({}),
       }),
       fetch(`${origin}/api/ws/tickets`, {
         method: "POST",
-        headers: {
-          cookie: `__Host-apollo_tf=${HANDLE}`,
+        headers: browserHeaders({
           "content-type": "application/json",
-        },
+        }),
         body: "{",
       }),
     ]);
@@ -211,16 +219,17 @@ describe("POST /api/ws/tickets", () => {
 
     const textBody = await fetch(`${origin}/api/ws/tickets`, {
       method: "POST",
-      headers: {
-        cookie: `__Host-apollo_tf=${HANDLE}`,
+      headers: browserHeaders({
         "content-type": "text/plain",
-      },
+      }),
       body: "x",
     });
-    const chunked = await rawPost(origin, {
-      cookie: `__Host-apollo_tf=${HANDLE}`,
-      "transfer-encoding": "chunked",
-    });
+    const chunked = await rawPost(
+      origin,
+      browserHeaders({
+        "transfer-encoding": "chunked",
+      }),
+    );
 
     expect(textBody.status).toBe(400);
     await expect(textBody.json()).resolves.toEqual({
@@ -242,7 +251,7 @@ describe("POST /api/ws/tickets", () => {
 
     const response = await fetch(`${origin}/api/ws/tickets`, {
       method: "POST",
-      headers: { cookie: `__Host-apollo_tf=${HANDLE}` },
+      headers: browserHeaders(),
     });
 
     expect(response.status).toBe(503);
@@ -260,7 +269,7 @@ describe("POST /api/ws/tickets", () => {
 
     const response = await fetch(`${origin}/api/ws/tickets`, {
       method: "POST",
-      headers: { cookie: `__Host-apollo_tf=${HANDLE}` },
+      headers: browserHeaders(),
     });
 
     expect(response.status).toBe(401);

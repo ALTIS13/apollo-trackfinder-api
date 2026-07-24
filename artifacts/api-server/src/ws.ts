@@ -41,8 +41,9 @@ const playerSyncMessageSchema = z
   })
   .strict();
 
-export interface PlayerSyncMessage
-  extends z.infer<typeof playerSyncMessageSchema> {}
+export interface PlayerSyncMessage extends z.infer<
+  typeof playerSyncMessageSchema
+> {}
 
 export interface WebSocketTimerScheduler {
   setInterval(callback: () => void, milliseconds: number): unknown;
@@ -98,8 +99,7 @@ function parseUpgradeTarget(
     return { kind: "invalid" };
   }
   const queryIndex = rawTarget.indexOf("?");
-  const path =
-    queryIndex < 0 ? rawTarget : rawTarget.slice(0, queryIndex);
+  const path = queryIndex < 0 ? rawTarget : rawTarget.slice(0, queryIndex);
   if (path !== WEBSOCKET_PATH) return { kind: "not_found" };
   if (queryIndex < 0) return { kind: "invalid" };
   const query = rawTarget.slice(queryIndex + 1);
@@ -110,10 +110,7 @@ function parseUpgradeTarget(
   return { kind: "valid", ticket: match[1]! };
 }
 
-function exactRawHeader(
-  request: IncomingMessage,
-  name: string,
-): string | null {
+function exactRawHeader(request: IncomingMessage, name: string): string | null {
   const values: string[] = [];
   for (let index = 0; index < request.rawHeaders.length; index += 2) {
     if (request.rawHeaders[index]?.toLowerCase() === name) {
@@ -238,15 +235,25 @@ async function validateBackingPolicy(
     );
     if (confirmed === null) return "forbidden";
     if (
-      confirmed.revision !== observation.revision ||
       confirmed.session.id !== observation.session.id ||
       confirmed.session.accountId !== observation.session.accountId ||
       confirmed.session.platformSessionId !==
         observation.session.platformSessionId ||
-      confirmed.session.installationId !== observation.session.installationId ||
-      confirmed.session.expiresAt !== observation.session.expiresAt
+      confirmed.session.installationId !== observation.session.installationId
     ) {
       return "unavailable";
+    }
+    if (confirmed.revision !== observation.revision) {
+      const concurrentPolicyExpiry = timestamp(
+        confirmed.session.assertionExpiresAt,
+      );
+      if (concurrentPolicyExpiry === null) return "unavailable";
+      if (
+        concurrentPolicyExpiry <= checkedNow(dependencies.now ?? Date.now) ||
+        !confirmed.session.entitlements.includes("tf.search")
+      ) {
+        return "forbidden";
+      }
     }
     return activePolicyBinding(
       ticket,
@@ -332,10 +339,7 @@ export function attachWebSocketServer(
   let closed = false;
   let closePromise: Promise<void> | null = null;
 
-  const deauthorizeSocket = (
-    ws: WebSocket,
-    context: SocketContext,
-  ): void => {
+  const deauthorizeSocket = (ws: WebSocket, context: SocketContext): void => {
     if (!context.authorized) return;
     context.authorized = false;
     context.room.delete(ws);
@@ -510,10 +514,7 @@ export function attachWebSocketServer(
     const validation = await validateBackingPolicy(ticket, dependencies);
     if (validation !== "authorized" || closed) {
       pendingSockets.delete(socket);
-      rejectUpgrade(
-        socket,
-        validation === "unavailable" || closed ? 503 : 401,
-      );
+      rejectUpgrade(socket, validation === "unavailable" || closed ? 503 : 401);
       return;
     }
     pendingSockets.delete(socket);

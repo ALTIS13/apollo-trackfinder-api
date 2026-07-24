@@ -12,15 +12,10 @@ import pinoHttp from "pino-http";
 
 import { adminRequestTelemetry } from "./lib/admin-telemetry.js";
 import { logger } from "./lib/logger.js";
+import { requireTfBrowserMutation } from "./lib/tf-browser-session.js";
 import { createApiRouter, type ApiRouterOptions } from "./routes/index.js";
 import { moduleHeartbeatRouter } from "./routes/module-heartbeats.js";
 
-const PRODUCTION_ORIGINS = [
-  "https://web.apollot.ru",
-  "https://tf.apollot.ru",
-  "https://api.apollot.ru",
-  "https://apollot.ru",
-];
 const API_BODY_LIMIT_BYTES = 100 * 1024;
 const bodyParserErrors = new WeakSet<object>();
 
@@ -119,6 +114,7 @@ function isExactLoopbackOrigin(origin: string): boolean {
 }
 
 export interface ApiAppOptions extends ApiRouterOptions {
+  readonly nodeEnv?: "development" | "production" | "test";
   readonly requestLogger?: Logger;
 }
 
@@ -149,10 +145,8 @@ export function sanitizedApiErrorHandler(
 export function createApiApp(options: ApiAppOptions = {}): Express {
   const app: Express = express();
   const requestLogger = options.requestLogger ?? logger;
-  const allowedOrigins = new Set(PRODUCTION_ORIGINS);
-  if (options.auth !== undefined) {
-    allowedOrigins.add(options.auth.webOrigin);
-  }
+  const nodeEnv = options.nodeEnv ?? process.env.NODE_ENV ?? "development";
+  const allowedOrigin = options.auth?.webOrigin;
 
   app.disable("x-powered-by");
   app.use(
@@ -192,8 +186,8 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
     cors({
       origin: (origin, callback) => {
         if (!origin) return callback(null, true);
-        if (allowedOrigins.has(origin)) return callback(null, true);
-        if (isExactLoopbackOrigin(origin)) {
+        if (origin === allowedOrigin) return callback(null, true);
+        if (nodeEnv !== "production" && isExactLoopbackOrigin(origin)) {
           return callback(null, true);
         }
         return callback(null, false);
@@ -203,6 +197,10 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
     }),
   );
 
+  app.use(cookieParser());
+  if (options.auth !== undefined) {
+    app.use("/api", requireTfBrowserMutation(options.auth.webOrigin));
+  }
   app.use(
     withParserProvenance(
       express.json({
@@ -218,7 +216,6 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
       }),
     ),
   );
-  app.use(cookieParser());
 
   app.use("/api", createApiRouter(options));
   app.use("/api", sanitizedApiErrorHandler);

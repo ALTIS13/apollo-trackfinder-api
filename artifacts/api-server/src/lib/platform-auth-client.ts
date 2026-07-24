@@ -26,6 +26,8 @@ const INTROSPECTION_PATH = "/v1/oauth/introspect";
 const JWKS_PATH = "/.well-known/jwks.json";
 const ASSERTION_AUDIENCE = "apollo-tf";
 const MAX_SECRET_FILE_BYTES = 4_096;
+const MAX_CLIENT_SECRET_CHARACTERS = 512;
+const BASIC_AUTHORIZATION_HEADER_MAX_BYTES = 2_048;
 const DEFAULT_TIMEOUT_MS = 3_000;
 const DEFAULT_JWKS_TIMEOUT_MS = 3_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 16 * 1_024;
@@ -241,6 +243,28 @@ function fixedLengthEqual(left: string, right: string): boolean {
   );
 }
 
+function validConfidentialClientCredentials(
+  clientId: string,
+  clientSecret: string,
+): boolean {
+  if (
+    !/^[A-Za-z0-9._~-]{1,128}$/.test(clientId) ||
+    clientSecret.length < 1 ||
+    clientSecret.length > MAX_CLIENT_SECRET_CHARACTERS ||
+    clientSecret.trim() !== clientSecret ||
+    /[\u0000-\u001f\u007f]/u.test(clientSecret)
+  ) {
+    return false;
+  }
+  const encoded = Buffer.from(`${clientId}:${clientSecret}`, "utf8").toString(
+    "base64",
+  );
+  return (
+    Buffer.byteLength(`Basic ${encoded}`, "utf8") <=
+    BASIC_AUTHORIZATION_HEADER_MAX_BYTES
+  );
+}
+
 export class PlatformAuthClient {
   private readonly issuer: string;
   private readonly apiOrigin: string;
@@ -261,11 +285,10 @@ export class PlatformAuthClient {
     );
     parseExactCallback(options.redirectUri);
     if (
-      !/^[A-Za-z0-9._~-]{1,128}$/.test(options.clientId) ||
-      options.clientSecret.length < 1 ||
-      options.clientSecret.length > MAX_SECRET_FILE_BYTES ||
-      options.clientSecret.trim() !== options.clientSecret ||
-      /[\u0000-\u001f\u007f]/u.test(options.clientSecret)
+      !validConfidentialClientCredentials(
+        options.clientId,
+        options.clientSecret,
+      )
     ) {
       throw new Error("TF authentication configuration is invalid");
     }
@@ -594,6 +617,9 @@ export async function parseTfAuthRuntimeConfig(
       requiredEnvironment(environment, "APOLLO_TF_CLIENT_SECRET_FILE"),
       dependencies.openSecretFile ?? open,
     );
+    if (!validConfidentialClientCredentials(clientId, clientSecret)) {
+      throw new Error("invalid secret");
+    }
     const verifierFile = environment.APOLLO_TF_BRIDGE_PKCE_VERIFIER_FILE;
     let bridgePkceVerifier: string | undefined;
     if (verifierFile !== undefined) {

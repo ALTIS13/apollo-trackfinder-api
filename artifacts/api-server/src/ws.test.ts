@@ -418,13 +418,11 @@ describe("one-time WebSocket upgrades", () => {
     const validTicket = ticket(opaque(), tfSession);
     const current = dependencies([validTicket]);
     const { origin } = await startWs(current);
-    const alias = `${validTicket.value.slice(0, -1)}${
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".at(
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".indexOf(
-          validTicket.value.at(-1)!,
-        ) + 1,
-      )
-    }`;
+    const alias = `${validTicket.value.slice(0, -1)}${"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".at(
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".indexOf(
+        validTicket.value.at(-1)!,
+      ) + 1,
+    )}`;
 
     const statuses = await Promise.all([
       rawUpgrade(origin, `/api/ws?sessionId=${opaque()}`),
@@ -436,10 +434,7 @@ describe("one-time WebSocket upgrades", () => {
       rawUpgrade(origin, `/api/ws?ticket=${alias}`),
       rawUpgrade(origin, `/api/ws?ticket=${validTicket.value}#fragment`),
       rawUpgrade(origin, `/api/ws/extra?ticket=${validTicket.value}`),
-      rawUpgrade(
-        origin,
-        `ws://127.0.0.1/api/ws?ticket=${validTicket.value}`,
-      ),
+      rawUpgrade(origin, `ws://127.0.0.1/api/ws?ticket=${validTicket.value}`),
       rawUpgrade(origin, `/api/./ws?ticket=${validTicket.value}`),
       rawUpgrade(origin, `/api/%77s?ticket=${validTicket.value}`),
       rawUpgrade(origin, `/api/ws?Ticket=${validTicket.value}`),
@@ -527,7 +522,7 @@ describe("one-time WebSocket upgrades", () => {
     expect(current.sessionStore.observeSession).toHaveBeenCalledTimes(2);
   });
 
-  it("maps a changed post-introspection revision or binding to 503", async () => {
+  it("accepts a concurrent HTTP policy refresh during WebSocket validation", async () => {
     const tfSession = session();
     const oneTime = ticket(opaque(), tfSession);
     const current = dependencies([oneTime]);
@@ -540,6 +535,30 @@ describe("one-time WebSocket upgrades", () => {
       .mockResolvedValueOnce({
         revision: opaque(),
         session: observed.session,
+      });
+    const { origin } = await startWs(current);
+
+    await expect(
+      rawUpgrade(origin, `/api/ws?ticket=${oneTime.value}`),
+    ).resolves.toBe(101);
+  });
+
+  it("maps a changed post-introspection immutable binding to 503", async () => {
+    const tfSession = session();
+    const oneTime = ticket(opaque(), tfSession);
+    const current = dependencies([oneTime]);
+    const observed = {
+      revision: REVISION,
+      session: current.sessions.get(oneTime.sessionHandle)!,
+    };
+    current.sessionStore.observeSession
+      .mockResolvedValueOnce(observed)
+      .mockResolvedValueOnce({
+        revision: opaque(),
+        session: {
+          ...observed.session,
+          installationId: "90000000-0000-4000-8000-000000000009",
+        },
       });
     const { origin } = await startWs(current);
 
@@ -628,19 +647,22 @@ describe("one-time WebSocket upgrades", () => {
       },
       401,
     ],
-  ])("rejects %s live introspection before 101", async (_name, result, status) => {
-    const tfSession = session();
-    const oneTime = ticket(opaque(), tfSession);
-    const current = dependencies([oneTime]);
-    current.platform.introspect.mockResolvedValue(
-      result as PolicyIntrospectionResponse,
-    );
-    const { origin } = await startWs(current);
+  ])(
+    "rejects %s live introspection before 101",
+    async (_name, result, status) => {
+      const tfSession = session();
+      const oneTime = ticket(opaque(), tfSession);
+      const current = dependencies([oneTime]);
+      current.platform.introspect.mockResolvedValue(
+        result as PolicyIntrospectionResponse,
+      );
+      const { origin } = await startWs(current);
 
-    await expect(
-      rawUpgrade(origin, `/api/ws?ticket=${oneTime.value}`),
-    ).resolves.toBe(status);
-  });
+      await expect(
+        rawUpgrade(origin, `/api/ws?ticket=${oneTime.value}`),
+      ).resolves.toBe(status);
+    },
+  );
 });
 
 describe("connected WebSocket lifecycle", () => {
@@ -688,10 +710,7 @@ describe("connected WebSocket lifecycle", () => {
       first.send(JSON.stringify({ ...valid, extra: true }));
     });
     await expectNoMessageDuring(second, () => {
-      first.send(
-        Buffer.from([0xc3, 0x28]),
-        { binary: false },
-      );
+      first.send(Buffer.from([0xc3, 0x28]), { binary: false });
     });
     await expectNoMessageDuring(second, () => {
       first.send(JSON.stringify({ ...valid, position: -1 }));
@@ -785,9 +804,7 @@ describe("connected WebSocket lifecycle", () => {
     const current = dependencies([oneTime]);
     const scheduler = new ManualScheduler();
     const { origin } = await startWs(current, { scheduler });
-    const ws = await connectOpen(
-      `${origin}/api/ws?ticket=${oneTime.value}`,
-    );
+    const ws = await connectOpen(`${origin}/api/ws?ticket=${oneTime.value}`);
     const closed = closeCode(ws);
     if (result instanceof Error) {
       current.sessionStore.observeSession.mockRejectedValue(result);
@@ -938,9 +955,9 @@ describe("connected WebSocket lifecycle", () => {
       `/api/ws?ticket=${pendingTicket.value}`,
     );
     await vi.waitFor(() => {
-      expect(
-        current.sessionStore.consumeWebSocketTicket,
-      ).toHaveBeenCalledWith(pendingTicket.value);
+      expect(current.sessionStore.consumeWebSocketTicket).toHaveBeenCalledWith(
+        pendingTicket.value,
+      );
     });
 
     const firstClose = handle.close();

@@ -1481,6 +1481,16 @@ function protectedOperatorHeaders(state) {
   return { "X-CSRF-Token": state.operatorCsrf };
 }
 
+function protectedTfHeaders(state) {
+  assert.equal(typeof state.tfCsrf, "string");
+  assert(state.tfCsrf.length > 0);
+  return {
+    Cookie: state.tfCookies.header(),
+    Origin: state.tfOrigin,
+    "X-CSRF-Token": state.tfCsrf,
+  };
+}
+
 async function mutateEntitlement(state, accountId, moduleKey, method) {
   return jsonCall(
     state,
@@ -2041,9 +2051,14 @@ async function runFlow(state, fixture, signal) {
     jar: state.tfCookies,
     origin: state.tfOrigin,
     label: "tf-session",
+    redact: ["csrfToken"],
   });
   assert.equal(me.json.accountId, accountId);
   assert(me.json.entitlements.includes("tf.search"));
+  const tfCsrfToken = me.json.csrfToken;
+  assert.equal(typeof tfCsrfToken, "string");
+  state.tfCsrf = tfCsrfToken;
+  state.rawSecrets.push(tfCsrfToken);
 
   const downloadBody = {
     tracks: [{ trackId: "smoke-invalid-track" }],
@@ -2054,6 +2069,7 @@ async function runFlow(state, fixture, signal) {
       status,
       jar: state.tfCookies,
       origin: state.tfOrigin,
+      headers: protectedTfHeaders(state),
       body: downloadBody,
       label,
     });
@@ -2085,8 +2101,7 @@ async function runFlow(state, fixture, signal) {
     await secureRequest(state.ca, state.tfOrigin, "/api/ws/tickets", {
       method: "POST",
       headers: {
-        Cookie: state.tfCookies.header(),
-        Origin: state.tfOrigin,
+        ...protectedTfHeaders(state),
         "Content-Length": "0",
       },
       signal,
@@ -2292,6 +2307,7 @@ async function main() {
       portalCookies: new CookieJar(),
       tfCookies: new CookieJar(),
       operatorCsrf: "",
+      tfCsrf: "",
       projections: [],
       rawSecrets: [
         ...fixture.rawSecrets,

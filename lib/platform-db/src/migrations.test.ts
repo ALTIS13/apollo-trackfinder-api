@@ -202,7 +202,18 @@ describe("runPlatformMigrations", () => {
     expect(sql).toMatch(
       /lock table apollo_platform\.authorization_codes in access exclusive mode/i,
     );
-    expect(sql).toMatch(/truncate table apollo_platform\.authorization_codes/i);
+    expect(sql).toMatch(
+      /if exists\s*\(\s*select 1 from apollo_platform\.authorization_codes\s*\)/i,
+    );
+    expect(sql).toMatch(
+      /authorization code drain required before migration 0004/i,
+    );
+    expect(sql).toMatch(
+      /authorization_codes no force row level security[\s\S]*authorization code drain required before migration 0004[\s\S]*authorization_codes force row level security/i,
+    );
+    expect(sql).not.toMatch(
+      /truncate table apollo_platform\.authorization_codes/i,
+    );
     expect(sql).toMatch(
       /auth_sessions_id_account_key unique \(id, account_id\)/i,
     );

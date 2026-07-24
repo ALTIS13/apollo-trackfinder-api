@@ -232,6 +232,23 @@ function authorizationInput() {
 }
 
 describe("PlatformAuthClient", () => {
+  it("enforces the Platform client-secret and Basic-header limits directly", async () => {
+    const fixture = await createPlatformFixture();
+
+    expect(
+      createClient(fixture, { clientSecret: "s".repeat(512) }),
+    ).toBeInstanceOf(PlatformAuthClient);
+    expect(() =>
+      createClient(fixture, { clientSecret: "s".repeat(513) }),
+    ).toThrow("TF authentication configuration is invalid");
+    expect(() =>
+      createClient(fixture, {
+        clientId: "c".repeat(128),
+        clientSecret: "€".repeat(512),
+      }),
+    ).toThrow("TF authentication configuration is invalid");
+  });
+
   it("builds the exact Platform authorization URL in the required order", async () => {
     const fixture = await createPlatformFixture();
     const input = authorizationInput();
@@ -520,6 +537,33 @@ describe("TF auth runtime configuration", () => {
       authRedisUrl: "redis://127.0.0.1:16379/7",
       bridgePkceVerifier: undefined,
     });
+  });
+
+  it("accepts exactly 512 client-secret characters and rejects 513 generically", async () => {
+    const accepted = await runtimeEnvironment();
+    await writeFile(accepted.secretPath, "s".repeat(512), "utf8");
+    await expect(
+      parseTfAuthRuntimeConfig(accepted.environment),
+    ).resolves.toMatchObject({
+      clientSecret: "s".repeat(512),
+    });
+
+    const rejected = await runtimeEnvironment();
+    const canary = `secret-${"x".repeat(506)}`;
+    expect(canary).toHaveLength(513);
+    await writeFile(rejected.secretPath, canary, "utf8");
+    let error: unknown;
+    try {
+      await parseTfAuthRuntimeConfig(rejected.environment);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(
+      "TF authentication configuration is invalid",
+    );
+    expect(JSON.stringify(error)).not.toContain(canary);
+    expect(JSON.stringify(error)).not.toContain(rejected.secretPath);
   });
 
   it("rejects a secret that grows beyond the byte limit after stat", async () => {

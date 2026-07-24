@@ -352,8 +352,27 @@ function exactRefreshedBinding(
     refreshed.platformSessionId === observation.session.platformSessionId &&
     refreshed.installationId === observation.session.installationId &&
     timestamp(refreshed.expiresAt) > now &&
-    timestamp(refreshed.assertionExpiresAt) > now
+    timestamp(refreshed.expiresAt) <=
+      timestamp(observation.session.expiresAt) &&
+    timestamp(refreshed.expiresAt) <= timestamp(introspection.expiresAt) &&
+    timestamp(refreshed.assertionExpiresAt) > now &&
+    timestamp(refreshed.assertionExpiresAt) <= timestamp(refreshed.expiresAt)
   );
+}
+
+function resolvedPolicyView(
+  session: TfSession,
+  introspection: Extract<PolicyIntrospectionResponse, { active: true }>,
+): TfSession {
+  const confirmed = new Set<string>(introspection.entitlements);
+  return {
+    ...session,
+    entitlements: Object.freeze(
+      [...new Set(session.entitlements)]
+        .filter((entitlement) => confirmed.has(entitlement))
+        .sort((left, right) => left.localeCompare(right)),
+    ),
+  };
 }
 
 function principalFrom(session: TfSession): TfPrincipal {
@@ -437,23 +456,36 @@ export function requireTfCapability(
         }
         const refreshed = await dependencies.sessionStore.refreshSession(
           handle,
-          observation.revision,
+          observation,
           introspection,
         );
         const refreshedTime = checkedNow(now);
+        let resolved = refreshed;
+        if (resolved === null) {
+          const concurrent =
+            await dependencies.sessionStore.observeSession(handle);
+          if (concurrent === null) {
+            sendUnauthorized(response);
+            return;
+          }
+          if (concurrent.revision === observation.revision) {
+            sendPolicyUnavailable(response);
+            return;
+          }
+          resolved = concurrent.session;
+        }
         if (
-          refreshed === null ||
           !exactRefreshedBinding(
             observation,
             introspection,
-            refreshed,
+            resolved,
             refreshedTime,
           )
         ) {
           sendPolicyUnavailable(response);
           return;
         }
-        authorizedSession = refreshed;
+        authorizedSession = resolvedPolicyView(resolved, introspection);
       }
 
       if (!authorizedSession.entitlements.includes(policy.capability)) {

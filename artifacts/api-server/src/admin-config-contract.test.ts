@@ -131,27 +131,27 @@ describe("admin telemetry container contract", () => {
   it("passes the runtime token only to API and admin services", () => {
     const interpolation = 'ADMIN_DASHBOARD_TOKEN: "${ADMIN_DASHBOARD_TOKEN:-}"';
 
-    expect(serviceBlock(rootCompose, "tf-api")).toContain(interpolation);
-    const rootAdmin = serviceBlock(rootCompose, "tf-admin");
+    expect(serviceBlock(rootCompose, "api")).toContain(interpolation);
+    const rootAdmin = serviceBlock(rootCompose, "admin");
     expect(rootAdmin).toContain(interpolation);
     expect(rootAdmin).toContain('ADMIN_ACCESS_USER: "${ADMIN_ACCESS_USER:-}"');
     expect(rootAdmin).toContain(
       'ADMIN_ACCESS_PASSWORD: "${ADMIN_ACCESS_PASSWORD:-}"',
     );
     expect(rootAdmin).toContain('"127.0.0.1:${TF_ADMIN_PORT:-3001}:80"');
-    expect(serviceBlock(rootCompose, "tf-api")).not.toContain("ADMIN_ACCESS_");
-    expect(serviceBlock(rootCompose, "tf-postgres")).not.toContain(
+    expect(serviceBlock(rootCompose, "api")).not.toContain("ADMIN_ACCESS_");
+    expect(serviceBlock(rootCompose, "db")).not.toContain(
       "ADMIN_DASHBOARD_TOKEN",
     );
-    expect(serviceBlock(rootCompose, "tf-web")).not.toContain(
+    expect(serviceBlock(rootCompose, "web")).not.toContain(
       "ADMIN_DASHBOARD_TOKEN",
     );
 
-    expect(serviceBlock(apiCompose, "tf-api")).toContain(interpolation);
-    expect(serviceBlock(apiCompose, "tf-postgres")).not.toContain(
+    expect(serviceBlock(apiCompose, "api")).toContain(interpolation);
+    expect(serviceBlock(apiCompose, "db")).not.toContain(
       "ADMIN_DASHBOARD_TOKEN",
     );
-    expect(serviceBlock(apiCompose, "tf-redis")).not.toContain(
+    expect(serviceBlock(apiCompose, "redis")).not.toContain(
       "ADMIN_DASHBOARD_TOKEN",
     );
   });
@@ -206,19 +206,19 @@ describe("admin telemetry container contract", () => {
       'APOLLO_MODULE_HEARTBEAT_KEYS: "${APOLLO_MODULE_HEARTBEAT_KEYS:-}"';
     const secretName = HEARTBEAT_KEYS_ENV;
 
-    expect(serviceBlock(rootCompose, "tf-api")).toContain(interpolation);
-    expect(serviceBlock(apiCompose, "tf-api")).toContain(interpolation);
+    expect(serviceBlock(rootCompose, "api")).toContain(interpolation);
+    expect(serviceBlock(apiCompose, "api")).toContain(interpolation);
 
     for (const compose of [rootCompose, apiCompose]) {
       expect(hasHeartbeatBuildArg(compose)).toBe(false);
     }
 
     for (const service of [
-      serviceBlock(rootCompose, "tf-admin"),
-      serviceBlock(rootCompose, "tf-web"),
-      serviceBlock(rootCompose, "tf-postgres"),
-      serviceBlock(apiCompose, "tf-postgres"),
-      serviceBlock(apiCompose, "tf-redis"),
+      serviceBlock(rootCompose, "admin"),
+      serviceBlock(rootCompose, "web"),
+      serviceBlock(rootCompose, "db"),
+      serviceBlock(apiCompose, "db"),
+      serviceBlock(apiCompose, "redis"),
     ]) {
       expect(service).not.toContain(secretName);
     }

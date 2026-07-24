@@ -183,9 +183,10 @@ describe("TF route policy map", () => {
     expect(
       requiredPolicyForRequest("POST", "/api/yandex/logout"),
     ).toMatchObject({ capability: "tf.integrations", live: true });
-    expect(
-      requiredPolicyForRequest("POST", "/api/ws/tickets"),
-    ).toMatchObject({ capability: "tf.search", live: true });
+    expect(requiredPolicyForRequest("POST", "/api/ws/tickets")).toMatchObject({
+      capability: "tf.search",
+      live: true,
+    });
   });
 
   it.each([
@@ -318,7 +319,14 @@ describe("requireTfCapability", () => {
     ).toHaveBeenCalledOnce();
     expect(
       currentDependencies.sessionStore.refreshSession,
-    ).toHaveBeenCalledWith(SESSION_HANDLE, REVISION, activeIntrospection());
+    ).toHaveBeenCalledWith(
+      SESSION_HANDLE,
+      observation({
+        entitlements: [],
+        assertionExpiresAt: new Date(NOW + 30_000).toISOString(),
+      }),
+      activeIntrospection(),
+    );
     expect(
       currentDependencies.sessionStore.observeSession,
     ).toHaveBeenCalledOnce();
@@ -442,8 +450,120 @@ describe("requireTfCapability", () => {
     ).toHaveBeenCalledTimes(failurePoint === "refresh" ? 1 : 0);
   });
 
-  it("does not retry, re-observe, or authorize when the CAS refresh is missing", async () => {
+  it("re-observes once and uses a valid concurrent refresh when the CAS result is missing", async () => {
     const currentDependencies = dependencies();
+    const concurrent = {
+      ...observation({
+        entitlements: ["tf.collections"],
+        assertionExpiresAt: new Date(NOW + 300_000).toISOString(),
+      }),
+      revision: randomBytes(32).toString("base64url"),
+    };
+    currentDependencies.sessionStore.observeSession
+      .mockResolvedValueOnce(observation())
+      .mockResolvedValueOnce(concurrent);
+    currentDependencies.sessionStore.refreshSession.mockResolvedValue(null);
+    const origin = await startPolicyServer(currentDependencies);
+
+    const response = await protectedRequest(origin, "/api/tracks/recent");
+
+    expect(response.status).toBe(200);
+    expect(
+      currentDependencies.sessionStore.observeSession,
+    ).toHaveBeenCalledTimes(2);
+    expect(currentDependencies.platform.introspect).toHaveBeenCalledOnce();
+    expect(
+      currentDependencies.sessionStore.refreshSession,
+    ).toHaveBeenCalledOnce();
+  });
+
+  it("denies a bounded concurrent entitlement absent from current introspection", async () => {
+    const currentDependencies = dependencies();
+    const concurrent = {
+      ...observation({
+        entitlements: ["tf.collections"],
+        assertionExpiresAt: new Date(NOW + 300_000).toISOString(),
+      }),
+      revision: randomBytes(32).toString("base64url"),
+    };
+    currentDependencies.platform.introspect.mockResolvedValue(
+      activeIntrospection({ entitlements: [] }),
+    );
+    currentDependencies.sessionStore.observeSession
+      .mockResolvedValueOnce(observation())
+      .mockResolvedValueOnce(concurrent);
+    currentDependencies.sessionStore.refreshSession.mockResolvedValue(null);
+    const origin = await startPolicyServer(currentDependencies);
+
+    const response = await protectedRequest(origin, "/api/tracks/recent");
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: "module_access_denied",
+    });
+    expect(
+      currentDependencies.sessionStore.observeSession,
+    ).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not regrant a bounded entitlement absent from concurrent storage", async () => {
+    const currentDependencies = dependencies();
+    const concurrent = {
+      ...observation({
+        entitlements: [],
+        assertionExpiresAt: new Date(NOW + 300_000).toISOString(),
+      }),
+      revision: randomBytes(32).toString("base64url"),
+    };
+    currentDependencies.platform.introspect.mockResolvedValue(
+      activeIntrospection({ entitlements: ["tf.collections"] }),
+    );
+    currentDependencies.sessionStore.observeSession
+      .mockResolvedValueOnce(observation())
+      .mockResolvedValueOnce(concurrent);
+    currentDependencies.sessionStore.refreshSession.mockResolvedValue(null);
+    const origin = await startPolicyServer(currentDependencies);
+
+    const response = await protectedRequest(origin, "/api/tracks/recent");
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: "module_access_denied",
+    });
+  });
+
+  it.each([
+    {
+      conflict: "session expiry beyond current introspection",
+      assertionExpiresAt: new Date(NOW + 4 * 60_000).toISOString(),
+      sessionExpiresAt: new Date(NOW + 10 * 60_000).toISOString(),
+      introspectionExpiresAt: new Date(NOW + 5 * 60_000).toISOString(),
+    },
+    {
+      conflict: "policy freshness beyond resolved session",
+      assertionExpiresAt: new Date(NOW + 6 * 60_000).toISOString(),
+      sessionExpiresAt: new Date(NOW + 5 * 60_000).toISOString(),
+      introspectionExpiresAt: new Date(NOW + 10 * 60_000).toISOString(),
+    },
+  ])("rejects a bounded concurrent $conflict", async (lifetime) => {
+    const currentDependencies = dependencies();
+    const concurrent = {
+      ...observation({
+        entitlements: ["tf.collections"],
+        assertionExpiresAt: lifetime.assertionExpiresAt,
+        expiresAt: lifetime.sessionExpiresAt,
+      }),
+      revision: randomBytes(32).toString("base64url"),
+    };
+    currentDependencies.platform.introspect.mockResolvedValue(
+      activeIntrospection({
+        entitlements: ["tf.collections"],
+        expiresAt: lifetime.introspectionExpiresAt,
+      }),
+    );
+    currentDependencies.sessionStore.observeSession
+      .mockResolvedValueOnce(observation())
+      .mockResolvedValueOnce(concurrent);
     currentDependencies.sessionStore.refreshSession.mockResolvedValue(null);
     const origin = await startPolicyServer(currentDependencies);
 
@@ -453,13 +573,43 @@ describe("requireTfCapability", () => {
     await expect(response.json()).resolves.toEqual({
       error: "policy_unavailable",
     });
+  });
+
+  it("authorizes both parallel HTTP refreshes through one bounded concurrent re-read", async () => {
+    const currentDependencies = dependencies();
+    const initial = observation({
+      entitlements: [],
+      assertionExpiresAt: new Date(NOW + 1_000).toISOString(),
+    });
+    const concurrent = {
+      ...observation({
+        entitlements: ["tf.collections"],
+        assertionExpiresAt: new Date(NOW + 300_000).toISOString(),
+      }),
+      revision: randomBytes(32).toString("base64url"),
+    };
+    currentDependencies.sessionStore.observeSession
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(concurrent);
+    currentDependencies.sessionStore.refreshSession
+      .mockResolvedValueOnce(concurrent.session)
+      .mockResolvedValueOnce(null);
+    const origin = await startPolicyServer(currentDependencies);
+
+    const responses = await Promise.all([
+      protectedRequest(origin, "/api/tracks/recent"),
+      protectedRequest(origin, "/api/tracks/recent"),
+    ]);
+
+    expect(responses.map(({ status }) => status).sort()).toEqual([200, 200]);
     expect(
       currentDependencies.sessionStore.observeSession,
-    ).toHaveBeenCalledOnce();
-    expect(currentDependencies.platform.introspect).toHaveBeenCalledOnce();
+    ).toHaveBeenCalledTimes(3);
+    expect(currentDependencies.platform.introspect).toHaveBeenCalledTimes(2);
     expect(
       currentDependencies.sessionStore.refreshSession,
-    ).toHaveBeenCalledOnce();
+    ).toHaveBeenCalledTimes(2);
   });
 
   it("revokes and denies an inactive introspection without refreshing", async () => {

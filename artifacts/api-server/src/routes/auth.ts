@@ -17,6 +17,7 @@ import {
   PlatformAuthUnavailableError,
   type PlatformAuthClient,
 } from "../lib/platform-auth-client.js";
+import { AUTH_COOKIE_NAMES } from "../lib/tf-browser-session.js";
 import {
   TfSessionStoreUnavailableError,
   type TfSessionStore,
@@ -30,12 +31,7 @@ const INSTALLATION_MAX_AGE_MS = 365 * 24 * 60 * 60 * 1_000;
 const TRANSACTION_MAX_AGE_MS = 5 * 60 * 1_000;
 const INSTALLATION_LABEL = "Apollo TF Web";
 
-export const AUTH_COOKIE_NAMES = Object.freeze({
-  installation: "__Host-apollo_tf_installation",
-  transaction: "__Host-apollo_tf_tx",
-  session: "__Host-apollo_tf",
-  csrf: "__Host-apollo_tf_csrf",
-});
+export { AUTH_COOKIE_NAMES } from "../lib/tf-browser-session.js";
 
 export interface AuthRouteDependencies {
   readonly platform: Pick<
@@ -321,7 +317,13 @@ export function createAuthRouter(dependencies: AuthRouteDependencies): Router {
 
   router.get("/me", async (request, response) => {
     const handle = cookieValue(request, AUTH_COOKIE_NAMES.session);
-    if (handle === null || !OPAQUE_PATTERN.test(handle)) {
+    const csrf = cookieValue(request, AUTH_COOKIE_NAMES.csrf);
+    if (
+      handle === null ||
+      !OPAQUE_PATTERN.test(handle) ||
+      csrf === null ||
+      !OPAQUE_PATTERN.test(csrf)
+    ) {
       sendAuthenticationError(response, 401);
       return;
     }
@@ -336,6 +338,7 @@ export function createAuthRouter(dependencies: AuthRouteDependencies): Router {
         installationId: session.installationId,
         entitlements: session.entitlements,
         expiresAt: session.expiresAt,
+        csrfToken: csrf,
       });
     } catch {
       sendAuthenticationError(response, 503);
@@ -343,18 +346,8 @@ export function createAuthRouter(dependencies: AuthRouteDependencies): Router {
   });
 
   router.post("/logout", async (request, response) => {
-    const origin = request.get("origin");
-    const csrfHeader = request.get("x-csrf-token");
-    const csrf = cookieValue(request, AUTH_COOKIE_NAMES.csrf);
     const handle = cookieValue(request, AUTH_COOKIE_NAMES.session);
-    if (
-      origin !== dependencies.webOrigin ||
-      csrfHeader === undefined ||
-      csrf === null ||
-      !fixedOpaqueEqual(csrfHeader, csrf) ||
-      handle === null ||
-      !OPAQUE_PATTERN.test(handle)
-    ) {
+    if (handle === null || !OPAQUE_PATTERN.test(handle)) {
       sendAuthenticationError(response, 403);
       return;
     }

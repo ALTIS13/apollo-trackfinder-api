@@ -474,7 +474,7 @@ describe("TfSessionStore sessions", () => {
 
     const refreshed = await store.refreshSession(
       created.handle,
-      observed!.revision,
+      observed!,
       refresh,
     );
 
@@ -494,7 +494,7 @@ describe("TfSessionStore sessions", () => {
     );
   });
 
-  it("rejects a stale different-response refresh instead of regranting revoked entitlements", async () => {
+  it("returns the newer active policy for a stale refresh without regranting revoked entitlements", async () => {
     const created = await store.createSession({
       assertionClaims: assertionClaims(),
       introspection: activeIntrospection({ entitlements: ["tf.search"] }),
@@ -505,7 +505,7 @@ describe("TfSessionStore sessions", () => {
     await expect(
       store.refreshSession(
         created.handle,
-        revocationObservation!.revision,
+        revocationObservation!,
         activeIntrospection({
           entitlements: [],
           expiresAt: created.session.expiresAt,
@@ -516,15 +516,140 @@ describe("TfSessionStore sessions", () => {
     await expect(
       store.refreshSession(
         created.handle,
-        staleObservation!.revision,
+        staleObservation!,
         activeIntrospection({
           entitlements: ["tf.search"],
           expiresAt: created.session.expiresAt,
         }),
       ),
-    ).rejects.toThrow("TF authentication storage unavailable");
+    ).resolves.toMatchObject({ entitlements: [] });
     await expect(store.getSession(created.handle)).resolves.toMatchObject({
       entitlements: [],
+    });
+  });
+
+  it("re-reads and accepts a benign CAS race that occurs after the initial read", async () => {
+    const created = await store.createSession({
+      assertionClaims: assertionClaims(),
+      introspection: activeIntrospection({ entitlements: ["tf.search"] }),
+    });
+    const observed = await store.observeSession(created.handle);
+    const strict = createStrictRedisClient(redis);
+    const winner = new TfSessionStore(strict);
+    const refresh = activeIntrospection({
+      entitlements: ["tf.collections", "tf.search"],
+      expiresAt: created.session.expiresAt,
+    });
+    let raced = false;
+    const racingStore = new TfSessionStore({
+      ...strict,
+      eval: async (script, numberOfKeys, ...arguments_) => {
+        if (!raced && script.includes('decoded["revision"]')) {
+          raced = true;
+          await winner.refreshSession(created.handle, observed!, refresh);
+        }
+        return strict.eval(script, numberOfKeys, ...arguments_);
+      },
+    });
+
+    await expect(
+      racingStore.refreshSession(created.handle, observed!, refresh),
+    ).resolves.toMatchObject({
+      id: created.session.id,
+      accountId: ACCOUNT_ID,
+      platformSessionId: SESSION_ID,
+      installationId: INSTALLATION_ID,
+      entitlements: ["tf.collections", "tf.search"],
+    });
+    expect(raced).toBe(true);
+  });
+
+  it("intersects a CAS-race policy with the current introspection entitlements", async () => {
+    const created = await store.createSession({
+      assertionClaims: assertionClaims(),
+      introspection: activeIntrospection({ entitlements: ["tf.search"] }),
+    });
+    const observed = await store.observeSession(created.handle);
+    const strict = createStrictRedisClient(redis);
+    const winner = new TfSessionStore(strict);
+    const winnerRefresh = activeIntrospection({
+      entitlements: ["tf.collections"],
+      expiresAt: created.session.expiresAt,
+    });
+    const currentIntrospection = activeIntrospection({
+      entitlements: [],
+      expiresAt: created.session.expiresAt,
+    });
+    let raced = false;
+    const racingStore = new TfSessionStore({
+      ...strict,
+      eval: async (script, numberOfKeys, ...arguments_) => {
+        if (!raced && script.includes('decoded["revision"]')) {
+          raced = true;
+          await winner.refreshSession(created.handle, observed!, winnerRefresh);
+        }
+        return strict.eval(script, numberOfKeys, ...arguments_);
+      },
+    });
+
+    await expect(
+      racingStore.refreshSession(
+        created.handle,
+        observed!,
+        currentIntrospection,
+      ),
+    ).resolves.toMatchObject({
+      id: created.session.id,
+      accountId: ACCOUNT_ID,
+      platformSessionId: SESSION_ID,
+      installationId: INSTALLATION_ID,
+      entitlements: [],
+    });
+    expect(raced).toBe(true);
+    await expect(store.getSession(created.handle)).resolves.toMatchObject({
+      entitlements: ["tf.collections"],
+    });
+  });
+
+  it("rejects a CAS-race session beyond the current introspection expiry", async () => {
+    const created = await store.createSession({
+      assertionClaims: assertionClaims(),
+      introspection: activeIntrospection({ entitlements: ["tf.search"] }),
+    });
+    const observed = await store.observeSession(created.handle);
+    const strict = createStrictRedisClient(redis);
+    const winner = new TfSessionStore(strict);
+    const winnerRefresh = activeIntrospection({
+      entitlements: ["tf.collections"],
+      expiresAt: created.session.expiresAt,
+    });
+    const currentIntrospection = activeIntrospection({
+      entitlements: ["tf.collections"],
+      expiresAt: new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
+    });
+    let raced = false;
+    const racingStore = new TfSessionStore({
+      ...strict,
+      eval: async (script, numberOfKeys, ...arguments_) => {
+        if (!raced && script.includes('decoded["revision"]')) {
+          raced = true;
+          await winner.refreshSession(created.handle, observed!, winnerRefresh);
+        }
+        return strict.eval(script, numberOfKeys, ...arguments_);
+      },
+    });
+
+    await expect(
+      racingStore.refreshSession(
+        created.handle,
+        observed!,
+        currentIntrospection,
+      ),
+    ).rejects.toThrow("TF authentication storage unavailable");
+    expect(raced).toBe(true);
+    await expect(store.getSession(created.handle)).resolves.toMatchObject({
+      entitlements: ["tf.collections"],
+      expiresAt: created.session.expiresAt,
     });
   });
 
@@ -552,7 +677,7 @@ describe("TfSessionStore sessions", () => {
 
     const refreshed = await delayedStore.refreshSession(
       created.handle,
-      observed!.revision,
+      observed!,
       activeIntrospection({
         entitlements: ["tf.collections"],
         expiresAt: shortenedExpiry,
@@ -586,7 +711,7 @@ describe("TfSessionStore sessions", () => {
 
     const outcomes = await Promise.allSettled([
       ...Array.from({ length: 16 }, () =>
-        store.refreshSession(created.handle, observed!.revision, refresh),
+        store.refreshSession(created.handle, observed!, refresh),
       ),
       ...Array.from({ length: 8 }, () => store.revokeSession(created.handle)),
     ]);
@@ -609,7 +734,7 @@ describe("TfSessionStore sessions", () => {
     await expect(
       store.refreshSession(
         created.handle,
-        observed!.revision,
+        observed!,
         activeIntrospection({
           sessionId: "40000000-0000-4000-8000-000000000004",
         }),
@@ -618,12 +743,21 @@ describe("TfSessionStore sessions", () => {
     await expect(
       store.refreshSession(
         created.handle,
-        observed!.revision,
+        observed!,
         activeIntrospection({
           expiresAt: new Date(Date.now() - 1_000).toISOString(),
         }),
       ),
     ).rejects.toThrow("TF authentication storage unavailable");
+    await expect(
+      store.refreshSession(created.handle, observed!, {
+        ...activeIntrospection(),
+        accountStatus: "suspended",
+      } as unknown as PolicyIntrospectionResponse),
+    ).rejects.toThrow("TF authentication storage unavailable");
+    await expect(store.getSession(created.handle)).resolves.toMatchObject({
+      entitlements: ["tf.downloads", "tf.search"],
+    });
   });
 });
 

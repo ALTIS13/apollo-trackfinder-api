@@ -490,6 +490,8 @@ Root-context multi-stage build использует Debian/glibc Node 20 и pinn
 
 Compose запускает PostgreSQL, Redis, one-shot migrator и API раздельно. Migrator применяет immutable migration bundle до старта готового API; API не выполняет startup migrations. `/healthz` отражает process liveness, а `/readyz` отдельно требует Redis readiness и точный migration manifest. Локальный smoke использует generated per-run secrets, loopback API port, private policy runner и гарантированный teardown с volumes/orphans; это локальная validation, а не deployment в Coolify/HomeNode.
 
+Migration `0004_authorization_code_binding.sql` берёт `ACCESS EXCLUSIVE` lock и прерывает transaction со статической ошибкой, если legacy `authorization_codes` не пуст. Перед rollout нужно остановить выдачу новых кодов, дождаться истечения/потребления pending codes или явно удалить их после backup/audit, затем повторить migration. Ошибка сохраняет строки и откатывает transaction. После успешного применения откат схемы требует отдельной согласованной migration и не выполняется при наличии новых кодов.
+
 ### `artifacts/api-server/Dockerfile`
 
 Root-context multi-stage build использует Debian/glibc Node 20 и pinned `pnpm@10.33.2`. Runtime устанавливает Python, FFmpeg и `yt-dlp`, запускается как UID/GID `10001:10001`, сохраняет read-only application tree и пишет только в объявленные tmpfs-пути. Entrypoint читает `DATABASE_URL_FILE` до импорта bundle и не выводит значение. Pino worker bundles сохраняют builder path `/app/artifacts/api-server/dist`.
@@ -532,25 +534,25 @@ Public Platform issuer и server-to-server control origin разделены. В
 
 ```yaml
 services:
-  tf-postgres:
-  tf-redis:
-  tf-api:
-  tf-web:
-  tf-admin:
+  db:
+  redis:
+  api:
+  web:
+  admin:
 ```
 
-Root template больше не содержит hardcoded database password или wildcard API binding. TF database/client secrets приходят из `TF_SECRET_DIRECTORY`, API/web/admin ports по умолчанию привязаны к `127.0.0.1`, data plane отделён от edge network. Compose передаёт одинаковый server-side `ADMIN_DASHBOARD_TOKEN` API и admin nginx; браузер его не получает. `APOLLO_MODULE_HEARTBEAT_KEYS` передаётся только API container. Пустой service token отключает backend endpoint; пустые operator credentials закрывают UI. Deployment в Coolify/HomeNode пока не выполнялся.
+Root template сохраняет исходные deployment identities: PostgreSQL service `db`, role/database `trackfinder` и logical volume `pgdata`. Он больше не содержит hardcoded database password или wildcard API binding. TF database/client secrets приходят из `TF_SECRET_DIRECTORY`, API/web/admin ports по умолчанию привязаны к `127.0.0.1`, data plane отделён от edge network. `VITE_API_URL` передаётся как Docker build argument и компилируется в web bundle; runtime environment nginx не может изменить уже собранный URL. Compose передаёт одинаковый server-side `ADMIN_DASHBOARD_TOKEN` API и admin nginx; браузер его не получает. `APOLLO_MODULE_HEARTBEAT_KEYS` передаётся только API container. Пустой service token отключает backend endpoint; пустые operator credentials закрывают UI. Deployment в Coolify/HomeNode пока не выполнялся.
 
 ### `artifacts/api-server/docker-compose.yml`
 
 ```yaml
 services:
-  tf-postgres:
-  tf-redis:
-  tf-api:
+  db:
+  redis:
+  api:
 ```
 
-Вложенный template использует те же стабильные service names, file secrets, loopback API binding и отдельные `tf-data`/`tf-edge`. Admin service входит только в корневой `docker-compose.yml`. `ADMIN_DASHBOARD_TOKEN` и `APOLLO_MODULE_HEARTBEAT_KEYS` передаются только API service.
+Вложенный template сохраняет собственные исходные identities: services `db`/`redis`/`api`, PostgreSQL role `apollo`, database `apollo_trackfinder` и volumes `postgres_data`/`redis_data`. Он использует file secrets, loopback API binding и отдельные `tf-data`/`tf-edge`. Admin service входит только в корневой `docker-compose.yml`. `ADMIN_DASHBOARD_TOKEN` и `APOLLO_MODULE_HEARTBEAT_KEYS` передаются только API service.
 
 **Переменные окружения:**
 
@@ -579,10 +581,12 @@ cp artifacts/api-server/.env.example .env
 
 export TF_SECRET_DIRECTORY=/var/lib/apollo-tf/secrets
 sudo install -d -m 0700 -o root -g root "$TF_SECRET_DIRECTORY"
+# Для нового pgdata:
 TF_POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+# Для существующего pgdata вместо генерации укажи текущий пароль роли trackfinder.
 TF_CLIENT_SECRET="$(openssl rand -hex 32)"
 printf '%s' "$TF_POSTGRES_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_postgres_password" >/dev/null
-printf 'postgres://apollo_tf_runtime:%s@tf-postgres:5432/apollo_tf' "$TF_POSTGRES_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_database_url" >/dev/null
+printf 'postgres://trackfinder:%s@db:5432/trackfinder' "$TF_POSTGRES_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_database_url" >/dev/null
 printf '%s' "$TF_CLIENT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_client_secret" >/dev/null
 unset TF_POSTGRES_PASSWORD TF_CLIENT_SECRET
 sudo chown root:root "$TF_SECRET_DIRECTORY"/tf_client_secret "$TF_SECRET_DIRECTORY"/tf_database_url "$TF_SECRET_DIRECTORY"/tf_postgres_password
@@ -597,7 +601,20 @@ startup требует ровно `tf_postgres_password`, `tf_database_url` и
 владельцем `root`; каталог `0700` закрывает host traversal, а файлы `0444`
 доступны non-root UID контейнеров только через точечные Compose secret mounts.
 Для rootless Docker владельцем должен быть пользователь daemon/Compose при тех
-же mode. Значения
+же mode. Для вложенного template URL использует
+`postgres://apollo:<password>@db:5432/apollo_trackfinder`.
+
+PostgreSQL применяет `POSTGRES_PASSWORD_FILE` только при инициализации пустого
+volume. Поэтому для уже развёрнутого `pgdata`/`postgres_data`
+`tf_database_url` при первом запуске обновлённого Compose обязан содержать
+текущий пароль существующей роли (`trackfinder` для root, `apollo` для
+вложенного template); замена `tf_postgres_password` сама по себе пароль роли
+не меняет. Ротация выполняется отдельной согласованной операцией: остановить
+API writers, выполнить `ALTER ROLE ... PASSWORD ...` через доверенный
+administrative channel, атомарно обновить `tf_database_url` и
+`tf_postgres_password`, затем перезапустить и проверить readiness.
+
+Для нового volume значения
 `tf_postgres_password` и password внутри `tf_database_url` должны совпадать;
 `tf_client_secret` регистрируется только как confidential Platform OAuth
 client secret и не передаётся browser-коду.

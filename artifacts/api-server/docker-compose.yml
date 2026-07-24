@@ -1,37 +1,32 @@
-name: ${COMPOSE_PROJECT_NAME:-apollo-tf-api}
-
 services:
-  tf-postgres:
+  db:
     image: postgres:16-bookworm
     restart: unless-stopped
     environment:
-      POSTGRES_DB: apollo_tf
+      POSTGRES_DB: apollo_trackfinder
       POSTGRES_PASSWORD_FILE: /run/secrets/tf_postgres_password
-      POSTGRES_USER: apollo_tf_runtime
+      POSTGRES_USER: apollo
     secrets:
       - tf_postgres_password
     volumes:
-      - tf-postgres-data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     networks:
       - tf-data
     healthcheck:
       test:
-        [
-          "CMD-SHELL",
-          "pg_isready -h 127.0.0.1 -U apollo_tf_runtime -d apollo_tf",
-        ]
+        ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U apollo -d apollo_trackfinder"]
       interval: 5s
       timeout: 5s
       retries: 20
 
-  tf-redis:
+  redis:
     image: redis:7-bookworm
     user: "999:999"
     restart: unless-stopped
     read_only: true
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
-      - tf-redis-data:/data
+      - redis_data:/data
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
     networks:
@@ -46,7 +41,7 @@ services:
       timeout: 5s
       retries: 20
 
-  tf-api:
+  api:
     build:
       context: ../..
       dockerfile: artifacts/api-server/Dockerfile
@@ -62,7 +57,7 @@ services:
       APOLLO_MODULE_HEARTBEAT_KEYS: "${APOLLO_MODULE_HEARTBEAT_KEYS:-}"
       APOLLO_PLATFORM_API_ORIGIN: "${APOLLO_PLATFORM_API_ORIGIN:-https://api.apollot.ru}"
       APOLLO_PLATFORM_ISSUER: "${APOLLO_PLATFORM_ISSUER:-https://api.apollot.ru}"
-      APOLLO_TF_AUTH_REDIS_URL: redis://tf-redis:6379/1
+      APOLLO_TF_AUTH_REDIS_URL: redis://redis:6379/1
       APOLLO_TF_CALLBACK_URL: "${APOLLO_TF_CALLBACK_URL:-https://api.tf.apollot.ru/api/auth/callback}"
       APOLLO_TF_CLIENT_ID: "${APOLLO_TF_CLIENT_ID:-apollo-tf-api}"
       APOLLO_TF_CLIENT_SECRET_FILE: /run/secrets/tf_client_secret
@@ -70,7 +65,7 @@ services:
       DATABASE_URL_FILE: /run/secrets/tf_database_url
       NODE_ENV: production
       PORT: "8080"
-      REDIS_URL: redis://tf-redis:6379/0
+      REDIS_URL: redis://redis:6379/0
       SERVER_URL: "${SERVER_URL:-https://api.tf.apollot.ru}"
       SPOTIFY_CLIENT_ID: "${SPOTIFY_CLIENT_ID:-}"
       SPOTIFY_CLIENT_SECRET: "${SPOTIFY_CLIENT_SECRET:-}"
@@ -89,9 +84,9 @@ services:
     cap_drop:
       - ALL
     depends_on:
-      tf-postgres:
+      db:
         condition: service_healthy
-      tf-redis:
+      redis:
         condition: service_healthy
     healthcheck:
       test:
@@ -113,8 +108,8 @@ secrets:
     file: ${TF_SECRET_DIRECTORY:?}/tf_postgres_password
 
 volumes:
-  tf-postgres-data:
-  tf-redis-data:
+  postgres_data:
+  redis_data:
 
 networks:
   tf-data:

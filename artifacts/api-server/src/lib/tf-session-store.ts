@@ -254,6 +254,19 @@ function sortedEntitlements(values: readonly string[]): string[] {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }
 
+function concurrentPolicyView(
+  current: TfSession,
+  introspection: Extract<PolicyIntrospectionResponse, { active: true }>,
+): TfSession {
+  const confirmed = new Set<string>(introspection.entitlements);
+  return tfSessionSchema.parse({
+    ...current,
+    entitlements: sortedEntitlements(
+      current.entitlements.filter((entitlement) => confirmed.has(entitlement)),
+    ),
+  });
+}
+
 function finiteTimestamp(value: string): number {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) throw new Error("invalid timestamp");
@@ -304,6 +317,52 @@ interface StoredSession {
   readonly raw: string;
   readonly revision: string;
   readonly session: TfSession;
+}
+
+function sameImmutableSession(left: TfSession, right: TfSession): boolean {
+  return (
+    left.id === right.id &&
+    left.accountId === right.accountId &&
+    left.platformSessionId === right.platformSessionId &&
+    left.installationId === right.installationId
+  );
+}
+
+function sameSessionSnapshot(left: TfSession, right: TfSession): boolean {
+  return (
+    sameImmutableSession(left, right) &&
+    left.assertionExpiresAt === right.assertionExpiresAt &&
+    left.expiresAt === right.expiresAt &&
+    left.entitlements.length === right.entitlements.length &&
+    left.entitlements.every(
+      (entitlement, index) => entitlement === right.entitlements[index],
+    )
+  );
+}
+
+function validConcurrentRefresh(
+  observed: TfSession,
+  current: TfSession,
+  introspection: Extract<PolicyIntrospectionResponse, { active: true }>,
+  now: number,
+): boolean {
+  const currentExpiry = finiteTimestamp(current.expiresAt);
+  const currentPolicyExpiry = finiteTimestamp(current.assertionExpiresAt);
+  const observedExpiry = finiteTimestamp(observed.expiresAt);
+  const platformExpiry = finiteTimestamp(introspection.expiresAt);
+  return (
+    sameImmutableSession(observed, current) &&
+    introspection.accountId === observed.accountId &&
+    introspection.sessionId === observed.platformSessionId &&
+    introspection.installationId === observed.installationId &&
+    introspection.accountStatus === "active" &&
+    currentExpiry > now &&
+    currentExpiry <= observedExpiry &&
+    currentExpiry <= platformExpiry &&
+    currentPolicyExpiry > now &&
+    currentPolicyExpiry <= currentExpiry &&
+    platformExpiry > now
+  );
 }
 
 export class TfSessionStore {
@@ -441,23 +500,39 @@ export class TfSessionStore {
 
   async refreshSession(
     handle: string,
-    observedRevision: string,
+    observation: TfSessionObservation,
     input: PolicyIntrospectionResponse,
   ): Promise<TfSession | null> {
     if (!OPAQUE_PATTERN.test(handle)) return null;
-    if (!OPAQUE_PATTERN.test(observedRevision)) {
-      throw new TfSessionStoreUnavailableError();
-    }
     try {
+      const observed = storedSessionSchema.parse({
+        revision: observation.revision,
+        session: observation.session,
+      });
       const introspection = policyIntrospectionResponseSchema.parse(input);
-      if (!introspection.active) throw new Error("inactive session");
+      if (!introspection.active || introspection.accountStatus !== "active") {
+        throw new Error("inactive session");
+      }
 
       const stored = await this.readSession(handle);
       if (stored === null) return null;
-      if (stored.revision !== observedRevision) {
-        throw new Error("stale session revision");
-      }
       const now = this.checkedNow();
+      if (stored.revision !== observed.revision) {
+        if (
+          !validConcurrentRefresh(
+            observed.session,
+            stored.session,
+            introspection,
+            now,
+          )
+        ) {
+          throw new Error("invalid concurrent refresh");
+        }
+        return concurrentPolicyView(stored.session, introspection);
+      }
+      if (!sameSessionSnapshot(stored.session, observed.session)) {
+        throw new Error("invalid observed session");
+      }
       const platformExpiresAt = finiteTimestamp(introspection.expiresAt);
       const currentExpiresAt = finiteTimestamp(stored.session.expiresAt);
       if (
@@ -490,13 +565,28 @@ export class TfSessionStore {
           COMPARE_REVISION_AND_REPLACE_SCRIPT,
           1,
           sessionKey(handle),
-          observedRevision,
+          observed.revision,
           JSON.stringify(replacement),
           expiresAt,
         ),
       );
       if (result === 1) return refreshed;
       if (result === -1) return null;
+      if (result === 0) {
+        const concurrent = await this.readSession(handle);
+        if (concurrent === null) return null;
+        if (
+          !validConcurrentRefresh(
+            observed.session,
+            concurrent.session,
+            introspection,
+            this.checkedNow(),
+          )
+        ) {
+          throw new Error("invalid concurrent refresh");
+        }
+        return concurrentPolicyView(concurrent.session, introspection);
+      }
       throw new Error("stale or invalid refresh result");
     } catch {
       throw new TfSessionStoreUnavailableError();

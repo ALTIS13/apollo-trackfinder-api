@@ -643,10 +643,11 @@ describe("GET /api/auth/me", () => {
     const dependencies = createDependencies({ tfSession: storedSession });
     const baseUrl = await startAuthServer(dependencies);
     const handle = opaque();
+    const csrf = opaque();
 
     const response = await fetch(`${baseUrl}/me`, {
       headers: {
-        cookie: `${AUTH_COOKIE_NAMES.session}=${handle}`,
+        cookie: `${AUTH_COOKIE_NAMES.session}=${handle}; ${AUTH_COOKIE_NAMES.csrf}=${csrf}`,
       },
     });
 
@@ -657,6 +658,7 @@ describe("GET /api/auth/me", () => {
       installationId: INSTALLATION_ID,
       entitlements: ["tf.downloads", "tf.search"],
       expiresAt: storedSession.expiresAt,
+      csrfToken: csrf,
     });
     expect(dependencies.sessionStore.getSession).toHaveBeenCalledWith(handle);
   });
@@ -673,7 +675,9 @@ describe("GET /api/auth/me", () => {
       headers:
         handle === undefined
           ? undefined
-          : { cookie: `${AUTH_COOKIE_NAMES.session}=${handle}` },
+          : {
+              cookie: `${AUTH_COOKIE_NAMES.session}=${handle}; ${AUTH_COOKIE_NAMES.csrf}=${opaque()}`,
+            },
     });
 
     expect(response.status).toBe(401);
@@ -691,7 +695,7 @@ describe("GET /api/auth/me", () => {
 
     const response = await fetch(`${baseUrl}/me`, {
       headers: {
-        cookie: `${AUTH_COOKIE_NAMES.session}=${opaque()}`,
+        cookie: `${AUTH_COOKIE_NAMES.session}=${opaque()}; ${AUTH_COOKIE_NAMES.csrf}=${opaque()}`,
       },
     });
 
@@ -703,37 +707,6 @@ describe("GET /api/auth/me", () => {
 });
 
 describe("POST /api/auth/logout", () => {
-  it("requires exact Origin, fixed-length matching CSRF, and a TF session", async () => {
-    const csrf = opaque();
-    const handle = opaque();
-    for (const headers of [
-      {
-        origin: "https://attacker.example",
-        "x-csrf-token": csrf,
-        cookie: `${AUTH_COOKIE_NAMES.csrf}=${csrf}; ${AUTH_COOKIE_NAMES.session}=${handle}`,
-      },
-      {
-        origin: WEB_ORIGIN,
-        "x-csrf-token": `${csrf}x`,
-        cookie: `${AUTH_COOKIE_NAMES.csrf}=${csrf}; ${AUTH_COOKIE_NAMES.session}=${handle}`,
-      },
-      {
-        origin: WEB_ORIGIN,
-        "x-csrf-token": csrf,
-        cookie: `${AUTH_COOKIE_NAMES.csrf}=${csrf}`,
-      },
-    ]) {
-      const dependencies = createDependencies();
-      const baseUrl = await startAuthServer(dependencies);
-      const response = await fetch(`${baseUrl}/logout`, {
-        method: "POST",
-        headers,
-      });
-      expect(response.status).toBe(403);
-      expect(dependencies.sessionStore.revokeSession).not.toHaveBeenCalled();
-    }
-  });
-
   it("revokes through strict Redis, clears auth cookies identically, and returns 204", async () => {
     const dependencies = createDependencies();
     const baseUrl = await startAuthServer(dependencies);

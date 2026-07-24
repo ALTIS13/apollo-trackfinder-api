@@ -45,7 +45,7 @@ export const PLATFORM_MIGRATION_MANIFEST: readonly MigrationManifestEntry[] =
     {
       name: "0004_authorization_code_binding.sql",
       checksum:
-        "aba678dbcfc68ced8c860b64bc76faa2d5541b70f3583b50365832890a8e090d",
+        "c76e504556b0b4fd491392d87e7af97e45ec2af64ae8cca05ab1b04ad8a5757d",
     },
     {
       name: "0005_authorization_code_digest_read.sql",
