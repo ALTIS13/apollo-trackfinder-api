@@ -1,64 +1,152 @@
+name: ${COMPOSE_PROJECT_NAME:-apollo-tf}
+
 services:
-  db:
-    image: postgres:16-alpine
+  tf-postgres:
+    image: postgres:16-bookworm
     restart: unless-stopped
     environment:
-      POSTGRES_USER: trackfinder
-      POSTGRES_PASSWORD: trackfinder
-      POSTGRES_DB: trackfinder
+      POSTGRES_DB: apollo_tf
+      POSTGRES_PASSWORD_FILE: /run/secrets/tf_postgres_password
+      POSTGRES_USER: apollo_tf_runtime
+    secrets:
+      - tf_postgres_password
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - tf-postgres-data:/var/lib/postgresql/data
+    networks:
+      - tf-data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U trackfinder"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -h 127.0.0.1 -U apollo_tf_runtime -d apollo_tf",
+        ]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
 
-  api:
+  tf-redis:
+    image: redis:7-bookworm
+    user: "999:999"
+    restart: unless-stopped
+    read_only: true
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - tf-redis-data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  tf-api:
     build:
       context: .
       dockerfile: artifacts/api-server/Dockerfile
     restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${TF_API_PORT:-8080}:8080"
     environment:
-      PORT: "8080"
-      NODE_ENV: production
-      DATABASE_URL: postgres://trackfinder:trackfinder@db:5432/trackfinder
-      SPOTIFY_CLIENT_ID: "${SPOTIFY_CLIENT_ID}"
-      SPOTIFY_CLIENT_SECRET: "${SPOTIFY_CLIENT_SECRET}"
-      SERVER_URL: "${SERVER_URL:-https://api.apollot.ru}"
-      WEB_URL: "${WEB_URL:-https://web.apollot.ru}"
       ADMIN_DASHBOARD_TOKEN: "${ADMIN_DASHBOARD_TOKEN:-}"
-      APOLLO_MODULE_HEARTBEAT_KEYS: "${APOLLO_MODULE_HEARTBEAT_KEYS:-}"
       APOLLO_API_VERSION: "${APOLLO_API_VERSION:-unknown}"
       APOLLO_DEPLOYED_AT: "${APOLLO_DEPLOYED_AT:-}"
+      APOLLO_MODULE_HEARTBEAT_KEYS: "${APOLLO_MODULE_HEARTBEAT_KEYS:-}"
+      APOLLO_PLATFORM_API_ORIGIN: "${APOLLO_PLATFORM_API_ORIGIN:-https://api.apollot.ru}"
+      APOLLO_PLATFORM_ISSUER: "${APOLLO_PLATFORM_ISSUER:-https://api.apollot.ru}"
+      APOLLO_TF_AUTH_REDIS_URL: redis://tf-redis:6379/1
+      APOLLO_TF_CALLBACK_URL: "${APOLLO_TF_CALLBACK_URL:-https://api.tf.apollot.ru/api/auth/callback}"
+      APOLLO_TF_CLIENT_ID: "${APOLLO_TF_CLIENT_ID:-apollo-tf-api}"
+      APOLLO_TF_CLIENT_SECRET_FILE: /run/secrets/tf_client_secret
+      APOLLO_TF_WEB_ORIGIN: "${APOLLO_TF_WEB_ORIGIN:-https://tf.apollot.ru}"
+      DATABASE_URL_FILE: /run/secrets/tf_database_url
+      NODE_ENV: production
+      PORT: "8080"
+      REDIS_URL: redis://tf-redis:6379/0
+      SERVER_URL: "${SERVER_URL:-https://api.tf.apollot.ru}"
+      SPOTIFY_CLIENT_ID: "${SPOTIFY_CLIENT_ID:-}"
+      SPOTIFY_CLIENT_SECRET: "${SPOTIFY_CLIENT_SECRET:-}"
+      WEB_URL: "${WEB_URL:-https://tf.apollot.ru}"
+    secrets:
+      - tf_client_secret
+      - tf_database_url
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+      - /tmp/tf-downloads:rw,noexec,nosuid,size=256m
+    networks:
+      - tf-data
+      - tf-edge
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     depends_on:
-      db:
+      tf-postgres:
         condition: service_healthy
+      tf-redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:8080/api/readyz').then(r=>{if(!r.ok)process.exit(1)})
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
-  web:
+  tf-web:
     build:
       context: .
       dockerfile: artifacts/music-player/Dockerfile
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "127.0.0.1:${TF_WEB_PORT:-3000}:80"
     environment:
-      VITE_API_URL: "${VITE_API_URL:-https://api.apollot.ru}"
+      VITE_API_URL: "${VITE_API_URL:-https://api.tf.apollot.ru}"
+    networks:
+      - tf-edge
 
-  admin:
+  tf-admin:
     build:
       context: .
       dockerfile: artifacts/admin-dashboard/Dockerfile
     restart: unless-stopped
     ports:
-      - "127.0.0.1:3001:80"
+      - "127.0.0.1:${TF_ADMIN_PORT:-3001}:80"
     environment:
-      APOLLO_API_UPSTREAM: "http://api:8080"
+      APOLLO_API_UPSTREAM: "http://tf-api:8080"
       ADMIN_DASHBOARD_TOKEN: "${ADMIN_DASHBOARD_TOKEN:-}"
       ADMIN_ACCESS_USER: "${ADMIN_ACCESS_USER:-}"
       ADMIN_ACCESS_PASSWORD: "${ADMIN_ACCESS_PASSWORD:-}"
+    networks:
+      - tf-edge
+    depends_on:
+      tf-api:
+        condition: service_healthy
+
+secrets:
+  tf_client_secret:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_client_secret
+  tf_database_url:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_database_url
+  tf_postgres_password:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_postgres_password
 
 volumes:
-  pgdata:
+  tf-postgres-data:
+  tf-redis-data:
+
+networks:
+  tf-data:
+    internal: true
+  tf-edge:

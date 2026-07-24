@@ -24,10 +24,7 @@ function redirectIsAllowed(redirectUri: string, nodeEnv: string): boolean {
   const url = new URL(redirectUri);
   if (url.protocol === "https:") return true;
   if (nodeEnv !== "development" || url.protocol !== "http:") return false;
-  return (
-    url.origin === "http://localhost" ||
-    url.origin === "http://127.0.0.1"
-  );
+  return ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
 }
 
 function freezeClient(
@@ -59,10 +56,7 @@ export class OAuthClientRegistry {
 
       const clientRedirects = new Set<string>();
       for (const redirectUri of client.redirectUris) {
-        if (
-          clientRedirects.has(redirectUri) ||
-          redirectUris.has(redirectUri)
-        ) {
+        if (clientRedirects.has(redirectUri) || redirectUris.has(redirectUri)) {
           throw new TypeError("Duplicate OAuth redirect URI");
         }
         if (!redirectIsAllowed(redirectUri, nodeEnv)) {
@@ -80,17 +74,11 @@ export class OAuthClientRegistry {
     return this.#clients.get(clientId) ?? null;
   }
 
-  verifySecret(
-    client: RegisteredOAuthClient,
-    rawSecret: string,
-  ): boolean {
-    const actual = createHash("sha256")
-      .update(rawSecret, "utf8")
-      .digest();
+  verifySecret(client: RegisteredOAuthClient, rawSecret: string): boolean {
+    const actual = createHash("sha256").update(rawSecret, "utf8").digest();
     const expected = Buffer.from(client.clientSecretDigest, "hex");
     return (
-      expected.length === actual.length &&
-      timingSafeEqual(expected, actual)
+      expected.length === actual.length && timingSafeEqual(expected, actual)
     );
   }
 }

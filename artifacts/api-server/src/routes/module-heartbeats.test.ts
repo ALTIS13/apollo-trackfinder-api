@@ -158,6 +158,7 @@ afterEach(async () => {
     servers.splice(0).map(
       (server) =>
         new Promise<void>((resolve, reject) => {
+          server.closeAllConnections();
           server.close((error) => (error ? reject(error) : resolve()));
         }),
     ),

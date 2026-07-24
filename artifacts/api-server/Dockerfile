@@ -1,4 +1,4 @@
-FROM node:20-slim AS builder
+FROM node:20-bookworm-slim AS builder
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
@@ -31,20 +31,28 @@ RUN pnpm install --frozen-lockfile --filter @workspace/api-server...
 
 RUN pnpm --filter @workspace/api-server run build
 
-FROM node:20-slim AS runner
+FROM node:20-bookworm-slim AS runner
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip ffmpeg \
   && pip3 install --no-cache-dir --break-system-packages yt-dlp \
-  && apt-get clean && rm -rf /var/lib/apt/lists/*
+  && apt-get clean && rm -rf /var/lib/apt/lists/* \
+  && groupadd --gid 10001 apollo \
+  && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin apollo
 
 WORKDIR /app
 
-COPY --from=builder /app/artifacts/api-server/dist ./dist
+COPY --from=builder /app/artifacts/api-server/dist ./artifacts/api-server/dist
+COPY artifacts/api-server/container/start-tf.sh ./bin/start-tf.sh
+
+RUN chmod 0555 /app/bin/start-tf.sh \
+  && chmod -R a-w /app
 
 EXPOSE 8080
 
 ENV NODE_ENV=production
 ENV PORT=8080
 
-CMD ["node", "dist/index.mjs"]
+USER 10001:10001
+ENTRYPOINT ["/app/bin/start-tf.sh"]
+CMD ["node", "artifacts/api-server/dist/index.mjs"]

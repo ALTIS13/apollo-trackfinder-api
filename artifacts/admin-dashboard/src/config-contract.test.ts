@@ -173,16 +173,18 @@ describe("admin dashboard delivery contracts", () => {
 
   it("configures the admin service with runtime same-origin upstream and token values", () => {
     expect(composeConfig).not.toMatch(/^version:/m);
-    expect(composeConfig).toMatch(/\n\s{2}admin:\s*\n/);
+    expect(composeConfig).toMatch(/\n\s{2}tf-admin:\s*\n/);
     expect(composeConfig).toContain(
       "dockerfile: artifacts/admin-dashboard/Dockerfile",
     );
     expect(composeConfig).not.toContain("VITE_ADMIN_API_URL");
-    expect(composeConfig).toContain('APOLLO_API_UPSTREAM: "http://api:8080"');
+    expect(composeConfig).toContain(
+      'APOLLO_API_UPSTREAM: "http://tf-api:8080"',
+    );
     expect(composeConfig).toContain(
       'ADMIN_DASHBOARD_TOKEN: "${ADMIN_DASHBOARD_TOKEN:-}"',
     );
-    expect(composeConfig).toContain('"127.0.0.1:3001:80"');
+    expect(composeConfig).toContain('"127.0.0.1:${TF_ADMIN_PORT:-3001}:80"');
     expect(composeConfig).toContain(
       'ADMIN_ACCESS_USER: "${ADMIN_ACCESS_USER:-}"',
     );

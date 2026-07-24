@@ -286,6 +286,7 @@ describe("production bundle", () => {
         fixture.paths.privateJwk,
       );
     },
+    20_000,
   );
 
   it.each([

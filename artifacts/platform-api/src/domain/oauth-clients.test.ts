@@ -45,35 +45,45 @@ describe("OAuthClientRegistry", () => {
 
   it.each([
     ["an empty registry", []],
-    ["more than eight clients", Array.from({ length: 9 }, (_, index) =>
-      client({
-        clientId: `client-${index}`,
-        redirectUris: [`https://client-${index}.example/callback`],
-      }),
-    )],
+    [
+      "more than eight clients",
+      Array.from({ length: 9 }, (_, index) =>
+        client({
+          clientId: `client-${index}`,
+          redirectUris: [`https://client-${index}.example/callback`],
+        }),
+      ),
+    ],
     ["unknown client keys", [client({ internalSecret: "leak" })]],
     ["an unknown audience", [client({ audience: "apollo-admin" })]],
-    ["an uppercase digest", [
-      client({ clientSecretDigest: digest(firstSecret).toUpperCase() }),
-    ]],
+    [
+      "an uppercase digest",
+      [client({ clientSecretDigest: digest(firstSecret).toUpperCase() })],
+    ],
     ["a short digest", [client({ clientSecretDigest: "a".repeat(63) })]],
     ["an empty redirect list", [client({ redirectUris: [] })]],
-    ["more than eight redirects", [
-      client({
-        redirectUris: Array.from(
-          { length: 9 },
-          (_, index) => `https://client.example/callback/${index}`,
-        ),
-      }),
-    ]],
-    ["duplicate redirects in one client", [
-      client({
-        redirectUris: [
-          "https://client.example/callback",
-          "https://client.example/callback",
-        ],
-      }),
-    ]],
+    [
+      "more than eight redirects",
+      [
+        client({
+          redirectUris: Array.from(
+            { length: 9 },
+            (_, index) => `https://client.example/callback/${index}`,
+          ),
+        }),
+      ],
+    ],
+    [
+      "duplicate redirects in one client",
+      [
+        client({
+          redirectUris: [
+            "https://client.example/callback",
+            "https://client.example/callback",
+          ],
+        }),
+      ],
+    ],
   ])("rejects %s", (_name, raw) => {
     expect(() => OAuthClientRegistry.parse(raw, "production")).toThrow();
   });
@@ -104,7 +114,7 @@ describe("OAuthClientRegistry", () => {
     ).toThrow();
   });
 
-  it("requires HTTPS except for exact development loopback origins", () => {
+  it("requires HTTPS except for exact development loopback hosts", () => {
     expect(() =>
       OAuthClientRegistry.parse(
         [client({ redirectUris: ["http://localhost/callback"] })],
@@ -117,20 +127,15 @@ describe("OAuthClientRegistry", () => {
         "development",
       ),
     ).toThrow();
-    expect(() =>
-      OAuthClientRegistry.parse(
-        [client({ redirectUris: ["http://localhost:3000/callback"] })],
-        "development",
-      ),
-    ).toThrow();
-
     expect(
       OAuthClientRegistry.parse(
         [
           client({
             redirectUris: [
               "http://localhost/callback",
+              "http://localhost:3000/callback",
               "http://127.0.0.1/callback",
+              "http://127.0.0.1:18082/api/auth/callback",
             ],
           }),
         ],
@@ -138,7 +143,9 @@ describe("OAuthClientRegistry", () => {
       ).get("apollo-tf-web")?.redirectUris,
     ).toEqual([
       "http://localhost/callback",
+      "http://localhost:3000/callback",
       "http://127.0.0.1/callback",
+      "http://127.0.0.1:18082/api/auth/callback",
     ]);
   });
 
@@ -155,6 +162,8 @@ describe("OAuthClientRegistry", () => {
       "utf8",
     );
     expect(source).toMatch(/timingSafeEqual\(/);
-    expect(source).toMatch(/createHash\("sha256"\)[\s\S]*update\(rawSecret, "utf8"\)/);
+    expect(source).toMatch(
+      /createHash\("sha256"\)[\s\S]*update\(rawSecret, "utf8"\)/,
+    );
   });
 });

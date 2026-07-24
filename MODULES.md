@@ -492,11 +492,37 @@ Compose запускает PostgreSQL, Redis, one-shot migrator и API разд�
 
 ### `artifacts/api-server/Dockerfile`
 
-1. Базовый образ: `node:20-alpine`
-2. Устанавливает Python + pip → `yt-dlp` (последняя версия)
-3. Копирует монорепозиторий, запускает `pnpm install --frozen-lockfile`
-4. Собирает через `esbuild` (`pnpm run build`)
-5. Запускает `node dist/index.mjs`
+Root-context multi-stage build использует Debian/glibc Node 20 и pinned `pnpm@10.33.2`. Runtime устанавливает Python, FFmpeg и `yt-dlp`, запускается как UID/GID `10001:10001`, сохраняет read-only application tree и пишет только в объявленные tmpfs-пути. Entrypoint читает `DATABASE_URL_FILE` до импорта bundle и не выводит значение. Pino worker bundles сохраняют builder path `/app/artifacts/api-server/dist`.
+
+### Локальный Platform-TF bridge
+
+`artifacts/platform-api/docker-compose.bridge.yml` содержит ровно семь сервисов:
+
+```text
+platform-postgres
+platform-redis
+platform-migrate
+platform-api
+tf-postgres
+tf-redis
+tf-api
+```
+
+Platform PostgreSQL/Redis доступны только в `platform-data`, TF PostgreSQL/Redis -- только в `tf-data`. Только `platform-api` и `tf-api` состоят в `platform-tf-control`; отдельная `bridge-edge` нужна лишь для одноразовых loopback TLS listener локального smoke. У баз данных и Redis нет host ports. Platform и TF используют разные роли, URL, secrets и volumes; ни один API не получает database secret другого продукта.
+
+Platform signing JWK/JWKS и OAuth client registry, TF confidential client secret и TF database URL подключаются как file-backed secrets. API/migrator работают без root, с read-only root filesystem, `no-new-privileges` и `cap_drop: ALL`. Disposable smoke проверяет браузерный TLS + PKCE S256, одноразовый OAuth code, live grant/revoke, одноразовый WebSocket ticket и close `4403`, после чего сканирует config/logs/projections/tracked bytes и удаляет project containers, networks, volumes и временные каталоги.
+
+Public Platform issuer и server-to-server control origin разделены. В production оба используют одобренный HTTPS. Внутренний `http://platform-api:8080` разрешён только явным disposable bridge flag в development; deterministic PKCE verifier также доступен только из bridge secret file и не заменяет production `randomBytes`.
+
+### Будущие контейнерные TF-модули
+
+- `tf-search`: authenticated HTTP + heartbeat key, минимальный entitlement `tf.search`; собственный runtime/cache, без прямого доступа к Platform/TF PostgreSQL.
+- `tf-integrations`: authenticated HTTP + отдельные heartbeat keys для provider adapters, минимальный entitlement `tf.integrations`; доступ только к согласованным account-bound integration operations, без общих provider credentials и общей БД.
+- `tf-download-worker`: authenticated queue/HTTP boundary + heartbeat key, минимальный entitlement `tf.downloads`; отдельное временное/data storage, без Docker socket, SSH и control-plane доступа.
+
+Модули не разделяют database credentials и не получают Docker/Coolify/Caddy/SSH доступ. На одной Coolify node связь строится через private service DNS. Между разными нодами требуется отдельно одобренный TLS upstream; Docker Compose network не является межузловой сетью.
+
+Для локального bridge новый домен не нужен. Перед remote rollout нужно запросить точные upstreams для уже согласованных `apollot.ru`, `api.apollot.ru`, `tf.apollot.ru`, `api.tf.apollot.ru` и `admin.apollot.ru`. Caddy access logs обязаны удалять query string у `/api/ws`, потому что он содержит одноразовый ticket. Получение ticket веб-клиентом остаётся следующим web integration этапом. HomeNode, Coolify, Caddy, UFW и DNS в Task 9 не менялись.
 
 ### `artifacts/admin-dashboard/Dockerfile`
 
@@ -506,23 +532,25 @@ Compose запускает PostgreSQL, Redis, one-shot migrator и API разд�
 
 ```yaml
 services:
-  db:     # PostgreSQL 16-alpine
-  api:    # API-сервер на порту 8080
-  web:    # Web player на порту 3000
-  admin:  # Admin dashboard на порту 3001
+  tf-postgres:
+  tf-redis:
+  tf-api:
+  tf-web:
+  tf-admin:
 ```
 
-Root stack содержит PostgreSQL, API, web и admin services. Compose передаёт одинаковый server-side `ADMIN_DASHBOARD_TOKEN` API и admin nginx; браузер его не получает. `APOLLO_MODULE_HEARTBEAT_KEYS` передаётся только API container. Admin port привязан к `127.0.0.1`, а UI дополнительно требует `ADMIN_ACCESS_USER`/`ADMIN_ACCESS_PASSWORD`. Пустой service token отключает backend endpoint; пустые operator credentials закрывают UI. Deployment в Coolify/HomeNode пока не выполнялся.
+Root template больше не содержит hardcoded database password или wildcard API binding. TF database/client secrets приходят из `TF_SECRET_DIRECTORY`, API/web/admin ports по умолчанию привязаны к `127.0.0.1`, data plane отделён от edge network. Compose передаёт одинаковый server-side `ADMIN_DASHBOARD_TOKEN` API и admin nginx; браузер его не получает. `APOLLO_MODULE_HEARTBEAT_KEYS` передаётся только API container. Пустой service token отключает backend endpoint; пустые operator credentials закрывают UI. Deployment в Coolify/HomeNode пока не выполнялся.
 
 ### `artifacts/api-server/docker-compose.yml`
 
 ```yaml
 services:
-  db:     # PostgreSQL 16-alpine
-  api:    # API-сервер на порту 8080
+  tf-postgres:
+  tf-redis:
+  tf-api:
 ```
 
-Этот вложенный compose относится к API, PostgreSQL и Redis; admin service входит в корневой `docker-compose.yml`. `ADMIN_DASHBOARD_TOKEN` и `APOLLO_MODULE_HEARTBEAT_KEYS` передаются только API service.
+Вложенный template использует те же стабильные service names, file secrets, loopback API binding и отдельные `tf-data`/`tf-edge`. Admin service входит только в корневой `docker-compose.yml`. `ADMIN_DASHBOARD_TOKEN` и `APOLLO_MODULE_HEARTBEAT_KEYS` передаются только API service.
 
 **Переменные окружения:**
 
@@ -531,7 +559,7 @@ services:
 | `SPOTIFY_CLIENT_ID` | Для Spotify | ID приложения Spotify |
 | `SPOTIFY_CLIENT_SECRET` | Для Spotify | Секрет приложения Spotify |
 | `SERVER_URL` | Для self-hosted Spotify | Публичный URL сервера (`https://api.yourdomain.com`). Callback для Spotify Dashboard: `${SERVER_URL}/api/spotify/callback` |
-| `DATABASE_URL` | Авто | Заполняется docker-compose автоматически |
+| `DATABASE_URL_FILE` | Да | Путь к file-backed TF database URL; entrypoint читает до импорта bundle |
 | `PORT` | Авто | 8080 |
 | `APOLLO_API_UPSTREAM` | Для admin runtime | nginx upstream origin только для exact same-origin `GET /api/admin/dashboard` proxy |
 | `ADMIN_DASHBOARD_TOKEN` | До production deployment | Server-side token, который nginx пересылает как `X-Admin-Dashboard-Token`; не попадает в browser bundle |
@@ -548,8 +576,31 @@ git clone https://github.com/ALTIS13/apollo-trackfinder-api
 cd apollo-trackfinder-api
 cp artifacts/api-server/.env.example .env
 # Заполни SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SERVER_URL
+
+export TF_SECRET_DIRECTORY=/var/lib/apollo-tf/secrets
+sudo install -d -m 0700 -o root -g root "$TF_SECRET_DIRECTORY"
+TF_POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+TF_CLIENT_SECRET="$(openssl rand -hex 32)"
+printf '%s' "$TF_POSTGRES_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_postgres_password" >/dev/null
+printf 'postgres://apollo_tf_runtime:%s@tf-postgres:5432/apollo_tf' "$TF_POSTGRES_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_database_url" >/dev/null
+printf '%s' "$TF_CLIENT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_client_secret" >/dev/null
+unset TF_POSTGRES_PASSWORD TF_CLIENT_SECRET
+sudo chown root:root "$TF_SECRET_DIRECTORY"/tf_client_secret "$TF_SECRET_DIRECTORY"/tf_database_url "$TF_SECRET_DIRECTORY"/tf_postgres_password
+sudo chmod 0444 "$TF_SECRET_DIRECTORY"/tf_client_secret "$TF_SECRET_DIRECTORY"/tf_database_url "$TF_SECRET_DIRECTORY"/tf_postgres_password
+
 docker compose up -d --build
 ```
+
+`TF_SECRET_DIRECTORY` обязателен для обоих Compose templates: production
+startup требует ровно `tf_postgres_password`, `tf_database_url` и
+`tf_client_secret`. Для rootful Docker каталог и три файла остаются под
+владельцем `root`; каталог `0700` закрывает host traversal, а файлы `0444`
+доступны non-root UID контейнеров только через точечные Compose secret mounts.
+Для rootless Docker владельцем должен быть пользователь daemon/Compose при тех
+же mode. Значения
+`tf_postgres_password` и password внутри `tf_database_url` должны совпадать;
+`tf_client_secret` регистрируется только как confidential Platform OAuth
+client secret и не передаётся browser-коду.
 
 ---
 

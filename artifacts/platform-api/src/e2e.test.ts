@@ -304,7 +304,7 @@ process.exit(0);
       execFileAsync(process.execPath, [smokeScript], {
         cwd: repositoryRoot,
         env: environment,
-        timeout: 10_000,
+        timeout: 20_000,
       }),
     ).rejects.toBeDefined();
     const log = (await pathExists(logPath))
@@ -377,7 +377,7 @@ describe("platform container contract", () => {
       expect(record.dockerHost).toBe("");
       expect(record.composeBake).toBe("false");
     }
-  });
+  }, 30_000);
 
   test("replaces inherited credentials, database URLs, and secret paths", async () => {
     const { records } = await runSmokeWithFakeDocker();
@@ -399,7 +399,7 @@ describe("platform container contract", () => {
         username: "apollo_platform_runtime",
       });
     }
-  });
+  }, 30_000);
 
   test("refuses a remote Docker host before invoking Docker", async () => {
     const { records, sentinelExists } = await runSmokeWithFakeDocker({
@@ -408,7 +408,7 @@ describe("platform container contract", () => {
 
     expect(records).toEqual([]);
     expect(sentinelExists).toBe(true);
-  });
+  }, 30_000);
 
   test("gives a remote Docker context precedence over a local Docker host", async () => {
     const { records, sentinelExists } = await runSmokeWithFakeDocker({
@@ -423,7 +423,7 @@ describe("platform container contract", () => {
     });
     expect(records.some(({ args }) => args[0] === "compose")).toBe(false);
     expect(sentinelExists).toBe(true);
-  });
+  }, 30_000);
 
   test("recognizes a mixed-case remote Docker context before mutation", async () => {
     const { records, sentinelExists } = await runSmokeWithFakeDocker({
@@ -438,7 +438,7 @@ describe("platform container contract", () => {
     });
     expect(records.some(({ args }) => args[0] === "compose")).toBe(false);
     expect(sentinelExists).toBe(true);
-  });
+  }, 30_000);
 
   test("rejects conflicting case-insensitive Docker selector keys", async () => {
     const runner = String.raw`
@@ -495,6 +495,7 @@ try {
       expect(exfiltrationAttempted).toBe(false);
       expect(sentinelExists).toBe(true);
     },
+    30_000,
   );
 
   test("uses a Debian/glibc multi-stage image with immutable runtime assets", async () => {

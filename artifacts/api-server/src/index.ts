@@ -1,4 +1,5 @@
 import Redis from "ioredis";
+import { probeDatabaseHealth } from "@workspace/db";
 
 import { createApiApp } from "./app.js";
 import {
@@ -12,6 +13,7 @@ import {
   parseTfAuthRuntimeConfig,
 } from "./lib/platform-auth-client.js";
 import { getRedis } from "./lib/redis.js";
+import { probeRedisHealth } from "./lib/redis-readiness.js";
 import {
   TfSessionStore,
   createStrictRedisClient,
@@ -35,6 +37,7 @@ async function start(): Promise<void> {
   }
 
   const authRedis = new Redis(authConfig.authRedisUrl, {
+    commandTimeout: 1_000,
     connectTimeout: 3_000,
     enableOfflineQueue: false,
     lazyConnect: true,
@@ -62,17 +65,33 @@ async function start(): Promise<void> {
     await authRedis.ping();
     const platform = new PlatformAuthClient({
       issuer: authConfig.issuer,
+      apiOrigin: authConfig.apiOrigin,
+      allowPrivateHttpTransport: authConfig.allowPrivateHttpTransport,
       clientId: authConfig.clientId,
       redirectUri: authConfig.callbackUrl,
       clientSecret: authConfig.clientSecret,
     });
     const sessionStore = new TfSessionStore(createStrictRedisClient(authRedis));
     const app = createApiApp({
+      readiness: async () => {
+        try {
+          const [redisReady, databaseReady] = await Promise.all([
+            probeRedisHealth(authConfig.authRedisUrl, { timeoutMs: 1_200 }),
+            probeDatabaseHealth({ timeoutMs: 1_200 }),
+          ]);
+          return redisReady && databaseReady;
+        } catch {
+          return false;
+        }
+      },
       auth: {
         platform,
         sessionStore,
         webOrigin: authConfig.webOrigin,
         secureCookies: true,
+        ...(authConfig.bridgePkceVerifier === undefined
+          ? {}
+          : { pkceVerifier: () => authConfig.bridgePkceVerifier! }),
       },
     });
 

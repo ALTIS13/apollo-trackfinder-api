@@ -7,6 +7,7 @@
     "test": "vitest run src",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "node build.mjs",
+    "bridge:smoke": "node scripts/bridge-smoke.mjs",
     "smoke": "node scripts/smoke.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs"
   },
@@ -28,6 +29,7 @@
     "@types/node": "catalog:",
     "@types/pg": "^8.18.0",
     "esbuild": "0.27.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "ws": "^8.20.0"
   }
 }

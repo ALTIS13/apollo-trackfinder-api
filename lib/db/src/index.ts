@@ -12,7 +12,12 @@ if (!databaseUrl) {
   );
 }
 
-export const pool = new Pool({ connectionString: databaseUrl });
+export const pool = new Pool({
+  connectionString: databaseUrl,
+  connectionTimeoutMillis: 5_000,
+  query_timeout: 10_000,
+  statement_timeout: 10_000,
+});
 export const db = drizzle(pool, { schema });
 
 interface DatabaseHealthProbeOptions {
@@ -30,17 +35,15 @@ export async function probeDatabaseHealth(
     statement_timeout: timeoutMs,
     application_name: "apollo-admin-health",
   });
-  let connected = false;
 
   try {
     await client.connect();
-    connected = true;
     await client.query("SELECT 1");
     return true;
   } catch {
     return false;
   } finally {
-    if (connected) await client.end().catch(() => undefined);
+    void client.end().catch(() => undefined);
   }
 }
 

@@ -65,6 +65,8 @@ export class PlatformAuthUnavailableError extends Error {
 
 export interface PlatformAuthClientOptions {
   readonly issuer: string;
+  readonly apiOrigin?: string;
+  readonly allowPrivateHttpTransport?: boolean;
   readonly clientId: string;
   readonly redirectUri: string;
   readonly clientSecret: string;
@@ -102,6 +104,39 @@ function parseExactOrigin(value: string, nodeEnv?: string): URL {
     throw new Error("invalid origin");
   }
   return url;
+}
+
+function parseApiOrigin(
+  value: string,
+  issuer: URL,
+  allowPrivateHttpTransport: boolean,
+): URL {
+  const url = new URL(value);
+  const exact =
+    url.origin === value &&
+    url.username.length === 0 &&
+    url.password.length === 0 &&
+    url.pathname === "/" &&
+    url.search.length === 0 &&
+    url.hash.length === 0;
+  if (!exact) throw new Error("invalid API origin");
+  if (url.protocol === "https:") return url;
+  if (
+    url.origin === issuer.origin &&
+    url.protocol === "http:" &&
+    isLoopbackHostname(url.hostname)
+  ) {
+    return url;
+  }
+  if (
+    allowPrivateHttpTransport &&
+    url.protocol === "http:" &&
+    url.hostname === "platform-api" &&
+    url.port === "8080"
+  ) {
+    return url;
+  }
+  throw new Error("invalid API origin");
 }
 
 function parseExactCallback(value: string, nodeEnv?: string): URL {
@@ -208,6 +243,7 @@ function fixedLengthEqual(left: string, right: string): boolean {
 
 export class PlatformAuthClient {
   private readonly issuer: string;
+  private readonly apiOrigin: string;
   private readonly clientId: string;
   private readonly redirectUri: string;
   private readonly clientSecret: string;
@@ -218,6 +254,11 @@ export class PlatformAuthClient {
 
   constructor(options: PlatformAuthClientOptions) {
     const issuer = parseExactOrigin(options.issuer);
+    const apiOrigin = parseApiOrigin(
+      options.apiOrigin ?? options.issuer,
+      issuer,
+      options.allowPrivateHttpTransport === true,
+    );
     parseExactCallback(options.redirectUri);
     if (
       !/^[A-Za-z0-9._~-]{1,128}$/.test(options.clientId) ||
@@ -230,6 +271,7 @@ export class PlatformAuthClient {
     }
 
     this.issuer = issuer.origin;
+    this.apiOrigin = apiOrigin.origin;
     this.clientId = options.clientId;
     this.redirectUri = options.redirectUri;
     this.clientSecret = options.clientSecret;
@@ -250,7 +292,7 @@ export class PlatformAuthClient {
     );
     this.fetchImplementation = options.fetch ?? fetch;
 
-    const jwksUrl = new URL(JWKS_PATH, this.issuer);
+    const jwksUrl = new URL(JWKS_PATH, this.apiOrigin);
     this.jwks = createRemoteJWKSet(jwksUrl, {
       timeoutDuration: jwksTimeoutMs,
       cooldownDuration: 30_000,
@@ -374,7 +416,7 @@ export class PlatformAuthClient {
       readonly body: string;
     },
   ): Promise<unknown> {
-    const url = new URL(path, this.issuer);
+    const url = new URL(path, this.apiOrigin);
     const response = await this.fetchImplementation(url, {
       method: "POST",
       headers: options.headers,
@@ -389,11 +431,14 @@ export class PlatformAuthClient {
 export interface TfAuthRuntimeConfig {
   readonly nodeEnv: "development" | "production" | "test";
   readonly issuer: string;
+  readonly apiOrigin: string;
+  readonly allowPrivateHttpTransport: boolean;
   readonly clientId: string;
   readonly callbackUrl: string;
   readonly webOrigin: string;
   readonly clientSecret: string;
   readonly authRedisUrl: string;
+  readonly bridgePkceVerifier?: string;
 }
 
 function requiredEnvironment(
@@ -511,6 +556,24 @@ export async function parseTfAuthRuntimeConfig(
     const issuer = parseExactOrigin(
       requiredEnvironment(environment, "APOLLO_PLATFORM_ISSUER"),
       nodeEnv,
+    );
+    const bridgeFlag = environment.APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP;
+    if (
+      bridgeFlag !== undefined &&
+      bridgeFlag !== "false" &&
+      bridgeFlag !== "true"
+    ) {
+      throw new Error("invalid bridge flag");
+    }
+    const allowPrivateHttpTransport =
+      bridgeFlag === "true" && nodeEnv === "development";
+    if (bridgeFlag === "true" && !allowPrivateHttpTransport) {
+      throw new Error("invalid bridge mode");
+    }
+    const apiOrigin = parseApiOrigin(
+      environment.APOLLO_PLATFORM_API_ORIGIN ?? issuer.origin,
+      issuer,
+      allowPrivateHttpTransport,
     ).origin;
     const callbackUrl = parseExactCallback(
       requiredEnvironment(environment, "APOLLO_TF_CALLBACK_URL"),
@@ -531,14 +594,34 @@ export async function parseTfAuthRuntimeConfig(
       requiredEnvironment(environment, "APOLLO_TF_CLIENT_SECRET_FILE"),
       dependencies.openSecretFile ?? open,
     );
+    const verifierFile = environment.APOLLO_TF_BRIDGE_PKCE_VERIFIER_FILE;
+    let bridgePkceVerifier: string | undefined;
+    if (verifierFile !== undefined) {
+      if (
+        !allowPrivateHttpTransport ||
+        apiOrigin !== "http://platform-api:8080"
+      ) {
+        throw new Error("invalid bridge verifier");
+      }
+      bridgePkceVerifier = await readClientSecret(
+        verifierFile,
+        dependencies.openSecretFile ?? open,
+      );
+      if (!/^[A-Za-z0-9._~-]{43,128}$/.test(bridgePkceVerifier)) {
+        throw new Error("invalid bridge verifier");
+      }
+    }
     return {
       nodeEnv: nodeEnv as TfAuthRuntimeConfig["nodeEnv"],
-      issuer,
+      issuer: issuer.origin,
+      apiOrigin,
+      allowPrivateHttpTransport,
       clientId,
       callbackUrl,
       webOrigin,
       clientSecret,
       authRedisUrl,
+      bridgePkceVerifier,
     };
   } catch {
     throw new Error("TF authentication configuration is invalid");

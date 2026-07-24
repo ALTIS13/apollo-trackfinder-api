@@ -480,24 +480,25 @@ async function runtimeEnvironment(
   const secret = randomBytes(48).toString("base64url");
   await writeFile(secretPath, secret, "utf8");
   const production = nodeEnv === "production";
+  const environment: NodeJS.ProcessEnv = {
+    NODE_ENV: nodeEnv,
+    APOLLO_PLATFORM_ISSUER: production
+      ? "https://api.apollot.ru"
+      : "http://127.0.0.1:18081",
+    APOLLO_TF_CLIENT_ID: "apollo-tf-api",
+    APOLLO_TF_CALLBACK_URL: production
+      ? CALLBACK_URL
+      : "http://127.0.0.1:18082/api/auth/callback",
+    APOLLO_TF_WEB_ORIGIN: production
+      ? "https://tf.apollot.ru"
+      : "http://127.0.0.1:18083",
+    APOLLO_TF_CLIENT_SECRET_FILE: secretPath,
+    APOLLO_TF_AUTH_REDIS_URL: "redis://127.0.0.1:16379/7",
+  };
   return {
     secret,
     secretPath,
-    environment: {
-      NODE_ENV: nodeEnv,
-      APOLLO_PLATFORM_ISSUER: production
-        ? "https://api.apollot.ru"
-        : "http://127.0.0.1:18081",
-      APOLLO_TF_CLIENT_ID: "apollo-tf-api",
-      APOLLO_TF_CALLBACK_URL: production
-        ? CALLBACK_URL
-        : "http://127.0.0.1:18082/api/auth/callback",
-      APOLLO_TF_WEB_ORIGIN: production
-        ? "https://tf.apollot.ru"
-        : "http://127.0.0.1:18083",
-      APOLLO_TF_CLIENT_SECRET_FILE: secretPath,
-      APOLLO_TF_AUTH_REDIS_URL: "redis://127.0.0.1:16379/7",
-    } satisfies NodeJS.ProcessEnv,
+    environment,
   };
 }
 
@@ -510,11 +511,14 @@ describe("TF auth runtime configuration", () => {
     expect(config).toEqual({
       nodeEnv: "production",
       issuer: "https://api.apollot.ru",
+      apiOrigin: "https://api.apollot.ru",
+      allowPrivateHttpTransport: false,
       clientId: "apollo-tf-api",
       callbackUrl: CALLBACK_URL,
       webOrigin: "https://tf.apollot.ru",
       clientSecret: fixture.secret,
       authRedisUrl: "redis://127.0.0.1:16379/7",
+      bridgePkceVerifier: undefined,
     });
   });
 
@@ -562,6 +566,69 @@ describe("TF auth runtime configuration", () => {
 
     const production = await runtimeEnvironment();
     production.environment.APOLLO_PLATFORM_ISSUER = "http://127.0.0.1:18081";
+    await expect(
+      parseTfAuthRuntimeConfig(production.environment),
+    ).rejects.toThrow("TF authentication configuration is invalid");
+  });
+
+  it("splits the public issuer from an explicit bridge-only API transport", async () => {
+    const development = await runtimeEnvironment("development");
+    development.environment.APOLLO_PLATFORM_API_ORIGIN =
+      "http://platform-api:8080";
+    development.environment.APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP = "true";
+
+    await expect(
+      parseTfAuthRuntimeConfig(development.environment),
+    ).resolves.toMatchObject({
+      issuer: "http://127.0.0.1:18081",
+      apiOrigin: "http://platform-api:8080",
+      allowPrivateHttpTransport: true,
+    });
+
+    for (const apiOrigin of [
+      "http://platform-api",
+      "http://platform-api:8081",
+      "http://platform-api.internal:8080",
+      "http://tf-api:8080",
+      "http://user@platform-api:8080",
+      "http://platform-api:8080/path",
+    ]) {
+      const invalid = await runtimeEnvironment("development");
+      invalid.environment.APOLLO_PLATFORM_API_ORIGIN = apiOrigin;
+      invalid.environment.APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP = "true";
+      await expect(
+        parseTfAuthRuntimeConfig(invalid.environment),
+      ).rejects.toThrow("TF authentication configuration is invalid");
+    }
+
+    const production = await runtimeEnvironment("production");
+    production.environment.APOLLO_PLATFORM_API_ORIGIN =
+      "http://platform-api:8080";
+    production.environment.APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP = "true";
+    await expect(
+      parseTfAuthRuntimeConfig(production.environment),
+    ).rejects.toThrow("TF authentication configuration is invalid");
+  });
+
+  it("accepts a file-backed fixed PKCE verifier only in explicit bridge mode", async () => {
+    const development = await runtimeEnvironment("development");
+    const verifierPath = join(
+      temporaryDirectories.at(-1)!,
+      "tf_bridge_pkce_verifier",
+    );
+    const verifier = "V".repeat(64);
+    await writeFile(verifierPath, verifier, "utf8");
+    development.environment.APOLLO_PLATFORM_API_ORIGIN =
+      "http://platform-api:8080";
+    development.environment.APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP = "true";
+    development.environment.APOLLO_TF_BRIDGE_PKCE_VERIFIER_FILE = verifierPath;
+
+    await expect(
+      parseTfAuthRuntimeConfig(development.environment),
+    ).resolves.toMatchObject({ bridgePkceVerifier: verifier });
+
+    const production = await runtimeEnvironment("production");
+    production.environment.APOLLO_TF_BRIDGE_PKCE_VERIFIER_FILE = verifierPath;
     await expect(
       parseTfAuthRuntimeConfig(production.environment),
     ).rejects.toThrow("TF authentication configuration is invalid");

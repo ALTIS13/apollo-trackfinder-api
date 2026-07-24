@@ -1,6 +1,6 @@
 # Apollo TF implementation status
 
-Last updated: 2026-07-17.
+Last updated: 2026-07-24.
 
 ## Что сделано
 
@@ -51,6 +51,11 @@ Last updated: 2026-07-17.
 - Smoke теперь case-insensitively отклоняет BuildKit/Buildx/Bake routing state до Docker invocation и после local selector validation принудительно использует `COMPOSE_BAKE=false`. Migration runner/readiness требуют exact manifest/history без extra rows. Activation/effective listing требуют active module state. Runtime/migrator PostgreSQL profiles имеют bounded connection/query/statement/lock/idle-transaction/pool limits, а app construction проверяет actual protected capability mapping.
 - Final narrow follow-up technical fix `8082809` требует active `entitlement.moduleState` в последнем PolicyService allow predicate, поэтому disable между module lookup и entitlement projection больше не может разрешить доступ. Migration cleanup сохраняет primary failure при rollback/unlock errors, всегда пытается advisory unlock и передаёт cleanup failure в `client.release(error)`; cleanup-only failure возвращается вызывающему коду.
 - Final single-path migration-lock fix `67fe0e6` трактует любую ошибку acquisition как uncertain client state: exact lock error сохраняется для caller и передаётся в `client.release(error)`, а unlock не выполняется без подтверждённого acquisition. Focused TDD RED был `1 failed / 16 passed`, GREEN — `17/17`; финальный re-review подтвердил исправление без оставшихся findings.
+- Task 9 реализовал локальный disposable Apollo Platform/Apollo TF auth bridge из семи сервисов: `platform-postgres`, `platform-redis`, `platform-migrate`, `platform-api`, `tf-postgres`, `tf-redis`, `tf-api`. Data planes разделены, только два API делят private control network, а отдельная `bridge-edge` разрешает исключительно loopback-bound host probes; базы и Redis не публикуют host ports.
+- Platform public issuer отделён от TF server-to-server control origin. Внутренний HTTP разрешён только development bridge-флагом и только для exact `http://platform-api:8080`; production сохраняет HTTPS. Dynamic callback port допускается только для точного loopback hostname и полного registered redirect URI. Deterministic file-backed PKCE verifier разрешён только этому disposable bridge, production продолжает использовать случайный verifier.
+- TF image запускается как `10001:10001` через non-root entrypoint, читает `DATABASE_URL_FILE` до импорта bundle, сохраняет Pino worker layout в `/app/artifacts/api-server/dist`, остаётся read-only с bounded tmpfs и проверяет PostgreSQL/Redis в readiness. Root и nested TF Compose переведены на file secrets, отдельные data networks и loopback API binding без передачи database/control credentials web/admin контейнерам.
+- Полный TLS browser-equivalent smoke доказал closed registration, operator bootstrap/login, invite-only регистрацию, verify/activate, PKCE S256 с exact replay verifier, single-use code equivalence, `tf.search`, deny/grant/revoke `tf.downloads`, одноразовый WebSocket ticket, replay reject и close `4403` после suspend. Rendered config, responses/projections, logs, command output и tracked bytes сканируются на raw values и SHA-256 digests; cleanup проверяет нулевые ресурсы и временные secret directories.
+- `MODULES.md` фиксирует будущие `tf-search`, `tf-integrations`, `tf-download-worker`: authenticated HTTP/heartbeat, least-privilege entitlements, собственные хранилища, отсутствие shared DB/Docker/SSH/control access, private Coolify DNS на одной ноде либо owner-approved TLS между нодами. Для локального этапа новый домен не нужен; HomeNode/Coolify/Caddy/UFW/DNS не менялись.
 
 ## Validation
 
@@ -110,6 +115,11 @@ Last updated: 2026-07-17.
 - Task 8 follow-up review reported two separate Important findings: the live smoke did not compare unknown tokens with consumed/unavailable public responses, and Linux file-backed secrets created as `0600` were unreadable to container UID `10001`. TDD RED was `2 failed / 13 passed / 3 skipped`; fix `1741c4d` added full status/body equivalence checks and the `0700` directory plus `0444` file contract. Focused GREEN was `15 passed / 3 live-only skipped`; fresh smoke passed in 62.2 seconds and cleanup reported Compose `[]`, zero matching containers/volumes and zero temp secret directories. Later whole-branch re-reviews are complete and approved.
 - Follow-up validation passed root typecheck before the Platform build, then `node --check` on exactly three bundles and a zero-match `@workspace/` scan over exactly those bundles. This proves local build/smoke behavior only; no Coolify/HomeNode validation, deployment or remote mutation occurred.
 - Residual constraints are explicit: password rotation against a retained PostgreSQL volume requires coordinated role-password and URL-secret updates, and the Debian/PostgreSQL/Redis base image tags are not yet digest-pinned. No HomeNode/Coolify/Caddy/UFW/DNS or other remote infrastructure was changed.
+- Task 9 focused bridge suite прошёл `45/45` с одним явно gated live-тестом; финальный `bridge:smoke` завершил полный TLS/PKCE/policy/WebSocket flow за `104.2s` без runtime warnings. Redirect projection требует ровно один экземпляр каждого разрешённого параметра, actual TF callback принимает только exact `code+state`, а отдельные RED/GREEN тесты отклоняют duplicate/missing/extra query keys без отражения секретов в ошибках.
+- Fresh disposable dependencies: platform-contract `10/10`, live PostgreSQL platform-db `39/39`, live serial Platform API `427 passed / 4 container-gated`, TF API с реальным Redis `298/298`, admin dashboard `216/216`. Fake-Docker suite прошёл `26 passed / 3 explicitly gated`; его child process ограничен `20s`, а enclosing tests — `30s`.
+- Workspace typecheck, Platform build и TF build прошли. Platform dist содержит ровно `index.mjs`, `migrate.mjs`, `policy-smoke.mjs`; TF dist содержит пять runtime `.mjs`. Все восемь прошли `node --check` и scans на unresolved workspace imports/legacy client-session.
+- Bridge/root/TF `docker compose config` прошли с generated file secrets. Финальный cleanup-аудит нашёл `0` matching containers, networks, volumes, временных bridge secret directories и validation fixtures. Промежуточные RED/root causes и исправления build context, Pino path, edge network, WebSocket timeout, projection scan, full-suite timeouts, migration test contention, Fetch blocked port и fixture typing записаны в `.superpowers/sdd/task-9-report.md`.
+- Полный независимый Task 9 re-review подтвердил `SPEC PASS`, `QUALITY APPROVED`, `READY TO COMMIT YES` без Critical/Important/Minor findings. Последний socket-listener follow-up также независимо одобрен; HomeNode, Coolify, Caddy, UFW и DNS не менялись.
 
 ## Commit/push
 
@@ -137,12 +147,14 @@ Last updated: 2026-07-17.
 - Final whole-branch technical fix is committed locally as `2eb4bed`; this documentation/status update is separate. The later focused re-reviews closed its remaining policy/migration findings. No push, merge, Coolify/HomeNode validation or remote infrastructure mutation was performed at that checkpoint.
 - Final narrow policy/migration cleanup fix is committed locally as `8082809`; this documentation/status update is separate. The final lock-cleanup follow-up and clean re-review are recorded by `67fe0e6` and `a83a6a6`. No push, merge, Coolify/HomeNode validation or remote infrastructure mutation was performed at that checkpoint.
 - Final single-path migration-lock fix is `67fe0e6`, its evidence commit is `a83a6a6`, and final branch status is `9d6d952`. The independently approved feature branch is published as `origin/codex/feat/apollo-identity-policy`, fast-forward merged and published in `origin/main`; no Coolify/HomeNode validation or remote infrastructure mutation was performed.
+- Task 9 готовится как один локальный commit `feat(platform): validate the containerized TF auth bridge` на `codex/feat/platform-pkce-tf-bridge`. Push/merge и любые remote infrastructure changes в этот этап не входят.
 
 ## Следующий логичный этап реализации
 
 - Локальная Apollo Platform Identity/Policy foundation и production-compatible container smoke завершены. Следующий feature stage должен начинаться только по отдельному binding brief; Task 8 не включает portal/TF client zone или дальнейшую платформенную функциональность.
 - Coolify/HomeNode rollout выполняется только после локальной реализации и validation всех web/server модулей, повторного read-only preflight и явного разрешения владельца непосредственно перед удалёнными изменениями.
 - Native Android APK decision remains separate: сохранить Expo-модули через native prebuild/Gradle либо выполнить отдельную миграцию на bare React Native.
+- После независимого принятия Task 9 следующий server/web этап: подключить Apollo TF web client к Platform authorize/callback, same-origin session и одноразовому WebSocket ticket без передачи Platform/TF service credentials в browser. Затем отдельными контейнерами выделять `tf-search`, `tf-integrations` и `tf-download-worker` по зафиксированным least-privilege contracts.
 
 ## Notes
 

@@ -57,6 +57,7 @@ export interface AuthRouteDependencies {
   >;
   readonly webOrigin: string;
   readonly secureCookies: boolean;
+  readonly pkceVerifier?: () => string;
 }
 
 class AuthRequestError extends Error {
@@ -212,7 +213,10 @@ export function createAuthRouter(dependencies: AuthRouteDependencies): Router {
           : randomUUID();
       const state = opaqueValue();
       const nonce = opaqueValue();
-      const codeVerifier = opaqueValue();
+      const codeVerifier = dependencies.pkceVerifier?.() ?? opaqueValue();
+      if (!/^[A-Za-z0-9._~-]{43,128}$/.test(codeVerifier)) {
+        throw new AuthRequestError(503);
+      }
       const transactionHandle =
         await dependencies.sessionStore.createTransaction({
           state,

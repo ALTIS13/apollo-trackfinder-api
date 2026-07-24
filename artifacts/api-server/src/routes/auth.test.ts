@@ -212,6 +212,7 @@ afterEach(async () => {
     servers.splice(0).map(
       (server) =>
         new Promise<void>((resolve, reject) => {
+          server.closeAllConnections();
           server.close((error) => (error ? reject(error) : resolve()));
         }),
     ),
@@ -274,6 +275,30 @@ describe("GET /api/auth/start", () => {
       httpOnly: true,
       maxAge: 300,
     });
+  });
+
+  it("uses an injected bridge verifier without exposing it in the redirect", async () => {
+    const verifier = "V".repeat(64);
+    const dependencies = {
+      ...createDependencies(),
+      pkceVerifier: vi.fn(() => verifier),
+    };
+    const baseUrl = await startAuthServer(dependencies);
+
+    const response = await fetch(`${baseUrl}/start`, {
+      redirect: "manual",
+    });
+
+    expect(response.status).toBe(303);
+    expect(dependencies.pkceVerifier).toHaveBeenCalledOnce();
+    expect(
+      dependencies.sessionStore.createTransaction.mock.calls[0]?.[0],
+    ).toMatchObject({ codeVerifier: verifier });
+    const location = response.headers.get("location")!;
+    expect(location).not.toContain(verifier);
+    expect(new URL(location).searchParams.get("code_challenge")).toBe(
+      createHash("sha256").update(verifier, "ascii").digest("base64url"),
+    );
   });
 
   it("reuses only a valid installation UUID cookie", async () => {

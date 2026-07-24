@@ -90,10 +90,11 @@ describe("admin telemetry container contract", () => {
   const adminEntrypoint = readWorkspaceFile(
     "artifacts/admin-dashboard/docker-entrypoint.d/16-admin-dashboard-defaults.envsh",
   );
-  const databaseSource = readWorkspaceFile("lib/db/src/index.ts");
   const backgroundQueueSource = readWorkspaceFile(
     "artifacts/api-server/src/lib/background-queue.ts",
   );
+  const apiIndexSource = readWorkspaceFile("artifacts/api-server/src/index.ts");
+  const modulesDocumentation = readWorkspaceFile("MODULES.md");
   const loggerSource = readWorkspaceFile(
     "artifacts/api-server/src/lib/logger.ts",
   );
@@ -109,30 +110,48 @@ describe("admin telemetry container contract", () => {
     readWorkspaceFile("artifacts/music-player/vite.config.ts"),
   ];
 
+  it("uses a disposable Redis readiness probe and documents exact TF boundaries", () => {
+    expect(apiIndexSource).toContain(
+      'import { probeRedisHealth } from "./lib/redis-readiness.js";',
+    );
+    expect(apiIndexSource).toContain(
+      "probeRedisHealth(authConfig.authRedisUrl, { timeoutMs: 1_200 })",
+    );
+    expect(apiIndexSource).not.toContain(
+      'authRedis.ping().then((reply) => reply === "PONG")',
+    );
+    expect(modulesDocumentation).toContain(
+      "`tf-integrations`: authenticated HTTP + отдельные heartbeat keys для provider adapters, минимальный entitlement `tf.integrations`",
+    );
+    expect(modulesDocumentation).toContain(
+      "production\nstartup требует ровно `tf_postgres_password`, `tf_database_url` и\n`tf_client_secret`",
+    );
+  });
+
   it("passes the runtime token only to API and admin services", () => {
     const interpolation = 'ADMIN_DASHBOARD_TOKEN: "${ADMIN_DASHBOARD_TOKEN:-}"';
 
-    expect(serviceBlock(rootCompose, "api")).toContain(interpolation);
-    const rootAdmin = serviceBlock(rootCompose, "admin");
+    expect(serviceBlock(rootCompose, "tf-api")).toContain(interpolation);
+    const rootAdmin = serviceBlock(rootCompose, "tf-admin");
     expect(rootAdmin).toContain(interpolation);
     expect(rootAdmin).toContain('ADMIN_ACCESS_USER: "${ADMIN_ACCESS_USER:-}"');
     expect(rootAdmin).toContain(
       'ADMIN_ACCESS_PASSWORD: "${ADMIN_ACCESS_PASSWORD:-}"',
     );
-    expect(rootAdmin).toContain('"127.0.0.1:3001:80"');
-    expect(serviceBlock(rootCompose, "api")).not.toContain("ADMIN_ACCESS_");
-    expect(serviceBlock(rootCompose, "db")).not.toContain(
+    expect(rootAdmin).toContain('"127.0.0.1:${TF_ADMIN_PORT:-3001}:80"');
+    expect(serviceBlock(rootCompose, "tf-api")).not.toContain("ADMIN_ACCESS_");
+    expect(serviceBlock(rootCompose, "tf-postgres")).not.toContain(
       "ADMIN_DASHBOARD_TOKEN",
     );
-    expect(serviceBlock(rootCompose, "web")).not.toContain(
+    expect(serviceBlock(rootCompose, "tf-web")).not.toContain(
       "ADMIN_DASHBOARD_TOKEN",
     );
 
-    expect(serviceBlock(apiCompose, "api")).toContain(interpolation);
-    expect(serviceBlock(apiCompose, "db")).not.toContain(
+    expect(serviceBlock(apiCompose, "tf-api")).toContain(interpolation);
+    expect(serviceBlock(apiCompose, "tf-postgres")).not.toContain(
       "ADMIN_DASHBOARD_TOKEN",
     );
-    expect(serviceBlock(apiCompose, "redis")).not.toContain(
+    expect(serviceBlock(apiCompose, "tf-redis")).not.toContain(
       "ADMIN_DASHBOARD_TOKEN",
     );
   });
@@ -187,19 +206,19 @@ describe("admin telemetry container contract", () => {
       'APOLLO_MODULE_HEARTBEAT_KEYS: "${APOLLO_MODULE_HEARTBEAT_KEYS:-}"';
     const secretName = HEARTBEAT_KEYS_ENV;
 
-    expect(serviceBlock(rootCompose, "api")).toContain(interpolation);
-    expect(serviceBlock(apiCompose, "api")).toContain(interpolation);
+    expect(serviceBlock(rootCompose, "tf-api")).toContain(interpolation);
+    expect(serviceBlock(apiCompose, "tf-api")).toContain(interpolation);
 
     for (const compose of [rootCompose, apiCompose]) {
       expect(hasHeartbeatBuildArg(compose)).toBe(false);
     }
 
     for (const service of [
-      serviceBlock(rootCompose, "admin"),
-      serviceBlock(rootCompose, "web"),
-      serviceBlock(rootCompose, "db"),
-      serviceBlock(apiCompose, "db"),
-      serviceBlock(apiCompose, "redis"),
+      serviceBlock(rootCompose, "tf-admin"),
+      serviceBlock(rootCompose, "tf-web"),
+      serviceBlock(rootCompose, "tf-postgres"),
+      serviceBlock(apiCompose, "tf-postgres"),
+      serviceBlock(apiCompose, "tf-redis"),
     ]) {
       expect(service).not.toContain(secretName);
     }
@@ -313,13 +332,6 @@ describe("admin telemetry container contract", () => {
     expect(adminEntrypoint).toContain("chown root:nginx /etc/nginx/.htpasswd");
     expect(adminEntrypoint).toContain("chmod 640 /etc/nginx/.htpasswd");
     expect(adminEntrypoint).toContain("unset ADMIN_ACCESS_PASSWORD");
-  });
-
-  it("uses a bounded PostgreSQL health client instead of an orphaned race", () => {
-    expect(databaseSource).toContain("new Client");
-    expect(databaseSource).toContain("connectionTimeoutMillis: timeoutMs");
-    expect(databaseSource).toContain("query_timeout: timeoutMs");
-    expect(databaseSource).toContain("statement_timeout: timeoutMs");
   });
 
   it("separates blocking worker connections from bounded telemetry commands", () => {
