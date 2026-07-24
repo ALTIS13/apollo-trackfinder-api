@@ -157,7 +157,7 @@ describe("TF search runtime configuration", () => {
     ).resolves.toMatchObject({ deployedAt: "2026-07-24T12:34:56+03:00" });
   });
 
-  it.each(["2026-07-24T12:34:56", "not-a-date"])
+  it.each(["2026-07-24T12:34:56", "2026-07-24T12:34:56+0300", "not-a-date"])
   ("rejects invalid deployed timestamp %s", async (APOLLO_DEPLOYED_AT) => {
     await expect(
       parseTfSearchRuntimeConfig(

@@ -13,7 +13,13 @@ export interface TfSearchRuntimeConfig {
 type SecretReader = (path: string) => Promise<string>;
 
 const secretSchema = z.string().min(32).max(512);
-const deployedAtSchema = z.string().datetime({ offset: true });
+const deployedAtSchema = z
+  .string()
+  .datetime({ offset: true })
+  .refine(
+    (value) => value.endsWith("Z") || /[+-]\d{2}:\d{2}$/.test(value),
+    "Expected an RFC3339 timestamp with a colon offset",
+  );
 const privateServiceNamePattern = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 function invalidConfiguration(): never {

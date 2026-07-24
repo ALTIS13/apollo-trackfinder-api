@@ -119,12 +119,12 @@ export function createTfSearchApp(options: CreateTfSearchAppOptions): Express {
   ] as const;
 
   app.post(TF_SEARCH_COMMAND_PATH, ...signedRequest, async (req, res) => {
-    if (!isReady(options.ready)) {
-      unavailable(res);
-      return;
-    }
     if (!authenticate(req, options.auth)) {
       res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    if (!isReady(options.ready)) {
+      unavailable(res);
       return;
     }
     const command = tfSearchCommandSchema.safeParse(parseJsonBody(rawBody(req)));
@@ -145,12 +145,12 @@ export function createTfSearchApp(options: CreateTfSearchAppOptions): Express {
   });
 
   app.post(TF_SEARCH_SUGGESTIONS_PATH, ...signedRequest, async (req, res) => {
-    if (!isReady(options.ready)) {
-      unavailable(res);
-      return;
-    }
     if (!authenticate(req, options.auth)) {
       res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    if (!isReady(options.ready)) {
+      unavailable(res);
       return;
     }
     const command = tfSearchSuggestionsCommandSchema.safeParse(parseJsonBody(rawBody(req)));

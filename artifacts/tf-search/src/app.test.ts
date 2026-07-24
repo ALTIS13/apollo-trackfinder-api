@@ -136,6 +136,52 @@ describe("TF search HTTP boundary", () => {
     expect(calls).toBe(0);
   });
 
+  it("authenticates both command bodies before returning unavailable readiness", async () => {
+    let searchCalls = 0;
+    let suggestionCalls = 0;
+    const unavailableService = service({
+        async search() {
+          searchCalls += 1;
+          return response;
+        },
+        async suggestions(input) {
+          suggestionCalls += 1;
+          return { schemaVersion: 1, requestId: input.requestId, suggestions: [] };
+        },
+    });
+    const searchBody = Buffer.from(JSON.stringify(command));
+    const suggestionsBody = Buffer.from(JSON.stringify({
+      schemaVersion: 1,
+      requestId,
+      query: "Artist",
+      limit: 1,
+    }));
+
+    for (const [path, body] of [
+      ["/v1/search", searchBody],
+      ["/v1/suggestions", suggestionsBody],
+    ] as const) {
+      const unavailable = app({ ready: () => false, service: unavailableService });
+      const unsigned = await request(unavailable, path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      expect(unsigned.status).toBe(401);
+      await expect(unsigned.json()).resolves.toEqual({ error: "unauthorized" });
+
+      const signed = await request(unavailable, path, {
+        method: "POST",
+        headers: signedHeaders(path, body),
+        body,
+      });
+      expect(signed.status).toBe(503);
+      await expect(signed.json()).resolves.toEqual({ error: "search_unavailable" });
+    }
+    expect(searchCalls).toBe(0);
+    expect(suggestionCalls).toBe(0);
+  });
+
   it("fails closed with the generic unauthorized response when authentication throws", async () => {
     const rawBody = Buffer.from(JSON.stringify(command));
     const throwingAuthApp = createTfSearchApp({

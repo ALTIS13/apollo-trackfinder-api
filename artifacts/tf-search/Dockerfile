@@ -27,8 +27,13 @@ RUN pnpm install --frozen-lockfile --filter @workspace/tf-search... \
 
 FROM node:20-bookworm-slim AS runner
 
+ARG YT_DLP_VERSION=2026.7.4
+ARG YT_DLP_SHA256=f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266
+
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip \
-  && python3 -m pip install --no-cache-dir --break-system-packages yt-dlp \
+  && printf '%s\n' "yt-dlp==${YT_DLP_VERSION} --hash=sha256:${YT_DLP_SHA256}" > /tmp/requirements.txt \
+  && python3 -m pip install --no-cache-dir --break-system-packages --require-hashes -r /tmp/requirements.txt \
+  && rm /tmp/requirements.txt \
   && apt-get clean && rm -rf /var/lib/apt/lists/* \
   && groupadd --gid 10001 tf-search \
   && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin tf-search
