@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const TF_SEARCH_COMMAND_PATH = "/v1/search";
+export const TF_SEARCH_ARTIST_DISCOVERY_PATH = "/v1/artist-discovery";
 export const TF_SEARCH_SUGGESTIONS_PATH = "/v1/suggestions";
 
 export const tfSearchSourceSchema: z.ZodEnum<["yt", "sc", "bc", "dz"]> =
@@ -101,6 +102,34 @@ const tfSearchSuggestionsCommandObjectSchema = z
   })
   .strict();
 
+const tfSearchArtistDiscoveryCommandObjectSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    requestId: canonicalUuidSchema,
+    artist: z.string().trim().min(1).max(200),
+    sources: tfSearchSourcesSchema,
+    limitPerSource: z.number().finite().int().min(1).max(10),
+  })
+  .strict();
+
+const tfSearchArtistDiscoveryResponseObjectSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    requestId: canonicalUuidSchema,
+    query: z.string().trim().min(1).max(200),
+    results: z.array(tfSearchResultObjectSchema).max(40),
+    sources: tfSearchSourcesSchema,
+    providerStatus: z
+      .object({
+        yt: providerStatusValueSchema,
+        sc: providerStatusValueSchema,
+        bc: providerStatusValueSchema,
+        dz: providerStatusValueSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
 const tfSearchSuggestionObjectSchema = z
   .object({
     artist: z.string().trim().min(1).max(200),
@@ -121,6 +150,12 @@ export type TfSearchResultSource = z.infer<typeof tfSearchResultSourceSchema>;
 export type TfSearchResult = z.infer<typeof tfSearchResultObjectSchema>;
 export type TfSearchCommand = z.infer<typeof tfSearchCommandObjectSchema>;
 export type TfSearchResponse = z.infer<typeof tfSearchResponseObjectSchema>;
+export type TfSearchArtistDiscoveryCommand = z.infer<
+  typeof tfSearchArtistDiscoveryCommandObjectSchema
+>;
+export type TfSearchArtistDiscoveryResponse = z.infer<
+  typeof tfSearchArtistDiscoveryResponseObjectSchema
+>;
 export type TfSearchSuggestionsCommand = z.infer<
   typeof tfSearchSuggestionsCommandObjectSchema
 >;
@@ -133,6 +168,10 @@ export const tfSearchCommandSchema: z.ZodType<TfSearchCommand> =
   tfSearchCommandObjectSchema;
 export const tfSearchResponseSchema: z.ZodType<TfSearchResponse> =
   tfSearchResponseObjectSchema;
+export const tfSearchArtistDiscoveryCommandSchema: z.ZodType<TfSearchArtistDiscoveryCommand> =
+  tfSearchArtistDiscoveryCommandObjectSchema;
+export const tfSearchArtistDiscoveryResponseSchema: z.ZodType<TfSearchArtistDiscoveryResponse> =
+  tfSearchArtistDiscoveryResponseObjectSchema;
 export const tfSearchSuggestionsCommandSchema: z.ZodType<TfSearchSuggestionsCommand> =
   tfSearchSuggestionsCommandObjectSchema;
 export const tfSearchSuggestionsResponseSchema: z.ZodType<TfSearchSuggestionsResponse> =

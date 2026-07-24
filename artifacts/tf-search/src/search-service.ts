@@ -1,4 +1,6 @@
 import type {
+  TfSearchArtistDiscoveryCommand,
+  TfSearchArtistDiscoveryResponse,
   TfSearchCommand,
   TfSearchResponse,
   TfSearchResult,
@@ -18,6 +20,9 @@ export interface SearchProvider {
 
 export interface SearchService {
   search(command: TfSearchCommand): Promise<TfSearchResponse>;
+  discoverArtist(
+    command: TfSearchArtistDiscoveryCommand,
+  ): Promise<TfSearchArtistDiscoveryResponse>;
   suggestions(command: TfSearchSuggestionsCommand): Promise<TfSearchSuggestionsResponse>;
   telemetry(): {
     readonly requestsPerMinute: number;
@@ -147,6 +152,55 @@ class SearchServiceImpl implements SearchService {
       cached: false,
       sources: command.sources,
       fallbackAvailable: command.mode === "manual" && ranked.length === 0 && command.sources.length < ALL_SOURCES.length,
+      providerStatus,
+    };
+  }
+
+  async discoverArtist(
+    command: TfSearchArtistDiscoveryCommand,
+  ): Promise<TfSearchArtistDiscoveryResponse> {
+    this.recordRequest();
+    const providerStatus = initialProviderStatus();
+    const selectedProviders = command.sources.map((source) => ({
+      source,
+      provider: this.providers.get(source),
+    }));
+    const settled = await Promise.allSettled(
+      selectedProviders.map(async ({ source, provider }) => {
+        if (!provider) throw { source };
+        const results = await provider.search(
+          command.artist,
+          command.limitPerSource,
+        );
+        return { source, results };
+      }),
+    );
+
+    const results: InternalTrack[] = [];
+    let succeededProviders = 0;
+    let failedProviders = 0;
+    for (let index = 0; index < settled.length; index += 1) {
+      const outcome = settled[index]!;
+      const source = selectedProviders[index]!.source;
+      if (outcome.status === "fulfilled") {
+        providerStatus[source] = "ok";
+        succeededProviders += 1;
+        results.push(...outcome.value.results.slice(0, command.limitPerSource));
+      } else {
+        providerStatus[source] = "failed";
+        failedProviders += 1;
+        this.logger?.warn({ source, errorClass: "provider_failure" });
+      }
+    }
+
+    if (failedProviders > 0) this.recordFailure(succeededProviders === 0);
+
+    return {
+      schemaVersion: 1,
+      requestId: command.requestId,
+      query: command.artist,
+      results: results.slice(0, 40),
+      sources: command.sources,
       providerStatus,
     };
   }

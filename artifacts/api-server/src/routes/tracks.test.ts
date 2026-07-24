@@ -94,9 +94,31 @@ function searchResponse(
   };
 }
 
+function artistDiscoveryResponse(
+  overrides: Partial<{
+    readonly query: string;
+    readonly results: ReturnType<typeof result>[];
+  }> = {},
+) {
+  return {
+    schemaVersion: 1 as const,
+    requestId: "10000000-0000-4000-8000-000000000001",
+    query: overrides.query ?? "Artist",
+    results: overrides.results ?? [result()],
+    sources: ["yt", "sc"] as const,
+    providerStatus: {
+      yt: "ok" as const,
+      sc: "ok" as const,
+      bc: "skipped" as const,
+      dz: "skipped" as const,
+    },
+  };
+}
+
 function searchGateway() {
   return {
     search: vi.fn().mockResolvedValue(searchResponse()),
+    discoverArtist: vi.fn().mockResolvedValue(artistDiscoveryResponse()),
     suggestions: vi.fn().mockResolvedValue({
       schemaVersion: 1,
       requestId: "10000000-0000-4000-8000-000000000001",
@@ -248,22 +270,31 @@ describe("TF search module routing", () => {
       routeDependencies({ searchGateway: gateway }),
     );
 
-    for (const body of [
+    for (const { body, message } of [
       {
-        artist: "Artist",
-        title: "Track",
-        mode: "manual",
-        sources: ["yt", "yt"],
+        body: {
+          artist: "Artist",
+          title: "Track",
+          mode: "manual",
+          sources: ["yt", "yt"],
+        },
+        message: "invalid search options",
       },
       {
-        artist: "Artist",
-        title: "Track",
-        maxResults: 41,
+        body: {
+          artist: "Artist",
+          title: "Track",
+          maxResults: 41,
+        },
+        message: "artist and title are required",
       },
       {
-        artist: "Artist",
-        title: "Track",
-        maxResults: 1.5,
+        body: {
+          artist: "Artist",
+          title: "Track",
+          maxResults: 1.5,
+        },
+        message: "invalid search options",
       },
     ]) {
       const response = await fetch(`${baseUrl}/tracks/search`, {
@@ -272,7 +303,36 @@ describe("TF search module routing", () => {
         body: JSON.stringify(body),
       });
       expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "bad_request",
+        message,
+      });
     }
+    expect(gateway.search).not.toHaveBeenCalled();
+  });
+
+  it("rejects whitespace-only artist or title before gateway dispatch", async () => {
+    const gateway = searchGateway();
+    const baseUrl = await startTracksServer(
+      routeDependencies({ searchGateway: gateway }),
+    );
+
+    for (const body of [
+      { artist: "   ", title: "Track" },
+      { artist: "Artist", title: "\t\r\n" },
+    ]) {
+      const response = await fetch(`${baseUrl}/tracks/search`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "bad_request",
+        message: "artist and title are required",
+      });
+    }
+
     expect(gateway.search).not.toHaveBeenCalled();
   });
 
@@ -355,12 +415,13 @@ describe("TF search module routing", () => {
 
   it("keeps recommendation personalization in the API and strips private candidates", async () => {
     const gateway = searchGateway();
-    gateway.search
+    gateway.discoverArtist
       .mockResolvedValueOnce(
-        searchResponse({ results: [result(0), result(1)] }),
+        artistDiscoveryResponse({ results: [result(0), result(1)] }),
       )
       .mockResolvedValueOnce(
-        searchResponse({
+        artistDiscoveryResponse({
+          query: "Second Artist",
           results: [result(0), result(2, { id: "yt_unique" })],
         }),
       );
@@ -375,7 +436,17 @@ describe("TF search module routing", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(gateway.search).toHaveBeenCalledTimes(2);
+    expect(gateway.discoverArtist).toHaveBeenNthCalledWith(1, {
+      artist: "Artist",
+      sources: ["yt", "sc"],
+      limitPerSource: 6,
+    });
+    expect(gateway.discoverArtist).toHaveBeenNthCalledWith(2, {
+      artist: "Second Artist",
+      sources: ["yt", "sc"],
+      limitPerSource: 6,
+    });
+    expect(gateway.search).not.toHaveBeenCalled();
     expect(body).toMatchObject({
       results: [
         { id: "yt_result_0" },
@@ -387,9 +458,44 @@ describe("TF search module routing", () => {
     expect(JSON.stringify(body)).not.toContain("providerStatus");
   });
 
-  it("keeps the empty recommendation fallback when the module is unavailable", async () => {
+  it("isolates artist discovery failures and returns at most 20 deduped public candidates", async () => {
     const gateway = searchGateway();
-    gateway.search.mockRejectedValue(new Error("private module detail"));
+    const candidates = Array.from({ length: 22 }, (_, index) =>
+      result(index, { id: index === 21 ? "yt_result_0" : `candidate_${index}` }),
+    );
+    gateway.discoverArtist
+      .mockRejectedValueOnce(new Error("private module detail"))
+      .mockResolvedValueOnce(
+        artistDiscoveryResponse({
+          query: "Second Artist",
+          results: candidates,
+        }),
+      );
+    const baseUrl = await startTracksServer(
+      routeDependencies({
+        searchGateway: gateway,
+        loadTopArtists: vi.fn().mockResolvedValue(["Artist", "Second Artist"]),
+      }),
+    );
+
+    const response = await fetch(`${baseUrl}/tracks/recommendations`);
+    const body = (await response.json()) as {
+      results: Array<Record<string, unknown>>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(gateway.discoverArtist).toHaveBeenCalledTimes(2);
+    expect(body.results).toHaveLength(20);
+    expect(new Set(body.results.map((candidate) => candidate["id"])).size).toBe(
+      20,
+    );
+    expect(JSON.stringify(body)).not.toContain("sourceUrl");
+    expect(JSON.stringify(body)).not.toContain("providerStatus");
+  });
+
+  it("keeps the empty recommendation fallback when every artist discovery fails", async () => {
+    const gateway = searchGateway();
+    gateway.discoverArtist.mockRejectedValue(new Error("private module detail"));
     const baseUrl = await startTracksServer(
       routeDependencies({
         searchGateway: gateway,

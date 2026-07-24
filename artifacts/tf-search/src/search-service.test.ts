@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type {
+  TfSearchArtistDiscoveryCommand,
   TfSearchCommand,
   TfSearchResult,
   TfSearchSource,
@@ -74,6 +75,49 @@ function providers(
 }
 
 describe("search service", () => {
+  it("discovers artists with the exact artist-only query and preserves provider order", async () => {
+    const calls: Array<{ source: TfSearchSource; query: string; limit: number }> = [];
+    const discoveryCommand: TfSearchArtistDiscoveryCommand = {
+      schemaVersion: 1,
+      requestId,
+      artist: "Artist",
+      sources: ["yt", "sc"],
+      limitPerSource: 6,
+    };
+    const service = createSearchService({
+      providers: [
+        provider(
+          "yt",
+          [track("youtube", { id: "yt_low", title: "Unrelated", score: 0 })],
+          calls,
+        ),
+        provider(
+          "sc",
+          [track("soundcloud", { id: "sc_high", title: "Artist", score: 999 })],
+          calls,
+        ),
+      ],
+    });
+
+    const response = await service.discoverArtist(discoveryCommand);
+
+    expect(calls).toEqual([
+      { source: "yt", query: "Artist", limit: 6 },
+      { source: "sc", query: "Artist", limit: 6 },
+    ]);
+    expect(response.query).toBe("Artist");
+    expect(response.results.map((candidate) => candidate.id)).toEqual([
+      "yt_low",
+      "sc_high",
+    ]);
+    expect(response.providerStatus).toEqual({
+      yt: "ok",
+      sc: "ok",
+      bc: "skipped",
+      dz: "skipped",
+    });
+  });
+
   it("fans out only to selected sources and uses the approved limits", async () => {
     const calls: Array<{ source: TfSearchSource; query: string; limit: number }> = [];
     const service = createSearchService({ providers: providers(calls) });

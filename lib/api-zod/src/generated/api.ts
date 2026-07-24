@@ -28,15 +28,30 @@ export const searchTracksBodySourcesMax = 4;
 export const searchTracksBodyMaxResultsMax = 40;
 
 export const SearchTracksBody = zod.object({
-  artist: zod.string().min(1).max(searchTracksBodyArtistMax),
-  title: zod.string().min(1).max(searchTracksBodyTitleMax),
+  artist: zod
+    .string()
+    .trim()
+    .min(1)
+    .max(searchTracksBodyArtistMax)
+    .describe("Artist name, trimmed before validation"),
+  title: zod
+    .string()
+    .trim()
+    .min(1)
+    .max(searchTracksBodyTitleMax)
+    .describe("Track title, trimmed before validation"),
   mode: zod.enum(["auto", "manual"]).optional(),
   sources: zod
     .array(zod.enum(["yt", "sc", "bc", "dz"]))
     .min(1)
     .max(searchTracksBodySourcesMax)
+    .refine((sources) => new Set(sources).size === sources.length, {
+      message: "Sources must be unique",
+    })
     .optional(),
-  maxResults: zod.number().min(1).max(searchTracksBodyMaxResultsMax).optional(),
+  maxResults: zod
+    .number()
+    .int().min(1).max(searchTracksBodyMaxResultsMax).optional(),
 });
 
 export const searchTracksResponseSourcesMax = 4;
@@ -67,7 +82,10 @@ export const SearchTracksResponse = zod.object({
   sources: zod
     .array(zod.enum(["yt", "sc", "bc", "dz"]))
     .min(1)
-    .max(searchTracksResponseSourcesMax),
+    .max(searchTracksResponseSourcesMax)
+    .refine((sources) => new Set(sources).size === sources.length, {
+      message: "Sources must be unique",
+    }),
   fallbackAvailable: zod
     .boolean()
     .describe(

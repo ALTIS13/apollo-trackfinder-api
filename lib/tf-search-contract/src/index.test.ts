@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  tfSearchArtistDiscoveryCommandSchema,
+  tfSearchArtistDiscoveryResponseSchema,
   tfSearchCommandSchema,
   tfSearchResponseSchema,
   tfSearchResultSourceSchema,
@@ -105,5 +107,71 @@ describe("tf search contract", () => {
     expect(tfSearchSuggestionsResponseSchema.parse(suggestionsResponse)).toEqual(suggestionsResponse);
     expect(tfSearchSuggestionsResponseSchema.safeParse({ ...suggestionsResponse, suggestions: Array.from({ length: 6 }, () => suggestionsResponse.suggestions[0]) }).success).toBe(false);
     expect(tfSearchSuggestionsResponseSchema.safeParse({ ...suggestionsResponse, suggestions: [{ ...suggestionsResponse.suggestions[0], accountId: "secret" }] }).success).toBe(false);
+  });
+
+  it("accepts a strict artist-only discovery command without a title sentinel", () => {
+    const discoveryCommand = {
+      schemaVersion: 1,
+      requestId,
+      artist: "Artist",
+      sources: ["yt", "sc"],
+      limitPerSource: 6,
+    } as const;
+    const discoveryResponse = {
+      schemaVersion: 1,
+      requestId,
+      query: "Artist",
+      results: [result],
+      sources: ["yt", "sc"],
+      providerStatus: {
+        yt: "ok",
+        sc: "failed",
+        bc: "skipped",
+        dz: "skipped",
+      },
+    } as const;
+
+    expect(tfSearchArtistDiscoveryCommandSchema.parse(discoveryCommand)).toEqual(
+      discoveryCommand,
+    );
+    expect(
+      tfSearchArtistDiscoveryCommandSchema.safeParse({
+        ...discoveryCommand,
+        title: "Artist",
+      }).success,
+    ).toBe(false);
+    expect(
+      tfSearchArtistDiscoveryCommandSchema.safeParse({
+        ...discoveryCommand,
+        artist: "   ",
+      }).success,
+    ).toBe(false);
+    expect(
+      tfSearchArtistDiscoveryCommandSchema.safeParse({
+        ...discoveryCommand,
+        sources: ["yt", "yt"],
+      }).success,
+    ).toBe(false);
+    expect(
+      tfSearchArtistDiscoveryCommandSchema.safeParse({
+        ...discoveryCommand,
+        limitPerSource: 1.5,
+      }).success,
+    ).toBe(false);
+    expect(
+      tfSearchArtistDiscoveryResponseSchema.parse(discoveryResponse),
+    ).toEqual(discoveryResponse);
+    expect(
+      tfSearchArtistDiscoveryResponseSchema.safeParse({
+        ...discoveryResponse,
+        query: "Artist Artist",
+      }).success,
+    ).toBe(true);
+    expect(
+      tfSearchArtistDiscoveryResponseSchema.safeParse({
+        ...discoveryResponse,
+        results: Array.from({ length: 41 }, () => result),
+      }).success,
+    ).toBe(false);
   });
 });

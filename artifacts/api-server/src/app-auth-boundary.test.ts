@@ -236,6 +236,7 @@ describe("credentialed TF browser boundary", () => {
   it("does not dispatch search when tf.search is absent or revoked", async () => {
     const searchGateway = {
       search: vi.fn(),
+      discoverArtist: vi.fn(),
       suggestions: vi.fn(),
     } satisfies TfSearchGateway;
     const absent = await startAuthenticatedApp({
@@ -266,6 +267,7 @@ describe("credentialed TF browser boundary", () => {
       });
     }
     expect(searchGateway.search).not.toHaveBeenCalled();
+    expect(searchGateway.discoverArtist).not.toHaveBeenCalled();
     expect(searchGateway.suggestions).not.toHaveBeenCalled();
   });
 

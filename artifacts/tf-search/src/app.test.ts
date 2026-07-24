@@ -2,12 +2,14 @@ import { Buffer } from "node:buffer";
 import type { AddressInfo } from "node:net";
 import { createSignedBodySignature } from "@workspace/module-runtime-contract";
 import type {
+  TfSearchArtistDiscoveryCommand,
+  TfSearchArtistDiscoveryResponse,
   TfSearchCommand,
   TfSearchResponse,
   TfSearchSuggestionsCommand,
   TfSearchSuggestionsResponse,
 } from "@workspace/tf-search-contract";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTfSearchApp } from "./app.js";
 import { HmacInternalRequestAuthenticator } from "./internal-auth.js";
 import type { SearchService } from "./search-service.js";
@@ -33,6 +35,21 @@ const response: TfSearchResponse = {
   fallbackAvailable: false,
   providerStatus: { yt: "ok", sc: "skipped", bc: "skipped", dz: "skipped" },
 };
+const discoveryCommand: TfSearchArtistDiscoveryCommand = {
+  schemaVersion: 1,
+  requestId,
+  artist: "Artist",
+  sources: ["yt", "sc"],
+  limitPerSource: 6,
+};
+const discoveryResponse: TfSearchArtistDiscoveryResponse = {
+  schemaVersion: 1,
+  requestId,
+  query: "Artist",
+  results: [],
+  sources: ["yt", "sc"],
+  providerStatus: { yt: "ok", sc: "ok", bc: "skipped", dz: "skipped" },
+};
 
 function service(overrides: Partial<SearchService> = {}): SearchService {
   return {
@@ -41,6 +58,9 @@ function service(overrides: Partial<SearchService> = {}): SearchService {
     },
     async suggestions(input: TfSearchSuggestionsCommand): Promise<TfSearchSuggestionsResponse> {
       return { schemaVersion: 1, requestId: input.requestId, suggestions: [] };
+    },
+    async discoverArtist() {
+      return discoveryResponse;
     },
     telemetry() {
       return { requestsPerMinute: 0, status: "healthy" };
@@ -284,6 +304,24 @@ describe("TF search HTTP boundary", () => {
       requestId,
       suggestions: [],
     });
+  });
+
+  it("serves a strictly validated signed artist-only discovery command", async () => {
+    const discoverArtist = vi.fn().mockResolvedValue(discoveryResponse);
+    const rawBody = Buffer.from(JSON.stringify(discoveryCommand));
+    const result = await request(
+      app({ service: service({ discoverArtist }) }),
+      "/v1/artist-discovery",
+      {
+        method: "POST",
+        headers: signedHeaders("/v1/artist-discovery", rawBody),
+        body: rawBody,
+      },
+    );
+
+    expect(result.status).toBe(200);
+    await expect(result.json()).resolves.toEqual(discoveryResponse);
+    expect(discoverArtist).toHaveBeenCalledWith(discoveryCommand);
   });
 
   it("uses strict case-sensitive paths for signed endpoints", async () => {

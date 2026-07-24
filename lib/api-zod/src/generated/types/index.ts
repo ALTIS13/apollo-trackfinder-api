@@ -14,6 +14,7 @@ export * from "./searchRequestMode";
 export * from "./searchRequestSourcesItem";
 export * from "./searchResponse";
 export * from "./searchResponseSourcesItem";
+export * from "./searchUnavailableResponse";
 export * from "./streamResponse";
 export * from "./trackResult";
 export * from "./trackSource";

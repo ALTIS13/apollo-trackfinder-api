@@ -66,6 +66,7 @@ function unavailableGateway(): TfSearchGateway {
   };
   return {
     search: unavailable,
+    discoverArtist: unavailable,
     suggestions: unavailable,
   };
 }
@@ -90,6 +91,28 @@ function preferredSourceUrl(
 
 function hasTfSearchAccess(entitlements: readonly string[]): boolean {
   return entitlements.includes("tf.search");
+}
+
+function hasLegacyInvalidSearchOptions(body: unknown): boolean {
+  if (typeof body !== "object" || body === null) return false;
+  const candidate = body as Record<string, unknown>;
+  const maxResults = candidate["maxResults"];
+  if (
+    typeof maxResults === "number" &&
+    !Number.isSafeInteger(maxResults)
+  ) {
+    return true;
+  }
+  const sources = candidate["sources"];
+  return (
+    Array.isArray(sources) &&
+    sources.every(
+      (source) =>
+        typeof source === "string" &&
+        ALL_SEARCH_SOURCES.includes(source as TfSearchSource),
+    ) &&
+    new Set(sources).size !== sources.length
+  );
 }
 
 const ALLOWED_HOSTS: Record<string, string[]> = {
@@ -209,24 +232,14 @@ export function createTracksRouter(
     if (!parseResult.success) {
       res.status(400).json({
         error: "bad_request",
-        message: "artist and title are required",
+        message: hasLegacyInvalidSearchOptions(req.body)
+          ? "invalid search options"
+          : "artist and title are required",
       });
       return;
     }
 
     const { artist, title, mode, sources } = parseResult.data;
-    if (
-      (sources !== undefined &&
-        new Set(sources).size !== sources.length) ||
-      (parseResult.data.maxResults !== undefined &&
-        !Number.isSafeInteger(parseResult.data.maxResults))
-    ) {
-      res.status(400).json({
-        error: "bad_request",
-        message: "invalid search options",
-      });
-      return;
-    }
     const maxResults = parseResult.data.maxResults ?? 20;
     const enabledSources: TfSearchSource[] =
       mode === "manual" && sources && sources.length > 0
@@ -789,20 +802,20 @@ export function createTracksRouter(
         return;
       }
 
-      const searchPromises = artists.map((artist) =>
+      const discoveryPromises = artists.map((artist) =>
         routeDependencies.searchGateway
-          .search({
+          .discoverArtist({
             artist,
-            title: artist,
-            mode: "manual",
             sources: ["yt", "sc"],
-            maxResults: 12,
+            limitPerSource: 6,
           })
           .then((response) => response.results),
       );
 
-      const nested = await Promise.all(searchPromises);
-      const allResults = nested.flat();
+      const settled = await Promise.allSettled(discoveryPromises);
+      const allResults = settled.flatMap((outcome) =>
+        outcome.status === "fulfilled" ? outcome.value : [],
+      );
 
       const seen = new Set<string>();
       const deduped = allResults.filter((r) => {

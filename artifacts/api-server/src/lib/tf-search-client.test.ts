@@ -1,7 +1,9 @@
 import { createSignedBodySignature } from "@workspace/module-runtime-contract";
 import {
+  TF_SEARCH_ARTIST_DISCOVERY_PATH,
   TF_SEARCH_COMMAND_PATH,
   TF_SEARCH_SUGGESTIONS_PATH,
+  type TfSearchArtistDiscoveryResponse,
   type TfSearchResponse,
   type TfSearchSuggestionsResponse,
 } from "../../../../lib/tf-search-contract/src/index.js";
@@ -57,6 +59,24 @@ function suggestionsResponse(requestId: string): TfSearchSuggestionsResponse {
     schemaVersion: 1,
     requestId,
     suggestions: [{ artist: "Artist", title: "Track" }],
+  };
+}
+
+function artistDiscoveryResponse(
+  requestId: string,
+): TfSearchArtistDiscoveryResponse {
+  return {
+    schemaVersion: 1,
+    requestId,
+    query: "Artist",
+    results: searchResponse(requestId).results,
+    sources: ["yt", "sc"],
+    providerStatus: {
+      yt: "ok",
+      sc: "ok",
+      bc: "skipped",
+      dz: "skipped",
+    },
   };
 }
 
@@ -296,6 +316,54 @@ describe("HttpTfSearchClient", () => {
       createSignedBodySignature({
         method: "POST",
         path: TF_SEARCH_SUGGESTIONS_PATH,
+        timestamp: String(Math.floor(NOW_MS / 1_000)),
+        nonce: FIRST_NONCE,
+        rawBody,
+        secret: SECRET,
+      }),
+    );
+  });
+
+  it("signs a strict artist-only discovery command without a title field", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(
+      async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as {
+          requestId: string;
+        };
+        return new Response(
+          JSON.stringify(artistDiscoveryResponse(body.requestId)),
+          { status: 200 },
+        );
+      },
+    );
+    const gateway = client(fetchImplementation);
+
+    await expect(
+      gateway.discoverArtist({
+        artist: "Artist",
+        sources: ["yt", "sc"],
+        limitPerSource: 6,
+      }),
+    ).resolves.toEqual(artistDiscoveryResponse(FIRST_REQUEST_ID));
+
+    const [url, init] = fetchImplementation.mock.calls[0]!;
+    expect(String(url)).toBe(
+      `https://search.apollot.ru${TF_SEARCH_ARTIST_DISCOVERY_PATH}`,
+    );
+    const rawBody = Buffer.from(String(init?.body));
+    expect(JSON.parse(rawBody.toString("utf8"))).toEqual({
+      schemaVersion: 1,
+      requestId: FIRST_REQUEST_ID,
+      artist: "Artist",
+      sources: ["yt", "sc"],
+      limitPerSource: 6,
+    });
+    expect(rawBody.toString("utf8")).not.toContain("title");
+    const headers = new Headers(init?.headers);
+    expect(headers.get("x-apollo-internal-signature")).toBe(
+      createSignedBodySignature({
+        method: "POST",
+        path: TF_SEARCH_ARTIST_DISCOVERY_PATH,
         timestamp: String(Math.floor(NOW_MS / 1_000)),
         nonce: FIRST_NONCE,
         rawBody,

@@ -74,11 +74,16 @@ export const tfSearchResultSourceSchema:
   z.ZodEnum<["youtube", "soundcloud", "bandcamp", "deezer"]>;
 export const tfSearchCommandSchema: z.ZodType<TfSearchCommand>;
 export const tfSearchResponseSchema: z.ZodType<TfSearchResponse>;
+export const tfSearchArtistDiscoveryCommandSchema:
+  z.ZodType<TfSearchArtistDiscoveryCommand>;
+export const tfSearchArtistDiscoveryResponseSchema:
+  z.ZodType<TfSearchArtistDiscoveryResponse>;
 export const tfSearchSuggestionsCommandSchema:
   z.ZodType<TfSearchSuggestionsCommand>;
 export const tfSearchSuggestionsResponseSchema:
   z.ZodType<TfSearchSuggestionsResponse>;
 export const TF_SEARCH_COMMAND_PATH = "/v1/search";
+export const TF_SEARCH_ARTIST_DISCOVERY_PATH = "/v1/artist-discovery";
 export const TF_SEARCH_SUGGESTIONS_PATH = "/v1/suggestions";
 ```
 
@@ -96,6 +101,10 @@ export const TF_SEARCH_SUGGESTIONS_PATH = "/v1/suggestions";
   - `TfSearchResponse`: matching command fields, query 1..501, at most 40
     results, `cached`, `fallbackAvailable`, and exact `yt/sc/bc/dz` provider
     statuses using `ok`, `failed`, or `skipped`.
+  - Artist discovery command: schema version 1, canonical UUID request ID,
+    artist 1..200, 1..4 unique sources, and integer per-source limit 1..10.
+    Its response carries the exact artist-only query, at most 40 internal
+    results, selected sources, and exact provider statuses.
   - Suggestion command: schema version 1, canonical UUID request ID, query
     2..200, integer limit 1..5. Suggestion response: matching request ID and
     at most five strict `{ artist: 1..200, title: 1..300 }` objects.
@@ -229,6 +238,8 @@ export interface SearchProvider {
 
 export interface SearchService {
   search(command: TfSearchCommand): Promise<TfSearchResponse>;
+  discoverArtist(command: TfSearchArtistDiscoveryCommand):
+    Promise<TfSearchArtistDiscoveryResponse>;
   suggestions(command: TfSearchSuggestionsCommand):
     Promise<TfSearchSuggestionsResponse>;
   telemetry(): {
@@ -479,6 +490,10 @@ git commit -m "feat(tf-search): serve signed search commands"
 export interface TfSearchGateway {
   search(input: Omit<TfSearchCommand, "schemaVersion" | "requestId">):
     Promise<TfSearchResponse>;
+  discoverArtist(input: Omit<
+    TfSearchArtistDiscoveryCommand,
+    "schemaVersion" | "requestId"
+  >): Promise<TfSearchArtistDiscoveryResponse>;
   suggestions(query: string, limit: number):
     Promise<TfSearchSuggestionsResponse>;
 }

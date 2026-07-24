@@ -3,12 +3,17 @@ import { readFile } from "node:fs/promises";
 
 import { createSignedBodySignature } from "@workspace/module-runtime-contract";
 import {
+  TF_SEARCH_ARTIST_DISCOVERY_PATH,
   TF_SEARCH_COMMAND_PATH,
   TF_SEARCH_SUGGESTIONS_PATH,
+  tfSearchArtistDiscoveryCommandSchema,
+  tfSearchArtistDiscoveryResponseSchema,
   tfSearchCommandSchema,
   tfSearchResponseSchema,
   tfSearchSuggestionsCommandSchema,
   tfSearchSuggestionsResponseSchema,
+  type TfSearchArtistDiscoveryCommand,
+  type TfSearchArtistDiscoveryResponse,
   type TfSearchCommand,
   type TfSearchResponse,
   type TfSearchSuggestionsResponse,
@@ -39,6 +44,12 @@ export interface TfSearchGateway {
   search(
     input: Omit<TfSearchCommand, "schemaVersion" | "requestId">,
   ): Promise<TfSearchResponse>;
+  discoverArtist(
+    input: Omit<
+      TfSearchArtistDiscoveryCommand,
+      "schemaVersion" | "requestId"
+    >,
+  ): Promise<TfSearchArtistDiscoveryResponse>;
   suggestions(
     query: string,
     limit: number,
@@ -221,6 +232,24 @@ export class HttpTfSearchClient implements TfSearchGateway {
       },
       tfSearchSuggestionsCommandSchema,
       tfSearchSuggestionsResponseSchema,
+    );
+  }
+
+  discoverArtist(
+    input: Omit<
+      TfSearchArtistDiscoveryCommand,
+      "schemaVersion" | "requestId"
+    >,
+  ): Promise<TfSearchArtistDiscoveryResponse> {
+    return this.dispatch(
+      TF_SEARCH_ARTIST_DISCOVERY_PATH,
+      {
+        schemaVersion: 1,
+        requestId: this.randomUuid(),
+        ...input,
+      },
+      tfSearchArtistDiscoveryCommandSchema,
+      tfSearchArtistDiscoveryResponseSchema,
     );
   }
 

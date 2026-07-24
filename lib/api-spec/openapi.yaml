@@ -51,6 +51,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Search module unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchUnavailableResponse"
         "500":
           description: Server error
           content:
@@ -195,10 +201,12 @@ components:
           type: string
           minLength: 1
           maxLength: 200
+          description: Artist name, trimmed before validation
         title:
           type: string
           minLength: 1
           maxLength: 300
+          description: Track title, trimmed before validation
         mode:
           type: string
           enum:
@@ -297,3 +305,13 @@ components:
       required:
         - error
         - message
+
+    SearchUnavailableResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          const: search_unavailable
+      required:
+        - error

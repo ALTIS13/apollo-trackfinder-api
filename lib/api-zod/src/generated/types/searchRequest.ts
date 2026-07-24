@@ -10,11 +10,13 @@ import type { SearchRequestSourcesItem } from "./searchRequestSourcesItem";
 
 export interface SearchRequest {
   /**
+   * Artist name, trimmed before validation
    * @minLength 1
    * @maxLength 200
    */
   artist: string;
   /**
+   * Track title, trimmed before validation
    * @minLength 1
    * @maxLength 300
    */

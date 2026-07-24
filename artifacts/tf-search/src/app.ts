@@ -1,8 +1,11 @@
 import { TextDecoder } from "node:util";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import {
+  TF_SEARCH_ARTIST_DISCOVERY_PATH,
   TF_SEARCH_COMMAND_PATH,
   TF_SEARCH_SUGGESTIONS_PATH,
+  tfSearchArtistDiscoveryCommandSchema,
+  tfSearchArtistDiscoveryResponseSchema,
   tfSearchCommandSchema,
   tfSearchResponseSchema,
   tfSearchSuggestionsCommandSchema,
@@ -161,6 +164,36 @@ export function createTfSearchApp(options: CreateTfSearchAppOptions): Express {
     try {
       const response = tfSearchSuggestionsResponseSchema.safeParse(
         await options.service.suggestions(command.data),
+      );
+      if (!response.success) {
+        unavailable(res);
+        return;
+      }
+      res.status(200).json(response.data);
+    } catch {
+      unavailable(res);
+    }
+  });
+
+  app.post(TF_SEARCH_ARTIST_DISCOVERY_PATH, ...signedRequest, async (req, res) => {
+    if (!authenticate(req, options.auth)) {
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    if (!isReady(options.ready)) {
+      unavailable(res);
+      return;
+    }
+    const command = tfSearchArtistDiscoveryCommandSchema.safeParse(
+      parseJsonBody(rawBody(req)),
+    );
+    if (!command.success) {
+      res.status(400).json({ error: "invalid_request" });
+      return;
+    }
+    try {
+      const response = tfSearchArtistDiscoveryResponseSchema.safeParse(
+        await options.service.discoverArtist(command.data),
       );
       if (!response.success) {
         unavailable(res);

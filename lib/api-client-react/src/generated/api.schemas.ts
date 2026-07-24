@@ -64,11 +64,13 @@ export const SearchRequestSourcesItem = {
 
 export interface SearchRequest {
   /**
+   * Artist name, trimmed before validation
    * @minLength 1
    * @maxLength 200
    */
   artist: string;
   /**
+   * Track title, trimmed before validation
    * @minLength 1
    * @maxLength 300
    */
@@ -127,3 +129,8 @@ export interface ErrorResponse {
   error: string;
   message: string;
 }
+
+export const SearchUnavailableResponseValue = {
+  error: "search_unavailable",
+} as const;
+export type SearchUnavailableResponse = typeof SearchUnavailableResponseValue;

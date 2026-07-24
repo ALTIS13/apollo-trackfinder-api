@@ -165,9 +165,17 @@ batch body.
 `tf-search` also exposes exact signed endpoints:
 
 - `POST /v1/suggestions` with `{ "schemaVersion": 1, "requestId": "<uuid>", "query": "<2..200 chars>", "limit": 5 }`
-- `POST /v1/candidates` with the search body plus a source subset; this is used by
-  recommendations and Deezer stream/download fallbacks while keeping private
-  `sourceUrl` out of browser responses.
+- `POST /v1/artist-discovery` with
+  `{ "schemaVersion": 1, "requestId": "<uuid>", "artist": "<1..200 chars>", "sources": ["yt", "sc"], "limitPerSource": 6 }`.
+  This narrow internal command preserves artist-only recommendation discovery:
+  providers receive the exact artist string, no title sentinel is manufactured,
+  each source is bounded to ten candidates, and the response is bounded to forty
+  candidates. `tf-api` isolates failures per artist, deduplicates by result ID,
+  limits the browser response to twenty results, and strips `sourceUrl` and
+  provider status.
+
+Deezer stream/download fallbacks continue to use `POST /v1/search` with their
+real artist/title pair and a private source subset.
 
 `GET /healthz` reports process liveness. `GET /readyz` reports only valid local
 configuration and initialized runtime state; external provider availability never

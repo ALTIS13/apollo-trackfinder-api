@@ -22,6 +22,7 @@ import type {
   HealthStatus,
   SearchRequest,
   SearchResponse,
+  SearchUnavailableResponse,
   StreamResponse,
 } from "./api.schemas";
 
@@ -131,7 +132,7 @@ export const searchTracks = async (
 };
 
 export const getSearchTracksMutationOptions = <
-  TError = ErrorType<ErrorResponse>,
+  TError = ErrorType<ErrorResponse | SearchUnavailableResponse>,
   TContext = unknown,
 >(options?: {
   mutation?: UseMutationOptions<
@@ -172,13 +173,15 @@ export type SearchTracksMutationResult = NonNullable<
   Awaited<ReturnType<typeof searchTracks>>
 >;
 export type SearchTracksMutationBody = BodyType<SearchRequest>;
-export type SearchTracksMutationError = ErrorType<ErrorResponse>;
+export type SearchTracksMutationError = ErrorType<
+  ErrorResponse | SearchUnavailableResponse
+>;
 
 /**
  * @summary Search for track variants
  */
 export const useSearchTracks = <
-  TError = ErrorType<ErrorResponse>,
+  TError = ErrorType<ErrorResponse | SearchUnavailableResponse>,
   TContext = unknown,
 >(options?: {
   mutation?: UseMutationOptions<
