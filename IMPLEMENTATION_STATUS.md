@@ -69,7 +69,7 @@ Last updated: 2026-07-24.
 
 ## Validation
 
-- TF web-session local release validation (2026-07-24): music-player suite `41/41`, selected API browser-contract suite `100/100`, player/root typechecks and player production build passed. `docker compose config` was run but could not render because required local variable `TF_SECRET_DIRECTORY` is unset; no Compose or infrastructure configuration was changed. The exact legacy scan found three test-only assertions in `tf-api-migration.test.ts`; the runtime-only scan was clean. The exact secret-boundary scan was clean.
+- TF web-session local release validation (2026-07-24): music-player suite `41/41`, selected API browser-contract suite `100/100`, player/root typechecks and player production build passed. Controller validation set `TF_SECRET_DIRECTORY` to a disposable verified workspace-local directory containing only canary paths `tf_client_secret`, `tf_database_url`, and `tf_postgres_password`; `docker compose config --quiet` exited `0`. After absolute-path containment checks, all three files and the directory were individually deleted (`TEMP_CLEAN=True`). No real secret, Compose configuration, or remote infrastructure was changed. The exact legacy scan found three test-only assertions in `tf-api-migration.test.ts`; the runtime-only scan was clean. The exact secret-boundary scan was clean.
 
 - Baseline 2026-06-23: `pnpm install`, full typecheck и build прошли до изменения mobile delivery target.
 - Residual search: активных Replit/Cursor артефактов в коде не найдено; оставшиеся `cursor` совпадения относятся к CSS/Redis cursor, не к Cursor IDE.
