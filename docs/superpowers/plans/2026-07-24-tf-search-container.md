@@ -509,7 +509,7 @@ export class HttpTfSearchClient implements TfSearchGateway {
 ```
 
 - `createTracksRouter` receives `searchGateway` through `TrackRouteDependencies`.
-- [ ] **Step 1: Write RED client tests**
+- [x] **Step 1: Write RED client tests**
 
 Assert exact origin validation and exact signed request shape. Verify:
 
@@ -521,7 +521,7 @@ Assert exact origin validation and exact signed request shape. Verify:
   typed `search_unavailable`;
 - no automatic retry occurs.
 
-- [ ] **Step 2: Write RED route migration tests**
+- [x] **Step 2: Write RED route migration tests**
 
 Inject a fake gateway and cover `/search`, `/batch-search`, `/suggest`,
 `/recommendations`, and Deezer fallback paths. Assert the existing browser response
@@ -532,7 +532,7 @@ internal provider status.
 Add an app-level test with a counting gateway proving absent/revoked `tf.search`
 returns the existing policy response and the gateway call count remains zero.
 
-- [ ] **Step 3: Run focused tests and verify RED**
+- [x] **Step 3: Run focused tests and verify RED**
 
 ```bash
 pnpm --filter @workspace/api-server test -- src/lib/tf-search-client.test.ts src/routes/tracks.test.ts src/app-auth-boundary.test.ts src/routes/policy-coverage.test.ts
@@ -541,7 +541,7 @@ pnpm --filter @workspace/api-server test -- src/lib/tf-search-client.test.ts src
 Expected: fail because the client/gateway does not exist and routes still call
 providers directly.
 
-- [ ] **Step 4: Implement the client and migrate all provider-search callers**
+- [x] **Step 4: Implement the client and migrate all provider-search callers**
 
 Construct one configured `HttpTfSearchClient` during API startup and inject it
 through app/router options. Public validation and Platform policy remain before the
@@ -560,7 +560,7 @@ Remove API provider adapters, ranking/classification, PostgreSQL search-cache
 runtime, and stale-cache queue cleanup. Keep the historical database schema/table
 and all stream/download `yt-dlp` functions.
 
-- [ ] **Step 5: Correct and regenerate the public API**
+- [x] **Step 5: Correct and regenerate the public API**
 
 Update `SearchRequest` with bounded `mode`, `sources`, and `maxResults`; update
 `TrackSource` to four source values; update `SearchResponse` with `sources` and
@@ -572,7 +572,7 @@ pnpm --filter @workspace/api-spec codegen
 
 Do not manually edit generated files after codegen.
 
-- [ ] **Step 6: Run Task 4 validation**
+- [x] **Step 6: Run Task 4 validation**
 
 ```bash
 pnpm --filter @workspace/api-server test -- src/lib/tf-search-client.test.ts src/routes/tracks.test.ts src/app-auth-boundary.test.ts src/routes/policy-coverage.test.ts
@@ -587,7 +587,7 @@ rg -n "searchYouTube|searchSoundCloud|searchBandcamp|searchDeezer|trackSearchCac
 Expected: tests/typechecks/build/syntax pass and the final scan has no API runtime
 matches.
 
-- [ ] **Step 7: Commit Task 4**
+- [x] **Step 7: Commit Task 4**
 
 ```bash
 git add artifacts/api-server lib/api-spec lib/api-client-react lib/api-zod pnpm-lock.yaml
