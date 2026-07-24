@@ -1,104 +1,151 @@
-# Task 3: Authenticated Search Service, Health, And Heartbeat
+# Task 3: End-User Platform Sessions Report
 
-## Status
+## Scope
 
-Implemented the `tf-search` runtime boundary only. `tf-api`, Compose files, and remote infrastructure were not changed.
+Implemented the domain-only `UserSessionService` for the `apollo-portal`
+audience. No HTTP routes, OAuth flow code, or product authorization service was
+added.
 
 ## RED Evidence
 
-1. The required focused boundary command was run before implementation:
+Command run before production implementation:
 
-   ```powershell
-   pnpm --filter @workspace/tf-search test -- src/config.test.ts src/internal-auth.test.ts src/app.test.ts src/logger.test.ts src/heartbeat.test.ts
-   ```
+```powershell
+pnpm --dir artifacts/platform-api test -- src/domain/user-sessions.test.ts
+```
 
-   It exited `1`: the five new boundary modules were absent. The output also identified the missing workspace dependency link, which was installed before implementation.
-
-2. Heartbeat shutdown regression:
-
-   ```powershell
-   pnpm --filter @workspace/tf-search test -- src/heartbeat.test.ts
-   ```
-
-   It exited `1`: `stop()` resolved while a later scheduled heartbeat was still pending. The regression now tracks every attempt and waits for it.
-
-3. Image build regression:
-
-   ```powershell
-   docker build --pull=false -f artifacts/tf-search/Dockerfile -t audio-navigator-tf-search-task3-red .
-   ```
-
-   It exited `1` with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`, proving the narrowed Docker workspace had discarded the lockfile catalog configuration. The Dockerfile now preserves that configuration while narrowing the package list.
-
-4. Self-review regressions:
-
-   ```powershell
-   pnpm --filter @workspace/tf-search test -- src/app.test.ts src/heartbeat.test.ts
-   ```
-
-   It exited `1`: an authenticator exception became `400` instead of generic `401`, and a telemetry exception stopped later heartbeats.
+Result: failed as expected because
+`src/domain/user-sessions.test.ts` could not import the absent
+`./user-sessions.js` module. The test file reported zero executed tests and the
+suite failure was the missing service module.
 
 ## GREEN Evidence
 
-- Focused boundary suite: 5 files / 51 tests passed.
-- App suggestions endpoint: 1 file / 7 tests passed after the signed route was restored from its RED `404` state.
-- Heartbeat lifecycle suite: 1 file / 5 tests passed after tracking all scheduled attempts.
-- Authenticator/telemetry self-review suite: 2 files / 14 tests passed.
-
-Final Task 3 validation:
+Final focused unit command:
 
 ```powershell
-pnpm --filter @workspace/tf-search test
-pnpm --filter @workspace/tf-search typecheck
-pnpm --filter @workspace/tf-search build
-node --check artifacts/tf-search/dist/index.mjs
-git diff --check
+pnpm --dir artifacts/platform-api test -- src/domain/user-sessions.test.ts
 ```
 
-All commands exited `0`. The test command passed 8 files and 73 tests; the bundle is syntactically valid.
+Result: exit 0, 14 test files passed, 262 tests passed, 16 skipped.
 
-The initial eight-process Vitest fork pool intermittently exited a worker after
-65 tests in this shared desktop environment, despite all files passing when
-isolated. The same suite passed with one and four fork workers, eight verbose
-fork workers, and eight thread workers. The package test script now explicitly
-uses the validated eight-worker thread pool; two consecutive plain package runs
-passed 8 files and 73 tests each.
-
-The final local image build also exited `0`:
+Final type check:
 
 ```powershell
-docker build --pull=false -f artifacts/tf-search/Dockerfile -t audio-navigator-tf-search-task3 .
+pnpm --dir artifacts/platform-api typecheck
 ```
 
-Inspection confirmed `10001:10001`, exposed `8080/tcp`, and the start-script entrypoint. A non-root shell check confirmed the final image has the bundle and start script only, no source artifact directory, and a non-writable `/app`.
+Result: exit 0.
+
+Final PostgreSQL integration command used a unique Compose project and both
+database URLs:
+
+```powershell
+docker compose -p audio-nav-task3-45d2d4a0 -f docker-compose.test.yml up -d --wait
+$env:PLATFORM_TEST_DATABASE_URL = 'postgres://apollo_platform_migrator:platform_migrator_test@127.0.0.1:55432/apollo_platform_test'
+$env:PLATFORM_TEST_RUNTIME_DATABASE_URL = 'postgres://apollo_platform_runtime:platform_runtime_test@127.0.0.1:55432/apollo_platform_test'
+pnpm test -- src/domain/user-sessions.integration.test.ts
+docker compose -p audio-nav-task3-45d2d4a0 -f docker-compose.test.yml down --volumes --remove-orphans
+```
+
+Result: exit 0, 19 test files passed, 275 tests passed, 3 skipped. The Compose
+stack was stopped and removed with volumes and orphans in a `finally` block.
+
+## Coverage
+
+- Verified pending users receive a portal session and authenticate with
+  `status: "pending"`; the result is portal-scoped rather than a product session.
+- Login only permits email-verified `pending` or `active` accounts.
+- Invalid, unverified, suspended, deleted, unknown, and wrong-password login
+  attempts receive generic `invalid_credentials`; unknown users follow the dummy
+  Argon2id verification path.
+- Portal login rotates only `apollo-portal` sessions, preserves admin/product
+  sessions, stores only the opaque-token digest, and supports opportunistic
+  Argon2 rehashing.
+- Authentication and revocation reject expired, revoked, wrong-audience, and
+  account-ineligible sessions, while non-finite persisted session dates fail
+  closed as `policy_unavailable`.
+- Audit payloads contain session audience, expiry/revocation state, rotation
+  count, and account status only. They exclude email, password, raw token, and
+  token digest.
+- PostgreSQL coverage verifies the runtime RLS path, digest-only session storage,
+  verified-pending portal state, exact-session revocation, and redacted audits.
 
 ## Changed Files
 
-- `artifacts/tf-search/src/config.ts`
-- `artifacts/tf-search/src/config.test.ts`
-- `artifacts/tf-search/src/internal-auth.ts`
-- `artifacts/tf-search/src/internal-auth.test.ts`
-- `artifacts/tf-search/src/app.ts`
-- `artifacts/tf-search/src/app.test.ts`
-- `artifacts/tf-search/src/heartbeat.ts`
-- `artifacts/tf-search/src/heartbeat.test.ts`
-- `artifacts/tf-search/src/logger.ts`
-- `artifacts/tf-search/src/logger.test.ts`
-- `artifacts/tf-search/src/index.ts`
-- `artifacts/tf-search/container/start-search.sh`
-- `artifacts/tf-search/Dockerfile`
-- `artifacts/tf-search/package.json`
-- `pnpm-lock.yaml`
+- `artifacts/platform-api/src/domain/user-sessions.ts`
+- `artifacts/platform-api/src/domain/user-sessions.test.ts`
+- `artifacts/platform-api/src/domain/user-sessions.integration.test.ts`
+- `artifacts/platform-api/src/domain/audit.ts`
+- `artifacts/platform-api/src/domain/errors.ts`
 
 ## Self-Review
 
-- Configuration loads only two required file-backed secrets, trims and bounds them, rejects equality, validates `APOLLO_DEPLOYED_AT`, and permits HTTP only for explicit private/local opt-in. Version metadata follows the existing `APOLLO_API_VERSION` convention.
-- Signed commands use exact raw bytes before JSON parsing, canonical paths, constant-time signature comparison, a 60-second timestamp window, a five-minute/256-entry replay cache, and generic fail-closed authentication responses. Unsupported encodings and content types never reach adapters.
-- Health/readiness depend only on process-local readiness. Command failures, malformed bodies, and provider exceptions expose stable bounded responses; no request body, query, header, signature, source URL, or raw provider error is passed to logs.
-- Heartbeats use the distinct key, existing `search-media` route, an exact signed payload, `redirect: "error"`, a ten-second abort, serialized 30-second-after-completion scheduling, and shutdown that aborts and awaits the active attempt.
-- Scope remains limited to `artifacts/tf-search` plus the dependency lockfile. No `tf-api`, Compose, HomeNode, Coolify, Caddy, UFW, DNS, or other remote infrastructure was changed.
+- Portal behavior remains audience-isolated: login rotation targets only
+  `apollo-portal`; authenticate and revoke require that exact audience.
+- The portal dummy hash is a separate fixed Argon2id hash from the operator
+  dummy hash and matches the approved profile.
+- Session lookup is repeated under account RLS before authentication or
+  revocation decisions, matching the operator-session stale-read defense.
+- No portal logic imports or couples to a future product authorization service.
 
 ## Concerns
 
-- The approved image requirement pins pnpm, but not the `yt-dlp` release. A later image rebuild can therefore pick up upstream provider behavior changes.
-- The image was built and structurally inspected locally; the disposable multi-service smoke and Compose isolation validation remain Task 5 work.
+- Product access denial is intentionally expressed through the authenticated
+  portal session's `pending` status and portal audience. Task 3 does not create
+  the future authorization service or product HTTP/OAuth boundaries that will
+  consume that contract.
+
+## Review Fix
+
+### Changes
+
+- Email verification eligibility now requires a finite `Date`. A null timestamp
+  remains a generic `invalid_credentials` denial, while an invalid `Date`, an
+  infinite timestamp, or a non-`Date` persisted value fails closed as
+  `policy_unavailable` after account identity is established.
+- Digest-bound authentication and revocation now classify a missing re-locked
+  account as `policy_unavailable`, alongside existing account/session identity
+  mismatches.
+- Unit coverage now proves that `UserSessionService.revoke` cannot revoke an
+  `apollo-admin` or product-audience session.
+
+### RED Evidence
+
+```powershell
+pnpm --dir artifacts/platform-api test -- src/domain/user-sessions.test.ts
+```
+
+Result: exit 1 with six expected failures: malformed login verification dates
+were accepted, malformed persisted verification dates authenticated/revoked,
+and missing re-locked accounts returned `invalid_credentials` instead of
+`policy_unavailable`.
+
+### Final Verification
+
+```powershell
+pnpm --dir artifacts/platform-api test -- src/domain/user-sessions.test.ts
+pnpm --dir artifacts/platform-api typecheck
+```
+
+Result: both exit 0. The focused command reported 14 files passed, 273 tests
+passed, and 16 skipped. TypeScript completed without errors.
+
+```powershell
+docker compose -p audio-nav-task3-review-bcd859d1 -f docker-compose.test.yml up -d --wait
+$env:PLATFORM_TEST_DATABASE_URL = 'postgres://apollo_platform_migrator:platform_migrator_test@127.0.0.1:55432/apollo_platform_test'
+$env:PLATFORM_TEST_RUNTIME_DATABASE_URL = 'postgres://apollo_platform_runtime:platform_runtime_test@127.0.0.1:55432/apollo_platform_test'
+pnpm exec vitest run src/domain/user-sessions.integration.test.ts
+docker compose -p audio-nav-task3-review-bcd859d1 -f docker-compose.test.yml down --volumes --remove-orphans
+```
+
+Result: exit 0, one integration file and one test passed. The unique disposable
+Compose project was removed with volumes and orphans in a `finally` block.
+
+The package-script form
+`pnpm --dir artifacts/platform-api test -- src/domain/user-sessions.integration.test.ts`
+was also attempted with the disposable stack. Its `vitest run src` script
+collects the whole API suite; the portal integration passed, but an unrelated
+`src/e2e.test.ts` container-contract test timed out at its fixed five-second
+limit. No Task 3 code was changed for that unrelated timeout; the direct Vitest
+invocation above isolates and passes the requested portal integration file.
