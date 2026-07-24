@@ -1,9 +1,13 @@
 # Apollo TF implementation status
 
-Last updated: 2026-07-24.
+Last updated: 2026-07-25.
 
 ## Что сделано
 
+- На `codex/feat/tf-search-container` завершена локальная реализация независимого `tf-search`: строгие signed HMAC-команды, provider fan-out, нормализация/ranking, bounded process-local cache `2048` записей с TTL `1h`, signed heartbeat `search-media` и одно-репличное ограничение первой версии.
+- `tf-api` сохранён как единственная публичная cookie/CSRF/Platform `tf.search` policy boundary и переведён на внутренний HTTP gateway для search, batch search, suggestions, recommendations и Deezer fallback. Browser/account/session/installation/entitlement данные в `tf-search` не передаются; внутренние `sourceUrl` и provider status не попадают в публичный ответ.
+- Root и nested Compose содержат изолированный `tf-search` без host port, data/edge networks, DB/Redis/Platform/provider-account/control-plane credentials или host mounts. Command/heartbeat keys разделены и загружаются из file-backed secrets; same-node HTTP разрешён только явным local flag, cross-node режим требует exact HTTPS origin.
+- Task 1-5 прошли отдельные implementation/review циклы с итогом `SPEC COMPLIANT / QUALITY APPROVED`. Whole-branch release review намеренно оставлен для Task 6 Step 4 и в этой контрольной точке не отмечен завершённым.
 - Исторический baseline перед cleanup: локальный `HEAD` совпадал с `origin/main` на commit `d6590464ef244e9d15d96e7dbc98377762efb066`.
 - Подтверждён remote проекта: `github.com/ALTIS13/apollo-trackfinder-api`.
 - Удалены Replit-артефакты из tracked-файлов: `.replit`, `.replitignore`, `replit.md`, `replit.nix`, `.replit-artifact/*`, `attached_assets/*`.
@@ -75,6 +79,12 @@ Last updated: 2026-07-24.
 
 ## Validation
 
+- TF search-container Task 6 Steps 1-3 (2026-07-25), branch `codex/feat/tf-search-container`, validated implementation head `caadae64e7de95260c88ffd9741cedce2cbd9782`: frozen install прошёл для `18` workspace projects без изменения lockfile. Полные suites: module-runtime `9/9`, tf-search-contract `6/6`, api-zod `2/2`, tf-search `122 passed / 1 explicitly gated skip`, api-server `358 passed / 2 environment/permission-gated skips`, music-player `85/85`. Первичный конкурентный запуск дал два API timeout; изолированный полный rerun тем же package script прошёл `358/358`, поэтому изменения runtime/test timeout не потребовались.
+- Root typecheck прошёл для libraries и всех `8` artifact/script projects. Production builds прошли: `tf-search` dist `2 files / 3,770,124 bytes` (`index.mjs` `1,468,839`); `tf-api` dist `10 files / 11,666,533 bytes` (`index.mjs` `4,265,441`); music-player dist `6 files / 1,698,369 bytes` (`JS` `517,554`, `CSS` `121,197`). Оба server entrypoint прошли `node --check`; `git diff --check` завершился без замечаний.
+- Exact root/nested Compose renders использовали новый workspace-contained `.tmp/task6-compose-canary` с шестью canary secret files: root `7,953` bytes, nested `6,871` bytes, оба exit `0`, stderr `0`, raw/digest leaks `0`. Canary directory и общий `.tmp` удалены после проверки.
+- Explicit real local Docker smoke прошёл на проекте `apollo-tf-search-smoke-45896-178b8edc`: signed internal command, policy-gated public search, response projection и heartbeat `unknown -> healthy`/recovery подтверждены. Cleanup: `containers=0`, `images=0`, `networks=0`, `volumes=0`, `temporaryDirectories=0`; независимый final prefix audit дополнительно показал `projects=0` и отсутствие `.tmp`.
+- Production scans: unresolved `@workspace/` imports `0`; forbidden browser/account/session/install/entitlement, database/Redis/Platform/provider-account и control-plane patterns в `tf-search` bundle `0`; legacy in-process search adapter/cache/classifier/ranker imports в `tf-api` runtime `0`; raw-secret/private-key/token и Task 6 canary patterns `0`. Известные non-blocking предупреждения остались прежними: tooltip sourcemap advisory и music-player chunk `517.55 kB` выше Vite threshold.
+- Домены для локальной validation не потребовались. HomeNode, Coolify, Caddy, UFW, DNS, доменные записи, Android и любая другая удалённая инфраструктура не проверялись на запись и не изменялись.
 - TF web-session unmanaged `/auth/me` merge-blocker follow-up (2026-07-24): focused and full music-player suites passed `85/85`, including six real-adapter stale failure cases after account B commit; selected API auth/boundary/ticket/policy/WebSocket tests passed `100/100`; player/root typechecks and player production build passed. Frozen install, exact runtime legacy/provider-secret/Yandex-token scans, and diff checks passed. No lockfile, generated shared-client, Compose/Docker, server runtime, or remote infrastructure change was made.
 - TF web-session independent whole-branch review (2026-07-24) found no Critical, Important, or Minor findings at `87905127ad12845bc77923e40be2a42ccbb5ca43` and returned `SPEC PASS`, `QUALITY APPROVED`, `READY TO MERGE YES`. Production cross-origin cookie behavior remains intentionally outside local validation; new Yandex onboarding remains deferred to server-side OAuth.
 - TF web-session merged-result validation (2026-07-24) on `main` at `567d0f2322c10d34846911b3af84669d80cd0a7b`: frozen install passed without lockfile changes; music-player passed `85/85`; selected API browser-contract tests passed `100/100`; player/root typechecks and player production build passed. Runtime legacy/secret scans were clean; exact `docker compose config` passed with three disposable workspace-local canary files, followed by verified cleanup (`TEMP_CLEAN=True`). Only the existing tooltip sourcemap and `517.55 kB` chunk-size advisories remain. No HomeNode, Coolify, Caddy, UFW, DNS, domain, or other remote infrastructure was changed.
@@ -152,6 +162,7 @@ Last updated: 2026-07-24.
 
 ## Commit/push
 
+- TF search-container implementation и Task 1-5 review fixes находятся локально на `codex/feat/tf-search-container`; Task 6 Steps 1-3 валидировали clean base `caadae64e7de95260c88ffd9741cedce2cbd9782`. Release record зафиксирован отдельным docs-коммитом `docs: record tf search container validation`; push, merge, изменение `main` и публикация не выполнялись.
 - Cleanup и операционная документация опубликованы в `main` commit `9a7d770fc053fcc64daeb337749920ce85f46506`.
 - Smart Git HTTPS завершался `Recv failure: Connection was reset`, поэтому commit опубликован через GitHub Git Database API после проверки parent и полного tree SHA.
 - Feature commit `2481f57b674be15e48140e818653a104e9dff3b0` опубликован в `origin/codex/feat/admin-topology-dashboard`, fast-forward merged в `main` и опубликован в `origin/main` после повторной validation на merged result.
@@ -181,6 +192,8 @@ Last updated: 2026-07-24.
 
 ## Следующий логичный этап реализации
 
+- Следующий обязательный release gate для текущей ветки -- Task 6 Step 4: независимый whole-branch review с точным вердиктом `SPEC PASS / QUALITY APPROVED / READY TO MERGE YES`. Step 5 publication/fast-forward merge и merged-result validation остаются отдельными и сейчас не выполнены.
+- После закрытия release gates следующий feature stage -- выделение `tf-integrations` в контейнер по той же reviewed least-privilege boundary: отдельные command/heartbeat secrets, отсутствие browser/session/policy данных, same-node private networking и exact HTTPS origin для будущего cross-node Coolify placement.
 - Локальная Apollo Platform Identity/Policy foundation и production-compatible container smoke завершены. Следующий feature stage должен начинаться только по отдельному binding brief; Task 8 не включает portal/TF client zone или дальнейшую платформенную функциональность.
 - Coolify/HomeNode rollout выполняется только после локальной реализации и validation всех web/server модулей, повторного read-only preflight и явного разрешения владельца непосредственно перед удалёнными изменениями.
 - Native Android APK decision remains separate: сохранить Expo-модули через native prebuild/Gradle либо выполнить отдельную миграцию на bare React Native.

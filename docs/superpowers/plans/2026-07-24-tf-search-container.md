@@ -718,7 +718,7 @@ git commit -m "feat(tf-search): add isolated container stack"
 - Consumes all Task 1-5 behavior.
 - Produces an independently reviewed feature branch ready for merge to `main`.
 
-- [ ] **Step 1: Run the complete local matrix**
+- [x] **Step 1: Run the complete local matrix**
 
 ```bash
 pnpm install --frozen-lockfile
@@ -742,7 +742,7 @@ scan tracked/runtime files for browser secrets, database credentials in
 `tf-search`, legacy in-process provider imports in `tf-api`, raw secret values,
 and control-plane access.
 
-- [ ] **Step 2: Record exact implementation state**
+- [x] **Step 2: Record exact implementation state**
 
 Update `IMPLEMENTATION_STATUS.md` in the existing output format:
 
@@ -756,7 +756,7 @@ review verdicts, branch/commit hashes, no-domain status, and the fact that
 HomeNode/Coolify/Caddy/UFW/DNS were not changed. Set the next stage to
 `tf-integrations` container extraction using the same reviewed boundary.
 
-- [ ] **Step 3: Commit the release record**
+- [x] **Step 3: Commit the release record**
 
 ```bash
 git add IMPLEMENTATION_STATUS.md docs/superpowers/plans/2026-07-24-tf-search-container.md
