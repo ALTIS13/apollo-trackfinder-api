@@ -6,6 +6,8 @@ const MAX_RESULTS_PER_ENTRY = 40;
 const MAX_SUGGESTIONS = 5;
 
 interface CacheEntry {
+  readonly artist: string;
+  readonly title: string;
   readonly expiresAt: number;
   readonly results: readonly TfSearchResult[];
 }
@@ -15,15 +17,7 @@ function normalize(value: string): string {
 }
 
 function keyFor(artist: string, title: string): string {
-  return `${normalize(artist)}::${normalize(title)}`;
-}
-
-function parseKey(key: string): TfSearchSuggestion {
-  const separator = key.indexOf("::");
-  return {
-    artist: key.slice(0, separator),
-    title: key.slice(separator + 2),
-  };
+  return JSON.stringify([normalize(artist), normalize(title)]);
 }
 
 export class BoundedSearchCache {
@@ -64,6 +58,8 @@ export class BoundedSearchCache {
 
   set(artist: string, title: string, results: readonly TfSearchResult[]): void {
     const key = keyFor(artist, title);
+    const normalizedArtist = normalize(artist);
+    const normalizedTitle = normalize(title);
     this.removeExpired();
     this.entries.delete(key);
 
@@ -74,6 +70,8 @@ export class BoundedSearchCache {
     }
 
     this.entries.set(key, {
+      artist: normalizedArtist,
+      title: normalizedTitle,
       expiresAt: this.now() + this.ttlMs,
       results: results.slice(0, MAX_RESULTS_PER_ENTRY),
     });
@@ -85,9 +83,9 @@ export class BoundedSearchCache {
     const maxSuggestions = Math.min(MAX_SUGGESTIONS, Math.max(0, Math.floor(limit)));
     const matches: TfSearchSuggestion[] = [];
 
-    for (const key of this.entries.keys()) {
-      if (!key.includes(normalizedQuery)) continue;
-      matches.push(parseKey(key));
+    for (const entry of this.entries.values()) {
+      if (!entry.artist.includes(normalizedQuery) && !entry.title.includes(normalizedQuery)) continue;
+      matches.push({ artist: entry.artist, title: entry.title });
       if (matches.length === maxSuggestions) break;
     }
 

@@ -25,6 +25,15 @@ export class YtDlpSearchError extends Error {
 
 const SEARCH_TIMEOUT_MS = 45_000;
 const MAX_STDOUT_BYTES = 2 * 1024 * 1024;
+const CHILD_ENV_KEYS = ["PATH", "HOME", "XDG_CACHE_HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL"] as const;
+
+export function createYtDlpEnvironment(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const childEnvironment: NodeJS.ProcessEnv = { PYTHONIOENCODING: "utf-8" };
+  for (const key of CHILD_ENV_KEYS) {
+    if (environment[key] !== undefined) childEnvironment[key] = environment[key];
+  }
+  return childEnvironment;
+}
 
 function runSearch(prefix: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -39,7 +48,7 @@ function runSearch(prefix: string): Promise<string> {
       "--no-playlist",
       "--no-cache-dir",
     ], {
-      env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+      env: createYtDlpEnvironment(),
     });
 
     const finish = (callback: () => void): void => {

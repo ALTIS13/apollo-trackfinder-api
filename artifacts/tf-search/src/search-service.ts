@@ -38,6 +38,7 @@ interface SearchServiceOptions {
 
 const ALL_SOURCES: readonly TfSearchSource[] = ["yt", "sc", "bc", "dz"];
 const ROLLING_WINDOW_SECONDS = 60;
+type ProviderStatus = "ok" | "failed" | "skipped";
 
 function isCacheable(command: TfSearchCommand): boolean {
   return command.maxResults <= 20
@@ -49,7 +50,7 @@ function providerLimit(source: TfSearchSource, maxResults: number): number {
   return source === "yt" || source === "sc" ? maxResults : Math.ceil(maxResults / 2);
 }
 
-function initialProviderStatus(): Record<TfSearchSource, "ok" | "failed" | "skipped"> {
+function initialProviderStatus(): Record<TfSearchSource, ProviderStatus> {
   return { yt: "skipped", sc: "skipped", bc: "skipped", dz: "skipped" };
 }
 
@@ -72,6 +73,8 @@ class SearchServiceImpl implements SearchService {
   private readonly now: () => number;
   private readonly logger?: SearchLogger;
   private readonly requestBuckets = new Int32Array(ROLLING_WINDOW_SECONDS);
+  private readonly partialFailureBuckets = new Int32Array(ROLLING_WINDOW_SECONDS);
+  private readonly totalFailureBuckets = new Int32Array(ROLLING_WINDOW_SECONDS);
   private readonly bucketSeconds = new Int32Array(ROLLING_WINDOW_SECONDS).fill(-1);
 
   constructor(options: SearchServiceOptions) {
@@ -97,7 +100,7 @@ class SearchServiceImpl implements SearchService {
           cached: true,
           sources: command.sources,
           fallbackAvailable: false,
-          providerStatus: { yt: "ok", sc: "ok", bc: "ok", dz: "ok" },
+          providerStatus: initialProviderStatus(),
         };
       }
     }
@@ -111,24 +114,30 @@ class SearchServiceImpl implements SearchService {
     }));
 
     const results: InternalTrack[] = [];
+    let succeededProviders = 0;
+    let failedProviders = 0;
     for (let index = 0; index < settled.length; index += 1) {
       const outcome = settled[index]!;
       const source = selectedProviders[index]!.source;
       if (outcome.status === "fulfilled") {
         providerStatus[source] = "ok";
+        succeededProviders += 1;
         results.push(...outcome.value.results);
       } else {
         providerStatus[source] = "failed";
+        failedProviders += 1;
         this.logger?.warn({ source, errorClass: "provider_failure" });
       }
     }
+
+    if (failedProviders > 0) this.recordFailure(succeededProviders === 0);
 
     const ranked = rank(results, { artist: command.artist, title: command.title }, medianOriginalDuration(results), {
       mode: command.mode,
       queryText: query,
     }).slice(0, command.maxResults);
 
-    if (cacheable) this.cache.set(command.artist, command.title, ranked);
+    if (cacheable && failedProviders === 0) this.cache.set(command.artist, command.title, ranked);
 
     return {
       schemaVersion: 1,
@@ -153,25 +162,53 @@ class SearchServiceImpl implements SearchService {
   telemetry(): { readonly requestsPerMinute: number; readonly status: "healthy" | "warning" | "degraded" } {
     const nowSecond = Math.floor(this.now() / 1_000);
     let requestsPerMinute = 0;
+    let partialFailures = 0;
+    let totalFailures = 0;
     for (let index = 0; index < ROLLING_WINDOW_SECONDS; index += 1) {
-      if (nowSecond - this.bucketSeconds[index]! >= ROLLING_WINDOW_SECONDS) {
+      if (this.bucketSeconds[index]! < nowSecond - (ROLLING_WINDOW_SECONDS - 1)
+        || this.bucketSeconds[index]! > nowSecond) {
         this.requestBuckets[index] = 0;
+        this.partialFailureBuckets[index] = 0;
+        this.totalFailureBuckets[index] = 0;
         continue;
       }
       requestsPerMinute += this.requestBuckets[index]!;
+      partialFailures += this.partialFailureBuckets[index]!;
+      totalFailures += this.totalFailureBuckets[index]!;
     }
 
-    return { requestsPerMinute, status: "healthy" };
+    const status = totalFailures >= 3
+      ? "degraded"
+      : partialFailures + totalFailures > 0
+        ? "warning"
+        : "healthy";
+    return { requestsPerMinute, status };
   }
 
   private recordRequest(): void {
     const second = Math.floor(this.now() / 1_000);
+    const bucketIndex = this.ensureBucket(second);
+    this.requestBuckets[bucketIndex] += 1;
+  }
+
+  private recordFailure(total: boolean): void {
+    const bucketIndex = this.ensureBucket(Math.floor(this.now() / 1_000));
+    if (total) {
+      this.totalFailureBuckets[bucketIndex] += 1;
+    } else {
+      this.partialFailureBuckets[bucketIndex] += 1;
+    }
+  }
+
+  private ensureBucket(second: number): number {
     const bucketIndex = ((second % ROLLING_WINDOW_SECONDS) + ROLLING_WINDOW_SECONDS) % ROLLING_WINDOW_SECONDS;
     if (this.bucketSeconds[bucketIndex] !== second) {
       this.bucketSeconds[bucketIndex] = second;
       this.requestBuckets[bucketIndex] = 0;
+      this.partialFailureBuckets[bucketIndex] = 0;
+      this.totalFailureBuckets[bucketIndex] = 0;
     }
-    this.requestBuckets[bucketIndex] += 1;
+    return bucketIndex;
   }
 }
 

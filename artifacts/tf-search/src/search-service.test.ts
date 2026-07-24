@@ -169,11 +169,50 @@ describe("search service", () => {
 
     expect(first.cached).toBe(false);
     expect(second.cached).toBe(true);
+    expect(second.providerStatus).toEqual({ yt: "skipped", sc: "skipped", bc: "skipped", dz: "skipped" });
     expect(extended.cached).toBe(false);
     expect(repeatedExtended.cached).toBe(false);
     expect(partial.cached).toBe(false);
     expect(repeatedPartial.cached).toBe(false);
     expect(calls).toHaveLength(18);
+  });
+
+  it("does not cache an incomplete all-source provider fan-out", async () => {
+    let partialCalls = 0;
+    const partialProviders = allSources.map((source): SearchProvider => ({
+      source,
+      async search() {
+        partialCalls += 1;
+        if (source === "sc") throw new Error("provider failure");
+        return [track(source === "yt" ? "youtube" : source === "bc" ? "bandcamp" : "deezer")];
+      },
+    }));
+    const partialService = createSearchService({ providers: partialProviders });
+
+    const partialFirst = await partialService.search(command());
+    const partialSecond = await partialService.search(command({ requestId: "10000000-0000-4000-8000-000000000002" }));
+
+    expect(partialFirst.cached).toBe(false);
+    expect(partialSecond.cached).toBe(false);
+    expect(partialCalls).toBe(8);
+
+    let totalCalls = 0;
+    const totalService = createSearchService({
+      providers: allSources.map((source) => ({
+        source,
+        async search() {
+          totalCalls += 1;
+          throw new Error("provider failure");
+        },
+      })),
+    });
+
+    const totalFirst = await totalService.search(command());
+    const totalSecond = await totalService.search(command({ requestId: "10000000-0000-4000-8000-000000000002" }));
+
+    expect(totalFirst.cached).toBe(false);
+    expect(totalSecond.cached).toBe(false);
+    expect(totalCalls).toBe(8);
   });
 
   it("does not leak sourceUrl through a public projection helper", () => {
@@ -183,16 +222,58 @@ describe("search service", () => {
     expect(JSON.stringify(publicResult)).not.toContain("media.example.test");
   });
 
-  it("reports bounded rolling RPM without retaining queries", async () => {
+  it("reports bounded rolling RPM and provider-failure status without retaining queries", async () => {
     let now = 0;
-    const service = createSearchService({ providers: [], now: () => now });
+    let failureMode: "none" | "partial" | "total" = "none";
+    const sourceNames = { yt: "youtube", sc: "soundcloud", bc: "bandcamp", dz: "deezer" } as const;
+    const service = createSearchService({
+      now: () => now,
+      providers: allSources.map((source) => ({
+        source,
+        async search() {
+          if (failureMode === "total" || (failureMode === "partial" && source === "sc")) {
+            throw new Error("provider failure");
+          }
+          return [track(sourceNames[source])];
+        },
+      })),
+    });
 
-    await service.search(command({ sources: ["yt"] }));
-    await service.search(command({ sources: ["yt"], title: "Different" }));
-    expect(service.telemetry()).toEqual({ requestsPerMinute: 2, status: "healthy" });
+    await service.search(command({ maxResults: 21, title: "Different" }));
+    failureMode = "partial";
+    await service.search(command({ requestId: "10000000-0000-4000-8000-000000000002", maxResults: 21, title: "Partial" }));
+    expect(service.telemetry()).toEqual({ requestsPerMinute: 2, status: "warning" });
+
+    failureMode = "total";
+    await service.search(command({ requestId: "10000000-0000-4000-8000-000000000003", maxResults: 21, title: "Total 1" }));
+    await service.search(command({ requestId: "10000000-0000-4000-8000-000000000004", maxResults: 21, title: "Total 2" }));
+    await service.search(command({ requestId: "10000000-0000-4000-8000-000000000005", maxResults: 21, title: "Total 3" }));
+    expect(service.telemetry()).toEqual({ requestsPerMinute: 5, status: "degraded" });
 
     now = 60_000;
     expect(service.telemetry()).toEqual({ requestsPerMinute: 0, status: "healthy" });
     expect(JSON.stringify(service)).not.toContain("Different");
+  });
+
+  it("does not add failure observations for cached hits", async () => {
+    let shouldFail = false;
+    const service = createSearchService({
+      providers: allSources.map((source) => ({
+        source,
+        async search() {
+          if (shouldFail) throw new Error("provider failure");
+          const sourceNames = { yt: "youtube", sc: "soundcloud", bc: "bandcamp", dz: "deezer" } as const;
+          return [track(sourceNames[source])];
+        },
+      })),
+    });
+
+    await service.search(command());
+    shouldFail = true;
+    const cached = await service.search(command({ requestId: "10000000-0000-4000-8000-000000000002" }));
+
+    expect(cached.cached).toBe(true);
+    expect(cached.providerStatus).toEqual({ yt: "skipped", sc: "skipped", bc: "skipped", dz: "skipped" });
+    expect(service.telemetry().status).toBe("healthy");
   });
 });

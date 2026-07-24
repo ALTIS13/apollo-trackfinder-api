@@ -29,6 +29,20 @@ describe("BoundedSearchCache", () => {
     ]);
   });
 
+  it("keeps delimiter-containing artist and title pairs distinct", () => {
+    const cache = new BoundedSearchCache();
+    cache.set("Alpha::Beta", "Gamma", [result(1)]);
+    cache.set("Alpha", "Beta::Gamma", [result(2)]);
+
+    expect(cache.size).toBe(2);
+    expect(cache.get("alpha::beta", "gamma")).toEqual([result(1)]);
+    expect(cache.get("alpha", "beta::gamma")).toEqual([result(2)]);
+    expect(cache.suggestions("alpha", 5)).toEqual([
+      { artist: "alpha::beta", title: "gamma" },
+      { artist: "alpha", title: "beta::gamma" },
+    ]);
+  });
+
   it("expires entries after one hour using the injected clock", () => {
     let now = 10_000;
     const cache = new BoundedSearchCache({ now: () => now });
