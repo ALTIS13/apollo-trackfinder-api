@@ -59,9 +59,28 @@ describe("module runtime contract", () => {
     expect(hasMatchingSignedBodySignature(expected.replace("v1=", "v2="), expected)).toBe(false);
   });
 
-  it("accepts only 43-character unpadded base64url nonces", () => {
-    expect(canonicalNonceSchema.safeParse("A".repeat(43)).success).toBe(true);
-    expect(canonicalNonceSchema.safeParse("a-b_C".repeat(8) + "xyz").success).toBe(true);
+  it("accepts only canonical 32-byte base64url nonces", () => {
+    const zeroBytesNonce = Buffer.alloc(32).toString("base64url");
+    const fullBytesNonce = Buffer.alloc(32, 0xff).toString("base64url");
+    const nonCanonicalZeroBytesAlias = `${zeroBytesNonce.slice(0, -1)}B`;
+
+    expect(Buffer.from(zeroBytesNonce, "base64url")).toHaveLength(32);
+    expect(Buffer.from(zeroBytesNonce, "base64url").toString("base64url")).toBe(
+      zeroBytesNonce,
+    );
+    expect(canonicalNonceSchema.safeParse(zeroBytesNonce).success).toBe(true);
+    expect(Buffer.from(fullBytesNonce, "base64url")).toHaveLength(32);
+    expect(Buffer.from(fullBytesNonce, "base64url").toString("base64url")).toBe(
+      fullBytesNonce,
+    );
+    expect(canonicalNonceSchema.safeParse(fullBytesNonce).success).toBe(true);
+
+    expect(Buffer.from(nonCanonicalZeroBytesAlias, "base64url")).toHaveLength(32);
+    expect(
+      Buffer.from(nonCanonicalZeroBytesAlias, "base64url").toString("base64url"),
+    ).toBe(zeroBytesNonce);
+    expect(canonicalNonceSchema.safeParse(nonCanonicalZeroBytesAlias).success).toBe(false);
+
     expect(canonicalNonceSchema.safeParse("A".repeat(42)).success).toBe(false);
     expect(canonicalNonceSchema.safeParse("A".repeat(43) + "=").success).toBe(false);
     expect(canonicalNonceSchema.safeParse("A".repeat(42) + "+").success).toBe(false);

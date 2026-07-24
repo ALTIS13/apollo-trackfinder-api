@@ -20,7 +20,8 @@ export interface SignatureInput {
 
 export const canonicalNonceSchema: z.ZodString = z
   .string()
-  .regex(/^[A-Za-z0-9_-]{43}$/);
+  // A 43-character base64url encoding of 32 bytes has two zero pad bits in its final character.
+  .regex(/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/);
 
 const moduleHeartbeatPayloadObjectSchema = z
   .object({
