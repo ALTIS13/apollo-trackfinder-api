@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { createElement, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -155,31 +155,27 @@ describe("TF API migration", () => {
     expect(new Headers(request?.headers).get("X-CSRF-Token")).toBe("csrf-canary");
   });
 
-  it("contains no legacy identity transport in the migrated HTTP call sites", () => {
+  it("contains no legacy identity transport in runtime TypeScript", () => {
     const srcDir = path.resolve(import.meta.dirname, "..");
-    const migratedFiles = [
-      "pages/Home.tsx",
-      "pages/Discover.tsx",
-      "components/TrackCard.tsx",
-      "hooks/use-spotify.ts",
-      "hooks/use-yandex.ts",
-    ];
+    const runtimeFiles = readdirSync(srcDir, { recursive: true, withFileTypes: true })
+      .filter((entry) =>
+        entry.isFile()
+        && /\.tsx?$/.test(entry.name)
+        && !entry.name.includes(".test."))
+      .map((entry) => path.join(entry.parentPath, entry.name));
     const legacyIdentity = [
-      "getClientSessionId",
-      "X-Client-Session",
-      "trackfinder_session_id",
-      "sessionId",
-      "sid",
+      /getClientSessionId/,
+      /X-Client-Session/,
+      /trackfinder_session_id/,
+      /\bsessionId\b/,
+      /\bsid\b/,
     ];
 
-    for (const file of migratedFiles) {
-      const source = readFileSync(path.join(srcDir, file), "utf8");
+    for (const file of runtimeFiles) {
+      const source = readFileSync(file, "utf8");
       for (const identity of legacyIdentity) {
-        expect(source).not.toContain(identity);
+        expect(source, `${path.relative(srcDir, file)} contains ${identity}`).not.toMatch(identity);
       }
     }
-
-    const playerSource = readFileSync(path.join(srcDir, "hooks/use-player.tsx"), "utf8");
-    expect(playerSource).not.toMatch(/\/tracks\/play[\s\S]{0,500}sessionId/);
   });
 });

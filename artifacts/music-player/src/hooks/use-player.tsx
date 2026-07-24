@@ -3,9 +3,13 @@ import { useQueryClient } from "@tanstack/react-query";
 import { getGetTrackStreamQueryOptions } from "@workspace/api-client-react";
 import type { TrackResult, TrackSource, TrackType } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
-import { getClientSessionId } from "@/lib/client-session";
-import { API_BASE as apiBase } from "@/lib/api-config";
-import { tfFetch, tfRequestInit } from "@/lib/tf-session-client";
+import {
+  buildTfWebSocketUrl,
+  createWebSocketTicket,
+  tfFetch,
+  tfRequestInit,
+} from "@/lib/tf-session-client";
+import { TfWebSocketLifecycle } from "@/lib/tf-websocket";
 
 interface PlayerContextType {
   currentTrack: TrackResult | null;
@@ -44,20 +48,6 @@ interface PlayerSyncState {
 }
 
 const PlayerContext = createContext<PlayerContextType | undefined>(undefined);
-
-const RECONNECT_DELAY_MS = 3000;
-const MAX_RECONNECT_DELAY_MS = 30000;
-
-function getWsUrl(): string {
-  const sessionId = encodeURIComponent(getClientSessionId());
-  if (apiBase.startsWith("http")) {
-    const url = new URL(apiBase);
-    const protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    return `${protocol}//${url.host}${url.pathname.replace(/\/$/, "")}/ws?sessionId=${sessionId}`;
-  }
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}${apiBase}/ws?sessionId=${sessionId}`;
-}
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const [currentTrack, setCurrentTrack] = useState<TrackResult | null>(null);
@@ -313,101 +303,88 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // ── WebSocket sync ────────────────────────────────────────────────────────
 
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const reconnectDelayRef = useRef(RECONNECT_DELAY_MS);
-  const mountedRef = useRef(true);
   const suppressSendUntilRef = useRef<number>(0);
 
-  const connectWs = useCallback(() => {
-    if (!mountedRef.current) return;
-    if (wsRef.current?.readyState === WebSocket.CONNECTING || wsRef.current?.readyState === WebSocket.OPEN) return;
-
+  const handleWsMessage = useCallback((event: MessageEvent) => {
     try {
-      const ws = new WebSocket(getWsUrl());
-      wsRef.current = ws;
+      const msg = JSON.parse(event.data) as PlayerSyncState;
+      if (msg.type !== "player_state") return;
+      if (!msg.track) return;
 
-      ws.onopen = () => { reconnectDelayRef.current = RECONNECT_DELAY_MS; };
+      const local = currentTrackRef.current;
 
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data) as PlayerSyncState;
-          if (msg.type !== "player_state") return;
-          if (!msg.track) return;
-
-          const local = currentTrackRef.current;
-
-          if (local?.id !== msg.track.id) {
-            suppressSendUntilRef.current = Date.now() + 10_000;
-            const validSources = ["youtube", "soundcloud"];
-            const remoteTrack: TrackResult = {
-              id: msg.track.id,
-              title: msg.track.title,
-              artist: msg.track.artist,
-              thumbnailUrl: msg.track.thumbnailUrl ?? null,
-              duration: msg.track.duration,
-              source: (validSources.includes(msg.track.source ?? "") ? msg.track.source : "youtube") as TrackSource,
-              type: "original" as TrackType,
-              quality: [],
-              score: 0,
-            };
-            const targetPosition = msg.position;
-            const targetIsPlaying = msg.isPlaying;
-            playTrackRef.current(remoteTrack)
-              .then(() => {
-                if (targetPosition > 1 && audioRef.current) {
-                  audioRef.current.currentTime = targetPosition;
-                  setProgress(targetPosition);
-                }
-                if (!targetIsPlaying && audioRef.current) audioRef.current.pause();
-              })
-              .catch(() => {});
-            return;
-          }
-
-          applyingRemoteRef.current = true;
-          try {
-            if (msg.isPlaying && !isPlayingRef.current) {
-              audioRef.current?.play().catch(() => {});
-            } else if (!msg.isPlaying && isPlayingRef.current) {
-              audioRef.current?.pause();
+      if (local?.id !== msg.track.id) {
+        suppressSendUntilRef.current = Date.now() + 10_000;
+        const validSources = ["youtube", "soundcloud"];
+        const remoteTrack: TrackResult = {
+          id: msg.track.id,
+          title: msg.track.title,
+          artist: msg.track.artist,
+          thumbnailUrl: msg.track.thumbnailUrl ?? null,
+          duration: msg.track.duration,
+          source: (validSources.includes(msg.track.source ?? "") ? msg.track.source : "youtube") as TrackSource,
+          type: "original" as TrackType,
+          quality: [],
+          score: 0,
+        };
+        const targetPosition = msg.position;
+        const targetIsPlaying = msg.isPlaying;
+        playTrackRef.current(remoteTrack)
+          .then(() => {
+            if (targetPosition > 1 && audioRef.current) {
+              audioRef.current.currentTime = targetPosition;
+              setProgress(targetPosition);
             }
-            const drift = Math.abs(progressRef.current - msg.position);
-            if (drift > 5 && audioRef.current) {
-              audioRef.current.currentTime = msg.position;
-              setProgress(msg.position);
-            }
-          } finally {
-            applyingRemoteRef.current = false;
-          }
-        } catch {}
-      };
+            if (!targetIsPlaying && audioRef.current) audioRef.current.pause();
+          })
+          .catch(() => {});
+        return;
+      }
 
-      ws.onclose = () => {
-        wsRef.current = null;
-        if (!mountedRef.current) return;
-        const delay = Math.min(reconnectDelayRef.current, MAX_RECONNECT_DELAY_MS);
-        reconnectDelayRef.current = Math.min(delay * 2, MAX_RECONNECT_DELAY_MS);
-        reconnectTimerRef.current = setTimeout(connectWs, delay);
-      };
-
-      ws.onerror = () => { ws.close(); };
-    } catch {
-      const delay = Math.min(reconnectDelayRef.current, MAX_RECONNECT_DELAY_MS);
-      reconnectDelayRef.current = Math.min(delay * 2, MAX_RECONNECT_DELAY_MS);
-      reconnectTimerRef.current = setTimeout(connectWs, delay);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+      applyingRemoteRef.current = true;
+      try {
+        if (msg.isPlaying && !isPlayingRef.current) {
+          audioRef.current?.play().catch(() => {});
+        } else if (!msg.isPlaying && isPlayingRef.current) {
+          audioRef.current?.pause();
+        }
+        const drift = Math.abs(progressRef.current - msg.position);
+        if (drift > 5 && audioRef.current) {
+          audioRef.current.currentTime = msg.position;
+          setProgress(msg.position);
+        }
+      } finally {
+        applyingRemoteRef.current = false;
+      }
+    } catch {}
   }, []);
 
   useEffect(() => {
-    mountedRef.current = true;
-    connectWs();
+    const lifecycle = new TfWebSocketLifecycle({
+      createTicket: createWebSocketTicket,
+      buildUrl: buildTfWebSocketUrl,
+      createSocket: (url) => {
+        const socket = new WebSocket(url);
+        wsRef.current = socket;
+        return socket;
+      },
+      onMessage: handleWsMessage,
+      onTerminalError: () => {
+        wsRef.current = null;
+        toast({
+          title: "Синхронизация недоступна",
+          description: "Обновите авторизацию Apollo TF и повторите попытку.",
+          variant: "destructive",
+        });
+      },
+    });
+    lifecycle.start();
+
     return () => {
-      mountedRef.current = false;
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); wsRef.current = null; }
+      lifecycle.stop();
+      wsRef.current = null;
     };
-  }, [connectWs]);
+  }, [handleWsMessage, toast]);
 
   const sendWsState = useCallback(() => {
     if (applyingRemoteRef.current) return;
