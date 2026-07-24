@@ -10,9 +10,11 @@ import {
 } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  clearTfSessionSecurityState,
+  commitTfSessionSecurityState,
+  fetchTfSession,
   type TfApiError,
   type TfBrowserSession,
-  loadTfSession,
   logoutTfSession,
   normalizeTfApiError,
   startTfLogin,
@@ -41,6 +43,11 @@ interface TfAuthState {
   error: TfApiError | null;
 }
 
+interface ActiveRefresh {
+  mode: "standard" | "policy";
+  promise: Promise<void>;
+}
+
 const TfAuthContext = createContext<TfAuthContextValue | null>(null);
 
 export function TfAuthProvider({ children }: { children: ReactNode }) {
@@ -52,22 +59,35 @@ export function TfAuthProvider({ children }: { children: ReactNode }) {
   });
   const mountedRef = useRef(false);
   const stateGenerationRef = useRef(0);
-  const refreshPromiseRef = useRef<Promise<void> | null>(null);
+  const activeRefreshRef = useRef<ActiveRefresh | null>(null);
 
-  const refresh = useCallback((): Promise<void> => {
-    if (refreshPromiseRef.current !== null) {
-      return refreshPromiseRef.current;
+  const beginRefresh = useCallback((mode: ActiveRefresh["mode"]): Promise<void> => {
+    const activeRefresh = activeRefreshRef.current;
+    if (
+      activeRefresh !== null
+      && (mode === "standard" || activeRefresh.mode === "policy")
+    ) {
+      return activeRefresh.promise;
     }
 
     const generation = ++stateGenerationRef.current;
+    clearTfSessionSecurityState();
+    const cancellation = queryClient.cancelQueries();
+    queryClient.clear();
     if (mountedRef.current) {
       setState({ status: "loading", session: null, error: null });
     }
 
     const refreshPromise = (async () => {
+      await cancellation.catch(() => {});
+      if (!mountedRef.current || generation !== stateGenerationRef.current) {
+        return;
+      }
+
       try {
-        const session = await loadTfSession();
+        const session = await fetchTfSession();
         if (mountedRef.current && generation === stateGenerationRef.current) {
+          commitTfSessionSecurityState(session);
           setState({ status: "authenticated", session, error: null });
         }
       } catch (error) {
@@ -82,14 +102,20 @@ export function TfAuthProvider({ children }: { children: ReactNode }) {
       }
     })();
 
-    refreshPromiseRef.current = refreshPromise;
+    const refreshRecord: ActiveRefresh = { mode, promise: refreshPromise };
+    activeRefreshRef.current = refreshRecord;
     void refreshPromise.finally(() => {
-      if (refreshPromiseRef.current === refreshPromise) {
-        refreshPromiseRef.current = null;
+      if (activeRefreshRef.current === refreshRecord) {
+        activeRefreshRef.current = null;
       }
     });
     return refreshPromise;
-  }, []);
+  }, [queryClient]);
+
+  const refresh = useCallback(
+    (): Promise<void> => beginRefresh("standard"),
+    [beginRefresh],
+  );
 
   useEffect(() => {
     mountedRef.current = true;
@@ -98,7 +124,9 @@ export function TfAuthProvider({ children }: { children: ReactNode }) {
 
       if (event.type === "invalidated") {
         stateGenerationRef.current += 1;
-        refreshPromiseRef.current = null;
+        activeRefreshRef.current = null;
+        clearTfSessionSecurityState();
+        void queryClient.cancelQueries().catch(() => {});
         queryClient.clear();
         setState({
           status: "unauthenticated",
@@ -108,35 +136,40 @@ export function TfAuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      void refresh();
+      void beginRefresh("policy");
     });
     void refresh();
 
     return () => {
       mountedRef.current = false;
       stateGenerationRef.current += 1;
-      refreshPromiseRef.current = null;
+      activeRefreshRef.current = null;
       unsubscribe();
+      clearTfSessionSecurityState();
+      void queryClient.cancelQueries().catch(() => {});
+      queryClient.clear();
     };
-  }, [queryClient, refresh]);
+  }, [beginRefresh, queryClient, refresh]);
 
   const login = useCallback(() => {
     startTfLogin();
   }, []);
 
   const logout = useCallback(async () => {
+    const remoteLogout = logoutTfSession().catch(() => {});
     stateGenerationRef.current += 1;
-    refreshPromiseRef.current = null;
-    try {
-      await logoutTfSession();
-    } catch {
-      // Local invalidation still completes when the server logout is unavailable.
-    } finally {
-      queryClient.clear();
-      if (mountedRef.current) {
-        setState({ status: "unauthenticated", session: null, error: null });
-      }
+    activeRefreshRef.current = null;
+    clearTfSessionSecurityState();
+    const cancellation = queryClient.cancelQueries();
+    queryClient.clear();
+    if (mountedRef.current) {
+      setState({ status: "unauthenticated", session: null, error: null });
     }
+
+    await Promise.all([
+      remoteLogout,
+      cancellation.catch(() => {}),
+    ]);
   }, [queryClient]);
 
   const hasEntitlement = useCallback((capability: string) => (

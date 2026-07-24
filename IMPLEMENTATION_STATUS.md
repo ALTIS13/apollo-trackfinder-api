@@ -61,16 +61,21 @@ Last updated: 2026-07-24.
 
 - Status: implemented and locally validated
 - Browser auth: Platform PKCE through `api.tf.apollot.ru`, host-only TF cookie
-- CSRF: `/api/auth/me` token retained in memory and sent on unsafe requests
+- CSRF: `/api/auth/me` is fetched and validated without side effects; only the mounted current auth-provider generation commits its canonical token in memory
 - Policy: `tf.search` gates application mount; server remains authoritative for every capability
-- Runtime invalidation: confirmed `401` clears CSRF and query state; core WebSocket/search policy failures revalidate `/auth/me` and unmount protected providers while pending
+- Runtime invalidation: confirmed `401` and core WebSocket/search/media policy failures synchronously unmount protected providers, cancel and clear protected queries, clear CSRF, then revalidate `/auth/me` where applicable
+- Account replacement: an accepted account B session can remount only after account A queries are cancelled and cleared; obsolete `/auth/me` generations cannot commit CSRF
+- Logout: the CSRF-protected server request starts with the current token, then local auth and query state clear immediately without waiting for network settlement
 - Search: generated `searchTracks` receives current credential/CSRF options at mutation time
-- WebSocket: one-time ticket acquired before every connection attempt; exact terminal close pairs and stale handlers are fail-closed
+- Generated media: stream/download `unauthorized`, `module_access_denied`, and `policy_unavailable` failures feed the auth channel before existing local error feedback
+- WebSocket: one-time ticket acquired before every connection attempt; exact terminal close pairs and stale handlers are fail-closed, and pre-open `websocket_unavailable` forces session revalidation before a fresh player lifecycle can mount
 - Yandex: browser token entry/transport removed; new onboarding is deferred to server-side OAuth while existing server-backed connections remain readable and logout-capable
 - Legacy browser UUID: removed
 - Remote infrastructure: unchanged; domains/Caddy/Coolify deployment still requires preflight and explicit approval
 
 ## Validation
+
+- TF web-session second whole-branch follow-up (2026-07-24): focused session/auth/generated-media/WebSocket coverage and the full music-player suite passed `78/78`; selected API auth/boundary/ticket/policy/WebSocket tests passed `100/100`; player/root typechecks and player production build passed. Frozen install, exact runtime legacy/provider-secret/Yandex-token scans, and `git diff --check` passed. No lockfile, generated shared-client, Compose/Docker, server runtime, or remote infrastructure change was made.
 
 - TF web-session consolidated final-review fix wave (2026-07-24): focused and full music-player suites passed `66/66`; selected API auth/boundary/ticket/policy/WebSocket tests passed `100/100`; player/root typechecks and player production build passed; exact runtime legacy/provider-secret scans and `git diff --check` were clean. `pnpm 10.33.2` regenerated `pnpm-lock.yaml` unchanged and `pnpm install --frozen-lockfile` passed. The required music-player test importer entries were retained together with pnpm's normalized shared Vitest peer snapshots and `path-scurry` deduplication to the already locked `lru-cache@11.5.2`. No tracked Compose file changed, so Compose was not rerun and no remote service or infrastructure was touched.
 

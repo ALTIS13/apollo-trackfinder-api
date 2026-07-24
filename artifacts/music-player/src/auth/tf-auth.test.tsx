@@ -5,11 +5,13 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   TfApiError,
-  loadTfSession,
+  clearTfSessionSecurityState,
+  fetchTfSession,
   logoutTfSession,
   reportTfAuthError,
   startTfLogin,
   tfFetch,
+  tfRequestInit,
 } from "@/lib/tf-session-client";
 import { TfAuthProvider, useTfAuth } from "./tf-auth";
 import { TfSessionBoundary } from "./TfSessionBoundary";
@@ -18,7 +20,7 @@ vi.mock("@/lib/tf-session-client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/tf-session-client")>();
   return {
     ...actual,
-    loadTfSession: vi.fn(),
+    fetchTfSession: vi.fn(),
     logoutTfSession: vi.fn(),
     startTfLogin: vi.fn(),
   };
@@ -31,8 +33,14 @@ const session = {
   expiresAt: "2099-01-01T00:00:00.000Z",
   csrfToken: "c".repeat(42) + "A",
 };
+const replacementSession = {
+  ...session,
+  accountId: "10000000-0000-4000-8000-000000000003",
+  installationId: "20000000-0000-4000-8000-000000000004",
+  csrfToken: "d".repeat(42) + "A",
+};
 
-const loadTfSessionMock = vi.mocked(loadTfSession);
+const fetchTfSessionMock = vi.mocked(fetchTfSession);
 const logoutTfSessionMock = vi.mocked(logoutTfSession);
 const startTfLoginMock = vi.mocked(startTfLogin);
 
@@ -47,11 +55,11 @@ function deferred<T>() {
 }
 
 function ProtectedCanary() {
-  const { logout } = useTfAuth();
+  const { logout, session: currentSession } = useTfAuth();
 
   return (
     <div>
-      <div data-testid="protected-canary">protected player</div>
+      <div data-testid="protected-canary">{currentSession?.accountId}</div>
       <button onClick={() => void logout()}>Sign out</button>
     </div>
   );
@@ -64,6 +72,15 @@ function LogoutActionProbe({ onReady }: { onReady: (logout: () => Promise<void>)
   }, [logout, onReady]);
 
   return <div data-testid="protected-canary">protected player</div>;
+}
+
+function ProviderLogoutProbe({ onReady }: { onReady: (logout: () => Promise<void>) => void }) {
+  const { logout } = useTfAuth();
+  useEffect(() => {
+    onReady(logout);
+  }, [logout, onReady]);
+
+  return null;
 }
 
 function renderAuth(queryClient = new QueryClient({
@@ -84,6 +101,7 @@ function renderAuth(queryClient = new QueryClient({
 
 afterEach(() => {
   cleanup();
+  clearTfSessionSecurityState();
   vi.resetAllMocks();
   vi.unstubAllGlobals();
 });
@@ -91,7 +109,7 @@ afterEach(() => {
 describe("TF auth boundary", () => {
   it("does not mount protected children before /auth/me succeeds", async () => {
     let resolveSession: (value: typeof session) => void;
-    loadTfSessionMock.mockReturnValueOnce(new Promise((resolve) => {
+    fetchTfSessionMock.mockReturnValueOnce(new Promise((resolve) => {
       resolveSession = resolve;
     }));
 
@@ -104,7 +122,7 @@ describe("TF auth boundary", () => {
   });
 
   it("shows sign in after a 401 and navigates through /auth/start", async () => {
-    loadTfSessionMock.mockRejectedValueOnce(new TfApiError(401, "unauthorized", "unauthenticated"));
+    fetchTfSessionMock.mockRejectedValueOnce(new TfApiError(401, "unauthorized", "unauthenticated"));
     const user = userEvent.setup();
 
     renderAuth();
@@ -119,7 +137,7 @@ describe("TF auth boundary", () => {
     new TfApiError(503, "policy_unavailable", "unavailable"),
     new Error("network unavailable"),
   ])("shows retry after a 503 or transport failure", async (error) => {
-    loadTfSessionMock.mockRejectedValueOnce(error);
+    fetchTfSessionMock.mockRejectedValueOnce(error);
 
     renderAuth();
 
@@ -128,7 +146,7 @@ describe("TF auth boundary", () => {
   });
 
   it("shows module locked when tf.search is absent", async () => {
-    loadTfSessionMock.mockResolvedValueOnce({ ...session, entitlements: ["tf.downloads"] });
+    fetchTfSessionMock.mockResolvedValueOnce({ ...session, entitlements: ["tf.downloads"] });
 
     renderAuth();
 
@@ -137,7 +155,7 @@ describe("TF auth boundary", () => {
   });
 
   it("does not mount protected UI when /auth/me validation fails", async () => {
-    loadTfSessionMock.mockRejectedValueOnce(
+    fetchTfSessionMock.mockRejectedValueOnce(
       new TfApiError(200, "invalid_session", "invalid"),
     );
 
@@ -147,9 +165,14 @@ describe("TF auth boundary", () => {
     expect(screen.queryByTestId("protected-canary")).not.toBeInTheDocument();
   });
 
-  it("clears query data and protected UI after logout", async () => {
-    loadTfSessionMock.mockResolvedValueOnce(session);
-    logoutTfSessionMock.mockResolvedValueOnce();
+  it("starts remote logout with the current token but unmounts and clears locally before it settles", async () => {
+    const remoteLogout = deferred<void>();
+    let logoutHeaders: HeadersInit | undefined;
+    fetchTfSessionMock.mockResolvedValueOnce(session);
+    logoutTfSessionMock.mockImplementationOnce(() => {
+      logoutHeaders = tfRequestInit({ method: "POST" }).headers;
+      return remoteLogout.promise;
+    });
     const { queryClient } = renderAuth();
 
     expect(await screen.findByTestId("protected-canary")).toBeInTheDocument();
@@ -157,14 +180,62 @@ describe("TF auth boundary", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
 
-    await waitFor(() => {
-      expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
-      expect(screen.queryByTestId("protected-canary")).not.toBeInTheDocument();
+    expect(logoutTfSessionMock).toHaveBeenCalledOnce();
+    expect(new Headers(logoutHeaders).get("X-CSRF-Token")).toBe(session.csrfToken);
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
+    expect(screen.queryByTestId("protected-canary")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Требуется вход" })).toBeInTheDocument();
+    expect(() => tfRequestInit({ method: "POST" })).toThrowError(
+      expect.objectContaining({ code: "csrf_unavailable" }),
+    );
+
+    remoteLogout.resolve();
+    await act(async () => {
+      await remoteLogout.promise;
     });
   });
 
+  it("rejects a delayed initial session response after logout", async () => {
+    const delayedSession = deferred<typeof session>();
+    fetchTfSessionMock.mockReturnValueOnce(delayedSession.promise);
+    logoutTfSessionMock.mockResolvedValueOnce();
+    let logoutAction: (() => Promise<void>) | undefined;
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <TfAuthProvider>
+          <ProviderLogoutProbe onReady={(logout) => { logoutAction = logout; }} />
+          <TfSessionBoundary>
+            <ProtectedCanary />
+          </TfSessionBoundary>
+        </TfAuthProvider>
+      </QueryClientProvider>,
+    );
+    await waitFor(() => {
+      expect(fetchTfSessionMock).toHaveBeenCalledOnce();
+      expect(logoutAction).toBeTypeOf("function");
+    });
+
+    await act(async () => {
+      await logoutAction!();
+    });
+    delayedSession.resolve(session);
+    await act(async () => {
+      await delayedSession.promise;
+    });
+
+    expect(screen.getByRole("heading", { name: "Требуется вход" })).toBeInTheDocument();
+    expect(screen.queryByTestId("protected-canary")).not.toBeInTheDocument();
+    expect(() => tfRequestInit({ method: "POST" })).toThrowError(
+      expect.objectContaining({ code: "csrf_unavailable" }),
+    );
+  });
+
   it("clears query data and unmounts protected UI after a runtime tfFetch 401", async () => {
-    loadTfSessionMock.mockResolvedValueOnce(session);
+    fetchTfSessionMock.mockResolvedValueOnce(session);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
       JSON.stringify({ error: "unauthorized" }),
       {
@@ -173,8 +244,10 @@ describe("TF auth boundary", () => {
       },
     )));
     const { queryClient } = renderAuth();
+    const cancelQueries = vi.spyOn(queryClient, "cancelQueries");
 
     expect(await screen.findByTestId("protected-canary")).toBeInTheDocument();
+    cancelQueries.mockClear();
     queryClient.setQueryData(["protected"], "cached");
 
     await expect(tfFetch("/tracks/recommendations")).rejects.toMatchObject({
@@ -187,17 +260,32 @@ describe("TF auth boundary", () => {
       expect(screen.queryByTestId("protected-canary")).not.toBeInTheDocument();
       expect(screen.getByRole("heading", { name: "Требуется вход" })).toBeInTheDocument();
     });
-    expect(loadTfSessionMock).toHaveBeenCalledOnce();
+    expect(fetchTfSessionMock).toHaveBeenCalledOnce();
+    expect(cancelQueries).toHaveBeenCalledOnce();
   });
 
-  it("deduplicates policy refreshes and locks before protected UI can remain mounted", async () => {
+  it("cancels and clears account A before one deduplicated policy refresh can mount account B", async () => {
     const refreshedSession = deferred<typeof session>();
-    loadTfSessionMock
+    const transitionOrder: string[] = [];
+    fetchTfSessionMock
       .mockResolvedValueOnce(session)
-      .mockReturnValueOnce(refreshedSession.promise);
-    renderAuth();
+      .mockImplementationOnce(() => {
+        transitionOrder.push("fetch-b");
+        return refreshedSession.promise;
+      });
+    const { queryClient } = renderAuth();
 
     expect(await screen.findByTestId("protected-canary")).toBeInTheDocument();
+    queryClient.setQueryData(["account-a"], "private-a");
+    const inFlight = queryClient.fetchQuery({
+      queryKey: ["account-a", "in-flight"],
+      queryFn: ({ signal }) => new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          transitionOrder.push("cancel-a");
+          reject(new DOMException("cancelled", "AbortError"));
+        });
+      }),
+    });
 
     act(() => {
       expect(reportTfAuthError(
@@ -212,11 +300,20 @@ describe("TF auth boundary", () => {
     });
 
     expect(screen.queryByTestId("protected-canary")).not.toBeInTheDocument();
-    expect(loadTfSessionMock).toHaveBeenCalledTimes(2);
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
+    expect(transitionOrder).toContain("cancel-a");
+    await expect(inFlight).rejects.toBeDefined();
+    await waitFor(() => expect(fetchTfSessionMock).toHaveBeenCalledTimes(2));
+    expect(transitionOrder).toEqual(["cancel-a", "fetch-b"]);
 
-    refreshedSession.resolve({ ...session, entitlements: ["tf.downloads"] });
-    expect(await screen.findByText("Модуль недоступен")).toBeInTheDocument();
-    expect(screen.queryByTestId("protected-canary")).not.toBeInTheDocument();
+    refreshedSession.resolve(replacementSession);
+    expect(await screen.findByTestId("protected-canary")).toHaveTextContent(
+      replacementSession.accountId,
+    );
+    expect(queryClient.getQueryData(["account-a"])).toBeUndefined();
+    expect(tfRequestInit({ method: "POST" })).toMatchObject({
+      headers: { "x-csrf-token": replacementSession.csrfToken },
+    });
   });
 
   it.each([
@@ -229,7 +326,7 @@ describe("TF auth boundary", () => {
       "Сервис временно недоступен",
     ],
   ])("keeps protected UI unmounted when policy refresh resolves to $kind", async (refreshError, heading) => {
-    loadTfSessionMock
+    fetchTfSessionMock
       .mockResolvedValueOnce(session)
       .mockRejectedValueOnce(refreshError);
     renderAuth();
@@ -242,12 +339,12 @@ describe("TF auth boundary", () => {
 
     expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
     expect(screen.queryByTestId("protected-canary")).not.toBeInTheDocument();
-    expect(loadTfSessionMock).toHaveBeenCalledTimes(2);
+    expect(fetchTfSessionMock).toHaveBeenCalledTimes(2);
   });
 
   it("ignores auth events and late refresh completion after provider cleanup", async () => {
     const refreshedSession = deferred<typeof session>();
-    loadTfSessionMock
+    fetchTfSessionMock
       .mockResolvedValueOnce(session)
       .mockReturnValueOnce(refreshedSession.promise);
     const view = renderAuth();
@@ -256,7 +353,7 @@ describe("TF auth boundary", () => {
     act(() => {
       reportTfAuthError(new TfApiError(403, "module_access_denied", "forbidden"));
     });
-    expect(loadTfSessionMock).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(fetchTfSessionMock).toHaveBeenCalledTimes(2));
 
     view.unmount();
     act(() => {
@@ -267,12 +364,69 @@ describe("TF auth boundary", () => {
       await refreshedSession.promise;
     });
 
-    expect(loadTfSessionMock).toHaveBeenCalledTimes(2);
+    expect(fetchTfSessionMock).toHaveBeenCalledTimes(2);
     expect(screen.queryByTestId("protected-canary")).not.toBeInTheDocument();
   });
 
+  it("accepts only the current provider generation when delayed account A resolves after account B", async () => {
+    const delayedAccountA = deferred<typeof session>();
+    fetchTfSessionMock
+      .mockReturnValueOnce(delayedAccountA.promise)
+      .mockResolvedValueOnce(replacementSession);
+
+    const firstProvider = renderAuth();
+    expect(screen.queryByTestId("protected-canary")).not.toBeInTheDocument();
+    await waitFor(() => expect(fetchTfSessionMock).toHaveBeenCalledOnce());
+    firstProvider.unmount();
+
+    renderAuth();
+    expect(await screen.findByTestId("protected-canary")).toHaveTextContent(
+      replacementSession.accountId,
+    );
+
+    delayedAccountA.resolve(session);
+    await act(async () => {
+      await delayedAccountA.promise;
+    });
+
+    expect(screen.getByTestId("protected-canary")).toHaveTextContent(
+      replacementSession.accountId,
+    );
+    expect(tfRequestInit({ method: "POST" })).toMatchObject({
+      headers: { "x-csrf-token": replacementSession.csrfToken },
+    });
+  });
+
+  it("does not commit a delayed policy response after a confirmed 401 replaces its generation", async () => {
+    const delayedReplacement = deferred<typeof replacementSession>();
+    fetchTfSessionMock
+      .mockResolvedValueOnce(session)
+      .mockReturnValueOnce(delayedReplacement.promise);
+    renderAuth();
+
+    expect(await screen.findByTestId("protected-canary")).toBeInTheDocument();
+    act(() => {
+      reportTfAuthError(new TfApiError(403, "module_access_denied", "forbidden"));
+    });
+    await waitFor(() => expect(fetchTfSessionMock).toHaveBeenCalledTimes(2));
+
+    act(() => {
+      reportTfAuthError(new TfApiError(401, "unauthorized", "unauthenticated"));
+      delayedReplacement.resolve(replacementSession);
+    });
+    await act(async () => {
+      await delayedReplacement.promise;
+    });
+
+    expect(screen.getByRole("heading", { name: "Требуется вход" })).toBeInTheDocument();
+    expect(screen.queryByTestId("protected-canary")).not.toBeInTheDocument();
+    expect(() => tfRequestInit({ method: "POST" })).toThrowError(
+      expect.objectContaining({ code: "csrf_unavailable" }),
+    );
+  });
+
   it("resolves and clears local state when the logout request fails", async () => {
-    loadTfSessionMock.mockResolvedValueOnce(session);
+    fetchTfSessionMock.mockResolvedValueOnce(session);
     logoutTfSessionMock.mockRejectedValueOnce(new Error("logout unavailable"));
     let logoutAction: (() => Promise<void>) | undefined;
     const queryClient = new QueryClient({

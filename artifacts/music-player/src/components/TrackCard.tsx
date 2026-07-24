@@ -8,7 +8,10 @@ import type { TrackResult } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { motion } from "framer-motion";
-import { tfRequestInit } from "@/lib/tf-session-client";
+import {
+  reportTfAuthError,
+  tfRequestInit,
+} from "@/lib/tf-session-client";
 
 interface TrackCardProps {
   track: TrackResult;
@@ -57,6 +60,7 @@ export function TrackCard({ track, index }: TrackCardProps) {
       document.body.removeChild(a);
       toast({ title: "Загрузка начата", description: `Скачиваем ${track.title}...` });
     } catch (err) {
+      reportTfAuthError(err);
       console.error("Download failed:", err);
       toast({ title: "Ошибка загрузки", description: "Не удалось получить ссылку для скачивания.", variant: "destructive" });
     } finally {

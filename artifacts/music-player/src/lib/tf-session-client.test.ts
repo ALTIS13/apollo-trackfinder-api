@@ -3,8 +3,9 @@ import {
   TfApiError,
   buildTfWebSocketUrl,
   clearTfSessionSecurityState,
+  commitTfSessionSecurityState,
   createWebSocketTicket,
-  loadTfSession,
+  fetchTfSession,
   tfFetch,
   tfRequestInit,
 } from "./tf-session-client";
@@ -18,6 +19,12 @@ const session = {
   csrfToken: CSRF_TOKEN,
 };
 
+async function fetchAndCommitSession() {
+  const fetchedSession = await fetchTfSession();
+  commitTfSessionSecurityState(fetchedSession);
+  return fetchedSession;
+}
+
 describe("TF browser session client", () => {
   beforeEach(() => {
     clearTfSessionSecurityState();
@@ -26,17 +33,23 @@ describe("TF browser session client", () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
-  it("loads the session with credentials and retains spread-safe CSRF headers only in memory", async () => {
+  it("fetches and validates the session without committing CSRF until the caller accepts it", async () => {
     vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify(session), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     }));
 
-    await expect(loadTfSession()).resolves.toEqual(session);
+    const fetchedSession = await fetchTfSession();
+    expect(fetchedSession).toEqual(session);
     expect(fetch).toHaveBeenCalledWith(
       expect.stringMatching(/\/api\/auth\/me$/),
       expect.objectContaining({ method: "GET", credentials: "include" }),
     );
+    expect(() => tfRequestInit({ method: "POST" })).toThrowError(
+      expect.objectContaining({ code: "csrf_unavailable" }),
+    );
+
+    commitTfSessionSecurityState(fetchedSession);
     expect(tfRequestInit({
       method: "post",
       headers: { "Content-Type": "application/json", "x-csrf-token": "caller-token" },
@@ -69,7 +82,7 @@ describe("TF browser session client", () => {
         headers: { "Content-Type": "application/json" },
       }));
 
-    await loadTfSession();
+    await fetchAndCommitSession();
     await expect(createWebSocketTicket()).resolves.toBe("a".repeat(43));
     expect(fetch).toHaveBeenLastCalledWith(
       expect.stringMatching(/\/api\/ws\/tickets$/),
@@ -140,7 +153,7 @@ describe("TF browser session client", () => {
         headers: { "Content-Type": "application/json" },
       }));
 
-    await loadTfSession();
+    await fetchAndCommitSession();
     await expect(tfFetch("/auth/me")).rejects.toMatchObject({ status: 401 });
     await expect(tfFetch("/tracks/play", { method: "POST" })).rejects.toMatchObject({
       code: "csrf_unavailable",
@@ -188,15 +201,15 @@ describe("TF browser session client", () => {
         headers: { "Content-Type": "application/json" },
       }));
 
-    await loadTfSession();
-    await expect(loadTfSession()).rejects.toMatchObject({ code: "invalid_session" });
+    await fetchAndCommitSession();
+    await expect(fetchTfSession()).rejects.toMatchObject({ code: "invalid_session" });
     await expect(tfFetch("/tracks/play", { method: "POST" })).rejects.toMatchObject({
       code: "csrf_unavailable",
     });
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
-  it("retains CSRF after a transient 503", async () => {
+  it("clears CSRF when a core policy 503 publishes revalidation", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(new Response(JSON.stringify(session), {
         status: 200,
@@ -207,10 +220,27 @@ describe("TF browser session client", () => {
         headers: { "Content-Type": "application/json" },
       }));
 
-    await loadTfSession();
+    await fetchAndCommitSession();
     await expect(tfFetch("/auth/me")).rejects.toMatchObject({ status: 503 });
-    expect(tfRequestInit({ method: "POST" })).toMatchObject({
-      headers: { "x-csrf-token": CSRF_TOKEN },
-    });
+    expect(() => tfRequestInit({ method: "POST" })).toThrowError(
+      expect.objectContaining({ code: "csrf_unavailable" }),
+    );
+  });
+
+  it("publishes forced revalidation for pre-open WebSocket unavailability", async () => {
+    const { reportTfAuthError, subscribeTfAuthSecurityEvents } = await import("./tf-session-client");
+    const listener = vi.fn();
+    const unsubscribe = subscribeTfAuthSecurityEvents(listener);
+
+    expect(reportTfAuthError(
+      new TfApiError(503, "websocket_unavailable", "unavailable"),
+    )).toBe(true);
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({
+      type: "revalidate",
+      error: expect.objectContaining({ code: "websocket_unavailable" }),
+    }));
+
+    unsubscribe();
   });
 });

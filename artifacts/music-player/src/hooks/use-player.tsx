@@ -149,6 +149,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       await audioRef.current.play();
       setIsPlaying(true);
     } catch (err) {
+      reportTfAuthError(err);
       console.error("Failed to play track:", err);
       setCurrentTrack(null);
       setIsPlaying(false);

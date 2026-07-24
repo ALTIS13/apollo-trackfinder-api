@@ -44,6 +44,7 @@ const CORE_POLICY_ERROR_CODES = new Set([
   "module_access_denied",
   "policy_revoked",
   "policy_unavailable",
+  "websocket_unavailable",
 ]);
 const authSecurityListeners = new Set<TfAuthSecurityListener>();
 
@@ -71,9 +72,7 @@ export function reportTfAuthError(error: unknown): boolean {
       : null;
   if (type === null) return false;
 
-  if (type === "invalidated") {
-    clearTfSessionSecurityState();
-  }
+  clearTfSessionSecurityState();
 
   const event: TfAuthSecurityEvent = { type, error: apiError };
   for (const listener of [...authSecurityListeners]) {
@@ -171,7 +170,7 @@ export async function tfFetch<T>(path: string, init?: RequestInit): Promise<T> {
   }
 }
 
-export async function loadTfSession(): Promise<TfBrowserSession> {
+export async function fetchTfSession(): Promise<TfBrowserSession> {
   const session = await tfFetch<unknown>("/auth/me");
 
   if (!isTfBrowserSession(session)) {
@@ -179,8 +178,16 @@ export async function loadTfSession(): Promise<TfBrowserSession> {
     throw new TfApiError(200, "invalid_session", "invalid");
   }
 
-  csrfToken = session.csrfToken;
   return session;
+}
+
+export function commitTfSessionSecurityState(session: TfBrowserSession): void {
+  if (!isTfBrowserSession(session)) {
+    clearTfSessionSecurityState();
+    throw new TfApiError(200, "invalid_session", "invalid");
+  }
+
+  csrfToken = session.csrfToken;
 }
 
 export function startTfLogin(): void {
@@ -188,11 +195,7 @@ export function startTfLogin(): void {
 }
 
 export async function logoutTfSession(): Promise<void> {
-  try {
-    await tfFetch<void>("/auth/logout", { method: "POST" });
-  } finally {
-    clearTfSessionSecurityState();
-  }
+  await tfFetch<void>("/auth/logout", { method: "POST" });
 }
 
 export async function createWebSocketTicket(): Promise<string> {

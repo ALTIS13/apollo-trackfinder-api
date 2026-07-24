@@ -16,7 +16,8 @@ import {
 import { useYandexLogout } from "@/hooks/use-yandex";
 import {
   clearTfSessionSecurityState,
-  loadTfSession,
+  commitTfSessionSecurityState,
+  fetchTfSession,
   subscribeTfAuthSecurityEvents,
   tfRequestInit,
 } from "./tf-session-client";
@@ -46,7 +47,7 @@ function queryWrapper({ children }: { children: ReactNode }) {
 
 async function loadSessionForUnsafeRequest() {
   vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(session));
-  await loadTfSession();
+  commitTfSessionSecurityState(await fetchTfSession());
   vi.mocked(fetch).mockClear();
 }
 
@@ -158,7 +159,7 @@ describe("TF API migration", () => {
     const user = userEvent.setup();
 
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(firstSession));
-    await loadTfSession();
+    commitTfSessionSecurityState(await fetchTfSession());
     vi.mocked(fetch).mockClear();
     vi.mocked(fetch).mockResolvedValue(jsonResponse({
       query: "Artist Track",
@@ -176,7 +177,7 @@ describe("TF API migration", () => {
     expect(fetch).not.toHaveBeenCalled();
 
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(nextSession));
-    await loadTfSession();
+    commitTfSessionSecurityState(await fetchTfSession());
     vi.mocked(fetch).mockClear();
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
       query: "Artist Track",

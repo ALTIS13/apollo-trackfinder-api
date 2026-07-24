@@ -4,7 +4,7 @@
 
 **Goal:** Make the Apollo TF web player use the merged Platform PKCE browser session, CSRF boundary, entitlement policy, and one-time WebSocket tickets without exposing bearer tokens or retaining the legacy browser UUID.
 
-**Architecture:** A music-player-local session adapter owns credentialed requests and keeps the CSRF token in memory. A React auth boundary loads `/api/auth/me` before protected providers mount, while all generated and manual API calls receive cookie/CSRF request options from the adapter. Player synchronization obtains a new one-use ticket before every WebSocket connection attempt and stops reconnecting when authentication or policy is denied.
+**Architecture:** A music-player-local session adapter owns credentialed requests and validates `/api/auth/me` without mutating security state. The React auth provider generation-checks each response before committing its CSRF token, cancels and clears protected queries during security transitions, and mounts protected providers only for the accepted session. Generated and manual API calls receive cookie/CSRF request options from the adapter. Player synchronization obtains a new one-use ticket before every WebSocket connection attempt and stops reconnecting when authentication or policy is denied.
 
 **Tech Stack:** React 19, TypeScript, Vite, TanStack Query, Wouter, Vitest 4, jsdom, Testing Library, Fastify TF API contract tests
 
@@ -14,12 +14,14 @@
 - Browser authorization is the host-only `__Host-apollo_tf` cookie. Do not store or transport a browser `sessionId`, bearer token, provider token, or Apollo Platform secret.
 - Browser-managed Yandex tokens are prohibited. New Yandex onboarding is deferred to server-side OAuth; already connected accounts retain server-backed status, read, and logout behavior.
 - JavaScript cannot read the API host's `__Host-apollo_tf_csrf` cookie. Keep only the `csrfToken` returned by `GET /api/auth/me` in memory.
+- `/api/auth/me` fetch/validation is separate from CSRF commit. Only the mounted auth provider may commit a validated response after confirming its request generation is current.
 - Every TF API request uses `credentials: "include"`.
 - `POST`, `PUT`, `PATCH`, and `DELETE` requests require the in-memory `X-CSRF-Token`; fail before `fetch` when the token is absent.
 - `GET /api/auth/start` is a top-level browser navigation. `POST /api/auth/logout` is a credentialed CSRF-protected request.
 - `POST /api/ws/tickets` has no body and returns a one-use ticket. Obtain a fresh ticket before every initial WebSocket connection and every reconnect.
 - The only WebSocket query parameter is `ticket`; never place cookies, CSRF values, account IDs, installation IDs, or legacy session IDs in the URL.
 - `401` means unauthenticated, `403 module_access_denied` means the account lacks the capability, and `503` means an authentication or policy dependency is unavailable. Do not convert these states into an infinite retry loop.
+- Confirmed invalidation and policy revalidation synchronously unmount protected UI, clear old CSRF and cached protected data, and cancel protected in-flight queries before any replacement `/api/auth/me` request.
 - Do not modify the generated shared API client defaults because that package is also used by non-browser clients. Pass request options from the music player.
 - Preserve the existing Apollo TF visual language for this functional stage. Do not add a marketing page, redesign the player, or create new product routes.
 - Android remains deferred.
@@ -39,7 +41,7 @@
 
 **Interfaces:**
 - Consumes: `apiUrl(path: string): string` and `API_BASE` from `src/lib/api-config.ts`
-- Produces: `TfBrowserSession`, `TfApiError`, `normalizeTfApiError()`, `loadTfSession()`, `clearTfSessionSecurityState()`, `tfRequestInit()`, `tfFetch()`, `reportTfAuthError()`, `subscribeTfAuthSecurityEvents()`, `startTfLogin()`, `logoutTfSession()`, `createWebSocketTicket()`, and `buildTfWebSocketUrl()`
+- Produces: `TfBrowserSession`, `TfApiError`, `normalizeTfApiError()`, `fetchTfSession()`, `commitTfSessionSecurityState()`, `clearTfSessionSecurityState()`, `tfRequestInit()`, `tfFetch()`, `reportTfAuthError()`, `subscribeTfAuthSecurityEvents()`, `startTfLogin()`, `logoutTfSession()`, `createWebSocketTicket()`, and `buildTfWebSocketUrl()`
 
 - [x] **Step 1: Add the player test harness and failing adapter tests**
 
@@ -84,8 +86,9 @@ import {
   TfApiError,
   buildTfWebSocketUrl,
   clearTfSessionSecurityState,
+  commitTfSessionSecurityState,
   createWebSocketTicket,
-  loadTfSession,
+  fetchTfSession,
   tfFetch,
   tfRequestInit,
 } from "./tf-session-client";
@@ -112,11 +115,14 @@ describe("TF browser session client", () => {
       headers: { "Content-Type": "application/json" },
     }));
 
-    await expect(loadTfSession()).resolves.toEqual(session);
+    const fetchedSession = await fetchTfSession();
+    expect(fetchedSession).toEqual(session);
     expect(fetch).toHaveBeenCalledWith(
       expect.stringMatching(/\/api\/auth\/me$/),
       expect.objectContaining({ method: "GET", credentials: "include" }),
     );
+    expect(() => tfRequestInit({ method: "POST" })).toThrow();
+    commitTfSessionSecurityState(fetchedSession);
     expect(tfRequestInit({ method: "POST" }).headers).toEqual(
       expect.objectContaining({ "X-CSRF-Token": "c".repeat(42) + "A" }),
     );
@@ -141,7 +147,7 @@ describe("TF browser session client", () => {
         headers: { "Content-Type": "application/json" },
       }));
 
-    await loadTfSession();
+    commitTfSessionSecurityState(await fetchTfSession());
     await expect(createWebSocketTicket()).resolves.toBe("a".repeat(43));
     expect(fetch).toHaveBeenLastCalledWith(
       expect.stringMatching(/\/api\/ws\/tickets$/),
@@ -216,7 +222,8 @@ export function normalizeTfApiError(error: unknown): TfApiError;
 export function clearTfSessionSecurityState(): void;
 export function tfRequestInit(init?: RequestInit): RequestInit;
 export async function tfFetch<T>(path: string, init?: RequestInit): Promise<T>;
-export async function loadTfSession(): Promise<TfBrowserSession>;
+export async function fetchTfSession(): Promise<TfBrowserSession>;
+export function commitTfSessionSecurityState(session: TfBrowserSession): void;
 export function startTfLogin(): void;
 export async function logoutTfSession(): Promise<void>;
 export async function createWebSocketTicket(): Promise<string>;
@@ -250,7 +257,7 @@ const kind =
   : "invalid";
 ```
 
-Network failures become `new TfApiError(0, "transport_unavailable", "transport")`. `loadTfSession` accepts only canonical UUID account/installation IDs, string entitlements, a valid future expiry, and a canonical unpadded 43-character base64url CSRF token before assigning module-scoped security state. Invalid responses clear CSRF. Confirmed `401` responses clear CSRF and publish an application-local invalidation event; exact core policy errors publish revalidation events. `startTfLogin` calls `window.location.assign(apiUrl("/auth/start"))`. `logoutTfSession` POSTs `/auth/logout` and clears the token in `finally`. `createWebSocketTicket` POSTs `/ws/tickets` without `body` or `Content-Type`, validates a 43-character base64url ticket, and returns it. `buildTfWebSocketUrl` converts `API_BASE` to `ws:` or `wss:` and appends only `/ws?ticket=<encoded ticket>`.
+Network failures become `new TfApiError(0, "transport_unavailable", "transport")`. `fetchTfSession` accepts only canonical UUID account/installation IDs, string entitlements, a valid future expiry, and a canonical unpadded 43-character base64url CSRF token, but does not assign module-scoped security state. Invalid responses clear CSRF. `commitTfSessionSecurityState` revalidates and commits only a provider-accepted session. Confirmed `401` responses and exact core policy/WebSocket unavailability errors clear CSRF and publish application-local invalidation or revalidation events. `startTfLogin` calls `window.location.assign(apiUrl("/auth/start"))`. `logoutTfSession` only starts and awaits the CSRF-protected remote POST; the provider starts it while the current token is available, then immediately performs local invalidation without waiting. `createWebSocketTicket` POSTs `/ws/tickets` without `body` or `Content-Type`, validates a 43-character base64url ticket, and returns it. `buildTfWebSocketUrl` converts `API_BASE` to `ws:` or `wss:` and appends only `/ws?ticket=<encoded ticket>`.
 
 Normalize unknown failures without discarding typed API failures:
 
@@ -292,7 +299,7 @@ git commit -m "feat(tf-web): add browser session client"
 - Modify: `artifacts/music-player/src/components/Sidebar.tsx`
 
 **Interfaces:**
-- Consumes: `TfBrowserSession`, `TfApiError`, `loadTfSession()`, `startTfLogin()`, `logoutTfSession()`
+- Consumes: `TfBrowserSession`, `TfApiError`, `fetchTfSession()`, `commitTfSessionSecurityState()`, `startTfLogin()`, `logoutTfSession()`
 - Produces: `TfAuthProvider`, `useTfAuth()`, `TfSessionBoundary`
 
 - [x] **Step 1: Write failing auth-state tests**
@@ -344,7 +351,7 @@ export interface TfAuthContextValue {
 }
 ```
 
-Provider behavior is generation-guarded and single-flight. It subscribes before the initial `refresh()`: invalidation clears the `QueryClient` and transitions immediately to unauthenticated, while core policy events transition to loading and share one `/auth/me` refresh. Logout and cleanup invalidate pending generations, and late promises or events cannot remount or mutate an unmounted provider. `hasEntitlement` is a strict `session.entitlements.includes(capability)`.
+Provider behavior is generation-guarded and single-flight. It subscribes before the initial `refresh()`: invalidation and policy replacement synchronously clear CSRF, cancel protected queries, clear the `QueryClient`, and unmount protected children. Policy events share one replacement `/auth/me` refresh, whose validated session is committed only after mounted/current-generation acceptance; an account A cache or delayed response cannot cross into account B. Logout starts its CSRF-protected server request before immediate local invalidation and suppresses the eventual remote result. Logout, invalidation, policy replacement, and cleanup invalidate pending generations, so late promises cannot repopulate CSRF or remount protected UI. `hasEntitlement` is a strict `session.entitlements.includes(capability)`.
 
 The boundary uses existing typography, button, border, and background tokens. It renders:
 
@@ -467,6 +474,8 @@ getGetTrackDownloadQueryOptions(track.id, {
 });
 ```
 
+Generated stream and download catches call `reportTfAuthError(error)` before their existing local reset/toast handling. Exact generated `unauthorized` invalidates the boundary, while `module_access_denied` and `policy_unavailable` force `/auth/me` revalidation.
+
 Replace manual track calls:
 
 ```ts
@@ -579,7 +588,7 @@ export class TfWebSocketLifecycle {
 }
 ```
 
-`start()` is idempotent, increments an attempt generation, and starts `connect`. Every `onopen`, `onmessage`, `onerror`, and `onclose` wrapper verifies running state, generation, and socket ownership. Stop, close, replacement, and terminal transitions detach all four handlers before releasing ownership. `4403/policy_revoked` is terminal forbidden, `1013/policy_unavailable` is terminal unavailable, and `1013/buffer_unavailable` stays transient. Other closes before `onopen` terminate once as unavailable; allowed post-open transient closes reconnect with a fresh ticket. `scheduleReconnect()` waits the current delay, doubles it with a `30000` cap, increments the generation, and calls `connect` so every attempt obtains a new ticket.
+`start()` is idempotent, increments an attempt generation, and starts `connect`. Every `onopen`, `onmessage`, `onerror`, and `onclose` wrapper verifies running state, generation, and socket ownership. Stop, close, replacement, and terminal transitions detach all four handlers before releasing ownership. `4403/policy_revoked` is terminal forbidden, `1013/policy_unavailable` is terminal unavailable, and `1013/buffer_unavailable` stays transient. Other closes before `onopen` terminate once as `websocket_unavailable`; that code forces auth/session revalidation, unmounts `PlayerProvider`, and creates a fresh lifecycle only after an accepted `/auth/me` response. Allowed post-open transient closes reconnect with a fresh ticket. `scheduleReconnect()` waits the current delay, doubles it with a `30000` cap, increments the generation, and calls `connect` so every attempt obtains a new ticket.
 
 Move only socket creation/reconnect ownership out of `use-player.tsx`; retain its player-state message application and outgoing state serialization. Remove the final `getClientSessionId` import and delete `src/lib/client-session.ts`. Extend the migration test to scan all runtime `.ts`/`.tsx` files under `src`, excluding tests, and prove that no legacy identity transport remains. On terminal authentication/policy failure, forward the typed error into the auth channel, show one destructive toast, and leave reconnection stopped while the auth boundary revalidates and unmounts `PlayerProvider`.
 
@@ -662,7 +671,10 @@ Update `IMPLEMENTATION_STATUS.md` with:
 - Policy: `tf.search` gates application mount; server remains authoritative for every capability
 - WebSocket: one-time ticket acquired before every connection attempt
 - Search: generated `searchTracks` receives credential/CSRF options at mutation time
-- Runtime invalidation: confirmed 401 clears CSRF/query state; core policy failures revalidate `/auth/me`
+- Generated media: stream/download auth and policy errors forward into the local auth channel before preserving existing user feedback
+- Runtime invalidation: confirmed 401 and policy replacement synchronously unmount, cancel/clear protected queries, and clear CSRF before any revalidation
+- Session commit: `/auth/me` fetch/validation is side-effect free; only a mounted current provider generation commits CSRF
+- Logout: remote POST starts with the current CSRF token, then local auth/query state clears immediately without waiting
 - Yandex: new onboarding deferred to server-side OAuth; existing connected accounts retain server-backed reads and logout
 - Legacy browser UUID: removed
 - Remote infrastructure: unchanged; domains/Caddy/Coolify deployment still requires preflight and explicit approval
