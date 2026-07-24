@@ -4,13 +4,23 @@ import tracksRouter from "./tracks.js";
 import spotifyRouter from "./spotify.js";
 import yandexRouter from "./yandex.js";
 import { adminRouter } from "./admin.js";
+import { createAuthRouter, type AuthRouteDependencies } from "./auth.js";
 
-const router: IRouter = Router();
+export interface ApiRouterOptions {
+  readonly auth?: AuthRouteDependencies;
+}
 
-router.use(healthRouter);
-router.use(tracksRouter);
-router.use(spotifyRouter);
-router.use(yandexRouter);
-router.use(adminRouter);
+export function createApiRouter(options: ApiRouterOptions = {}): IRouter {
+  const router: IRouter = Router();
+  if (options.auth !== undefined) {
+    router.use("/auth", createAuthRouter(options.auth));
+  }
+  router.use(healthRouter);
+  router.use(tracksRouter);
+  router.use(spotifyRouter);
+  router.use(yandexRouter);
+  router.use(adminRouter);
+  return router;
+}
 
-export default router;
+export default createApiRouter();

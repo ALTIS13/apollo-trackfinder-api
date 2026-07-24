@@ -1,48 +1,97 @@
-import app from "./app";
-import { logger } from "./lib/logger";
-import { runMigrations } from "./lib/migrate";
-import { getRedis } from "./lib/redis";
-import { attachWebSocketServer } from "./ws";
-import { initBackgroundQueues, shutdownBackgroundQueues } from "./lib/background-queue";
+import Redis from "ioredis";
 
-const rawPort = process.env["PORT"];
+import { createApiApp } from "./app.js";
+import {
+  initBackgroundQueues,
+  shutdownBackgroundQueues,
+} from "./lib/background-queue.js";
+import { logger } from "./lib/logger.js";
+import { runMigrations } from "./lib/migrate.js";
+import {
+  PlatformAuthClient,
+  parseTfAuthRuntimeConfig,
+} from "./lib/platform-auth-client.js";
+import { getRedis } from "./lib/redis.js";
+import {
+  TfSessionStore,
+  createStrictRedisClient,
+} from "./lib/tf-session-store.js";
+import { attachWebSocketServer } from "./ws.js";
 
-if (!rawPort) {
-  throw new Error(
-    "PORT environment variable is required but was not provided.",
-  );
-}
+async function start(): Promise<void> {
+  const authConfig = await parseTfAuthRuntimeConfig(process.env);
+  const rawPort = process.env["PORT"];
+  if (rawPort === undefined) {
+    throw new Error("invalid runtime configuration");
+  }
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("invalid runtime configuration");
+  }
 
-const port = Number(rawPort);
+  const authRedis = new Redis(authConfig.authRedisUrl, {
+    connectTimeout: 3_000,
+    enableOfflineQueue: false,
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    retryStrategy: () => null,
+  });
+  authRedis.on("error", () => {
+    logger.error(
+      { component: "tf-auth-store" },
+      "TF authentication storage unavailable",
+    );
+  });
 
-if (Number.isNaN(port) || port <= 0) {
-  throw new Error(`Invalid PORT value: "${rawPort}"`);
-}
+  try {
+    await authRedis.connect();
+    await authRedis.ping();
+    const platform = new PlatformAuthClient({
+      issuer: authConfig.issuer,
+      clientId: authConfig.clientId,
+      redirectUri: authConfig.callbackUrl,
+      clientSecret: authConfig.clientSecret,
+    });
+    const sessionStore = new TfSessionStore(createStrictRedisClient(authRedis));
+    const app = createApiApp({
+      auth: {
+        platform,
+        sessionStore,
+        webOrigin: authConfig.webOrigin,
+        secureCookies: true,
+      },
+    });
 
-getRedis();
-
-runMigrations()
-  .then(async () => {
-    const server = app.listen(port, (err: unknown) => {
-      if (err) {
-        logger.error({ err }, "Error listening on port");
-        process.exit(1);
-      }
+    getRedis();
+    await runMigrations();
+    const server = app.listen(port, () => {
       logger.info({ port }, "Server listening");
     });
     attachWebSocketServer(server);
-
     await initBackgroundQueues();
 
-    const shutdown = async () => {
-      logger.info("Shutting down background queues...");
-      await shutdownBackgroundQueues();
-      process.exit(0);
+    let shuttingDown = false;
+    const shutdown = (): void => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      server.close(() => {
+        void shutdownBackgroundQueues()
+          .then(() => authRedis.quit())
+          .catch(() => {
+            authRedis.disconnect(false);
+          })
+          .finally(() => process.exit(0));
+      });
     };
     process.once("SIGTERM", shutdown);
     process.once("SIGINT", shutdown);
-  })
-  .catch((err) => {
-    logger.error({ err }, "Migration failed — server will not start");
-    process.exit(1);
-  });
+  } catch (error) {
+    authRedis.disconnect(false);
+    throw error;
+  }
+}
+
+void start().catch(() => {
+  process.stderr.write("TF API startup failed\n");
+  process.exitCode = 1;
+});

@@ -82,8 +82,8 @@ async function startHeartbeatServer(
 async function startProductionServer() {
   process.env["DATABASE_URL"] ??= "postgres://unused:unused@127.0.0.1:1/unused";
   process.env["LOG_LEVEL"] ??= "silent";
-  const { default: app } = await import("../app");
-  return startServer(app);
+  const { createApiApp } = await import("../app");
+  return startServer(createApiApp());
 }
 
 async function startServer(serverApp: Express) {
