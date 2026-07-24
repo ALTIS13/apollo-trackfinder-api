@@ -246,14 +246,14 @@ export class BoundedSearchCache {
 }
 ```
 
-- [ ] **Step 1: Write RED cache tests**
+- [x] **Step 1: Write RED cache tests**
 
 Assert exact key normalization, one-hour expiry, insertion-order refresh on hit,
 2,048-entry eviction, replacement without cardinality growth, maximum 40 stored
 results, and suggestions limited to five matching normalized artist/title pairs.
 Use injected clocks; do not sleep.
 
-- [ ] **Step 2: Write RED search-service parity tests**
+- [x] **Step 2: Write RED search-service parity tests**
 
 Inject four provider fakes. Cover:
 
@@ -270,7 +270,7 @@ it("reports bounded rolling RPM without retaining queries");
 Use representative existing ranking fixtures copied from the current API behavior.
 Assert no test log contains artist, title, `sourceUrl`, raw error message, or headers.
 
-- [ ] **Step 3: Run focused tests and verify RED**
+- [x] **Step 3: Run focused tests and verify RED**
 
 ```bash
 pnpm --filter @workspace/tf-search test -- src/cache.test.ts src/search-service.test.ts
@@ -278,7 +278,7 @@ pnpm --filter @workspace/tf-search test -- src/cache.test.ts src/search-service.
 
 Expected: fail because the runtime files do not exist.
 
-- [ ] **Step 4: Move and implement the search runtime**
+- [x] **Step 4: Move and implement the search runtime**
 
 Port classifier/ranker/provider behavior from `artifacts/api-server` without changing
 public score/type/ID semantics. Split only metadata-search process functions from
@@ -290,7 +290,7 @@ existing median original duration, ranks, limits to `maxResults`, and caches onl
 the exact standard path from the design. Cache and telemetry retain no raw query
 outside bounded cache keys/results.
 
-- [ ] **Step 5: Run Task 2 validation**
+- [x] **Step 5: Run Task 2 validation**
 
 ```bash
 pnpm --filter @workspace/tf-search test -- src/cache.test.ts src/search-service.test.ts
@@ -300,7 +300,7 @@ pnpm --filter @workspace/tf-search typecheck
 Expected: focused tests and typecheck pass. The executable entry point and
 production bundle are introduced and validated by Task 3.
 
-- [ ] **Step 6: Commit Task 2**
+- [x] **Step 6: Commit Task 2**
 
 ```bash
 git add artifacts/tf-search pnpm-lock.yaml
