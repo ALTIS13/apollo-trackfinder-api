@@ -3,15 +3,15 @@ import { execFile } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import {
   access,
-  chmod,
   lstat,
   mkdir,
   mkdtemp,
+  open,
+  readdir,
   realpath,
-  rm,
   rmdir,
   stat,
-  writeFile,
+  unlink,
 } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,6 +46,8 @@ const SENSITIVE_ENVIRONMENT = Object.freeze([
   "TF_SEARCH_HEARTBEAT_SECRET",
   "TF_SEARCH_INTERNAL_AUTH_SECRET",
 ]);
+const OWNERSHIP_MARKER = ".tf-search-smoke-owner";
+const ownershipRecords = new WeakMap();
 
 function generatedSecret(bytes = 32) {
   return randomBytes(bytes).toString("base64url");
@@ -53,6 +55,10 @@ function generatedSecret(bytes = 32) {
 
 function digest(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+export function observedRequestsPerMinute(...values) {
+  return Math.max(0, ...values);
 }
 
 function isLocalDockerEndpoint(value) {
@@ -123,41 +129,88 @@ function assertPhysicalContainment(candidate, root, allowRoot = false) {
   }
 }
 
-async function verifiedWorkspaceRoot(root) {
+function fileIdentity(stats) {
+  return Object.freeze({
+    device: String(stats.dev),
+    inode: String(stats.ino),
+  });
+}
+
+function assertIdentity(actual, expected, label) {
+  if (
+    actual.device !== expected.device ||
+    actual.inode !== expected.inode
+  ) {
+    throw new Error(`${label} identity was replaced`);
+  }
+}
+
+async function verifiedWorkspaceRoot(root, expected) {
   const lexicalRoot = resolve(root);
-  const rootStats = await lstat(lexicalRoot);
+  const rootStats = await lstat(lexicalRoot, { bigint: true });
   if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
     throw new Error("Workspace root cannot be symbolic or reparse-linked");
   }
   const physicalRoot = await realpath(lexicalRoot);
-  return { lexicalRoot, physicalRoot };
+  const identity = fileIdentity(rootStats);
+  if (expected !== undefined) {
+    if (
+      lexicalRoot !== expected.lexicalRoot ||
+      physicalRoot !== expected.physicalRoot
+    ) {
+      throw new Error("Workspace root was replaced");
+    }
+    assertIdentity(identity, expected.identity, "Workspace root");
+  }
+  return { identity, lexicalRoot, physicalRoot };
 }
 
-async function verifiedPhysicalDirectory(candidate, workspace) {
+async function verifiedPhysicalDirectory(candidate, workspace, expected) {
   const lexicalCandidate = assertWorkspaceContainedPath(
     candidate,
     workspace.lexicalRoot,
   );
-  const candidateStats = await lstat(lexicalCandidate);
+  const candidateStats = await lstat(lexicalCandidate, { bigint: true });
   if (!candidateStats.isDirectory() || candidateStats.isSymbolicLink()) {
     throw new Error("Temporary directory cannot be symbolic or reparse-linked");
   }
   const physicalCandidate = await realpath(lexicalCandidate);
   assertPhysicalContainment(physicalCandidate, workspace.physicalRoot);
-  return { lexicalCandidate, physicalCandidate };
+  const identity = fileIdentity(candidateStats);
+  if (expected !== undefined) {
+    if (
+      lexicalCandidate !== expected.lexicalCandidate ||
+      physicalCandidate !== expected.physicalCandidate
+    ) {
+      throw new Error("Temporary directory was replaced");
+    }
+    assertIdentity(identity, expected.identity, "Temporary directory");
+  }
+  return { identity, lexicalCandidate, physicalCandidate };
 }
 
-async function verifiedPhysicalFile(candidate, parent, workspace) {
+async function verifiedPhysicalFile(candidate, parent, workspace, expected) {
   const lexicalCandidate = assertWorkspaceContainedPath(
     candidate,
     workspace.lexicalRoot,
   );
-  const candidateStats = await lstat(lexicalCandidate);
+  const candidateStats = await lstat(lexicalCandidate, { bigint: true });
   if (!candidateStats.isFile() || candidateStats.isSymbolicLink()) {
     throw new Error("Temporary file cannot be symbolic or reparse-linked");
   }
   const physicalCandidate = await realpath(lexicalCandidate);
   assertPhysicalContainment(physicalCandidate, parent.physicalCandidate);
+  const identity = fileIdentity(candidateStats);
+  if (expected !== undefined) {
+    if (
+      lexicalCandidate !== expected.lexicalCandidate ||
+      physicalCandidate !== expected.physicalCandidate
+    ) {
+      throw new Error("Temporary file was replaced");
+    }
+    assertIdentity(identity, expected.identity, "Temporary file");
+  }
+  return { identity, lexicalCandidate, physicalCandidate };
 }
 
 async function pathExists(path) {
@@ -221,71 +274,269 @@ async function prepareTemporaryContext(repositoryRoot, options) {
   return { temporaryParent, temporaryRoot, workspace };
 }
 
-async function verifiedTemporaryContext(repositoryRoot, options) {
-  const workspace = await verifiedWorkspaceRoot(repositoryRoot);
-  const { temporaryParentPath, temporaryRootPath } = temporaryPaths(
-    repositoryRoot,
-    options,
+async function runInterlock(options, phase, path, name) {
+  if (typeof options.interlock === "function") {
+    await options.interlock({ name, path, phase });
+  }
+}
+
+async function verifyOwnedHierarchy(record) {
+  const workspace = await verifiedWorkspaceRoot(
+    record.workspace.lexicalRoot,
+    record.workspace,
   );
   const temporaryRoot = await verifiedPhysicalDirectory(
-    temporaryRootPath,
+    record.temporaryRoot.lexicalCandidate,
     workspace,
+    record.temporaryRoot,
   );
   const temporaryParent =
-    temporaryParentPath === temporaryRootPath
+    record.temporaryParent.lexicalCandidate ===
+    record.temporaryRoot.lexicalCandidate
       ? temporaryRoot
-      : await verifiedPhysicalDirectory(temporaryParentPath, workspace);
+      : await verifiedPhysicalDirectory(
+          record.temporaryParent.lexicalCandidate,
+          workspace,
+          record.temporaryParent,
+        );
   assertPhysicalContainment(
     temporaryParent.physicalCandidate,
     temporaryRoot.physicalCandidate,
     true,
   );
-  return { temporaryParent, temporaryRoot, workspace };
+  const directory = await verifiedPhysicalDirectory(
+    record.directory.lexicalCandidate,
+    workspace,
+    record.directory,
+  );
+  assertPhysicalContainment(
+    directory.physicalCandidate,
+    temporaryParent.physicalCandidate,
+  );
+  return { directory, temporaryParent, temporaryRoot, workspace };
 }
 
-export async function removeVerifiedDirectory(directory, options = {}) {
-  const repositoryRoot = options.repositoryRoot ?? defaultRepositoryRoot;
-  const { temporaryParent, temporaryRoot, workspace } =
-    await verifiedTemporaryContext(repositoryRoot, options);
-  const verified = await verifiedPhysicalDirectory(directory, workspace);
+function ownershipRecord(ownership, directory) {
+  if (typeof ownership !== "object" || ownership === null) {
+    throw new Error("Smoke ownership handle is required");
+  }
+  const record = ownershipRecords.get(ownership);
   if (
-    verified.physicalCandidate === temporaryParent.physicalCandidate ||
-    !verified.physicalCandidate.startsWith(
-      `${temporaryParent.physicalCandidate}${sep}`,
-    )
+    record === undefined ||
+    resolve(directory) !== record.directory.lexicalCandidate
   ) {
-    throw new Error("Refusing to remove a non-smoke directory");
+    throw new Error("Smoke ownership handle does not match the run");
   }
-  await verifiedWorkspaceRoot(repositoryRoot);
-  await verifiedPhysicalDirectory(temporaryRoot.lexicalCandidate, workspace);
-  await verifiedPhysicalDirectory(temporaryParent.lexicalCandidate, workspace);
-  await verifiedPhysicalDirectory(directory, workspace);
-  await rm(verified.lexicalCandidate, { force: true, recursive: true });
-  if (temporaryParent.lexicalCandidate !== temporaryRoot.lexicalCandidate) {
-    try {
-      await verifiedWorkspaceRoot(repositoryRoot);
-      const refreshedTemporaryParent = await verifiedPhysicalDirectory(
-        temporaryParent.lexicalCandidate,
-        workspace,
-      );
-      await rmdir(refreshedTemporaryParent.lexicalCandidate);
-    } catch (error) {
-      if (
-        error?.code !== "ENOENT" &&
-        error?.code !== "ENOTEMPTY" &&
-        error?.code !== "EEXIST"
-      ) {
-        throw error;
-      }
-    }
+  return record;
+}
+
+async function openedRegularIdentity(handle, label) {
+  const stats = await handle.stat({ bigint: true });
+  if (!stats.isFile()) throw new Error(`${label} is not a regular file`);
+  return fileIdentity(stats);
+}
+
+async function createOwnedFile(record, name, value, options, finalMode = 0o444) {
+  if (name.length === 0 || name.includes("/") || name.includes("\\")) {
+    throw new Error("Invalid owned file name");
   }
+  if (record.files.has(name)) {
+    throw new Error("Owned file already exists");
+  }
+
+  const { directory } = await verifyOwnedHierarchy(record);
+  const path = assertWorkspaceContainedPath(
+    join(directory.lexicalCandidate, name),
+    record.workspace.lexicalRoot,
+  );
+  const handle = await open(path, "wx", 0o600);
+  let file;
   try {
-    await verifiedWorkspaceRoot(repositoryRoot);
-    const refreshedTemporaryRoot = await verifiedPhysicalDirectory(
-      temporaryRoot.lexicalCandidate,
-      workspace,
+    const identity = await openedRegularIdentity(handle, "Owned file");
+    file = Object.freeze({
+      identity,
+      lexicalCandidate: path,
+      physicalCandidate: path,
+    });
+    record.files.set(name, file);
+    await runInterlock(options, "after-owned-file-open", path, name);
+
+    const current = await verifyOwnedHierarchy(record);
+    const verified = await verifiedPhysicalFile(
+      path,
+      current.directory,
+      current.workspace,
     );
-    await rmdir(refreshedTemporaryRoot.lexicalCandidate);
+    assertIdentity(verified.identity, identity, "Owned file");
+    assertIdentity(
+      await openedRegularIdentity(handle, "Owned file"),
+      identity,
+      "Owned file",
+    );
+    file = Object.freeze({
+      identity,
+      lexicalCandidate: path,
+      physicalCandidate: verified.physicalCandidate,
+    });
+    record.files.set(name, file);
+
+    await handle.writeFile(value, { encoding: "utf8" });
+    await handle.sync();
+    if (process.platform !== "win32") {
+      await handle.chmod(finalMode);
+      await handle.sync();
+    }
+    assertIdentity(
+      await openedRegularIdentity(handle, "Owned file"),
+      identity,
+      "Owned file",
+    );
+  } finally {
+    await handle.close();
+  }
+
+  const current = await verifyOwnedHierarchy(record);
+  await verifiedPhysicalFile(
+    path,
+    current.directory,
+    current.workspace,
+    file,
+  );
+  return file;
+}
+
+async function readAndVerifyMarker(record) {
+  const marker = record.files.get(OWNERSHIP_MARKER);
+  if (marker === undefined) throw new Error("Smoke ownership marker is missing");
+  const current = await verifyOwnedHierarchy(record);
+  await verifiedPhysicalFile(
+    marker.lexicalCandidate,
+    current.directory,
+    current.workspace,
+    marker,
+  );
+  const handle = await open(marker.lexicalCandidate, "r");
+  try {
+    assertIdentity(
+      await openedRegularIdentity(handle, "Ownership marker"),
+      marker.identity,
+      "Ownership marker",
+    );
+    const value = await handle.readFile({ encoding: "utf8" });
+    if (value !== record.markerToken) {
+      throw new Error("Smoke ownership marker token does not match");
+    }
+    const refreshed = await verifyOwnedHierarchy(record);
+    await verifiedPhysicalFile(
+      marker.lexicalCandidate,
+      refreshed.directory,
+      refreshed.workspace,
+      marker,
+    );
+    assertIdentity(
+      await openedRegularIdentity(handle, "Ownership marker"),
+      marker.identity,
+      "Ownership marker",
+    );
+  } finally {
+    await handle.close();
+  }
+}
+
+async function verifyExactOwnedContents(record) {
+  const current = await verifyOwnedHierarchy(record);
+  const entries = await readdir(current.directory.lexicalCandidate, {
+    withFileTypes: true,
+  });
+  const expected = [...record.files.keys()].sort();
+  const actual = entries.map(({ name }) => name).sort();
+  if (
+    actual.length !== expected.length ||
+    actual.some((name, index) => name !== expected[index])
+  ) {
+    throw new Error("Smoke run contains an unexpected allowlist entry");
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.isSymbolicLink()) {
+      throw new Error("Smoke run contains a non-regular allowlist entry");
+    }
+    const file = record.files.get(entry.name);
+    await verifiedPhysicalFile(
+      join(current.directory.lexicalCandidate, entry.name),
+      current.directory,
+      current.workspace,
+      file,
+    );
+  }
+  await readAndVerifyMarker(record);
+}
+
+async function removeOwnedFile(record, name, options) {
+  const file = record.files.get(name);
+  if (file === undefined) throw new Error("Owned file record is missing");
+  if (name !== OWNERSHIP_MARKER) await readAndVerifyMarker(record);
+
+  const current = await verifyOwnedHierarchy(record);
+  await verifiedPhysicalFile(
+    file.lexicalCandidate,
+    current.directory,
+    current.workspace,
+    file,
+  );
+  const handle = await open(file.lexicalCandidate, "r");
+  try {
+    assertIdentity(
+      await openedRegularIdentity(handle, "Owned cleanup file"),
+      file.identity,
+      "Owned cleanup file",
+    );
+    await runInterlock(
+      options,
+      "after-cleanup-file-open",
+      file.lexicalCandidate,
+      name,
+    );
+    const refreshed = await verifyOwnedHierarchy(record);
+    await verifiedPhysicalFile(
+      file.lexicalCandidate,
+      refreshed.directory,
+      refreshed.workspace,
+      file,
+    );
+    assertIdentity(
+      await openedRegularIdentity(handle, "Owned cleanup file"),
+      file.identity,
+      "Owned cleanup file",
+    );
+    if (name === OWNERSHIP_MARKER) {
+      const value = await handle.readFile({ encoding: "utf8" });
+      if (value !== record.markerToken) {
+        throw new Error("Smoke ownership marker token does not match");
+      }
+    } else {
+      await readAndVerifyMarker(record);
+    }
+    await unlink(file.lexicalCandidate);
+  } finally {
+    await handle.close();
+  }
+
+  try {
+    await lstat(file.lexicalCandidate);
+    throw new Error("Owned cleanup file still exists after unlink");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
+async function removeEmptyRecordedDirectory(directory, workspace) {
+  try {
+    await verifiedPhysicalDirectory(
+      directory.lexicalCandidate,
+      workspace,
+      directory,
+    );
+    await rmdir(directory.lexicalCandidate);
   } catch (error) {
     if (
       error?.code !== "ENOENT" &&
@@ -297,20 +548,93 @@ export async function removeVerifiedDirectory(directory, options = {}) {
   }
 }
 
+export async function removeVerifiedDirectory(directory, options = {}) {
+  const repositoryRoot = options.repositoryRoot ?? defaultRepositoryRoot;
+  const record = ownershipRecord(options.ownership, directory);
+  if (resolve(repositoryRoot) !== record.workspace.lexicalRoot) {
+    throw new Error("Smoke ownership repository does not match");
+  }
+  const paths = temporaryPaths(repositoryRoot, options);
+  if (
+    paths.temporaryRootPath !== record.temporaryRoot.lexicalCandidate ||
+    paths.temporaryParentPath !== record.temporaryParent.lexicalCandidate
+  ) {
+    throw new Error("Smoke ownership temporary parent does not match");
+  }
+
+  await verifyExactOwnedContents(record);
+  await runInterlock(
+    options,
+    "after-cleanup-scan",
+    record.directory.lexicalCandidate,
+  );
+  await verifyExactOwnedContents(record);
+
+  for (const name of [...record.files.keys()]
+    .filter((candidate) => candidate !== OWNERSHIP_MARKER)
+    .sort()) {
+    await removeOwnedFile(record, name, options);
+  }
+  await readAndVerifyMarker(record);
+  await removeOwnedFile(record, OWNERSHIP_MARKER, options);
+
+  const current = await verifyOwnedHierarchy(record);
+  await rmdir(current.directory.lexicalCandidate);
+  const workspace = await verifiedWorkspaceRoot(
+    record.workspace.lexicalRoot,
+    record.workspace,
+  );
+  if (
+    record.temporaryParent.lexicalCandidate !==
+    record.temporaryRoot.lexicalCandidate
+  ) {
+    await removeEmptyRecordedDirectory(record.temporaryParent, workspace);
+  }
+  await removeEmptyRecordedDirectory(record.temporaryRoot, workspace);
+  ownershipRecords.delete(options.ownership);
+}
+
 export async function prepareSecretDirectory(environment, options = {}) {
   const repositoryRoot = options.repositoryRoot ?? defaultRepositoryRoot;
-  const { temporaryParent, workspace } = await prepareTemporaryContext(
-    repositoryRoot,
-    options,
-  );
+  const { temporaryParent, temporaryRoot, workspace } =
+    await prepareTemporaryContext(
+      repositoryRoot,
+      options,
+    );
   const directoryPath = assertWorkspaceContainedPath(
     await mkdtemp(join(temporaryParent.lexicalCandidate, "tf-search-smoke-")),
     repositoryRoot,
   );
   const directory = await verifiedPhysicalDirectory(directoryPath, workspace);
+  const ownership = Object.freeze(Object.create(null));
+  const record = {
+    directory,
+    files: new Map(),
+    markerToken: generatedSecret(),
+    ownership,
+    temporaryParent,
+    temporaryRoot,
+    workspace,
+  };
+  ownershipRecords.set(ownership, record);
 
   try {
-    await chmod(directory.lexicalCandidate, 0o700);
+    await runInterlock(options, "after-run-created", directory.lexicalCandidate);
+    const marker = await createOwnedFile(
+      record,
+      OWNERSHIP_MARKER,
+      record.markerToken,
+      options,
+      0o400,
+    );
+    record.files.set(OWNERSHIP_MARKER, marker);
+    await runInterlock(
+      options,
+      "after-ownership-marker-created",
+      directory.lexicalCandidate,
+      OWNERSHIP_MARKER,
+    );
+
     const postgresPassword = generatedSecret();
     const clientSecret = generatedSecret();
     const commandSecret = generatedSecret();
@@ -332,18 +656,7 @@ export async function prepareSecretDirectory(environment, options = {}) {
     ];
 
     for (const [name, value] of secrets) {
-      await verifiedWorkspaceRoot(repositoryRoot);
-      const verifiedDirectory = await verifiedPhysicalDirectory(
-        directory.lexicalCandidate,
-        workspace,
-      );
-      const path = assertWorkspaceContainedPath(
-        join(directory.lexicalCandidate, name),
-        repositoryRoot,
-      );
-      await writeFile(path, value, { flag: "wx", mode: 0o600 });
-      await verifiedPhysicalFile(path, verifiedDirectory, workspace);
-      await chmod(path, 0o444);
+      await createOwnedFile(record, name, value, options);
     }
     if (process.platform !== "win32") {
       assert.equal(
@@ -361,14 +674,16 @@ export async function prepareSecretDirectory(environment, options = {}) {
     environment.TF_SECRET_DIRECTORY = directory.lexicalCandidate;
     return Object.freeze({
       directory: directory.lexicalCandidate,
+      ownership,
       rawSecretCanaries: Object.freeze(secrets.map(([, value]) => value)),
       secretNames: Object.freeze(secrets.map(([name]) => name)),
     });
   } catch (error) {
     await removeVerifiedDirectory(directory.lexicalCandidate, {
+      ownership,
       repositoryRoot,
       temporaryParent: options.temporaryParent,
-    });
+    }).catch(() => undefined);
     throw error;
   }
 }
@@ -425,12 +740,12 @@ server.listen(8080, "0.0.0.0");
 
 async function writeSmokeOverride(
   environment,
-  secretDirectory,
+  prepared,
   repositoryRoot,
 ) {
   const port = safePort(environment);
   const overridePath = assertWorkspaceContainedPath(
-    join(secretDirectory, "compose.smoke.yml"),
+    join(prepared.directory, "compose.smoke.yml"),
     repositoryRoot,
   );
   const override = {
@@ -471,7 +786,13 @@ async function writeSmokeOverride(
       },
     },
   };
-  await writeFile(overridePath, stringify(override));
+  const record = ownershipRecord(prepared.ownership, prepared.directory);
+  await createOwnedFile(
+    record,
+    "compose.smoke.yml",
+    stringify(override),
+    {},
+  );
   return { overridePath, port };
 }
 
@@ -681,7 +1002,7 @@ export async function runTfSearchSmoke(options) {
     });
     const override = await writeSmokeOverride(
       environment,
-      prepared.directory,
+      prepared,
       repositoryRoot,
     );
     overridePath = override.overridePath;
@@ -772,6 +1093,7 @@ export async function runTfSearchSmoke(options) {
       const audited = await auditProject(docker, environment, project);
       if (prepared !== undefined) {
         await removeVerifiedDirectory(prepared.directory, {
+          ownership: prepared.ownership,
           repositoryRoot,
           temporaryParent: options.temporaryParent,
         });
@@ -1092,7 +1414,10 @@ async function exerciseRealStack(context) {
     heartbeatUnknownAfterRestart,
     heartbeatRecovered: recovered.status === "healthy",
     heartbeatVersion: recovered.version,
-    requestsPerMinute: recovered.requestsPerMinute,
+    requestsPerMinute: observedRequestsPerMinute(
+      healthy.requestsPerMinute,
+      recovered.requestsPerMinute,
+    ),
     responseProjection,
   };
 }

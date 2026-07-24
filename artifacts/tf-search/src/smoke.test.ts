@@ -2,16 +2,21 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   access,
+  chmod,
+  link,
+  lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
+  rename,
   rm,
   rmdir,
   symlink,
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
@@ -29,7 +34,7 @@ const smokeScript = join(
 const workspaceTemporaryRoot = resolve(repositoryRoot, ".tmp");
 const searchTestTemporaryParent = join(
   workspaceTemporaryRoot,
-  "tf-search-smoke-test",
+  `tf-search-smoke-test-${process.pid}`,
 );
 
 interface DockerCall {
@@ -53,6 +58,9 @@ interface SmokeObservations {
 }
 
 interface SmokeModule {
+  readonly observedRequestsPerMinute: (
+    ...values: readonly number[]
+  ) => number;
   readonly canonicalizeDockerSelectors: (environment: NodeJS.ProcessEnv) => {
     readonly context: string;
     readonly environment: NodeJS.ProcessEnv;
@@ -65,17 +73,29 @@ interface SmokeModule {
   readonly prepareSecretDirectory: (
     environment: NodeJS.ProcessEnv,
     options?: {
+      readonly interlock?: (event: {
+        readonly name?: string;
+        readonly path: string;
+        readonly phase: string;
+      }) => Promise<void>;
       readonly repositoryRoot?: string;
       readonly temporaryParent?: string;
     },
   ) => Promise<{
-    readonly directory: string;
-    readonly rawSecretCanaries: readonly string[];
-    readonly secretNames: readonly string[];
-  }>;
+      readonly directory: string;
+      readonly ownership: object;
+      readonly rawSecretCanaries: readonly string[];
+      readonly secretNames: readonly string[];
+    }>;
   readonly removeVerifiedDirectory: (
     directory: string,
     options?: {
+      readonly interlock?: (event: {
+        readonly name?: string;
+        readonly path: string;
+        readonly phase: string;
+      }) => Promise<void>;
+      readonly ownership: object;
       readonly repositoryRoot?: string;
       readonly temporaryParent?: string;
     },
@@ -247,6 +267,13 @@ describe("tf-search disposable smoke contract", () => {
     ).toThrow("outside the worktree");
   });
 
+  it("retains a positive RPM observed before a later heartbeat window expires", async () => {
+    const smoke = await loadSmokeModule();
+
+    expect(smoke.observedRequestsPerMinute(2, 0)).toBe(2);
+    expect(smoke.observedRequestsPerMinute(0, 3, 1)).toBe(3);
+  });
+
   it("isolates per-run secrets from a concurrent API temp owner", async () => {
     const smoke = await loadSmokeModule();
     const environment = { ...process.env };
@@ -303,6 +330,7 @@ describe("tf-search disposable smoke contract", () => {
       expect(heartbeatMap).toEqual({ "search-media": heartbeatSecret });
 
       await smoke.removeVerifiedDirectory(prepared.directory, {
+        ownership: prepared.ownership,
         repositoryRoot,
         temporaryParent: searchTestTemporaryParent,
       });
@@ -314,6 +342,7 @@ describe("tf-search disposable smoke contract", () => {
       if (prepared !== undefined && !removed) {
         await smoke
           .removeVerifiedDirectory(prepared.directory, {
+            ownership: prepared.ownership,
             repositoryRoot,
             temporaryParent: searchTestTemporaryParent,
           })
@@ -402,10 +431,11 @@ describe("tf-search disposable smoke contract", () => {
 
       await expect(
         smoke.removeVerifiedDirectory(linkedRunDirectory, {
+          ownership: {},
           repositoryRoot: workspace,
           temporaryParent: linkedTemporaryParent,
         }),
-      ).rejects.toThrow(/symbolic|reparse|physical/i);
+      ).rejects.toThrow(/ownership|symbolic|reparse|physical/i);
       expect(await readFile(sentinel, "utf8")).toBe("preserve");
     } finally {
       if (runDirectoryIsLink) {
@@ -424,6 +454,425 @@ describe("tf-search disposable smoke contract", () => {
           throw error;
         }
       });
+    }
+  });
+
+  // Node has no cross-platform openat/unlinkat or directory rename lock. These
+  // interlocks exercise every observable identity boundary around handle I/O.
+  it("rejects parent replacement before marker creation without writing secrets outside", async ({
+    skip,
+  }) => {
+    const smoke = await loadSmokeModule();
+    const outerTemporaryRoot = join(
+      repositoryRoot,
+      ".superpowers",
+      "sdd",
+      "task-6-parent-interleave-tmp",
+    );
+    await mkdir(outerTemporaryRoot, { recursive: true });
+    const fixtureRoot = await mkdtemp(join(outerTemporaryRoot, "parent-race-"));
+    const workspace = join(fixtureRoot, "workspace");
+    const outside = join(fixtureRoot, "outside");
+    const temporaryRoot = join(workspace, ".tmp");
+    const owner = join(temporaryRoot, "tf-search-smoke-owner");
+    const displacedOwner = join(temporaryRoot, "owner-original");
+    const externalMarker = join(outside, "external-marker");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    let ownerIsLink = false;
+    let interlocked = false;
+
+    await mkdir(owner, { recursive: true });
+    await mkdir(outside);
+    await writeFile(externalMarker, "preserve");
+    try {
+      await expect(
+        smoke.prepareSecretDirectory(
+          {},
+          {
+            repositoryRoot: workspace,
+            temporaryParent: owner,
+            interlock: async ({ path, phase }) => {
+              if (phase !== "after-run-created") return;
+              interlocked = true;
+              const externalRun = join(
+                outside,
+                path.slice(path.lastIndexOf(sep) + 1),
+              );
+              await rename(owner, displacedOwner);
+              await mkdir(externalRun);
+              try {
+                await symlink(outside, owner, linkType);
+                ownerIsLink = true;
+              } catch (error) {
+                const code = (error as NodeJS.ErrnoException).code;
+                if (code === "EPERM" || code === "EACCES") {
+                  skip();
+                  return;
+                }
+                throw error;
+              }
+            },
+          },
+        ),
+      ).rejects.toThrow(
+        /ownership|physical|identity|replaced|symbolic|reparse/i,
+      );
+      expect(interlocked).toBe(true);
+      expect(await readFile(externalMarker, "utf8")).toBe("preserve");
+      const outsideEntries = await readdir(outside, {
+        recursive: true,
+        withFileTypes: true,
+      });
+      for (const entry of outsideEntries) {
+        if (!entry.isFile() || entry.name === "external-marker") continue;
+        const value = await readFile(join(entry.parentPath, entry.name), "utf8");
+        expect(value).toBe("");
+      }
+    } finally {
+      if (ownerIsLink) await unlink(owner).catch(() => undefined);
+      await rm(fixtureRoot, { force: true, recursive: true });
+      await rmdir(outerTemporaryRoot).catch(() => undefined);
+    }
+  });
+
+  it("rejects run replacement before secret creation and preserves the external marker", async ({
+    skip,
+  }) => {
+    const smoke = await loadSmokeModule();
+    const outerTemporaryRoot = join(
+      repositoryRoot,
+      ".superpowers",
+      "sdd",
+      "task-6-run-interleave-tmp",
+    );
+    await mkdir(outerTemporaryRoot, { recursive: true });
+    const fixtureRoot = await mkdtemp(join(outerTemporaryRoot, "run-race-"));
+    const workspace = join(fixtureRoot, "workspace");
+    const outside = join(fixtureRoot, "outside");
+    const owner = join(workspace, ".tmp", "tf-search-smoke-owner");
+    const externalMarker = join(outside, "external-marker");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    let displacedRun = "";
+    let runIsLink = false;
+    let interlocked = false;
+
+    await mkdir(owner, { recursive: true });
+    await mkdir(outside);
+    await writeFile(externalMarker, "preserve");
+    try {
+      await expect(
+        smoke.prepareSecretDirectory(
+          {},
+          {
+            repositoryRoot: workspace,
+            temporaryParent: owner,
+            interlock: async ({ path, phase }) => {
+              if (phase !== "after-ownership-marker-created") return;
+              interlocked = true;
+              displacedRun = `${path}-original`;
+              await rename(path, displacedRun);
+              try {
+                await symlink(outside, path, linkType);
+                runIsLink = true;
+              } catch (error) {
+                const code = (error as NodeJS.ErrnoException).code;
+                if (code === "EPERM" || code === "EACCES") {
+                  skip();
+                  return;
+                }
+                throw error;
+              }
+            },
+          },
+        ),
+      ).rejects.toThrow(
+        /ownership|physical|identity|replaced|symbolic|reparse/i,
+      );
+      expect(interlocked).toBe(true);
+      expect(await readFile(externalMarker, "utf8")).toBe("preserve");
+      expect(await readdir(outside)).toEqual(["external-marker"]);
+      if (displacedRun.length > 0) {
+        const displacedFiles = await readdir(displacedRun);
+        expect(displacedFiles).toEqual([".tf-search-smoke-owner"]);
+      }
+    } finally {
+      if (runIsLink) {
+        const runLink = (await readdir(owner)).find((name) =>
+          name.startsWith("tf-search-smoke-"),
+        );
+        if (runLink !== undefined) {
+          await unlink(join(owner, runLink)).catch(() => undefined);
+        }
+      }
+      await rm(fixtureRoot, { force: true, recursive: true });
+      await rmdir(outerTemporaryRoot).catch(() => undefined);
+    }
+  });
+
+  it("rejects file substitution after exclusive open without overwriting an external file", async () => {
+    const smoke = await loadSmokeModule();
+    const outerTemporaryRoot = join(
+      repositoryRoot,
+      ".superpowers",
+      "sdd",
+      "task-6-file-interleave-tmp",
+    );
+    await mkdir(outerTemporaryRoot, { recursive: true });
+    const fixtureRoot = await mkdtemp(join(outerTemporaryRoot, "file-race-"));
+    const workspace = join(fixtureRoot, "workspace");
+    const outside = join(fixtureRoot, "outside");
+    const owner = join(workspace, ".tmp", "tf-search-smoke-owner");
+    const externalMarker = join(outside, "external-marker");
+    let displacedFile = "";
+    let interlocked = false;
+
+    await mkdir(owner, { recursive: true });
+    await mkdir(outside);
+    await writeFile(externalMarker, "preserve");
+    try {
+      await expect(
+        smoke.prepareSecretDirectory(
+          {},
+          {
+            repositoryRoot: workspace,
+            temporaryParent: owner,
+            interlock: async ({ name, path, phase }) => {
+              if (
+                phase !== "after-owned-file-open" ||
+                name !== "tf_client_secret"
+              ) {
+                return;
+              }
+              interlocked = true;
+              displacedFile = `${path}-original`;
+              await rename(path, displacedFile);
+              await link(externalMarker, path);
+            },
+          },
+        ),
+      ).rejects.toThrow(/identity|replaced/i);
+      expect(interlocked).toBe(true);
+      expect(await readFile(externalMarker, "utf8")).toBe("preserve");
+      expect(await readFile(displacedFile, "utf8")).toBe("");
+      expect((await lstat(externalMarker)).nlink).toBeGreaterThanOrEqual(2);
+    } finally {
+      await rm(fixtureRoot, { force: true, recursive: true });
+      await rmdir(outerTemporaryRoot).catch(() => undefined);
+    }
+  });
+
+  it("refuses cleanup after run replacement and never follows the replacement", async ({
+    skip,
+  }) => {
+    const smoke = await loadSmokeModule();
+    const outerTemporaryRoot = join(
+      repositoryRoot,
+      ".superpowers",
+      "sdd",
+      "task-6-cleanup-run-interleave-tmp",
+    );
+    await mkdir(outerTemporaryRoot, { recursive: true });
+    const fixtureRoot = await mkdtemp(join(outerTemporaryRoot, "cleanup-race-"));
+    const workspace = join(fixtureRoot, "workspace");
+    const outside = join(fixtureRoot, "outside");
+    const owner = join(workspace, ".tmp", "tf-search-smoke-owner");
+    const externalMarker = join(outside, "external-marker");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    let prepared:
+      | Awaited<ReturnType<SmokeModule["prepareSecretDirectory"]>>
+      | undefined;
+    let displacedRun = "";
+    let runIsLink = false;
+    let interlocked = false;
+
+    await mkdir(owner, { recursive: true });
+    await mkdir(outside);
+    await writeFile(externalMarker, "preserve");
+    try {
+      prepared = await smoke.prepareSecretDirectory(
+        {},
+        { repositoryRoot: workspace, temporaryParent: owner },
+      );
+      await expect(
+        smoke.removeVerifiedDirectory(prepared.directory, {
+          repositoryRoot: workspace,
+          temporaryParent: owner,
+          ownership: prepared.ownership,
+          interlock: async ({ path, phase }) => {
+            if (phase !== "after-cleanup-scan") return;
+            interlocked = true;
+            displacedRun = `${path}-original`;
+            await rename(path, displacedRun);
+            try {
+              await symlink(outside, path, linkType);
+              runIsLink = true;
+            } catch (error) {
+              const code = (error as NodeJS.ErrnoException).code;
+              if (code === "EPERM" || code === "EACCES") {
+                skip();
+                return;
+              }
+              throw error;
+            }
+          },
+        }),
+      ).rejects.toThrow(
+        /ownership|physical|identity|replaced|symbolic|reparse/i,
+      );
+      expect(interlocked).toBe(true);
+      expect(await readFile(externalMarker, "utf8")).toBe("preserve");
+      expect(await readdir(outside)).toEqual(["external-marker"]);
+      expect((await readdir(displacedRun)).length).toBeGreaterThan(1);
+    } finally {
+      if (runIsLink && prepared !== undefined) {
+        await unlink(prepared.directory).catch(() => undefined);
+      }
+      await rm(fixtureRoot, { force: true, recursive: true });
+      await rmdir(outerTemporaryRoot).catch(() => undefined);
+    }
+  });
+
+  it("refuses cleanup when the ownership marker changes", async () => {
+    const smoke = await loadSmokeModule();
+    const outerTemporaryRoot = join(
+      repositoryRoot,
+      ".superpowers",
+      "sdd",
+      "task-6-marker-mismatch-tmp",
+    );
+    await mkdir(outerTemporaryRoot, { recursive: true });
+    const fixtureRoot = await mkdtemp(join(outerTemporaryRoot, "marker-race-"));
+    const workspace = join(fixtureRoot, "workspace");
+    const owner = join(workspace, ".tmp", "tf-search-smoke-owner");
+    let prepared:
+      | Awaited<ReturnType<SmokeModule["prepareSecretDirectory"]>>
+      | undefined;
+
+    await mkdir(owner, { recursive: true });
+    try {
+      prepared = await smoke.prepareSecretDirectory(
+        {},
+        { repositoryRoot: workspace, temporaryParent: owner },
+      );
+      const marker = join(prepared.directory, ".tf-search-smoke-owner");
+      await chmod(marker, 0o600).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      });
+      await writeFile(marker, "attacker-marker");
+
+      await expect(
+        smoke.removeVerifiedDirectory(prepared.directory, {
+          repositoryRoot: workspace,
+          temporaryParent: owner,
+          ownership: prepared.ownership,
+        }),
+      ).rejects.toThrow(/marker|ownership|identity/i);
+      expect(
+        await readFile(join(prepared.directory, prepared.secretNames[0]), "utf8"),
+      ).not.toBe("");
+    } finally {
+      await rm(fixtureRoot, { force: true, recursive: true });
+      await rmdir(outerTemporaryRoot).catch(() => undefined);
+    }
+  });
+
+  it("refuses cleanup when the run directory contains an unknown entry", async () => {
+    const smoke = await loadSmokeModule();
+    const outerTemporaryRoot = join(
+      repositoryRoot,
+      ".superpowers",
+      "sdd",
+      "task-6-unknown-entry-tmp",
+    );
+    await mkdir(outerTemporaryRoot, { recursive: true });
+    const fixtureRoot = await mkdtemp(join(outerTemporaryRoot, "unknown-race-"));
+    const workspace = join(fixtureRoot, "workspace");
+    const owner = join(workspace, ".tmp", "tf-search-smoke-owner");
+    let prepared:
+      | Awaited<ReturnType<SmokeModule["prepareSecretDirectory"]>>
+      | undefined;
+
+    await mkdir(owner, { recursive: true });
+    try {
+      prepared = await smoke.prepareSecretDirectory(
+        {},
+        { repositoryRoot: workspace, temporaryParent: owner },
+      );
+      const unknown = join(prepared.directory, "unexpected-entry");
+      await writeFile(unknown, "preserve");
+
+      await expect(
+        smoke.removeVerifiedDirectory(prepared.directory, {
+          repositoryRoot: workspace,
+          temporaryParent: owner,
+          ownership: prepared.ownership,
+        }),
+      ).rejects.toThrow(/unexpected|allowlist|ownership/i);
+      expect(await readFile(unknown, "utf8")).toBe("preserve");
+      expect(
+        await readFile(join(prepared.directory, prepared.secretNames[0]), "utf8"),
+      ).not.toBe("");
+    } finally {
+      await rm(fixtureRoot, { force: true, recursive: true });
+      await rmdir(outerTemporaryRoot).catch(() => undefined);
+    }
+  });
+
+  it("revalidates an opened cleanup file before unlinking it", async () => {
+    const smoke = await loadSmokeModule();
+    const outerTemporaryRoot = join(
+      repositoryRoot,
+      ".superpowers",
+      "sdd",
+      "task-6-cleanup-file-interleave-tmp",
+    );
+    await mkdir(outerTemporaryRoot, { recursive: true });
+    const fixtureRoot = await mkdtemp(
+      join(outerTemporaryRoot, "cleanup-file-race-"),
+    );
+    const workspace = join(fixtureRoot, "workspace");
+    const outside = join(fixtureRoot, "outside");
+    const owner = join(workspace, ".tmp", "tf-search-smoke-owner");
+    const externalMarker = join(outside, "external-marker");
+    let prepared:
+      | Awaited<ReturnType<SmokeModule["prepareSecretDirectory"]>>
+      | undefined;
+    let displacedFile = "";
+    let interlocked = false;
+
+    await mkdir(owner, { recursive: true });
+    await mkdir(outside);
+    await writeFile(externalMarker, "preserve");
+    try {
+      prepared = await smoke.prepareSecretDirectory(
+        {},
+        { repositoryRoot: workspace, temporaryParent: owner },
+      );
+      await expect(
+        smoke.removeVerifiedDirectory(prepared.directory, {
+          repositoryRoot: workspace,
+          temporaryParent: owner,
+          ownership: prepared.ownership,
+          interlock: async ({ name, path, phase }) => {
+            if (
+              phase !== "after-cleanup-file-open" ||
+              name !== "tf_client_secret"
+            ) {
+              return;
+            }
+            interlocked = true;
+            displacedFile = `${path}-original`;
+            await rename(path, displacedFile);
+            await link(externalMarker, path);
+          },
+        }),
+      ).rejects.toThrow(/identity|replaced/i);
+      expect(interlocked).toBe(true);
+      expect(await readFile(externalMarker, "utf8")).toBe("preserve");
+      expect(await readFile(displacedFile, "utf8")).not.toBe("");
+    } finally {
+      await rm(fixtureRoot, { force: true, recursive: true });
+      await rmdir(outerTemporaryRoot).catch(() => undefined);
     }
   });
 
