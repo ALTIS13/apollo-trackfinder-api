@@ -423,7 +423,6 @@ git commit -m "feat(tf-web): gate player behind platform session"
 - Modify: `artifacts/music-player/src/hooks/use-player.tsx`
 - Modify: `artifacts/music-player/src/hooks/use-spotify.ts`
 - Modify: `artifacts/music-player/src/hooks/use-yandex.ts`
-- Delete: `artifacts/music-player/src/lib/client-session.ts`
 - Create: `artifacts/music-player/src/lib/tf-api-migration.test.ts`
 
 **Interfaces:**
@@ -439,10 +438,10 @@ it("loads recommendations without a sessionId query and with credentials");
 it("posts Spotify and Yandex logout with CSRF");
 it("navigates to Spotify login without sid");
 it("posts the Yandex token through the CSRF adapter");
-it("contains no runtime reference to getClientSessionId, X-Client-Session, or trackfinder_session_id");
+it("contains no legacy identity transport in the migrated HTTP call sites");
 ```
 
-For the source scan, resolve `src` from `import.meta.dirname`, read only runtime `.ts`/`.tsx` files, exclude `*.test.*`, and assert the forbidden strings are absent.
+For the source scan, resolve `src` from `import.meta.dirname` and inspect `Home.tsx`, `Discover.tsx`, `TrackCard.tsx`, `use-spotify.ts`, and `use-yandex.ts`. Assert `getClientSessionId`, `X-Client-Session`, `trackfinder_session_id`, `sessionId`, and `sid` are absent from those migrated HTTP call sites. `use-player.tsx` may retain its existing WebSocket-only `getClientSessionId` reference until Task 4 replaces that lifecycle, but its HTTP `/tracks/play` body must not contain `sessionId`.
 
 - [ ] **Step 2: Run the migration test and verify RED**
 
@@ -496,7 +495,7 @@ export function spotifyLoginUrl(): string {
 }
 ```
 
-Both provider logout mutations use `{ method: "POST" }`. Yandex token remains JSON POST. All provider GET calls preserve their existing query parameters and return types. Remove imports and uses of `getClientSessionId`, then delete `src/lib/client-session.ts`.
+Both provider logout mutations use `{ method: "POST" }`. Yandex token remains JSON POST. All provider GET calls preserve their existing query parameters and return types. Remove every HTTP use of `getClientSessionId`; leave only the pre-existing WebSocket reference for Task 4.
 
 - [ ] **Step 4: Run migration tests and the complete player suite**
 
@@ -508,7 +507,7 @@ pnpm --filter @workspace/music-player test
 pnpm --filter @workspace/music-player typecheck
 ```
 
-Expected: all player tests PASS, no forbidden legacy string in runtime source, and TypeScript exits 0.
+Expected: all player tests PASS, no legacy identity transport remains in migrated HTTP call sites or the `/tracks/play` body, and TypeScript exits 0.
 
 Commit:
 
@@ -524,7 +523,9 @@ git commit -m "feat(tf-web): migrate protected api calls"
 **Files:**
 - Create: `artifacts/music-player/src/lib/tf-websocket.ts`
 - Test: `artifacts/music-player/src/lib/tf-websocket.test.ts`
+- Modify: `artifacts/music-player/src/lib/tf-api-migration.test.ts`
 - Modify: `artifacts/music-player/src/hooks/use-player.tsx`
+- Delete: `artifacts/music-player/src/lib/client-session.ts`
 
 **Interfaces:**
 - Consumes: `createWebSocketTicket()`, `buildTfWebSocketUrl()`, and `TfApiError`
@@ -541,6 +542,7 @@ it("uses a URL whose only query key is ticket");
 it("backs off reconnects from 3000ms up to 30000ms");
 it("does not reconnect after unauthenticated, forbidden, or unavailable ticket errors");
 it("cancels pending ticket work and timers after stop");
+it("contains no runtime reference to getClientSessionId, X-Client-Session, trackfinder_session_id, sessionId query transport, or sid query transport");
 ```
 
 Use a fake socket implementing `onopen`, `onmessage`, `onclose`, `onerror`, `readyState`, and `close()`. The ticket dependency returns ordered values such as `"a".repeat(43)` and `"b".repeat(43)` so reuse is observable.
@@ -605,7 +607,7 @@ private async connect(attempt: number): Promise<void> {
 
 `start()` is idempotent, increments an attempt generation, and starts `connect`. `scheduleReconnect()` waits the current delay, doubles it with a `30000` cap, increments the generation, and calls `connect` so every attempt obtains a new ticket. `stop()` marks the lifecycle stopped, increments the generation to invalidate pending ticket promises, clears the timer, nulls `onclose`, and closes the active socket.
 
-Move only socket creation/reconnect ownership out of `use-player.tsx`; retain its player-state message application and outgoing state serialization. On terminal authentication/policy failure, show one destructive toast and leave reconnection stopped until `PlayerProvider` is remounted after auth refresh or relogin.
+Move only socket creation/reconnect ownership out of `use-player.tsx`; retain its player-state message application and outgoing state serialization. Remove the final `getClientSessionId` import and delete `src/lib/client-session.ts`. Extend the migration test to scan all runtime `.ts`/`.tsx` files under `src`, excluding tests, and prove that no legacy identity transport remains. On terminal authentication/policy failure, show one destructive toast and leave reconnection stopped until `PlayerProvider` is remounted after auth refresh or relogin.
 
 - [ ] **Step 4: Run lifecycle and player tests, typecheck, and commit**
 
@@ -622,7 +624,7 @@ Expected: all lifecycle/player tests PASS and TypeScript exits 0.
 Commit:
 
 ```bash
-git add artifacts/music-player/src/lib/tf-websocket.ts artifacts/music-player/src/lib/tf-websocket.test.ts artifacts/music-player/src/hooks/use-player.tsx
+git add artifacts/music-player/src/lib/tf-websocket.ts artifacts/music-player/src/lib/tf-websocket.test.ts artifacts/music-player/src/lib/tf-api-migration.test.ts artifacts/music-player/src/hooks/use-player.tsx artifacts/music-player/src/lib/client-session.ts
 git commit -m "feat(tf-web): use one-time websocket tickets"
 ```
 
