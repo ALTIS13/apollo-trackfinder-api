@@ -88,8 +88,10 @@ function shellPath(path: string): string {
 
 async function runApiStartup(options: {
   readonly databaseUrl?: string;
+  readonly heartbeatFileConfigured?: boolean;
   readonly heartbeatKeys?: string;
   readonly heartbeatPath?: string;
+  readonly inlineHeartbeatKeys?: string;
 }): Promise<{
   readonly stdout: string;
   readonly stderr: string;
@@ -124,8 +126,14 @@ async function runApiStartup(options: {
       env: {
         PATH: process.env.PATH,
         DATABASE_URL_FILE: shellPath(databasePath),
-        APOLLO_MODULE_HEARTBEAT_KEYS: '{"attacker":"must-not-win-over-file"}',
-        APOLLO_MODULE_HEARTBEAT_KEYS_FILE: shellPath(heartbeatPath),
+        APOLLO_MODULE_HEARTBEAT_KEYS:
+          options.inlineHeartbeatKeys ??
+          '{"attacker":"must-not-win-over-file"}',
+        ...(options.heartbeatFileConfigured === false
+          ? {}
+          : {
+              APOLLO_MODULE_HEARTBEAT_KEYS_FILE: shellPath(heartbeatPath),
+            }),
       },
       maxBuffer: 1024 * 1024,
       windowsHide: true,
@@ -357,6 +365,28 @@ describe("TF deployment identity contract", () => {
     expect(result.stderr).toBe("");
     expect(`${result.stdout}\n${result.stderr}`).not.toContain(heartbeatSecret);
     expect(`${result.stdout}\n${result.stderr}`).not.toContain(heartbeatMap);
+  });
+
+  it("rejects an inherited valid inline heartbeat map when the file selector is absent", async () => {
+    const inlineSecret = "i".repeat(32);
+    const inlineMap = JSON.stringify({ "search-media": inlineSecret });
+    const execution = runApiStartup({
+      heartbeatFileConfigured: false,
+      inlineHeartbeatKeys: inlineMap,
+    });
+
+    await expect(execution).rejects.toBeDefined();
+    await execution.catch((error: unknown) => {
+      const output =
+        typeof error === "object" && error !== null
+          ? `${String((error as { stdout?: unknown }).stdout ?? "")}\n${String(
+              (error as { stderr?: unknown }).stderr ?? "",
+            )}`
+          : "";
+      expect(output.trim()).toBe("");
+      expect(output).not.toContain(inlineSecret);
+      expect(output).not.toContain(inlineMap);
+    });
   });
 
   it.each([

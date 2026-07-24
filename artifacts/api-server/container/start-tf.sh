@@ -16,21 +16,24 @@ fi
 export DATABASE_URL="$database_url"
 unset database_url
 
-if [ -n "${APOLLO_MODULE_HEARTBEAT_KEYS_FILE:-}" ]; then
-  unset APOLLO_MODULE_HEARTBEAT_KEYS
-  if [ ! -r "$APOLLO_MODULE_HEARTBEAT_KEYS_FILE" ]; then
-    exit 1
-  fi
+unset APOLLO_MODULE_HEARTBEAT_KEYS
+if [ -z "${APOLLO_MODULE_HEARTBEAT_KEYS_FILE:-}" ]; then
+  exit 1
+fi
 
-  heartbeat_keys_size=$(wc -c < "$APOLLO_MODULE_HEARTBEAT_KEYS_FILE")
-  if [ "$heartbeat_keys_size" -lt 1 ] || [ "$heartbeat_keys_size" -gt 131072 ]; then
-    unset heartbeat_keys_size
-    exit 1
-  fi
+if [ ! -r "$APOLLO_MODULE_HEARTBEAT_KEYS_FILE" ]; then
+  exit 1
+fi
+
+heartbeat_keys_size=$(wc -c < "$APOLLO_MODULE_HEARTBEAT_KEYS_FILE")
+if [ "$heartbeat_keys_size" -lt 1 ] || [ "$heartbeat_keys_size" -gt 131072 ]; then
   unset heartbeat_keys_size
+  exit 1
+fi
+unset heartbeat_keys_size
 
-  heartbeat_keys=$(
-    node - "$APOLLO_MODULE_HEARTBEAT_KEYS_FILE" <<'NODE'
+heartbeat_keys=$(
+  node - "$APOLLO_MODULE_HEARTBEAT_KEYS_FILE" <<'NODE'
 const { readFileSync } = require("node:fs");
 
 const allowedModuleIds = new Set([
@@ -84,13 +87,12 @@ for (const [moduleId, secret] of entries) {
 
 process.stdout.write(raw);
 NODE
-  ) || {
-    unset heartbeat_keys
-    exit 1
-  }
-
-  export APOLLO_MODULE_HEARTBEAT_KEYS="$heartbeat_keys"
+) || {
   unset heartbeat_keys
-fi
+  exit 1
+}
+
+export APOLLO_MODULE_HEARTBEAT_KEYS="$heartbeat_keys"
+unset heartbeat_keys
 
 exec "$@"
