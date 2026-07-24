@@ -5,6 +5,7 @@ import type { TrackResult, TrackSource, TrackType } from "@workspace/api-client-
 import { useToast } from "@/hooks/use-toast";
 import { getClientSessionId } from "@/lib/client-session";
 import { API_BASE as apiBase } from "@/lib/api-config";
+import { tfFetch, tfRequestInit } from "@/lib/tf-session-client";
 
 interface PlayerContextType {
   currentTrack: TrackResult | null;
@@ -126,14 +127,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!currentTrack) return;
-    fetch(`${apiBase}/tracks/play`, {
+    tfFetch<void>("/tracks/play", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         trackId: currentTrack.id,
         artist: currentTrack.artist,
         title: currentTrack.title,
-        sessionId: getClientSessionId(),
       }),
     }).catch(() => {});
   }, [currentTrack?.id]);
@@ -150,7 +150,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setDuration(track.duration || 0);
       audioRef.current.pause();
       audioRef.current.src = "";
-      const res = await queryClient.fetchQuery(getGetTrackStreamQueryOptions(track.id));
+      const res = await queryClient.fetchQuery(getGetTrackStreamQueryOptions(track.id, {
+        request: tfRequestInit({ method: "GET" }),
+      }));
       if (!res.streamUrl) throw new Error("No stream URL");
       audioRef.current.src = res.streamUrl;
       await audioRef.current.play();

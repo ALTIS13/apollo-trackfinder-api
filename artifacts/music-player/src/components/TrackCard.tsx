@@ -8,6 +8,7 @@ import type { TrackResult } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { motion } from "framer-motion";
+import { tfRequestInit } from "@/lib/tf-session-client";
 
 interface TrackCardProps {
   track: TrackResult;
@@ -44,7 +45,9 @@ export function TrackCard({ track, index }: TrackCardProps) {
   const handleDownload = async () => {
     try {
       setIsDownloading(true);
-      const res = await queryClient.fetchQuery(getGetTrackDownloadQueryOptions(track.id));
+      const res = await queryClient.fetchQuery(getGetTrackDownloadQueryOptions(track.id, {
+        request: tfRequestInit({ method: "GET" }),
+      }));
       if (!res.downloadUrl) throw new Error("No download URL returned");
       const a = document.createElement("a");
       a.href = res.downloadUrl;

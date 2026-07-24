@@ -3,8 +3,7 @@ import { TrackCard } from "@/components/TrackCard";
 import { Sparkles, Music2, Loader2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import type { TrackResult } from "@workspace/api-client-react";
-import { getClientSessionId } from "@/lib/client-session";
-import { API_BASE } from "@/lib/api-config";
+import { tfFetch } from "@/lib/tf-session-client";
 
 export default function Discover() {
   const [recommendations, setRecommendations] = useState<TrackResult[]>([]);
@@ -12,14 +11,8 @@ export default function Discover() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const sessionId = getClientSessionId();
-    const url = `${API_BASE}/tracks/recommendations?sessionId=${encodeURIComponent(sessionId)}&limit=20`;
     setIsLoading(true);
-    fetch(url)
-      .then((r) => {
-        if (!r.ok) throw new Error("Не удалось загрузить рекомендации");
-        return r.json();
-      })
+    tfFetch<{ results: TrackResult[] }>("/tracks/recommendations?limit=20")
       .then((data) => {
         setRecommendations(data.results ?? []);
         setError(null);

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useSearchTracks } from "@workspace/api-client-react";
 import type { TrackType, TrackResult } from "@workspace/api-client-react";
 import { TrackCard } from "@/components/TrackCard";
+import { tfRequestInit } from "@/lib/tf-session-client";
 import { Search, Music2, Loader2, Sparkles } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -58,7 +59,9 @@ export default function Home() {
     saveSourcePrefs("auto", next);
   }, []);
 
-  const searchMutation = useSearchTracks();
+  const searchMutation = useSearchTracks({
+    request: tfRequestInit({ method: "POST" }),
+  });
 
   function buildSearchData(a: string, t: string) {
     const data: Record<string, unknown> = { artist: a, title: t };

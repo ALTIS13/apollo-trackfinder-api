@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getClientSessionId } from "@/lib/client-session";
-import { API_BASE } from "@/lib/api-config";
+import { apiUrl } from "@/lib/api-config";
+import { tfFetch } from "@/lib/tf-session-client";
 
 export interface SpotifyTrack {
   id: string;
@@ -27,30 +27,10 @@ export interface SpotifyStatus {
   spotifyUserId?: string;
 }
 
-function sessionHeaders(): Record<string, string> {
-  return { "X-Client-Session": getClientSessionId() };
-}
-
-async function apiFetch<T>(path: string, params?: Record<string, string>): Promise<T> {
-  const isAbsolute = path.startsWith("http://") || path.startsWith("https://");
-  const fullPath = isAbsolute ? path : `${window.location.origin}${path}`;
-  const url = new URL(fullPath);
-  if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-  const resp = await fetch(url.toString(), {
-    credentials: "include",
-    headers: sessionHeaders(),
-  });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ message: resp.statusText }));
-    throw new Error((err as { message?: string }).message ?? "Request failed");
-  }
-  return resp.json();
-}
-
 export function useSpotifyStatus() {
   return useQuery<SpotifyStatus>({
     queryKey: ["spotify", "status"],
-    queryFn: () => apiFetch(`${API_BASE}/spotify/status`),
+    queryFn: () => tfFetch("/spotify/status"),
     retry: false,
   });
 }
@@ -58,7 +38,7 @@ export function useSpotifyStatus() {
 export function useSpotifyLogout() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => apiFetch(`${API_BASE}/spotify/logout`),
+    mutationFn: () => tfFetch("/spotify/logout", { method: "POST" }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["spotify"] });
     },
@@ -69,10 +49,7 @@ export function useSpotifyLiked(offset = 0, limit = 50) {
   return useQuery<{ tracks: SpotifyTrack[]; total: number; offset: number; limit: number }>({
     queryKey: ["spotify", "liked", offset, limit],
     queryFn: () =>
-      apiFetch(`${API_BASE}/spotify/liked`, {
-        offset: String(offset),
-        limit: String(limit),
-      }),
+      tfFetch(`/spotify/liked?offset=${offset}&limit=${limit}`),
     enabled: false,
   });
 }
@@ -80,7 +57,7 @@ export function useSpotifyLiked(offset = 0, limit = 50) {
 export function useSpotifyPlaylists() {
   return useQuery<{ playlists: SpotifyPlaylist[]; total: number }>({
     queryKey: ["spotify", "playlists"],
-    queryFn: () => apiFetch(`${API_BASE}/spotify/playlists`),
+    queryFn: () => tfFetch("/spotify/playlists"),
     enabled: false,
   });
 }
@@ -89,10 +66,7 @@ export function useSpotifyPlaylistTracks(playlistId: string | null, offset = 0, 
   return useQuery<{ tracks: SpotifyTrack[]; total: number; offset: number; limit: number }>({
     queryKey: ["spotify", "playlist", playlistId, offset, limit],
     queryFn: () =>
-      apiFetch(`${API_BASE}/spotify/playlists/${playlistId}/tracks`, {
-        offset: String(offset),
-        limit: String(limit),
-      }),
+      tfFetch(`/spotify/playlists/${playlistId}/tracks?offset=${offset}&limit=${limit}`),
     enabled: !!playlistId,
   });
 }
@@ -100,12 +74,11 @@ export function useSpotifyPlaylistTracks(playlistId: string | null, offset = 0, 
 export function useSpotifyTopTracks(timeRange: "short_term" | "medium_term" | "long_term" = "medium_term") {
   return useQuery<{ tracks: SpotifyTrack[]; timeRange: string }>({
     queryKey: ["spotify", "top-tracks", timeRange],
-    queryFn: () => apiFetch(`${API_BASE}/spotify/top-tracks`, { time_range: timeRange }),
+    queryFn: () => tfFetch(`/spotify/top-tracks?time_range=${timeRange}`),
     enabled: false,
   });
 }
 
 export function spotifyLoginUrl(): string {
-  const sid = getClientSessionId();
-  return `${API_BASE}/spotify/login?sid=${encodeURIComponent(sid)}`;
+  return apiUrl("/spotify/login");
 }
