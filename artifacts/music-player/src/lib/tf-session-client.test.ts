@@ -85,4 +85,90 @@ describe("TF browser session client", () => {
     expect(error).toBeInstanceOf(TfApiError);
     expect(error).toMatchObject({ status, code, kind });
   });
+
+  it("normalizes a successful response body read failure", async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      status: 200,
+      ok: true,
+      headers: new Headers({ "Content-Type": "application/json" }),
+      json: vi.fn().mockRejectedValue(new Error("body read failed")),
+    } as unknown as Response);
+
+    await expect(tfFetch("/auth/me")).rejects.toMatchObject({
+      status: 0,
+      code: "transport_unavailable",
+      kind: "transport",
+    });
+  });
+
+  it.each([
+    [401, "unauthenticated"],
+    [403, "forbidden"],
+    [503, "unavailable"],
+  ])("classifies malformed JSON on status %s", async (status, kind) => {
+    vi.mocked(fetch).mockResolvedValue(new Response("{", {
+      status,
+      headers: { "Content-Type": "application/json" },
+    }));
+
+    await expect(tfFetch("/auth/me")).rejects.toMatchObject({
+      status,
+      code: "invalid_response",
+      kind,
+    });
+  });
+
+  it("clears CSRF after a confirmed 401", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(session), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "unauthorized" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      }));
+
+    await loadTfSession();
+    await expect(tfFetch("/auth/me")).rejects.toMatchObject({ status: 401 });
+    await expect(tfFetch("/tracks/play", { method: "POST" })).rejects.toMatchObject({
+      code: "csrf_unavailable",
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears CSRF after an invalid session payload", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(session), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accountId: session.accountId }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+
+    await loadTfSession();
+    await expect(loadTfSession()).rejects.toMatchObject({ code: "invalid_session" });
+    await expect(tfFetch("/tracks/play", { method: "POST" })).rejects.toMatchObject({
+      code: "csrf_unavailable",
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains CSRF after a transient 503", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(session), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "policy_unavailable" }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      }));
+
+    await loadTfSession();
+    await expect(tfFetch("/auth/me")).rejects.toMatchObject({ status: 503 });
+    expect(new Headers(tfRequestInit({ method: "POST" }).headers).get("X-CSRF-Token")).toBe("csrf-canary");
+  });
 });
