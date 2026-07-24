@@ -145,19 +145,34 @@ describe("TF search runtime configuration", () => {
     ).rejects.toThrow("invalid runtime configuration");
   });
 
-  it("accepts HTTPS without the insecure transport flag and valid deployed metadata", async () => {
-    await expect(
-      parseTfSearchRuntimeConfig(
-        environment({ APOLLO_DEPLOYED_AT: "2026-07-24T12:34:56+03:00" }),
-        secretReader({
-          "/run/secrets/command": commandSecret,
-          "/run/secrets/heartbeat": heartbeatSecret,
-        }),
-      ),
-    ).resolves.toMatchObject({ deployedAt: "2026-07-24T12:34:56+03:00" });
-  });
+  it.each([
+    "2026-07-24T12:34:56Z",
+    "2026-07-24T12:34:56+00:00",
+    "2026-07-24T12:34:56+23:59",
+    "2026-07-24T12:34:56-23:59",
+  ])(
+    "accepts HTTPS without the insecure transport flag and valid deployed metadata %s",
+    async (APOLLO_DEPLOYED_AT) => {
+      await expect(
+        parseTfSearchRuntimeConfig(
+          environment({ APOLLO_DEPLOYED_AT }),
+          secretReader({
+            "/run/secrets/command": commandSecret,
+            "/run/secrets/heartbeat": heartbeatSecret,
+          }),
+        ),
+      ).resolves.toMatchObject({ deployedAt: APOLLO_DEPLOYED_AT });
+    },
+  );
 
-  it.each(["2026-07-24T12:34:56", "2026-07-24T12:34:56+0300", "not-a-date"])
+  it.each([
+    "2026-07-24T12:34:56",
+    "2026-07-24T12:34:56+0300",
+    "2026-07-24T12:34:56+99:99",
+    "2026-07-24T12:34:56+24:00",
+    "2026-07-24T12:34:56+23:60",
+    "not-a-date",
+  ])
   ("rejects invalid deployed timestamp %s", async (APOLLO_DEPLOYED_AT) => {
     await expect(
       parseTfSearchRuntimeConfig(

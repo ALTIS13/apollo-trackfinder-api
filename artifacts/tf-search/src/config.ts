@@ -17,8 +17,8 @@ const deployedAtSchema = z
   .string()
   .datetime({ offset: true })
   .refine(
-    (value) => value.endsWith("Z") || /[+-]\d{2}:\d{2}$/.test(value),
-    "Expected an RFC3339 timestamp with a colon offset",
+    (value) => /(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(value),
+    "Expected an RFC3339 timestamp with a valid offset",
   );
 const privateServiceNamePattern = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
