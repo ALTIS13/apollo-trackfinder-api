@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { createServer, request, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createConnection, type AddressInfo, type Socket } from "node:net";
 import { Writable } from "node:stream";
 
 import type { PolicyIntrospectionResponse } from "@workspace/platform-contract";
@@ -14,6 +14,7 @@ import {
   type TfSession,
   type WebSocketTicket,
 } from "./lib/tf-session-store.js";
+import * as serverStartup from "./lib/server-startup.js";
 import {
   attachWebSocketServer,
   canBufferWebSocketMessage,
@@ -29,6 +30,7 @@ const REVISION = randomBytes(32).toString("base64url");
 const servers: Server[] = [];
 const handles: WebSocketServerHandle[] = [];
 const clients: WebSocket[] = [];
+const rawSockets: Socket[] = [];
 
 function opaque(): string {
   return randomBytes(32).toString("base64url");
@@ -273,6 +275,106 @@ async function rawUpgradeResponse(
   });
 }
 
+interface RawWebSocketPeer {
+  readonly socket: Socket;
+  sendText(payload: string): void;
+  waitForCloseCode(milliseconds?: number): Promise<number>;
+}
+
+function maskedTextFrame(payload: string): Buffer {
+  const body = Buffer.from(payload, "utf8");
+  if (body.byteLength > 125) throw new Error("raw test payload too large");
+  const mask = randomBytes(4);
+  const frame = Buffer.allocUnsafe(2 + mask.byteLength + body.byteLength);
+  frame[0] = 0x81;
+  frame[1] = 0x80 | body.byteLength;
+  mask.copy(frame, 2);
+  for (let index = 0; index < body.byteLength; index += 1) {
+    frame[6 + index] = body[index]! ^ mask[index % mask.byteLength]!;
+  }
+  return frame;
+}
+
+async function connectRawWebSocket(
+  origin: string,
+  path: string,
+): Promise<RawWebSocketPeer> {
+  const url = new URL(origin);
+  const socket = createConnection({
+    host: url.hostname,
+    port: Number(url.port),
+  });
+  rawSockets.push(socket);
+  let buffered = Buffer.alloc(0);
+  let notifyData: (() => void) | null = null;
+  socket.on("data", (chunk: Buffer) => {
+    buffered = Buffer.concat([buffered, chunk]);
+    notifyData?.();
+    notifyData = null;
+  });
+  await once(socket, "connect");
+  socket.write(
+    `GET ${path} HTTP/1.1\r\n` +
+      `Host: ${url.hostname}:${url.port}\r\n` +
+      "Connection: Upgrade\r\n" +
+      "Upgrade: websocket\r\n" +
+      `Sec-WebSocket-Key: ${randomBytes(16).toString("base64")}\r\n` +
+      "Sec-WebSocket-Version: 13\r\n\r\n",
+  );
+
+  const waitForData = async (deadline: number): Promise<void> => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("raw WebSocket timeout");
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        notifyData = null;
+        reject(new Error("raw WebSocket timeout"));
+      }, remaining);
+      notifyData = () => {
+        clearTimeout(timeout);
+        resolve();
+      };
+    });
+  };
+
+  const handshakeDeadline = Date.now() + 1_000;
+  while (buffered.indexOf("\r\n\r\n") < 0) {
+    await waitForData(handshakeDeadline);
+  }
+  const headerEnd = buffered.indexOf("\r\n\r\n") + 4;
+  const response = buffered.subarray(0, headerEnd).toString("latin1");
+  buffered = buffered.subarray(headerEnd);
+  if (!response.startsWith("HTTP/1.1 101 ")) {
+    throw new Error("raw WebSocket upgrade rejected");
+  }
+
+  return {
+    socket,
+    sendText: (payload) => socket.write(maskedTextFrame(payload)),
+    waitForCloseCode: async (milliseconds = 1_000) => {
+      const deadline = Date.now() + milliseconds;
+      while (true) {
+        if (buffered.byteLength >= 2) {
+          const payloadLength = buffered[1]! & 0x7f;
+          if (payloadLength >= 126) {
+            throw new Error("unexpected raw WebSocket frame length");
+          }
+          const frameLength = 2 + payloadLength;
+          if (buffered.byteLength >= frameLength) {
+            const opcode = buffered[0]! & 0x0f;
+            const payload = buffered.subarray(2, frameLength);
+            buffered = buffered.subarray(frameLength);
+            if (opcode === 0x8 && payload.byteLength >= 2) {
+              return payload.readUInt16BE(0);
+            }
+          }
+        }
+        await waitForData(deadline);
+      }
+    },
+  };
+}
+
 function closeCode(ws: WebSocket): Promise<number> {
   return new Promise((resolve) => {
     ws.once("close", (code) => resolve(code));
@@ -296,6 +398,7 @@ async function expectNoMessageDuring(
 }
 
 afterEach(async () => {
+  for (const socket of rawSockets.splice(0)) socket.destroy();
   for (const client of clients.splice(0)) client.terminate();
   await Promise.all(handles.splice(0).map((handle) => handle.close()));
   await Promise.all(
@@ -700,6 +803,63 @@ describe("connected WebSocket lifecycle", () => {
     expect(scheduler.size).toBe(0);
   });
 
+  it.each([
+    ["forbidden", 4403],
+    ["unavailable", 1013],
+  ])(
+    "does not relay a raw peer after periodic policy becomes %s",
+    async (outcome, expectedCloseCode) => {
+      const senderSession = session(ACCOUNT_A);
+      const recipientSession = session(ACCOUNT_A);
+      const senderTicket = ticket(opaque(), senderSession);
+      const recipientTicket = ticket(opaque(), recipientSession);
+      const current = dependencies([senderTicket, recipientTicket]);
+      const scheduler = new ManualScheduler();
+      const { origin } = await startWs(current, { scheduler });
+      const sender = await connectRawWebSocket(
+        origin,
+        `/api/ws?ticket=${senderTicket.value}`,
+      );
+      const recipient = await connectOpen(
+        `${origin}/api/ws?ticket=${recipientTicket.value}`,
+      );
+      const originalObserve =
+        current.sessionStore.observeSession.getMockImplementation()!;
+      if (outcome === "forbidden") {
+        current.sessions.delete(senderTicket.sessionHandle);
+      } else {
+        current.sessionStore.observeSession.mockImplementation(
+          async (handle: string) => {
+            if (handle === senderTicket.sessionHandle) {
+              throw new TfSessionStoreUnavailableError();
+            }
+            return originalObserve(handle);
+          },
+        );
+      }
+
+      const serverClose = sender.waitForCloseCode();
+      scheduler.runAll();
+      await expect(serverClose).resolves.toBe(expectedCloseCode);
+      expect(recipient.readyState).toBe(WebSocket.OPEN);
+
+      await expectNoMessageDuring(
+        recipient,
+        () =>
+          sender.sendText(
+            JSON.stringify({
+              type: "player_state",
+              track: null,
+              position: 0,
+              isPlaying: false,
+            }),
+          ),
+        150,
+      );
+      expect(recipient.readyState).toBe(WebSocket.OPEN);
+    },
+  );
+
   it("closes only sockets backed by the revoked TF session", async () => {
     const revokedSession = session(ACCOUNT_A);
     const healthySession = session(ACCOUNT_A);
@@ -792,5 +952,130 @@ describe("connected WebSocket lifecycle", () => {
     await expect(pendingUpgrade).resolves.toBe(0);
     expect(server.listenerCount("upgrade")).toBe(0);
     expect(scheduler.size).toBe(0);
+  });
+});
+
+describe("API startup WebSocket orchestration", () => {
+  it("closes attached WebSockets before startup resource cleanup", async () => {
+    type InitializeApiRuntime = (
+      server: Server,
+      options: {
+        readonly attachWebSocket: (server: Server) => WebSocketServerHandle;
+        readonly initializeAfterAttach: () => Promise<void>;
+      },
+    ) => Promise<WebSocketServerHandle>;
+    const initializeApiRuntime = Reflect.get(
+      serverStartup,
+      "initializeApiRuntime",
+    ) as InitializeApiRuntime | undefined;
+    const activeSession = session();
+    const pendingSession = session();
+    const activeTicket = ticket(opaque(), activeSession);
+    const pendingTicket = ticket(opaque(), pendingSession);
+    const current = dependencies([activeTicket, pendingTicket]);
+    const scheduler = new ManualScheduler();
+    const originalConsume =
+      current.sessionStore.consumeWebSocketTicket.getMockImplementation()!;
+    let markPendingStarted: (() => void) | undefined;
+    const pendingStarted = new Promise<void>((resolve) => {
+      markPendingStarted = resolve;
+    });
+    current.sessionStore.consumeWebSocketTicket.mockImplementation(
+      async (value: string) => {
+        if (value === pendingTicket.value) {
+          markPendingStarted?.();
+          return new Promise<WebSocketTicket | null>(() => {});
+        }
+        return originalConsume(value);
+      },
+    );
+    const serverSockets = new Set<Socket>();
+    const closeQueues = vi.fn(async () => {});
+    let cleanupSnapshot:
+      | {
+          readonly activeReadyState: number;
+          readonly allServerSocketsDestroyed: boolean;
+          readonly serverSocketCount: number;
+          readonly timerCount: number;
+          readonly upgradeListenerCount: number;
+        }
+      | undefined;
+    let activeClient: WebSocket | undefined;
+    let pendingUpgrade: Promise<number> | undefined;
+    let attachCalled = false;
+    let initializeAfterAttachCalled = false;
+    let listeningServer: Server | undefined;
+    const closeRedis = vi.fn(async () => {
+      cleanupSnapshot = {
+        activeReadyState: activeClient?.readyState ?? WebSocket.CLOSED,
+        allServerSocketsDestroyed: [...serverSockets].every(
+          (socket) => socket.destroyed,
+        ),
+        serverSocketCount: serverSockets.size,
+        timerCount: scheduler.size,
+        upgradeListenerCount: listeningServer?.listenerCount("upgrade") ?? -1,
+      };
+    });
+
+    await expect(
+      serverStartup.startApiListener({
+        listen: () => {
+          const server = createServer((_request, response) => {
+            response.writeHead(404).end();
+          });
+          listeningServer = server;
+          servers.push(server);
+          server.on("connection", (socket) => serverSockets.add(socket));
+          server.listen(0, "127.0.0.1");
+          return server;
+        },
+        initialize: async (server) => {
+          if (initializeApiRuntime === undefined) {
+            throw new Error("missing API runtime initializer");
+          }
+          await initializeApiRuntime(server, {
+            attachWebSocket: (attachedServer) => {
+              attachCalled = true;
+              const handle = attachWebSocketServer(attachedServer, {
+                platform: current.platform,
+                sessionStore: current.sessionStore,
+                scheduler,
+              });
+              handles.push(handle);
+              return handle;
+            },
+            initializeAfterAttach: async () => {
+              initializeAfterAttachCalled = true;
+              const address = server.address() as AddressInfo;
+              const origin = `ws://127.0.0.1:${address.port}`;
+              activeClient = await connectOpen(
+                `${origin}/api/ws?ticket=${activeTicket.value}`,
+              );
+              pendingUpgrade = rawUpgrade(
+                origin,
+                `/api/ws?ticket=${pendingTicket.value}`,
+              );
+              await pendingStarted;
+              throw new Error("later initialization failed");
+            },
+          });
+        },
+        closeQueues,
+        closeRedis,
+      }),
+    ).rejects.toThrow("TF API startup failed");
+
+    expect(attachCalled).toBe(true);
+    expect(initializeAfterAttachCalled).toBe(true);
+    expect(cleanupSnapshot).toEqual({
+      activeReadyState: WebSocket.CLOSED,
+      allServerSocketsDestroyed: true,
+      serverSocketCount: 2,
+      timerCount: 0,
+      upgradeListenerCount: 0,
+    });
+    await expect(pendingUpgrade).resolves.toBe(0);
+    expect(closeQueues).toHaveBeenCalledOnce();
+    expect(closeRedis).toHaveBeenCalledOnce();
   });
 });

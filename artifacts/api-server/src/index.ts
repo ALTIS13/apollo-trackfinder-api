@@ -16,7 +16,10 @@ import {
   TfSessionStore,
   createStrictRedisClient,
 } from "./lib/tf-session-store.js";
-import { startApiListener } from "./lib/server-startup.js";
+import {
+  initializeApiRuntime,
+  startApiListener,
+} from "./lib/server-startup.js";
 import { attachWebSocketServer } from "./ws.js";
 import type { WebSocketServerHandle } from "./ws.js";
 
@@ -78,17 +81,14 @@ async function start(): Promise<void> {
     const server = await startApiListener({
       listen: () => app.listen(port),
       initialize: async (listeningServer) => {
-        webSocketHandle = attachWebSocketServer(listeningServer, {
-          platform,
-          sessionStore,
+        webSocketHandle = await initializeApiRuntime(listeningServer, {
+          attachWebSocket: (server) =>
+            attachWebSocketServer(server, {
+              platform,
+              sessionStore,
+            }),
+          initializeAfterAttach: initBackgroundQueues,
         });
-        try {
-          await initBackgroundQueues();
-        } catch {
-          await webSocketHandle.close();
-          webSocketHandle = null;
-          throw new Error("TF API initialization failed");
-        }
       },
       closeQueues: shutdownBackgroundQueues,
       closeRedis: closeRedisResources,

@@ -7,6 +7,17 @@ interface ApiListenerOptions {
   readonly closeRedis: () => Promise<void>;
 }
 
+export interface ApiRuntimeHandle {
+  close(): Promise<void>;
+}
+
+export interface ApiRuntimeInitializationOptions<
+  Handle extends ApiRuntimeHandle,
+> {
+  readonly attachWebSocket: (server: Server) => Handle;
+  readonly initializeAfterAttach: () => Promise<void>;
+}
+
 async function waitForListening(server: Server): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const onListening = (): void => {
@@ -28,6 +39,20 @@ async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolve) => {
     server.close(() => resolve());
   });
+}
+
+export async function initializeApiRuntime<Handle extends ApiRuntimeHandle>(
+  server: Server,
+  options: ApiRuntimeInitializationOptions<Handle>,
+): Promise<Handle> {
+  const webSocketHandle = options.attachWebSocket(server);
+  try {
+    await options.initializeAfterAttach();
+    return webSocketHandle;
+  } catch {
+    await webSocketHandle.close();
+    throw new Error("TF API initialization failed");
+  }
 }
 
 export async function startApiListener(

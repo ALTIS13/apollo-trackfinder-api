@@ -70,6 +70,7 @@ interface SocketContext {
   readonly ticket: WebSocketTicket;
   readonly room: Set<WebSocket>;
   timer: unknown;
+  authorized: boolean;
   validating: boolean;
   cleaned: boolean;
 }
@@ -331,13 +332,22 @@ export function attachWebSocketServer(
   let closed = false;
   let closePromise: Promise<void> | null = null;
 
+  const deauthorizeSocket = (
+    ws: WebSocket,
+    context: SocketContext,
+  ): void => {
+    if (!context.authorized) return;
+    context.authorized = false;
+    context.room.delete(ws);
+    if (context.room.size === 0) rooms.delete(context.ticket.accountId);
+  };
+
   const cleanupSocket = (ws: WebSocket): void => {
     const context = contexts.get(ws);
     if (context === undefined || context.cleaned) return;
     context.cleaned = true;
     scheduler.clearInterval(context.timer);
-    context.room.delete(ws);
-    if (context.room.size === 0) rooms.delete(context.ticket.accountId);
+    deauthorizeSocket(ws, context);
     contexts.delete(ws);
     ws.off("message", onMessage);
     ws.off("close", onSocketClose);
@@ -354,11 +364,22 @@ export function attachWebSocketServer(
     isBinary: boolean,
   ): void {
     const context = contexts.get(this);
-    if (context === undefined) return;
+    if (
+      context === undefined ||
+      !context.authorized ||
+      this.readyState !== WebSocket.OPEN
+    ) {
+      return;
+    }
     const message = validatedPlayerMessage(data, isBinary);
     if (message === null) return;
     for (const client of context.room) {
-      if (client !== this && client.readyState === WebSocket.OPEN) {
+      const recipientContext = contexts.get(client);
+      if (
+        client !== this &&
+        recipientContext?.authorized === true &&
+        client.readyState === WebSocket.OPEN
+      ) {
         if (
           !canBufferWebSocketMessage(
             client.bufferedAmount,
@@ -396,6 +417,7 @@ export function attachWebSocketServer(
   ): Promise<void> => {
     if (
       context.cleaned ||
+      !context.authorized ||
       context.validating ||
       ws.readyState !== WebSocket.OPEN
     ) {
@@ -404,10 +426,18 @@ export function attachWebSocketServer(
     context.validating = true;
     try {
       const result = await validateBackingPolicy(context.ticket, dependencies);
-      if (context.cleaned || ws.readyState !== WebSocket.OPEN) return;
+      if (
+        context.cleaned ||
+        !context.authorized ||
+        ws.readyState !== WebSocket.OPEN
+      ) {
+        return;
+      }
       if (result === "forbidden") {
+        deauthorizeSocket(ws, context);
         ws.close(4403, "policy_revoked");
       } else if (result === "unavailable") {
+        deauthorizeSocket(ws, context);
         ws.close(1013, "policy_unavailable");
       }
     } finally {
@@ -423,6 +453,7 @@ export function attachWebSocketServer(
       ticket,
       room,
       timer: undefined,
+      authorized: true,
       validating: false,
       cleaned: false,
     };
