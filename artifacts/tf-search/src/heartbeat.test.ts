@@ -107,6 +107,65 @@ describe("TF search heartbeat", () => {
     await handle.stop();
   });
 
+  it.each([202, 503])("cancels the heartbeat response body for status %i", async (status) => {
+    vi.useFakeTimers();
+    const cancel = vi.fn(async () => undefined);
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => ({
+      status,
+      body: { cancel },
+    }) as unknown as Response);
+    const handle = startSearchHeartbeat({
+      apiOrigin: "https://api.example.test",
+      secret,
+      version: "build-1",
+      ready: () => true,
+      telemetry: () => ({ requestsPerMinute: 0, status: "healthy" }),
+      fetch,
+    });
+
+    await vi.runAllTicks();
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    await handle.stop();
+  });
+
+  it("continues after response-body cancellation fails without changing readiness", async () => {
+    vi.useFakeTimers();
+    const ready = vi.fn(() => true);
+    const failingCancel = vi.fn(async () => {
+      throw new Error("body cancellation failed");
+    });
+    const succeedingCancel = vi.fn(async () => undefined);
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce({
+        status: 503,
+        body: { cancel: failingCancel },
+      } as unknown as Response)
+      .mockResolvedValueOnce({
+        status: 202,
+        body: { cancel: succeedingCancel },
+      } as unknown as Response);
+    const handle = startSearchHeartbeat({
+      apiOrigin: "https://api.example.test",
+      secret,
+      version: "build-1",
+      ready,
+      telemetry: () => ({ requestsPerMinute: 0, status: "healthy" }),
+      fetch,
+    });
+
+    await vi.runAllTicks();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(failingCancel).toHaveBeenCalledTimes(1);
+    expect(succeedingCancel).toHaveBeenCalledTimes(1);
+    expect(ready).toHaveReturnedWith(true);
+    await handle.stop();
+  });
+
   it("continues after a telemetry failure", async () => {
     vi.useFakeTimers();
     let telemetryCalls = 0;

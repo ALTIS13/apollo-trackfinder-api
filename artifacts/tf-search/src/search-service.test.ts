@@ -193,7 +193,10 @@ describe("search service", () => {
     const service = createSearchService({ providers: providers(calls), cache: new BoundedSearchCache() });
 
     const first = await service.search(command({ sources: ["dz", "bc", "sc", "yt"], mode: "manual" }));
-    const second = await service.search(command({ requestId: "10000000-0000-4000-8000-000000000002" }));
+    const second = await service.search(command({
+      requestId: "10000000-0000-4000-8000-000000000002",
+      mode: "manual",
+    }));
     const extended = await service.search(command({
       requestId: "10000000-0000-4000-8000-000000000003",
       maxResults: 21,
@@ -219,6 +222,103 @@ describe("search service", () => {
     expect(partial.cached).toBe(false);
     expect(repeatedPartial.cached).toBe(false);
     expect(calls).toHaveLength(18);
+  });
+
+  it("does not reuse a one-result cache entry for a twenty-result search", async () => {
+    const calls: Array<{ source: TfSearchSource; query: string; limit: number }> = [];
+    const manyResults = (source: TfSearchResult["source"]) =>
+      Array.from({ length: 6 }, (_, index) => track(source, {
+        id: `${source}_${index}`,
+        viewCount: 10_000 - index,
+      }));
+    const service = createSearchService({
+      providers: [
+        provider("yt", manyResults("youtube"), calls),
+        provider("sc", manyResults("soundcloud"), calls),
+        provider("bc", manyResults("bandcamp"), calls),
+        provider("dz", manyResults("deezer"), calls),
+      ],
+    });
+
+    const oneResult = await service.search(command({ maxResults: 1 }));
+    const twentyResults = await service.search(command({
+      requestId: "10000000-0000-4000-8000-000000000002",
+      maxResults: 20,
+    }));
+
+    expect(oneResult.results).toHaveLength(1);
+    expect(twentyResults.cached).toBe(false);
+    expect(twentyResults.results).toHaveLength(20);
+    expect(calls).toHaveLength(8);
+  });
+
+  it.each([
+    ["manual", "auto"],
+    ["auto", "manual"],
+  ] as const)("does not reuse %s ranking for %s mode", async (firstMode, secondMode) => {
+    const calls: Array<{ source: TfSearchSource; query: string; limit: number }> = [];
+    const service = createSearchService({ providers: providers(calls) });
+
+    const first = await service.search(command({ mode: firstMode }));
+    const second = await service.search(command({
+      requestId: "10000000-0000-4000-8000-000000000002",
+      mode: secondMode,
+    }));
+    const repeatedSecond = await service.search(command({
+      requestId: "10000000-0000-4000-8000-000000000003",
+      mode: secondMode,
+    }));
+
+    expect(first.cached).toBe(false);
+    expect(second.cached).toBe(false);
+    expect(repeatedSecond.cached).toBe(true);
+    expect(calls).toHaveLength(8);
+  });
+
+  it("uses the same cache identity for canonical-equivalent source ordering", async () => {
+    const calls: Array<{ source: TfSearchSource; query: string; limit: number }> = [];
+    const service = createSearchService({ providers: providers(calls) });
+
+    const first = await service.search(command({ sources: ["dz", "bc", "sc", "yt"] }));
+    const reordered = await service.search(command({
+      requestId: "10000000-0000-4000-8000-000000000002",
+      sources: ["yt", "sc", "bc", "dz"],
+    }));
+
+    expect(first.cached).toBe(false);
+    expect(reordered.cached).toBe(true);
+    expect(calls).toHaveLength(4);
+  });
+
+  it("normalizes artist and title without exposing cache dimensions in suggestions", async () => {
+    const calls: Array<{ source: TfSearchSource; query: string; limit: number }> = [];
+    const service = createSearchService({ providers: providers(calls) });
+
+    await service.search(command({
+      artist: "  THE Artist  ",
+      title: "  THE Track  ",
+      mode: "manual",
+      maxResults: 7,
+    }));
+    const cached = await service.search(command({
+      requestId: "10000000-0000-4000-8000-000000000002",
+      artist: "the artist",
+      title: "the track",
+      mode: "manual",
+      maxResults: 7,
+    }));
+    const suggestions = await service.suggestions({
+      schemaVersion: 1,
+      requestId: "10000000-0000-4000-8000-000000000003",
+      query: "track",
+      limit: 5,
+    });
+
+    expect(cached.cached).toBe(true);
+    expect(calls).toHaveLength(4);
+    expect(suggestions.suggestions).toEqual([
+      { artist: "the artist", title: "the track" },
+    ]);
   });
 
   it("does not cache an incomplete all-source provider fan-out", async () => {

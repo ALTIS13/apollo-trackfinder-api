@@ -67,7 +67,7 @@ export function startSearchHeartbeat(options: HeartbeatOptions): SearchHeartbeat
       activeController = new AbortController();
       controller = activeController;
       timeout = setTimeout(() => activeController?.abort(), HEARTBEAT_TIMEOUT_MS);
-      await send(new URL(HEARTBEAT_PATH, options.apiOrigin).toString(), {
+      const response = await send(new URL(HEARTBEAT_PATH, options.apiOrigin).toString(), {
         method: "POST",
         redirect: "error",
         signal: activeController.signal,
@@ -79,6 +79,12 @@ export function startSearchHeartbeat(options: HeartbeatOptions): SearchHeartbeat
         },
         body: rawBody.toString("utf8"),
       });
+      try {
+        const cancellation = response.body?.cancel();
+        void cancellation?.catch(() => undefined);
+      } catch {
+        // Body disposal must never affect readiness or the next heartbeat attempt.
+      }
     } catch {
       // The next scheduled attempt deliberately remains independent of local or transport failure.
     } finally {
