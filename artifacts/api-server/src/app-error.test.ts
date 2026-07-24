@@ -22,6 +22,31 @@ const REVISION = randomBytes(32).toString("base64url");
 const HANDLE = randomBytes(32).toString("base64url");
 const servers: Server[] = [];
 
+function captureRequestLogs(): {
+  readonly logger: ReturnType<typeof createTfLogger>;
+  readonly read: () => string;
+} {
+  let output = "";
+  const destination = new Writable({
+    write(chunk, _encoding, callback) {
+      output += chunk.toString();
+      callback();
+    },
+  });
+  return {
+    logger: createTfLogger(destination),
+    read: () => output,
+  };
+}
+
+async function startApp(app: ReturnType<typeof createApiApp>): Promise<string> {
+  const server = app.listen(0, "127.0.0.1");
+  servers.push(server);
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  return `http://127.0.0.1:${address.port}`;
+}
+
 afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(
@@ -36,6 +61,84 @@ afterEach(async () => {
 });
 
 describe("terminal API error sanitization", () => {
+  it("preserves a fixed sanitized 400 for malformed JSON", async () => {
+    const canary = `malformed-json-${randomBytes(24).toString("base64url")}`;
+    const logs = captureRequestLogs();
+    const stderr = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    const origin = await startApp(createApiApp({ requestLogger: logs.logger }));
+
+    const response = await fetch(`${origin}/api/yandex/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: `{"token":"${canary}"`,
+    });
+    const body = await response.text();
+
+    expect(response.status).toBe(400);
+    expect(body).toBe('{"error":"invalid_request"}');
+    expect(body).not.toContain(canary);
+    expect(logs.read()).not.toContain(canary);
+    expect(JSON.stringify(stderr.mock.calls)).not.toContain(canary);
+  });
+
+  it("preserves a fixed sanitized 413 for an oversized body", async () => {
+    const canary = `oversized-json-${randomBytes(24).toString("base64url")}`;
+    const logs = captureRequestLogs();
+    const stderr = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    const origin = await startApp(createApiApp({ requestLogger: logs.logger }));
+
+    const response = await fetch(`${origin}/api/yandex/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: canary,
+        padding: "x".repeat(128 * 1024),
+      }),
+    });
+    const body = await response.text();
+
+    expect(response.status).toBe(413);
+    expect(body).toBe('{"error":"request_too_large"}');
+    expect(body).not.toContain(canary);
+    expect(logs.read()).not.toContain(canary);
+    expect(JSON.stringify(stderr.mock.calls)).not.toContain(canary);
+  });
+
+  it("does not trust a generic error with forged client status fields", () => {
+    const canary = `forged-status-${randomBytes(24).toString("base64url")}`;
+    const log = { error: vi.fn() };
+    const status = vi.fn().mockReturnThis();
+    const json = vi.fn();
+    const next = vi.fn();
+
+    sanitizedApiErrorHandler(
+      Object.assign(new Error(canary), {
+        status: 400,
+        statusCode: 400,
+      }),
+      {
+        log,
+        method: "POST",
+        path: "/yandex/token",
+      } as unknown as Request,
+      {
+        headersSent: false,
+        json,
+        status,
+      } as unknown as Response,
+      next as NextFunction,
+    );
+
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith({ error: "internal_error" });
+    expect(next).not.toHaveBeenCalled();
+    expect(JSON.stringify(log.error.mock.calls)).not.toContain(canary);
+  });
+
   it("does not forward a sensitive error after response headers were sent", () => {
     const canary = `partial-response-${randomBytes(24).toString("base64url")}`;
     const log = { error: vi.fn() };
