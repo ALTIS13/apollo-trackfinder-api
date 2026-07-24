@@ -40,6 +40,7 @@ const apiStartupScript = join(
   "start-tf.sh",
 );
 type TemporaryOptions = {
+  readonly afterTemporaryRootVerified?: () => Promise<void>;
   readonly repositoryRoot?: string;
 };
 
@@ -238,23 +239,6 @@ async function verifiedPhysicalDirectory(
   return { lexicalCandidate, physicalCandidate };
 }
 
-async function ensureVerifiedDirectory(
-  candidate: string,
-  workspace: VerifiedWorkspace,
-): Promise<VerifiedDirectory> {
-  try {
-    return await verifiedPhysicalDirectory(candidate, workspace);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  try {
-    await mkdir(candidate);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  }
-  return verifiedPhysicalDirectory(candidate, workspace);
-}
-
 function temporaryLayout(root: string): {
   readonly ownerRoot: string;
   readonly temporaryRoot: string;
@@ -272,23 +256,72 @@ function temporaryLayout(root: string): {
   return { ownerRoot, temporaryRoot };
 }
 
-async function prepareTemporaryContext(root: string): Promise<{
+async function verifyExistingDirectory(
+  candidate: string,
+  workspace: VerifiedWorkspace,
+): Promise<VerifiedDirectory | undefined> {
+  try {
+    return await verifiedPhysicalDirectory(candidate, workspace);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return undefined;
+  }
+}
+
+async function prepareTemporaryContext(
+  root: string,
+  afterTemporaryRootVerified?: () => Promise<void>,
+): Promise<{
   readonly owner: VerifiedDirectory;
   readonly temporary: VerifiedDirectory;
   readonly workspace: VerifiedWorkspace;
 }> {
   const workspace = await verifiedWorkspaceRoot(root);
   const layout = temporaryLayout(workspace.lexicalRoot);
-  const temporary = await ensureVerifiedDirectory(
+  const existingTemporary = await verifyExistingDirectory(
     layout.temporaryRoot,
     workspace,
   );
-  const owner = await ensureVerifiedDirectory(layout.ownerRoot, workspace);
-  assertPhysicalContainment(
-    owner.physicalCandidate,
-    temporary.physicalCandidate,
-  );
-  return { owner, temporary, workspace };
+  await verifyExistingDirectory(layout.ownerRoot, workspace);
+  if (afterTemporaryRootVerified !== undefined) {
+    if (existingTemporary === undefined) {
+      try {
+        await mkdir(layout.temporaryRoot);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+      await verifiedPhysicalDirectory(layout.temporaryRoot, workspace);
+    }
+    await afterTemporaryRootVerified();
+  }
+
+  let lastNotFound: unknown;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await verifyExistingDirectory(layout.temporaryRoot, workspace);
+    await verifyExistingDirectory(layout.ownerRoot, workspace);
+    try {
+      await mkdir(layout.ownerRoot, { recursive: true });
+      const temporary = await verifiedPhysicalDirectory(
+        layout.temporaryRoot,
+        workspace,
+      );
+      const owner = await verifiedPhysicalDirectory(
+        layout.ownerRoot,
+        workspace,
+      );
+      assertPhysicalContainment(
+        owner.physicalCandidate,
+        temporary.physicalCandidate,
+      );
+      return { owner, temporary, workspace };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      lastNotFound = error;
+    }
+  }
+  throw new Error("API temporary owner could not be stabilized", {
+    cause: lastNotFound,
+  });
 }
 
 async function verifiedTemporaryContext(root: string): Promise<{
@@ -388,25 +421,40 @@ async function createTemporaryDirectory(
   options: TemporaryOptions = {},
 ): Promise<string> {
   const root = options.repositoryRoot ?? repositoryRoot;
-  const context = await prepareTemporaryContext(root);
-  const directoryPath = assertContainedPath(
-    await mkdtemp(join(context.owner.lexicalCandidate, prefix)),
-    context.owner.lexicalCandidate,
-    "Generated temporary directory escaped its owner",
-  );
-  const directory = await verifiedPhysicalDirectory(
-    directoryPath,
-    context.workspace,
-  );
-  assertPhysicalContainment(
-    directory.physicalCandidate,
-    context.owner.physicalCandidate,
-  );
-  temporaryDirectories.push({
-    directory: directory.lexicalCandidate,
-    repositoryRoot: context.workspace.lexicalRoot,
+  let lastNotFound: unknown;
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const context = await prepareTemporaryContext(
+      root,
+      attempt === 0 ? options.afterTemporaryRootVerified : undefined,
+    );
+    try {
+      const directoryPath = assertContainedPath(
+        await mkdtemp(join(context.owner.lexicalCandidate, prefix)),
+        context.owner.lexicalCandidate,
+        "Generated temporary directory escaped its owner",
+      );
+      const directory = await verifiedPhysicalDirectory(
+        directoryPath,
+        context.workspace,
+      );
+      assertPhysicalContainment(
+        directory.physicalCandidate,
+        context.owner.physicalCandidate,
+      );
+      temporaryDirectories.push({
+        directory: directory.lexicalCandidate,
+        repositoryRoot: context.workspace.lexicalRoot,
+      });
+      return directory.lexicalCandidate;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      lastNotFound = error;
+    }
+  }
+  throw new Error("API temporary run could not be created", {
+    cause: lastNotFound,
   });
-  return directory.lexicalCandidate;
 }
 
 async function writeTemporaryFixture(
@@ -514,6 +562,48 @@ describe("TF deployment identity contract", () => {
 
     expect(fromOwner).not.toBe("..");
     expect(fromOwner.startsWith(`..${sep}`)).toBe(false);
+  });
+
+  it("recreates an empty temp root removed before owner creation", async () => {
+    const outerTemporaryRoot = join(
+      repositoryRoot,
+      ".superpowers",
+      "sdd",
+      "task-5-api-owner-race-tmp",
+    );
+    await mkdir(outerTemporaryRoot, { recursive: true });
+    const fixtureRoot = await mkdtemp(
+      join(outerTemporaryRoot, "api-owner-race-"),
+    );
+    const workspace = join(fixtureRoot, "workspace");
+    const temporaryRoot = join(workspace, ".tmp");
+    const expectedOwner = join(temporaryRoot, "api-deployment-contract");
+    let interleavingObserved = 0;
+
+    await mkdir(workspace);
+    try {
+      const directory = await createTemporaryDirectory("owner-race-", {
+        repositoryRoot: workspace,
+        afterTemporaryRootVerified: async () => {
+          expect((await lstat(temporaryRoot)).isDirectory()).toBe(true);
+          await rmdir(temporaryRoot);
+          interleavingObserved += 1;
+        },
+      });
+
+      expect(interleavingObserved).toBe(1);
+      const fromOwner = relative(expectedOwner, directory);
+      expect(fromOwner).not.toBe("..");
+      expect(fromOwner.startsWith(`..${sep}`)).toBe(false);
+    } finally {
+      await rm(fixtureRoot, { force: true, recursive: true });
+      await rmdir(outerTemporaryRoot).catch((error: unknown) => {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
+          throw error;
+        }
+      });
+    }
   });
 
   it("rejects linked temp roots, owner parents, and run directories", async ({
