@@ -83,8 +83,24 @@ export const TF_SEARCH_SUGGESTIONS_PATH = "/v1/suggestions";
 ```
 
 - `TfSearchResponse.results[]` includes internal `sourceUrl`; public API code must strip it.
+- Exact strict DTO bounds:
+  - `TfSearchResult`: `id` 3..4096, `title` 1..500, `artist` 1..300,
+    `type` original/remix/live/cover, integer `duration` 0..86400, four-value
+    result source, nullable HTTPS `thumbnailUrl` up to 4096, 1..32 unique
+    quality strings of 1..32 characters, nullable integer `viewCount`
+    0..`Number.MAX_SAFE_INTEGER`, finite `score` 0..1000, and HTTPS
+    `sourceUrl` up to 4096.
+  - `TfSearchCommand`: schema version 1, canonical UUID request ID, artist
+    1..200, title 1..300, required mode, 1..4 unique sources, and integer
+    `maxResults` 1..40.
+  - `TfSearchResponse`: matching command fields, query 1..501, at most 40
+    results, `cached`, `fallbackAvailable`, and exact `yt/sc/bc/dz` provider
+    statuses using `ok`, `failed`, or `skipped`.
+  - Suggestion command: schema version 1, canonical UUID request ID, query
+    2..200, integer limit 1..5. Suggestion response: matching request ID and
+    at most five strict `{ artist: 1..200, title: 1..300 }` objects.
 
-- [ ] **Step 1: Add RED tests for canonical signatures**
+- [x] **Step 1: Add RED tests for canonical signatures**
 
 Create tests asserting this exact canonical form:
 
@@ -117,7 +133,7 @@ Mutate method, path, timestamp, nonce, body, and secret separately and assert a
 different signature. Assert constant-time comparison accepts only the exact
 signature and canonical nonce accepts 43-character unpadded base64url only.
 
-- [ ] **Step 2: Add RED tests for strict search DTOs**
+- [x] **Step 2: Add RED tests for strict search DTOs**
 
 Use a canonical command fixture and assert:
 
@@ -139,7 +155,7 @@ Cover every source/result-source enum, trimmed length bounds, strict unknown-fie
 rejection, maximum 40 results, HTTPS-only `sourceUrl`, finite numeric fields, and
 strict provider status values `ok`, `failed`, `skipped`.
 
-- [ ] **Step 3: Run the new tests and verify RED**
+- [x] **Step 3: Run the new tests and verify RED**
 
 Run:
 
@@ -150,7 +166,7 @@ pnpm --filter @workspace/tf-search-contract test
 
 Expected: both fail because the packages/exports do not exist.
 
-- [ ] **Step 4: Implement the two contract packages**
+- [x] **Step 4: Implement the two contract packages**
 
 Use `z.object(...).strict()`. `createSignedBodySignature` uppercases the method,
 hashes the exact bytes, joins the five canonical lines with `\n`, and returns
@@ -160,7 +176,7 @@ hashes the exact bytes, joins the five canonical lines with `\n`, and returns
 Make the API heartbeat implementation import and re-export the shared heartbeat
 signature and payload schema so all existing API callers keep their names.
 
-- [ ] **Step 5: Run focused and compatibility tests**
+- [x] **Step 5: Run focused and compatibility tests**
 
 Run:
 
@@ -173,7 +189,7 @@ pnpm --filter @workspace/api-server typecheck
 
 Expected: all tests pass and typecheck exits 0.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 ```bash
 git add lib/module-runtime-contract lib/tf-search-contract tsconfig.json artifacts/api-server/package.json artifacts/api-server/src/lib/module-heartbeat.ts artifacts/api-server/src/lib/module-heartbeat.test.ts pnpm-lock.yaml
