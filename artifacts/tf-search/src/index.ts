@@ -3,21 +3,13 @@ import { parseTfSearchRuntimeConfig } from "./config.js";
 import { startSearchHeartbeat } from "./heartbeat.js";
 import { HmacInternalRequestAuthenticator } from "./internal-auth.js";
 import { logger } from "./logger.js";
+import { createRuntimeProviders } from "./runtime-providers.js";
 import { createSearchService } from "./search-service.js";
-import { searchBandcamp } from "./adapters/bandcamp.js";
-import { searchDeezer } from "./adapters/deezer.js";
-import { searchSoundCloud } from "./adapters/soundcloud.js";
-import { searchYouTube } from "./adapters/youtube.js";
 
 async function start(): Promise<void> {
   const config = await parseTfSearchRuntimeConfig(process.env);
   const service = createSearchService({
-    providers: [
-      { source: "yt", search: searchYouTube },
-      { source: "sc", search: searchSoundCloud },
-      { source: "bc", search: searchBandcamp },
-      { source: "dz", search: searchDeezer },
-    ],
+    providers: createRuntimeProviders(config.fixtureAdapters),
     logger: {
       warn({ source, errorClass }) {
         logger.warn({ source, errorClass }, "Search provider unavailable");

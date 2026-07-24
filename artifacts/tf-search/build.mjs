@@ -14,6 +14,10 @@ await build({
   platform: "node",
   outdir: distDir,
   outExtension: { ".js": ".mjs" },
+  banner: {
+    js: `import { createRequire as __bannerCreateRequire } from "node:module";
+globalThis.require = __bannerCreateRequire(import.meta.url);`,
+  },
   sourcemap: "linked",
   logLevel: "info",
 });

@@ -7,6 +7,7 @@ export interface TfSearchRuntimeConfig {
   readonly heartbeatSecret: string;
   readonly heartbeatApiOrigin: string;
   readonly version: string;
+  readonly fixtureAdapters: boolean;
   readonly deployedAt?: string;
 }
 
@@ -106,8 +107,20 @@ export async function parseTfSearchRuntimeConfig(
   const version = env["APOLLO_API_VERSION"]?.trim() || "unknown";
   if (version.length > 128) return invalidConfiguration();
 
-  const deployedAt = env["APOLLO_DEPLOYED_AT"]?.trim();
+  const rawDeployedAt = env["APOLLO_DEPLOYED_AT"]?.trim();
+  const deployedAt =
+    rawDeployedAt === undefined || rawDeployedAt.length === 0
+      ? undefined
+      : rawDeployedAt;
   if (deployedAt !== undefined && !deployedAtSchema.safeParse(deployedAt).success) {
+    return invalidConfiguration();
+  }
+  const fixtureFlag = env["TF_SEARCH_SMOKE_FIXTURES"];
+  if (fixtureFlag !== undefined && fixtureFlag !== "true") {
+    return invalidConfiguration();
+  }
+  const fixtureAdapters = fixtureFlag === "true";
+  if (fixtureAdapters && env["NODE_ENV"] !== "test") {
     return invalidConfiguration();
   }
 
@@ -117,6 +130,7 @@ export async function parseTfSearchRuntimeConfig(
     heartbeatSecret,
     heartbeatApiOrigin,
     version,
+    fixtureAdapters,
     ...(deployedAt === undefined ? {} : { deployedAt }),
   };
 }

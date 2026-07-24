@@ -54,7 +54,7 @@ services:
       ADMIN_DASHBOARD_TOKEN: "${ADMIN_DASHBOARD_TOKEN:-}"
       APOLLO_API_VERSION: "${APOLLO_API_VERSION:-unknown}"
       APOLLO_DEPLOYED_AT: "${APOLLO_DEPLOYED_AT:-}"
-      APOLLO_MODULE_HEARTBEAT_KEYS: "${APOLLO_MODULE_HEARTBEAT_KEYS:-}"
+      APOLLO_MODULE_HEARTBEAT_KEYS_FILE: /run/secrets/tf_module_heartbeat_keys
       APOLLO_PLATFORM_API_ORIGIN: "${APOLLO_PLATFORM_API_ORIGIN:-https://api.apollot.ru}"
       APOLLO_PLATFORM_ISSUER: "${APOLLO_PLATFORM_ISSUER:-https://api.apollot.ru}"
       APOLLO_TF_AUTH_REDIS_URL: redis://redis:6379/1
@@ -69,16 +69,22 @@ services:
       SERVER_URL: "${SERVER_URL:-https://api.tf.apollot.ru}"
       SPOTIFY_CLIENT_ID: "${SPOTIFY_CLIENT_ID:-}"
       SPOTIFY_CLIENT_SECRET: "${SPOTIFY_CLIENT_SECRET:-}"
+      TF_SEARCH_ALLOW_INSECURE_HTTP: "true"
+      TF_SEARCH_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_search_internal_auth_secret
+      TF_SEARCH_ORIGIN: http://tf-search:8080
       WEB_URL: "${WEB_URL:-https://tf.apollot.ru}"
     secrets:
       - tf_client_secret
       - tf_database_url
+      - tf_module_heartbeat_keys
+      - tf_search_internal_auth_secret
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
       - /tmp/tf-downloads:rw,noexec,nosuid,size=256m
     networks:
       - tf-data
       - tf-edge
+      - tf-search-control
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -88,6 +94,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      tf-search:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -95,6 +103,59 @@ services:
         - -e
         - >-
           fetch('http://127.0.0.1:8080/api/readyz').then(r=>{if(!r.ok)process.exit(1)})
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  tf-search:
+    build:
+      context: .
+      dockerfile: artifacts/tf-search/Dockerfile
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    init: true
+    environment:
+      APOLLO_API_VERSION: "${TF_SEARCH_VERSION:-unknown}"
+      APOLLO_DEPLOYED_AT: "${TF_SEARCH_DEPLOYED_AT:-}"
+      NODE_ENV: production
+      PORT: "8080"
+      TF_SEARCH_HEARTBEAT_ALLOW_INSECURE_HTTP: "true"
+      TF_SEARCH_HEARTBEAT_API_ORIGIN: http://api:8080
+      TF_SEARCH_HEARTBEAT_SECRET_FILE: /run/secrets/tf_search_heartbeat_secret
+      TF_SEARCH_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_search_internal_auth_secret
+    secrets:
+      - tf_search_internal_auth_secret
+      - tf_search_heartbeat_secret
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+      - /tmp/yt-dlp:rw,noexec,nosuid,size=64m
+    networks:
+      - tf-search-control
+      - tf-search-egress
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    stop_grace_period: 20s
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+          pids: 128
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:8080/readyz').then(r=>{if(!r.ok)process.exit(1)})
       interval: 5s
       timeout: 3s
       retries: 20
@@ -134,8 +195,14 @@ secrets:
     file: ${TF_SECRET_DIRECTORY:?}/tf_client_secret
   tf_database_url:
     file: ${TF_SECRET_DIRECTORY:?}/tf_database_url
+  tf_module_heartbeat_keys:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_module_heartbeat_keys
   tf_postgres_password:
     file: ${TF_SECRET_DIRECTORY:?}/tf_postgres_password
+  tf_search_heartbeat_secret:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_search_heartbeat_secret
+  tf_search_internal_auth_secret:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_search_internal_auth_secret
 
 volumes:
   pgdata:
@@ -145,3 +212,6 @@ networks:
   tf-data:
     internal: true
   tf-edge:
+  tf-search-control:
+    internal: true
+  tf-search-egress: {}

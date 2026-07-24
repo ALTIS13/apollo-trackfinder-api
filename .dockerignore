@@ -1,6 +1,7 @@
 node_modules
 .git
 .local
+.tmp
 .cache
 .config
 *.log

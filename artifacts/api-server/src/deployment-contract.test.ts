@@ -1,7 +1,15 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  rmdir,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -20,7 +28,15 @@ const nestedComposePath = join(
 const musicPlayerDirectory = join(repositoryRoot, "artifacts", "music-player");
 const musicPlayerDockerfile = join(musicPlayerDirectory, "Dockerfile");
 const modulesDocumentation = join(repositoryRoot, "MODULES.md");
+const apiStartupScript = join(
+  repositoryRoot,
+  "artifacts",
+  "api-server",
+  "container",
+  "start-tf.sh",
+);
 const temporaryDirectories: string[] = [];
+const temporaryRoot = join(repositoryRoot, ".tmp");
 
 type ComposeService = {
   readonly build?: {
@@ -29,15 +45,26 @@ type ComposeService = {
     readonly dockerfile?: string;
   };
   readonly depends_on?: Record<string, unknown>;
+  readonly deploy?: Record<string, unknown>;
   readonly environment?: Record<string, string>;
+  readonly healthcheck?: Record<string, unknown>;
+  readonly init?: boolean;
   readonly networks?: readonly string[];
+  readonly pids_limit?: number;
   readonly ports?: readonly string[];
+  readonly read_only?: boolean;
+  readonly security_opt?: readonly string[];
   readonly secrets?: readonly string[];
+  readonly stop_grace_period?: string;
+  readonly tmpfs?: readonly string[];
+  readonly user?: string;
   readonly volumes?: readonly string[];
 };
 
 type ComposeTemplate = {
   readonly name?: string;
+  readonly networks?: Record<string, Record<string, unknown> | null>;
+  readonly secrets?: Record<string, { readonly file?: string }>;
   readonly services: Record<string, ComposeService>;
   readonly volumes?: Record<string, unknown>;
 };
@@ -50,6 +77,81 @@ function service(template: ComposeTemplate, name: string): ComposeService {
   const current = template.services[name];
   if (current === undefined) throw new Error(`missing service ${name}`);
   return current;
+}
+
+function shellPath(path: string): string {
+  if (process.platform !== "win32") return path;
+  const match = /^([A-Za-z]):\\(.*)$/.exec(path);
+  if (match === null) return path.replaceAll("\\", "/");
+  return `/${match[1]!.toLowerCase()}/${match[2]!.replaceAll("\\", "/")}`;
+}
+
+async function runApiStartup(options: {
+  readonly databaseUrl?: string;
+  readonly heartbeatKeys?: string;
+  readonly heartbeatPath?: string;
+}): Promise<{
+  readonly stdout: string;
+  readonly stderr: string;
+}> {
+  const directory = await createTemporaryDirectory("apollo-tf-api-startup-");
+  const databasePath = join(directory, "tf_database_url");
+  const heartbeatPath =
+    options.heartbeatPath ?? join(directory, "tf_module_heartbeat_keys");
+  await writeFile(
+    databasePath,
+    options.databaseUrl ??
+      "postgres://trackfinder:contract@db:5432/trackfinder",
+  );
+  if (options.heartbeatKeys !== undefined) {
+    await writeFile(heartbeatPath, options.heartbeatKeys);
+  }
+  const probe = [
+    "const value = JSON.parse(process.env.APOLLO_MODULE_HEARTBEAT_KEYS);",
+    "const database = new URL(process.env.DATABASE_URL);",
+    "process.stdout.write(JSON.stringify({",
+    "  heartbeatModules: Object.keys(value),",
+    "  databaseHost: database.hostname,",
+    "  databaseUser: database.username,",
+    "}));",
+  ].join("");
+
+  return execFileAsync(
+    "sh",
+    [
+      shellPath(apiStartupScript),
+      process.execPath,
+      "-e",
+      probe,
+    ],
+    {
+      cwd: repositoryRoot,
+      env: {
+        PATH: process.env.PATH,
+        DATABASE_URL_FILE: shellPath(databasePath),
+        APOLLO_MODULE_HEARTBEAT_KEYS:
+          '{"attacker":"must-not-win-over-file"}',
+        APOLLO_MODULE_HEARTBEAT_KEYS_FILE: shellPath(heartbeatPath),
+      },
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+    },
+  );
+}
+
+async function createTemporaryDirectory(prefix: string): Promise<string> {
+  await mkdir(temporaryRoot, { recursive: true });
+  const directory = await mkdtemp(join(temporaryRoot, prefix));
+  const fromRoot = relative(repositoryRoot, directory);
+  if (
+    fromRoot.length === 0 ||
+    fromRoot === ".." ||
+    fromRoot.startsWith(`..${sep}`)
+  ) {
+    throw new Error("Temporary path escaped the worktree");
+  }
+  temporaryDirectories.push(directory);
+  return directory;
 }
 
 async function filesRecursively(directory: string): Promise<string[]> {
@@ -72,6 +174,14 @@ afterEach(async () => {
       .splice(0)
       .map((directory) => rm(directory, { force: true, recursive: true })),
   );
+  try {
+    await rmdir(temporaryRoot);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
+      throw error;
+    }
+  }
 });
 
 describe("TF deployment identity contract", () => {
@@ -84,6 +194,7 @@ describe("TF deployment identity contract", () => {
       "api",
       "db",
       "redis",
+      "tf-search",
       "web",
     ]);
     expect(Object.keys(template.volumes ?? {}).sort()).toEqual([
@@ -99,10 +210,19 @@ describe("TF deployment identity contract", () => {
       "pgdata:/var/lib/postgresql/data",
     );
     expect(service(template, "api").environment).toMatchObject({
+      APOLLO_MODULE_HEARTBEAT_KEYS_FILE:
+        "/run/secrets/tf_module_heartbeat_keys",
       APOLLO_TF_AUTH_REDIS_URL: "redis://redis:6379/1",
       DATABASE_URL_FILE: "/run/secrets/tf_database_url",
       REDIS_URL: "redis://redis:6379/0",
+      TF_SEARCH_ALLOW_INSECURE_HTTP: "true",
+      TF_SEARCH_INTERNAL_AUTH_SECRET_FILE:
+        "/run/secrets/tf_search_internal_auth_secret",
+      TF_SEARCH_ORIGIN: "http://tf-search:8080",
     });
+    expect(service(template, "api").environment).not.toHaveProperty(
+      "APOLLO_MODULE_HEARTBEAT_KEYS",
+    );
     expect(service(template, "api").environment).not.toHaveProperty(
       "DATABASE_URL",
     );
@@ -113,6 +233,9 @@ describe("TF deployment identity contract", () => {
     expect(service(template, "redis").ports).toBeUndefined();
     expect(service(template, "admin").environment).toMatchObject({
       APOLLO_API_UPSTREAM: "http://api:8080",
+    });
+    expect(service(template, "api").depends_on).toMatchObject({
+      "tf-search": { condition: "service_healthy" },
     });
     expect(JSON.stringify(template)).not.toMatch(/postgres:\/\/[^"]+:[^"]+@/);
   });
@@ -125,6 +248,7 @@ describe("TF deployment identity contract", () => {
       "api",
       "db",
       "redis",
+      "tf-search",
     ]);
     expect(Object.keys(template.volumes ?? {}).sort()).toEqual([
       "postgres_data",
@@ -140,10 +264,19 @@ describe("TF deployment identity contract", () => {
     );
     expect(service(template, "redis").volumes).toContain("redis_data:/data");
     expect(service(template, "api").environment).toMatchObject({
+      APOLLO_MODULE_HEARTBEAT_KEYS_FILE:
+        "/run/secrets/tf_module_heartbeat_keys",
       APOLLO_TF_AUTH_REDIS_URL: "redis://redis:6379/1",
       DATABASE_URL_FILE: "/run/secrets/tf_database_url",
       REDIS_URL: "redis://redis:6379/0",
+      TF_SEARCH_ALLOW_INSECURE_HTTP: "true",
+      TF_SEARCH_INTERNAL_AUTH_SECRET_FILE:
+        "/run/secrets/tf_search_internal_auth_secret",
+      TF_SEARCH_ORIGIN: "http://tf-search:8080",
     });
+    expect(service(template, "api").environment).not.toHaveProperty(
+      "APOLLO_MODULE_HEARTBEAT_KEYS",
+    );
     expect(service(template, "api").environment).not.toHaveProperty(
       "DATABASE_URL",
     );
@@ -152,6 +285,9 @@ describe("TF deployment identity contract", () => {
     ]);
     expect(service(template, "db").ports).toBeUndefined();
     expect(service(template, "redis").ports).toBeUndefined();
+    expect(service(template, "api").depends_on).toMatchObject({
+      "tf-search": { condition: "service_healthy" },
+    });
     expect(JSON.stringify(template)).not.toMatch(/postgres:\/\/[^"]+:[^"]+@/);
 
     const documentation = await readFile(modulesDocumentation, "utf8");
@@ -177,10 +313,9 @@ describe("TF deployment identity contract", () => {
     expect(dockerfile).toContain("ARG VITE_API_URL");
     expect(dockerfile).toContain("ENV VITE_API_URL=${VITE_API_URL}");
 
-    const outputDirectory = await mkdtemp(
-      join(tmpdir(), "apollo-tf-web-bundle-"),
+    const outputDirectory = await createTemporaryDirectory(
+      "apollo-tf-web-bundle-",
     );
-    temporaryDirectories.push(outputDirectory);
     await execFileAsync(
       process.execPath,
       [
@@ -211,4 +346,66 @@ describe("TF deployment identity contract", () => {
     ).join("\n");
     expect(bundle).toContain(apiOrigin);
   }, 60_000);
+
+  it("loads the bounded heartbeat key map from its configured file without replacing the database contract", async () => {
+    const heartbeatSecret = "h".repeat(32);
+    const heartbeatMap = JSON.stringify({
+      "search-media": heartbeatSecret,
+    });
+    const result = await runApiStartup({ heartbeatKeys: heartbeatMap });
+
+    expect(JSON.parse(result.stdout)).toEqual({
+      heartbeatModules: ["search-media"],
+      databaseHost: "db",
+      databaseUser: "trackfinder",
+    });
+    expect(result.stderr).toBe("");
+    expect(`${result.stdout}\n${result.stderr}`).not.toContain(heartbeatSecret);
+    expect(`${result.stdout}\n${result.stderr}`).not.toContain(heartbeatMap);
+  });
+
+  it.each([
+    ["missing", undefined, "missing"],
+    ["empty", "", undefined],
+    ["whitespace-only", " \r\n\t", undefined],
+    ["oversized", `{"search-media":"${"h".repeat(131_073)}"}`, undefined],
+  ])(
+    "rejects a %s heartbeat map before starting the API",
+    async (_label, heartbeatKeys, heartbeatPathKind) => {
+      const outsideMissingPath = resolve(
+        temporaryRoot,
+        `apollo-missing-heartbeat-${process.pid}`,
+      );
+      await expect(
+        runApiStartup({
+          ...(heartbeatKeys === undefined ? {} : { heartbeatKeys }),
+          ...(heartbeatPathKind === "missing"
+            ? { heartbeatPath: outsideMissingPath }
+            : {}),
+        }),
+      ).rejects.toBeDefined();
+    },
+  );
+
+  it("documents the exact file-backed search boundary and one-replica limitation", async () => {
+    const documentation = await readFile(modulesDocumentation, "utf8");
+
+    for (const secret of [
+      "tf_search_internal_auth_secret",
+      "tf_search_heartbeat_secret",
+      "tf_module_heartbeat_keys",
+    ]) {
+      expect(documentation).toContain(`\`${secret}\``);
+    }
+    expect(documentation).toContain("одна реплика");
+    expect(documentation).toContain("2 048");
+    expect(documentation).toContain("один час");
+    expect(documentation).toContain("http://tf-search:8080");
+    expect(documentation).toContain("HTTPS");
+    expect(documentation).toContain("синхронизац");
+    expect(documentation).toContain("домен не нужен");
+    expect(documentation).toContain(
+      "HomeNode, Coolify, Caddy, UFW и DNS не изменялись",
+    );
+  });
 });

@@ -39,6 +39,7 @@ describe("TF search runtime configuration", () => {
       heartbeatSecret,
       heartbeatApiOrigin: "https://api.example.test",
       version: "2026.7.24",
+      fixtureAdapters: false,
     });
   });
 
@@ -79,6 +80,53 @@ describe("TF search runtime configuration", () => {
       ),
     ).rejects.toThrow("invalid runtime configuration");
   });
+
+  it("enables deterministic fixtures only for the explicitly gated test runtime", async () => {
+    const read = secretReader({
+      "/run/secrets/command": commandSecret,
+      "/run/secrets/heartbeat": heartbeatSecret,
+    });
+
+    await expect(
+      parseTfSearchRuntimeConfig(
+        environment({
+          NODE_ENV: "test",
+          TF_SEARCH_SMOKE_FIXTURES: "true",
+        }),
+        read,
+      ),
+    ).resolves.toMatchObject({ fixtureAdapters: true });
+
+    for (const NODE_ENV of ["development", "production", undefined]) {
+      await expect(
+        parseTfSearchRuntimeConfig(
+          environment({
+            NODE_ENV,
+            TF_SEARCH_SMOKE_FIXTURES: "true",
+          }),
+          read,
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+    }
+  });
+
+  it.each(["false", "yes", "1"])(
+    "rejects an invalid deterministic fixture flag %s",
+    async (TF_SEARCH_SMOKE_FIXTURES) => {
+      await expect(
+        parseTfSearchRuntimeConfig(
+          environment({
+            NODE_ENV: "test",
+            TF_SEARCH_SMOKE_FIXTURES,
+          }),
+          secretReader({
+            "/run/secrets/command": commandSecret,
+            "/run/secrets/heartbeat": heartbeatSecret,
+          }),
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+    },
+  );
 
   it.each([undefined, "0", "8080.5", "65536", "text"])
   ("rejects invalid port %s", async (PORT) => {
@@ -183,5 +231,17 @@ describe("TF search runtime configuration", () => {
         }),
       ),
     ).rejects.toThrow("invalid runtime configuration");
+  });
+
+  it("treats an empty optional deployed timestamp as absent", async () => {
+    await expect(
+      parseTfSearchRuntimeConfig(
+        environment({ APOLLO_DEPLOYED_AT: "" }),
+        secretReader({
+          "/run/secrets/command": commandSecret,
+          "/run/secrets/heartbeat": heartbeatSecret,
+        }),
+      ),
+    ).resolves.not.toHaveProperty("deployedAt");
   });
 });

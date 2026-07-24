@@ -8,6 +8,7 @@ import { parse } from "yaml";
 const apiRoot = process.cwd();
 const workspaceRoot = resolve(apiRoot, "../..");
 const HEARTBEAT_KEYS_ENV = "APOLLO_MODULE_HEARTBEAT_KEYS";
+const HEARTBEAT_KEYS_FILE_ENV = "APOLLO_MODULE_HEARTBEAT_KEYS_FILE";
 
 function readWorkspaceFile(path: string): string {
   return readFileSync(resolve(workspaceRoot, path), "utf8");
@@ -124,7 +125,7 @@ describe("admin telemetry container contract", () => {
       "`tf-integrations`: authenticated HTTP + отдельные heartbeat keys для provider adapters, минимальный entitlement `tf.integrations`",
     );
     expect(modulesDocumentation).toContain(
-      "production\nstartup требует ровно `tf_postgres_password`, `tf_database_url` и\n`tf_client_secret`",
+      "production\nstartup требует ровно шесть файлов: `tf_postgres_password`, `tf_database_url`,\n`tf_client_secret`, `tf_search_internal_auth_secret`,",
     );
   });
 
@@ -203,11 +204,16 @@ describe("admin telemetry container contract", () => {
 
   it("passes module heartbeat keys only to API containers and excludes operator files", () => {
     const interpolation =
-      'APOLLO_MODULE_HEARTBEAT_KEYS: "${APOLLO_MODULE_HEARTBEAT_KEYS:-}"';
-    const secretName = HEARTBEAT_KEYS_ENV;
+      "APOLLO_MODULE_HEARTBEAT_KEYS_FILE: /run/secrets/tf_module_heartbeat_keys";
 
     expect(serviceBlock(rootCompose, "api")).toContain(interpolation);
     expect(serviceBlock(apiCompose, "api")).toContain(interpolation);
+    expect(serviceBlock(rootCompose, "api")).not.toMatch(
+      /^\s*APOLLO_MODULE_HEARTBEAT_KEYS:/m,
+    );
+    expect(serviceBlock(apiCompose, "api")).not.toMatch(
+      /^\s*APOLLO_MODULE_HEARTBEAT_KEYS:/m,
+    );
 
     for (const compose of [rootCompose, apiCompose]) {
       expect(hasHeartbeatBuildArg(compose)).toBe(false);
@@ -220,7 +226,8 @@ describe("admin telemetry container contract", () => {
       serviceBlock(apiCompose, "db"),
       serviceBlock(apiCompose, "redis"),
     ]) {
-      expect(service).not.toContain(secretName);
+      expect(service).not.toContain(HEARTBEAT_KEYS_ENV);
+      expect(service).not.toContain(HEARTBEAT_KEYS_FILE_ENV);
     }
 
     for (const source of [
@@ -230,7 +237,8 @@ describe("admin telemetry container contract", () => {
       adminNginx,
       ...viteSources,
     ]) {
-      expect(source).not.toContain(secretName);
+      expect(source).not.toContain(HEARTBEAT_KEYS_ENV);
+      expect(source).not.toContain(HEARTBEAT_KEYS_FILE_ENV);
     }
   });
 

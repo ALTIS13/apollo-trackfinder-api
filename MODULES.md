@@ -516,9 +516,30 @@ Platform signing JWK/JWKS и OAuth client registry, TF confidential client secre
 
 Public Platform issuer и server-to-server control origin разделены. В production оба используют одобренный HTTPS. Внутренний `http://platform-api:8080` разрешён только явным disposable bridge flag в development; deterministic PKCE verifier также доступен только из bridge secret file и не заменяет production `randomBytes`.
 
+### Контейнерный `tf-search`
+
+`tf-search` разворачивается отдельным контейнером и получает только
+`tf_search_internal_auth_secret` для команд API и отдельный
+`tf_search_heartbeat_secret` для heartbeat `search-media`. API получает первый
+ключ и file-backed map `tf_module_heartbeat_keys`; heartbeat secret не
+монтируется в API. Командный и heartbeat ключи обязаны различаться.
+
+На одной ноде API использует private DNS `http://tf-search:8080` с явным
+local-only флагом. Сеть `tf-search-control` является internal, а
+`tf-search-egress` подключена только к поисковому контейнеру. У `tf-search` нет
+host port, доступа к `tf-data`, `tf-edge`, PostgreSQL, Redis, Platform,
+provider-account credentials или control-plane. Для размещения на другой ноде
+допускается только точный HTTPS origin с обычной проверкой сертификата и
+hostname; редиректы запрещены.
+
+Первый release: одна реплика, replay state и LRU-like cache хранятся
+в памяти процесса. Cache ограничен 2 048 записями и TTL один час, поэтому
+перезапуск выполняет cold start. Для HMAC timestamp на всех нодах обязательна
+синхронизация часов. Для локального same-node этапа новый домен не нужен.
+HomeNode, Coolify, Caddy, UFW и DNS не изменялись.
+
 ### Будущие контейнерные TF-модули
 
-- `tf-search`: authenticated HTTP + heartbeat key, минимальный entitlement `tf.search`; собственный runtime/cache, без прямого доступа к Platform/TF PostgreSQL.
 - `tf-integrations`: authenticated HTTP + отдельные heartbeat keys для provider adapters, минимальный entitlement `tf.integrations`; доступ только к согласованным account-bound integration operations, без общих provider credentials и общей БД.
 - `tf-download-worker`: authenticated queue/HTTP boundary + heartbeat key, минимальный entitlement `tf.downloads`; отдельное временное/data storage, без Docker socket, SSH и control-plane доступа.
 
@@ -537,11 +558,12 @@ services:
   db:
   redis:
   api:
+  tf-search:
   web:
   admin:
 ```
 
-Root template сохраняет исходные deployment identities: PostgreSQL service `db`, role/database `trackfinder` и logical volume `pgdata`. Он больше не содержит hardcoded database password или wildcard API binding. TF database/client secrets приходят из `TF_SECRET_DIRECTORY`, API/web/admin ports по умолчанию привязаны к `127.0.0.1`, data plane отделён от edge network. `VITE_API_URL` передаётся как Docker build argument и компилируется в web bundle; runtime environment nginx не может изменить уже собранный URL. Compose передаёт одинаковый server-side `ADMIN_DASHBOARD_TOKEN` API и admin nginx; браузер его не получает. `APOLLO_MODULE_HEARTBEAT_KEYS` передаётся только API container. Пустой service token отключает backend endpoint; пустые operator credentials закрывают UI. Deployment в Coolify/HomeNode пока не выполнялся.
+Root template сохраняет исходные deployment identities: PostgreSQL service `db`, role/database `trackfinder` и logical volume `pgdata`. Он больше не содержит hardcoded database password или wildcard API binding. TF database/client secrets приходят из `TF_SECRET_DIRECTORY`, API/web/admin ports по умолчанию привязаны к `127.0.0.1`, data plane отделён от edge network. `VITE_API_URL` передаётся как Docker build argument и компилируется в web bundle; runtime environment nginx не может изменить уже собранный URL. Compose передаёт одинаковый server-side `ADMIN_DASHBOARD_TOKEN` API и admin nginx; браузер его не получает. `APOLLO_MODULE_HEARTBEAT_KEYS_FILE` указывает API на `/run/secrets/tf_module_heartbeat_keys`; raw map не задаётся в Compose. `tf-search` подключён только к `tf-search-control` и `tf-search-egress`, а API ожидает его readiness без обратной startup-зависимости поискового контейнера. Пустой service token отключает backend endpoint; пустые operator credentials закрывают UI. Deployment в Coolify/HomeNode пока не выполнялся.
 
 ### `artifacts/api-server/docker-compose.yml`
 
@@ -550,9 +572,10 @@ services:
   db:
   redis:
   api:
+  tf-search:
 ```
 
-Вложенный template сохраняет собственные исходные identities: services `db`/`redis`/`api`, PostgreSQL role `apollo`, database `apollo_trackfinder` и volumes `postgres_data`/`redis_data`. Он использует file secrets, loopback API binding и отдельные `tf-data`/`tf-edge`. Admin service входит только в корневой `docker-compose.yml`. `ADMIN_DASHBOARD_TOKEN` и `APOLLO_MODULE_HEARTBEAT_KEYS` передаются только API service.
+Вложенный template сохраняет собственные исходные identities: services `db`/`redis`/`api`/`tf-search`, PostgreSQL role `apollo`, database `apollo_trackfinder` и volumes `postgres_data`/`redis_data`. Он использует file secrets, loopback API binding и отдельные `tf-data`/`tf-edge`. Admin service входит только в корневой `docker-compose.yml`. `ADMIN_DASHBOARD_TOKEN` передаётся только API service, а heartbeat map подключается к API через `APOLLO_MODULE_HEARTBEAT_KEYS_FILE`. Вложенный `tf-search` сохраняет те же secret и network boundaries, что корневой template.
 
 **Переменные окружения:**
 
@@ -567,7 +590,10 @@ services:
 | `ADMIN_DASHBOARD_TOKEN` | До production deployment | Server-side token, который nginx пересылает как `X-Admin-Dashboard-Token`; не попадает в browser bundle |
 | `ADMIN_ACCESS_USER` | Для доступа к admin UI | Operator username для nginx Basic Auth; допустимы буквы, цифры и `_.@-` |
 | `ADMIN_ACCESS_PASSWORD` | Для доступа к admin UI | Operator password; хэшируется при старте контейнера и удаляется из окружения nginx process |
-| `APOLLO_MODULE_HEARTBEAT_KEYS` | Нет | API-only JSON map `{ "moduleId": "per-module-secret" }`; пустое/невалидное значение отключает module heartbeat endpoint |
+| `APOLLO_MODULE_HEARTBEAT_KEYS_FILE` | В Compose | API-only путь к JSON map `{ "search-media": "<heartbeat-secret>" }`; entrypoint отклоняет unreadable, empty и oversized файл |
+| `TF_SEARCH_INTERNAL_AUTH_SECRET_FILE` | В Compose | Общий только для API и `tf-search` HMAC command key |
+| `TF_SEARCH_ORIGIN` | В Compose | Same-node `http://tf-search:8080`; HTTP разрешён только вместе с `TF_SEARCH_ALLOW_INSECURE_HTTP=true` |
+| `TF_SEARCH_HEARTBEAT_SECRET_FILE` | Для `tf-search` | Отдельный heartbeat key, который не монтируется в API |
 | `APOLLO_API_VERSION` | Нет | Версия in-process API-модулей в admin snapshot; default `unknown` |
 | `APOLLO_DEPLOYED_AT` | Нет | ISO timestamp фактического deployment; при отсутствии UI показывает `Нет данных` |
 
@@ -585,19 +611,26 @@ sudo install -d -m 0700 -o root -g root "$TF_SECRET_DIRECTORY"
 TF_POSTGRES_PASSWORD="$(openssl rand -hex 32)"
 # Для существующего pgdata вместо генерации укажи текущий пароль роли trackfinder.
 TF_CLIENT_SECRET="$(openssl rand -hex 32)"
+TF_SEARCH_COMMAND_SECRET="$(openssl rand -hex 32)"
+TF_SEARCH_HEARTBEAT_SECRET="$(openssl rand -hex 32)"
 printf '%s' "$TF_POSTGRES_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_postgres_password" >/dev/null
 printf 'postgres://trackfinder:%s@db:5432/trackfinder' "$TF_POSTGRES_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_database_url" >/dev/null
 printf '%s' "$TF_CLIENT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_client_secret" >/dev/null
-unset TF_POSTGRES_PASSWORD TF_CLIENT_SECRET
-sudo chown root:root "$TF_SECRET_DIRECTORY"/tf_client_secret "$TF_SECRET_DIRECTORY"/tf_database_url "$TF_SECRET_DIRECTORY"/tf_postgres_password
-sudo chmod 0444 "$TF_SECRET_DIRECTORY"/tf_client_secret "$TF_SECRET_DIRECTORY"/tf_database_url "$TF_SECRET_DIRECTORY"/tf_postgres_password
+printf '%s' "$TF_SEARCH_COMMAND_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_search_internal_auth_secret" >/dev/null
+printf '%s' "$TF_SEARCH_HEARTBEAT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_search_heartbeat_secret" >/dev/null
+printf '{"search-media":"%s"}' "$TF_SEARCH_HEARTBEAT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_module_heartbeat_keys" >/dev/null
+unset TF_POSTGRES_PASSWORD TF_CLIENT_SECRET TF_SEARCH_COMMAND_SECRET TF_SEARCH_HEARTBEAT_SECRET
+sudo chown root:root "$TF_SECRET_DIRECTORY"/tf_*
+sudo chmod 0444 "$TF_SECRET_DIRECTORY"/tf_*
 
 docker compose up -d --build
 ```
 
 `TF_SECRET_DIRECTORY` обязателен для обоих Compose templates: production
-startup требует ровно `tf_postgres_password`, `tf_database_url` и
-`tf_client_secret`. Для rootful Docker каталог и три файла остаются под
+startup требует ровно шесть файлов: `tf_postgres_password`, `tf_database_url`,
+`tf_client_secret`, `tf_search_internal_auth_secret`,
+`tf_search_heartbeat_secret` и `tf_module_heartbeat_keys`. Для rootful Docker
+каталог и эти файлы остаются под
 владельцем `root`; каталог `0700` закрывает host traversal, а файлы `0444`
 доступны non-root UID контейнеров только через точечные Compose secret mounts.
 Для rootless Docker владельцем должен быть пользователь daemon/Compose при тех
