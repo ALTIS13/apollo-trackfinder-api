@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createModuleHeartbeatSignature,
+  moduleHeartbeatPayloadSchema,
   ModuleHeartbeatService,
   parseModuleHeartbeatKeys,
 } from "./module-heartbeat";
@@ -94,6 +95,16 @@ function createHeartbeatInput(
 }
 
 describe("ModuleHeartbeatService", () => {
+  it("re-exports the strict shared heartbeat payload schema", () => {
+    expect(moduleHeartbeatPayloadSchema.parse(validPayload)).toEqual(
+      validPayload,
+    );
+    expect(
+      moduleHeartbeatPayloadSchema.safeParse({ ...validPayload, extra: true })
+        .success,
+    ).toBe(false);
+  });
+
   it("disables ingestion when no module keys are configured", () => {
     const service = new ModuleHeartbeatService({ keys: new Map() });
 

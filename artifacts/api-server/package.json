@@ -14,6 +14,7 @@
     "@workspace/admin-dashboard-contract": "workspace:*",
     "@workspace/api-zod": "workspace:*",
     "@workspace/db": "workspace:*",
+    "@workspace/module-runtime-contract": "workspace:*",
     "@workspace/platform-contract": "workspace:*",
     "bullmq": "^5.73.0",
     "cookie-parser": "^1.4.7",

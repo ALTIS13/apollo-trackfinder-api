@@ -1,12 +1,17 @@
-import {
-  createHash,
-  createHmac,
-  randomBytes,
-  timingSafeEqual,
-} from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { z } from "zod";
 import type { HealthStatus } from "@workspace/admin-dashboard-contract";
+import {
+  createModuleHeartbeatSignature,
+  hasMatchingSignedBodySignature,
+  moduleHeartbeatPayloadSchema,
+} from "@workspace/module-runtime-contract";
+export {
+  createModuleHeartbeatSignature,
+  moduleHeartbeatPayloadSchema,
+} from "@workspace/module-runtime-contract";
+export type { SignatureInput } from "@workspace/module-runtime-contract";
 
 const MODULE_IDS = [
   "public-web",
@@ -31,25 +36,7 @@ const CANONICAL_HEARTBEAT_PATH_PATTERN =
   /^\/api\/internal\/modules\/[a-z0-9]+(?:-[a-z0-9]+)*\/heartbeat$/;
 const DUMMY_SECRET = randomBytes(32).toString("hex");
 
-const moduleHeartbeatPayloadSchema = z
-  .object({
-    schemaVersion: z.literal(1),
-    status: z.enum(["healthy", "warning", "degraded", "unknown"]),
-    version: z.string().trim().min(1).max(128),
-    deployedAt: z.string().datetime({ offset: true }).optional(),
-    requestsPerMinute: z.number().finite().min(0).max(1_000_000).optional(),
-  })
-  .strict();
-
 const heartbeatKeysSchema = z.record(z.string(), z.string().min(32).max(512));
-
-export interface SignatureInput {
-  moduleId: string;
-  timestamp: string;
-  nonce: string;
-  rawBody: Buffer;
-  secret: string;
-}
 
 export interface ModuleHeartbeatIngestInput {
   moduleId: string;
@@ -92,18 +79,6 @@ interface AcceptedHeartbeat {
   requestsPerMinute: number;
 }
 
-export function createModuleHeartbeatSignature(input: SignatureInput): string {
-  const bodyHash = createHash("sha256").update(input.rawBody).digest("hex");
-  const canonical = [
-    "POST",
-    `/api/internal/modules/${input.moduleId}/heartbeat`,
-    input.timestamp,
-    input.nonce,
-    bodyHash,
-  ].join("\n");
-  return `v1=${createHmac("sha256", input.secret).update(canonical).digest("hex")}`;
-}
-
 export function isCanonicalModuleHeartbeatPath(path: string): boolean {
   return CANONICAL_HEARTBEAT_PATH_PATTERN.test(path);
 }
@@ -136,19 +111,6 @@ export function parseModuleHeartbeatKeys(
   } catch {
     return new Map();
   }
-}
-
-function hasMatchingSignature(
-  providedSignature: string | undefined,
-  expectedSignature: string,
-): boolean {
-  const providedDigest = createHash("sha256")
-    .update(providedSignature ?? "")
-    .digest();
-  const expectedDigest = createHash("sha256")
-    .update(expectedSignature)
-    .digest();
-  return timingSafeEqual(providedDigest, expectedDigest);
 }
 
 function parseSignedTimestamp(timestamp: string): number | undefined {
@@ -199,7 +161,7 @@ export class ModuleHeartbeatService {
     });
 
     if (
-      !hasMatchingSignature(input.signature, expectedSignature) ||
+      !hasMatchingSignedBodySignature(input.signature, expectedSignature) ||
       !this.keys.has(moduleId)
     ) {
       return { kind: "unauthorized" };
