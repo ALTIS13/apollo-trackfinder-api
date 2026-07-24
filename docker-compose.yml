@@ -131,8 +131,10 @@ services:
       - /tmp:rw,noexec,nosuid,size=32m
       - /tmp/yt-dlp:rw,noexec,nosuid,size=64m
     networks:
-      - tf-search-control
-      - tf-search-egress
+      tf-search-control:
+        gw_priority: 0
+      tf-search-egress:
+        gw_priority: 1
     security_opt:
       - no-new-privileges:true
     cap_drop:

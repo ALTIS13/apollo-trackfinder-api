@@ -29,11 +29,65 @@ if [ -n "${APOLLO_MODULE_HEARTBEAT_KEYS_FILE:-}" ]; then
   fi
   unset heartbeat_keys_size
 
-  heartbeat_keys=$(cat "$APOLLO_MODULE_HEARTBEAT_KEYS_FILE")
-  if [ -z "$(printf '%s' "$heartbeat_keys" | tr -d '[:space:]')" ]; then
+  heartbeat_keys=$(
+    node - "$APOLLO_MODULE_HEARTBEAT_KEYS_FILE" <<'NODE'
+const { readFileSync } = require("node:fs");
+
+const allowedModuleIds = new Set([
+  "public-web",
+  "core-api",
+  "account-integrations",
+  "search-media",
+  "download-worker",
+  "postgresql",
+  "redis",
+  "queue-redis",
+  "media-storage",
+]);
+const fail = () => process.exit(1);
+
+let raw;
+let parsed;
+try {
+  raw = readFileSync(process.argv[2], "utf8");
+  parsed = JSON.parse(raw);
+} catch {
+  fail();
+}
+
+if (
+  typeof parsed !== "object" ||
+  parsed === null ||
+  Array.isArray(parsed) ||
+  Object.getPrototypeOf(parsed) !== Object.prototype
+) {
+  fail();
+}
+
+const entries = Object.entries(parsed);
+if (
+  entries.length > 128 ||
+  !Object.prototype.hasOwnProperty.call(parsed, "search-media")
+) {
+  fail();
+}
+for (const [moduleId, secret] of entries) {
+  if (
+    !allowedModuleIds.has(moduleId) ||
+    typeof secret !== "string" ||
+    secret.length < 32 ||
+    secret.length > 512
+  ) {
+    fail();
+  }
+}
+
+process.stdout.write(raw);
+NODE
+  ) || {
     unset heartbeat_keys
     exit 1
-  fi
+  }
 
   export APOLLO_MODULE_HEARTBEAT_KEYS="$heartbeat_keys"
   unset heartbeat_keys

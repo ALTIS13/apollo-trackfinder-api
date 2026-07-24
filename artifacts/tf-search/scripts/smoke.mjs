@@ -1,16 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import {
-  createHash,
-  createHmac,
-  randomBytes,
-  randomUUID,
-} from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import {
   access,
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
+  realpath,
   rm,
   rmdir,
   stat,
@@ -114,6 +111,55 @@ export function assertWorkspaceContainedPath(
   return resolvedCandidate;
 }
 
+function assertPhysicalContainment(candidate, root, allowRoot = false) {
+  const fromRoot = relative(root, candidate);
+  if (
+    (!allowRoot && fromRoot.length === 0) ||
+    fromRoot === ".." ||
+    fromRoot.startsWith(`..${sep}`) ||
+    resolve(root, fromRoot) !== candidate
+  ) {
+    throw new Error("Physical path is outside the worktree");
+  }
+}
+
+async function verifiedWorkspaceRoot(root) {
+  const lexicalRoot = resolve(root);
+  const rootStats = await lstat(lexicalRoot);
+  if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
+    throw new Error("Workspace root cannot be symbolic or reparse-linked");
+  }
+  const physicalRoot = await realpath(lexicalRoot);
+  return { lexicalRoot, physicalRoot };
+}
+
+async function verifiedPhysicalDirectory(candidate, workspace) {
+  const lexicalCandidate = assertWorkspaceContainedPath(
+    candidate,
+    workspace.lexicalRoot,
+  );
+  const candidateStats = await lstat(lexicalCandidate);
+  if (!candidateStats.isDirectory() || candidateStats.isSymbolicLink()) {
+    throw new Error("Temporary directory cannot be symbolic or reparse-linked");
+  }
+  const physicalCandidate = await realpath(lexicalCandidate);
+  assertPhysicalContainment(physicalCandidate, workspace.physicalRoot);
+  return { lexicalCandidate, physicalCandidate };
+}
+
+async function verifiedPhysicalFile(candidate, parent, workspace) {
+  const lexicalCandidate = assertWorkspaceContainedPath(
+    candidate,
+    workspace.lexicalRoot,
+  );
+  const candidateStats = await lstat(lexicalCandidate);
+  if (!candidateStats.isFile() || candidateStats.isSymbolicLink()) {
+    throw new Error("Temporary file cannot be symbolic or reparse-linked");
+  }
+  const physicalCandidate = await realpath(lexicalCandidate);
+  assertPhysicalContainment(physicalCandidate, parent.physicalCandidate);
+}
+
 async function pathExists(path) {
   try {
     await access(path);
@@ -123,25 +169,37 @@ async function pathExists(path) {
   }
 }
 
-export async function removeVerifiedDirectory(
-  directory,
-  options = {},
-) {
+export async function removeVerifiedDirectory(directory, options = {}) {
   const repositoryRoot = options.repositoryRoot ?? defaultRepositoryRoot;
-  const verified = assertWorkspaceContainedPath(directory, repositoryRoot);
-  const temporaryRoot = assertWorkspaceContainedPath(
+  const workspace = await verifiedWorkspaceRoot(repositoryRoot);
+  const temporaryRootPath = assertWorkspaceContainedPath(
     join(repositoryRoot, ".tmp"),
     repositoryRoot,
   );
+  const temporaryRoot = await verifiedPhysicalDirectory(
+    temporaryRootPath,
+    workspace,
+  );
+  const verified = await verifiedPhysicalDirectory(directory, workspace);
   if (
-    verified !== temporaryRoot &&
-    !verified.startsWith(`${temporaryRoot}${sep}`)
+    verified.physicalCandidate === temporaryRoot.physicalCandidate ||
+    !verified.physicalCandidate.startsWith(
+      `${temporaryRoot.physicalCandidate}${sep}`,
+    )
   ) {
     throw new Error("Refusing to remove a non-smoke directory");
   }
-  await rm(verified, { force: true, recursive: true });
+  await verifiedWorkspaceRoot(repositoryRoot);
+  await verifiedPhysicalDirectory(temporaryRootPath, workspace);
+  await verifiedPhysicalDirectory(directory, workspace);
+  await rm(verified.lexicalCandidate, { force: true, recursive: true });
   try {
-    await rmdir(temporaryRoot);
+    await verifiedWorkspaceRoot(repositoryRoot);
+    const refreshedTemporaryRoot = await verifiedPhysicalDirectory(
+      temporaryRootPath,
+      workspace,
+    );
+    await rmdir(refreshedTemporaryRoot.lexicalCandidate);
   } catch (error) {
     if (
       error?.code !== "ENOENT" &&
@@ -153,23 +211,31 @@ export async function removeVerifiedDirectory(
   }
 }
 
-export async function prepareSecretDirectory(
-  environment,
-  options = {},
-) {
+export async function prepareSecretDirectory(environment, options = {}) {
   const repositoryRoot = options.repositoryRoot ?? defaultRepositoryRoot;
-  const temporaryRoot = assertWorkspaceContainedPath(
+  const workspace = await verifiedWorkspaceRoot(repositoryRoot);
+  const temporaryRootPath = assertWorkspaceContainedPath(
     join(repositoryRoot, ".tmp"),
     repositoryRoot,
   );
-  await mkdir(temporaryRoot, { recursive: true });
-  const directory = assertWorkspaceContainedPath(
-    await mkdtemp(join(temporaryRoot, "tf-search-smoke-")),
+  try {
+    await verifiedPhysicalDirectory(temporaryRootPath, workspace);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    await mkdir(temporaryRootPath);
+  }
+  const temporaryRoot = await verifiedPhysicalDirectory(
+    temporaryRootPath,
+    workspace,
+  );
+  const directoryPath = assertWorkspaceContainedPath(
+    await mkdtemp(join(temporaryRoot.lexicalCandidate, "tf-search-smoke-")),
     repositoryRoot,
   );
+  const directory = await verifiedPhysicalDirectory(directoryPath, workspace);
 
   try {
-    await chmod(directory, 0o700);
+    await chmod(directory.lexicalCandidate, 0o700);
     const postgresPassword = generatedSecret();
     const clientSecret = generatedSecret();
     const commandSecret = generatedSecret();
@@ -191,28 +257,42 @@ export async function prepareSecretDirectory(
     ];
 
     for (const [name, value] of secrets) {
-      const path = assertWorkspaceContainedPath(join(directory, name), repositoryRoot);
-      await writeFile(path, value, { mode: 0o600 });
+      await verifiedWorkspaceRoot(repositoryRoot);
+      const verifiedDirectory = await verifiedPhysicalDirectory(
+        directory.lexicalCandidate,
+        workspace,
+      );
+      const path = assertWorkspaceContainedPath(
+        join(directory.lexicalCandidate, name),
+        repositoryRoot,
+      );
+      await writeFile(path, value, { flag: "wx", mode: 0o600 });
+      await verifiedPhysicalFile(path, verifiedDirectory, workspace);
       await chmod(path, 0o444);
     }
     if (process.platform !== "win32") {
-      assert.equal((await stat(directory)).mode & 0o777, 0o700);
+      assert.equal(
+        (await stat(directory.lexicalCandidate)).mode & 0o777,
+        0o700,
+      );
       for (const [name] of secrets) {
         assert.equal(
-          (await stat(join(directory, name))).mode & 0o777,
+          (await stat(join(directory.lexicalCandidate, name))).mode & 0o777,
           0o444,
         );
       }
     }
 
-    environment.TF_SECRET_DIRECTORY = directory;
+    environment.TF_SECRET_DIRECTORY = directory.lexicalCandidate;
     return Object.freeze({
-      directory,
+      directory: directory.lexicalCandidate,
       rawSecretCanaries: Object.freeze(secrets.map(([, value]) => value)),
       secretNames: Object.freeze(secrets.map(([name]) => name)),
     });
   } catch (error) {
-    await removeVerifiedDirectory(directory, { repositoryRoot });
+    await removeVerifiedDirectory(directory.lexicalCandidate, {
+      repositoryRoot,
+    });
     throw error;
   }
 }
@@ -329,6 +409,26 @@ function assertSecretFree(text, secrets, label) {
   }
 }
 
+function assertCanaryFree(text, canaries, label) {
+  for (const canary of canaries) {
+    if (canary.length > 0 && text.includes(canary)) {
+      throw new Error(`${label} contains sensitive smoke canary`);
+    }
+  }
+}
+
+function sanitizeSmokeError(error, canaries) {
+  const message = error instanceof Error ? error.message : "UnknownError";
+  if (
+    Array.from(canaries).some(
+      (canary) => canary.length > 0 && message.includes(canary),
+    )
+  ) {
+    return new Error("TF search smoke suppressed a sensitive smoke canary");
+  }
+  return error instanceof Error ? error : new Error("TF search smoke failed");
+}
+
 async function resolveLocalDockerEnvironment(environment, docker) {
   const selectors = canonicalizeDockerSelectors(environment);
   if (selectors.context.length > 0) {
@@ -408,13 +508,24 @@ function nonEmptyLines(value) {
 
 async function auditProject(docker, environment, project) {
   const label = `label=com.docker.compose.project=${project}`;
-  const [containers, networks, volumes] = await Promise.all([
-    docker(["ps", "-a", "-q", "--filter", label], environment),
-    docker(["network", "ls", "-q", "--filter", label], environment),
-    docker(["volume", "ls", "-q", "--filter", label], environment),
+  const [containers, networks, volumes, labeledImages, namedImages] =
+    await Promise.all([
+      docker(["ps", "-a", "-q", "--filter", label], environment),
+      docker(["network", "ls", "-q", "--filter", label], environment),
+      docker(["volume", "ls", "-q", "--filter", label], environment),
+      docker(["image", "ls", "-q", "--filter", label], environment),
+      docker(
+        ["image", "ls", "-q", "--filter", `reference=${project}-*`],
+        environment,
+      ),
+    ]);
+  const images = new Set([
+    ...nonEmptyLines(labeledImages.stdout),
+    ...nonEmptyLines(namedImages.stdout),
   ]);
   return {
     containers: nonEmptyLines(containers.stdout).length,
+    images: images.size,
     networks: nonEmptyLines(networks.stdout).length,
     volumes: nonEmptyLines(volumes.stdout).length,
   };
@@ -432,7 +543,11 @@ function assertObservations(observations) {
     "heartbeatUnknownAfterRestart",
     "heartbeatRecovered",
   ]) {
-    assert.equal(observations[field], true, `Smoke observation failed: ${field}`);
+    assert.equal(
+      observations[field],
+      true,
+      `Smoke observation failed: ${field}`,
+    );
   }
   assert.equal(observations.heartbeatVersion, "task-5-smoke");
   assert(
@@ -463,8 +578,22 @@ export async function runTfSearchSmoke(options) {
   let cleanupError;
   let compose;
   let logsCollected = false;
+  const logCanaries = new Set([
+    SMOKE_QUERY_ARTIST,
+    SMOKE_QUERY_TITLE,
+    `${SMOKE_QUERY_ARTIST} ${SMOKE_QUERY_TITLE}`,
+    SMOKE_ADMIN_TOKEN,
+  ]);
+  const registerLogCanaries = (values) => {
+    for (const value of values) {
+      if (typeof value === "string" && value.length > 0) {
+        logCanaries.add(value);
+      }
+    }
+  };
   let cleanup = {
     containers: -1,
+    images: -1,
     networks: -1,
     volumes: -1,
     temporaryDirectories: -1,
@@ -510,6 +639,7 @@ export async function runTfSearchSmoke(options) {
       compose,
       environment,
       project,
+      registerLogCanaries,
       restartApi: async () => {
         await compose(["restart", "api"]);
       },
@@ -519,17 +649,11 @@ export async function runTfSearchSmoke(options) {
     logsCollected = true;
     const logText = `${logs.stdout}\n${logs.stderr}`;
     assertSecretFree(logText, prepared.rawSecretCanaries, "container logs");
-    for (const canary of observations.leakCanaries ?? []) {
-      assert(!logText.includes(canary), "container logs contain request data");
-    }
+    assertCanaryFree(logText, logCanaries, "container logs");
   } catch (error) {
     lifecycleError = error;
   } finally {
-    if (
-      prepared !== undefined &&
-      compose !== undefined &&
-      !logsCollected
-    ) {
+    if (prepared !== undefined && compose !== undefined && !logsCollected) {
       try {
         const logs = await compose(["logs", "--no-color", "api", "tf-search"]);
         const logText = `${logs.stdout}\n${logs.stderr}`;
@@ -538,6 +662,7 @@ export async function runTfSearchSmoke(options) {
           prepared.rawSecretCanaries,
           "failure container logs",
         );
+        assertCanaryFree(logText, logCanaries, "failure container logs");
         if (lifecycleError instanceof Error && logText.trim().length > 0) {
           lifecycleError = new Error(
             `${lifecycleError.message}\n${logText.slice(-16_384)}`,
@@ -555,7 +680,7 @@ export async function runTfSearchSmoke(options) {
             join(repositoryRoot, "docker-compose.yml"),
             overridePath,
             project,
-            ["down", "-v", "--remove-orphans"],
+            ["down", "-v", "--remove-orphans", "--rmi", "local"],
           ),
           environment,
         );
@@ -578,6 +703,7 @@ export async function runTfSearchSmoke(options) {
       };
       assert.deepEqual(cleanup, {
         containers: 0,
+        images: 0,
         networks: 0,
         volumes: 0,
         temporaryDirectories: 0,
@@ -587,8 +713,22 @@ export async function runTfSearchSmoke(options) {
     }
   }
 
-  if (lifecycleError !== undefined) throw lifecycleError;
-  if (cleanupError !== undefined) throw cleanupError;
+  const allCanaries = new Set([
+    ...(prepared?.rawSecretCanaries ?? []),
+    ...logCanaries,
+  ]);
+  if (cleanupError !== undefined) {
+    const safeCleanupError = sanitizeSmokeError(cleanupError, allCanaries);
+    if (safeCleanupError.message.includes("sensitive smoke canary")) {
+      throw safeCleanupError;
+    }
+  }
+  if (lifecycleError !== undefined) {
+    throw sanitizeSmokeError(lifecycleError, allCanaries);
+  }
+  if (cleanupError !== undefined) {
+    throw sanitizeSmokeError(cleanupError, allCanaries);
+  }
   return { project, cleanup, observations };
 }
 
@@ -704,7 +844,7 @@ process.stdout.write(JSON.stringify({
   };
 }
 
-async function seedPolicySession(compose) {
+export async function seedPolicySession(compose, registerLogCanaries) {
   const sessionHandle = generatedSecret();
   const csrf = generatedSecret();
   const revision = generatedSecret();
@@ -713,6 +853,15 @@ async function seedPolicySession(compose) {
   const installationId = randomUUID();
   const tfSessionId = randomUUID();
   const now = Date.now();
+  registerLogCanaries([
+    accountId,
+    platformSessionId,
+    installationId,
+    tfSessionId,
+    sessionHandle,
+    csrf,
+    revision,
+  ]);
   const stored = JSON.stringify({
     revision,
     session: {
@@ -742,7 +891,11 @@ async function seedPolicySession(compose) {
   return {
     accountId,
     csrf,
+    installationId,
+    platformSessionId,
+    revision,
     sessionHandle,
+    tfSessionId,
   };
 }
 
@@ -768,7 +921,10 @@ async function publicPolicySearch(apiOrigin, policySession) {
   assert.equal(result.response.status, 200, "public policy search status");
   assert(Array.isArray(result.body?.results), "public search results missing");
   assert(result.body.results.length > 0, "public search returned no fixture");
-  assert(!result.text.includes("sourceUrl"), "public response exposes source URL");
+  assert(
+    !result.text.includes("sourceUrl"),
+    "public response exposes source URL",
+  );
   assert(
     !result.text.includes("providerStatus"),
     "public response exposes provider status",
@@ -777,18 +933,22 @@ async function publicPolicySearch(apiOrigin, policySession) {
 }
 
 async function dashboardModule(apiOrigin, status) {
-  return waitFor(`search-media heartbeat ${status}`, async () => {
-    const result = await fetchJson(`${apiOrigin}/api/admin/dashboard`, {
-      headers: { "x-admin-dashboard-token": SMOKE_ADMIN_TOKEN },
-    });
-    if (!result.response.ok || !Array.isArray(result.body?.modules)) {
-      return false;
-    }
-    const module = result.body.modules.find(
-      (candidate) => candidate.id === "search-media",
-    );
-    return module?.status === status ? module : false;
-  }, 45_000);
+  return waitFor(
+    `search-media heartbeat ${status}`,
+    async () => {
+      const result = await fetchJson(`${apiOrigin}/api/admin/dashboard`, {
+        headers: { "x-admin-dashboard-token": SMOKE_ADMIN_TOKEN },
+      });
+      if (!result.response.ok || !Array.isArray(result.body?.modules)) {
+        return false;
+      }
+      const module = result.body.modules.find(
+        (candidate) => candidate.id === "search-media",
+      );
+      return module?.status === status ? module : false;
+    },
+    45_000,
+  );
 }
 
 async function exerciseRealStack(context) {
@@ -817,7 +977,10 @@ async function exerciseRealStack(context) {
   await waitForApi(context.apiOrigin);
 
   const internal = await runInternalCommandContract(context.compose);
-  const policySession = await seedPolicySession(context.compose);
+  const policySession = await seedPolicySession(
+    context.compose,
+    context.registerLogCanaries,
+  );
   const responseProjection = await publicPolicySearch(
     context.apiOrigin,
     policySession,
@@ -849,10 +1012,6 @@ async function exerciseRealStack(context) {
     heartbeatVersion: recovered.version,
     requestsPerMinute: recovered.requestsPerMinute,
     responseProjection,
-    leakCanaries: [
-      `${SMOKE_QUERY_ARTIST} ${SMOKE_QUERY_TITLE}`,
-      policySession.accountId,
-    ],
   };
 }
 

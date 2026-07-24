@@ -118,19 +118,13 @@ async function runApiStartup(options: {
 
   return execFileAsync(
     "sh",
-    [
-      shellPath(apiStartupScript),
-      process.execPath,
-      "-e",
-      probe,
-    ],
+    [shellPath(apiStartupScript), process.execPath, "-e", probe],
     {
       cwd: repositoryRoot,
       env: {
         PATH: process.env.PATH,
         DATABASE_URL_FILE: shellPath(databasePath),
-        APOLLO_MODULE_HEARTBEAT_KEYS:
-          '{"attacker":"must-not-win-over-file"}',
+        APOLLO_MODULE_HEARTBEAT_KEYS: '{"attacker":"must-not-win-over-file"}',
         APOLLO_MODULE_HEARTBEAT_KEYS_FILE: shellPath(heartbeatPath),
       },
       maxBuffer: 1024 * 1024,
@@ -350,12 +344,13 @@ describe("TF deployment identity contract", () => {
   it("loads the bounded heartbeat key map from its configured file without replacing the database contract", async () => {
     const heartbeatSecret = "h".repeat(32);
     const heartbeatMap = JSON.stringify({
+      "core-api": "c".repeat(32),
       "search-media": heartbeatSecret,
     });
     const result = await runApiStartup({ heartbeatKeys: heartbeatMap });
 
     expect(JSON.parse(result.stdout)).toEqual({
-      heartbeatModules: ["search-media"],
+      heartbeatModules: ["core-api", "search-media"],
       databaseHost: "db",
       databaseUser: "trackfinder",
     });
@@ -369,6 +364,37 @@ describe("TF deployment identity contract", () => {
     ["empty", "", undefined],
     ["whitespace-only", " \r\n\t", undefined],
     ["oversized", `{"search-media":"${"h".repeat(131_073)}"}`, undefined],
+    ["malformed JSON", "{", undefined],
+    ["array", JSON.stringify(["h".repeat(32)]), undefined],
+    ["null", "null", undefined],
+    [
+      "missing search-media",
+      JSON.stringify({ "core-api": "c".repeat(32) }),
+      undefined,
+    ],
+    [
+      "short search-media secret",
+      JSON.stringify({ "search-media": "h".repeat(31) }),
+      undefined,
+    ],
+    [
+      "long search-media secret",
+      JSON.stringify({ "search-media": "h".repeat(513) }),
+      undefined,
+    ],
+    [
+      "nested secret structure",
+      JSON.stringify({ "search-media": { secret: "h".repeat(32) } }),
+      undefined,
+    ],
+    [
+      "unknown module",
+      JSON.stringify({
+        "search-media": "h".repeat(32),
+        "unknown-module": "u".repeat(32),
+      }),
+      undefined,
+    ],
   ])(
     "rejects a %s heartbeat map before starting the API",
     async (_label, heartbeatKeys, heartbeatPathKind) => {
@@ -376,14 +402,22 @@ describe("TF deployment identity contract", () => {
         temporaryRoot,
         `apollo-missing-heartbeat-${process.pid}`,
       );
-      await expect(
-        runApiStartup({
-          ...(heartbeatKeys === undefined ? {} : { heartbeatKeys }),
-          ...(heartbeatPathKind === "missing"
-            ? { heartbeatPath: outsideMissingPath }
-            : {}),
-        }),
-      ).rejects.toBeDefined();
+      const execution = runApiStartup({
+        ...(heartbeatKeys === undefined ? {} : { heartbeatKeys }),
+        ...(heartbeatPathKind === "missing"
+          ? { heartbeatPath: outsideMissingPath }
+          : {}),
+      });
+      await expect(execution).rejects.toBeDefined();
+      await execution.catch((error: unknown) => {
+        const output =
+          typeof error === "object" && error !== null
+            ? `${String((error as { stdout?: unknown }).stdout ?? "")}\n${String(
+                (error as { stderr?: unknown }).stderr ?? "",
+              )}`
+            : "";
+        expect(output.trim()).toBe("");
+      });
     },
   );
 

@@ -37,7 +37,12 @@ const dockerfilePath = join(
   "Dockerfile",
 );
 const temporaryDirectories: string[] = [];
-const temporaryRoot = join(repositoryRoot, ".tmp");
+const temporaryRoot = join(
+  repositoryRoot,
+  ".superpowers",
+  "sdd",
+  "task-5-search-deployment-tmp",
+);
 
 interface ComposeService {
   readonly build?: {
@@ -63,7 +68,9 @@ interface ComposeService {
   readonly environment?: Record<string, string>;
   readonly healthcheck?: Record<string, unknown>;
   readonly init?: boolean;
-  readonly networks?: readonly string[];
+  readonly networks?:
+    | readonly string[]
+    | Readonly<Record<string, { readonly gw_priority?: number } | null>>;
   readonly pids_limit?: number;
   readonly ports?: readonly string[];
   readonly read_only?: boolean;
@@ -89,6 +96,17 @@ function service(template: ComposeTemplate, name: string): ComposeService {
   const value = template.services[name];
   if (value === undefined) throw new Error(`missing service ${name}`);
   return value;
+}
+
+function networkNames(value: ComposeService["networks"]): readonly string[] {
+  if (value === undefined) return [];
+  return Array.isArray(value)
+    ? value
+    : Object.keys(
+        value as Readonly<
+          Record<string, { readonly gw_priority?: number } | null>
+        >,
+      );
 }
 
 function shellPath(path: string): string {
@@ -174,7 +192,11 @@ afterEach(async () => {
 
 describe("tf-search deployment contract", () => {
   it.each([
-    ["root", rootComposePath, ["admin", "api", "db", "redis", "tf-search", "web"]],
+    [
+      "root",
+      rootComposePath,
+      ["admin", "api", "db", "redis", "tf-search", "web"],
+    ],
     ["nested", nestedComposePath, ["api", "db", "redis", "tf-search"]],
   ])(
     "adds one isolated search service to the %s template",
@@ -190,13 +212,26 @@ describe("tf-search deployment contract", () => {
       });
       expect(search.ports).toBeUndefined();
       expect(search.volumes).toBeUndefined();
-      expect(search.networks).toEqual([
-        "tf-search-control",
-        "tf-search-egress",
-      ]);
-      expect(search.networks).not.toContain("tf-data");
-      expect(search.networks).not.toContain("tf-edge");
-      expect(api.networks).toContain("tf-search-control");
+      expect(search.networks).toEqual({
+        "tf-search-control": { gw_priority: 0 },
+        "tf-search-egress": { gw_priority: 1 },
+      });
+      expect(networkNames(search.networks)).not.toContain("tf-data");
+      expect(networkNames(search.networks)).not.toContain("tf-edge");
+      expect(networkNames(api.networks)).toContain("tf-search-control");
+      expect(
+        (
+          search.networks as Readonly<
+            Record<string, { readonly gw_priority?: number }>
+          >
+        )["tf-search-control"]?.gw_priority,
+      ).toBeLessThan(
+        (
+          search.networks as Readonly<
+            Record<string, { readonly gw_priority?: number }>
+          >
+        )["tf-search-egress"]?.gw_priority ?? 0,
+      );
       expect(template.networks?.["tf-search-control"]).toEqual({
         internal: true,
       });
@@ -271,43 +306,40 @@ describe("tf-search deployment contract", () => {
   it.each([
     ["root", rootComposePath],
     ["nested", nestedComposePath],
-  ])(
-    "hardens and bounds the %s search process",
-    async (_label, path) => {
-      const template = await composeTemplate(path);
-      const search = service(template, "tf-search");
+  ])("hardens and bounds the %s search process", async (_label, path) => {
+    const template = await composeTemplate(path);
+    const search = service(template, "tf-search");
 
-      expect(search.user).toBe("10001:10001");
-      expect(search.read_only).toBe(true);
-      expect(search.init).toBe(true);
-      expect(search.security_opt).toEqual(["no-new-privileges:true"]);
-      expect(search.cap_drop).toEqual(["ALL"]);
-      expect(search.pids_limit).toBe(128);
-      expect(search.tmpfs).toEqual([
-        "/tmp:rw,noexec,nosuid,size=32m",
-        "/tmp/yt-dlp:rw,noexec,nosuid,size=64m",
-      ]);
-      expect(search.stop_grace_period).toBe("20s");
-      expect(search.deploy).toEqual({
-        replicas: 1,
-        resources: {
-          limits: { cpus: "1.0", memory: "512M", pids: 128 },
-          reservations: { cpus: "0.25", memory: "256M" },
-        },
-      });
-      expect(search.healthcheck).toMatchObject({
-        interval: "5s",
-        timeout: "3s",
-        retries: 20,
-      });
-      expect(search.healthcheck?.["test"]).toEqual([
-        "CMD",
-        "node",
-        "-e",
-        expect.stringContaining("http://127.0.0.1:8080/readyz"),
-      ]);
-    },
-  );
+    expect(search.user).toBe("10001:10001");
+    expect(search.read_only).toBe(true);
+    expect(search.init).toBe(true);
+    expect(search.security_opt).toEqual(["no-new-privileges:true"]);
+    expect(search.cap_drop).toEqual(["ALL"]);
+    expect(search.pids_limit).toBe(128);
+    expect(search.tmpfs).toEqual([
+      "/tmp:rw,noexec,nosuid,size=32m",
+      "/tmp/yt-dlp:rw,noexec,nosuid,size=64m",
+    ]);
+    expect(search.stop_grace_period).toBe("20s");
+    expect(search.deploy).toEqual({
+      replicas: 1,
+      resources: {
+        limits: { cpus: "1.0", memory: "512M", pids: 128 },
+        reservations: { cpus: "0.25", memory: "256M" },
+      },
+    });
+    expect(search.healthcheck).toMatchObject({
+      interval: "5s",
+      timeout: "3s",
+      retries: 20,
+    });
+    expect(search.healthcheck?.["test"]).toEqual([
+      "CMD",
+      "node",
+      "-e",
+      expect.stringContaining("http://127.0.0.1:8080/readyz"),
+    ]);
+  });
 
   it.each([
     ["root", rootComposePath],

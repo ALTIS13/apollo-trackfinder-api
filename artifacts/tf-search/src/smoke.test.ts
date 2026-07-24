@@ -1,5 +1,16 @@
 import { execFile } from "node:child_process";
-import { access, readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  rmdir,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -37,9 +48,7 @@ interface SmokeObservations {
 }
 
 interface SmokeModule {
-  readonly canonicalizeDockerSelectors: (
-    environment: NodeJS.ProcessEnv,
-  ) => {
+  readonly canonicalizeDockerSelectors: (environment: NodeJS.ProcessEnv) => {
     readonly context: string;
     readonly environment: NodeJS.ProcessEnv;
     readonly host: string;
@@ -60,6 +69,12 @@ interface SmokeModule {
     directory: string,
     options?: { readonly repositoryRoot?: string },
   ) => Promise<void>;
+  readonly seedPolicySession: (
+    compose: (
+      args: readonly string[],
+    ) => Promise<{ readonly stdout: string; readonly stderr: string }>,
+    registerLogCanaries: (values: readonly string[]) => void,
+  ) => Promise<unknown>;
   readonly runTfSearchSmoke: (options: {
     readonly environment: NodeJS.ProcessEnv;
     readonly repositoryRoot?: string;
@@ -70,12 +85,14 @@ interface SmokeModule {
     readonly exerciseStack: (context: {
       readonly apiOrigin: string;
       readonly project: string;
+      readonly registerLogCanaries: (values: readonly string[]) => void;
       readonly restartApi: () => Promise<void>;
     }) => Promise<SmokeObservations>;
   }) => Promise<{
     readonly project: string;
     readonly cleanup: {
       readonly containers: number;
+      readonly images: number;
       readonly networks: number;
       readonly volumes: number;
       readonly temporaryDirectories: number;
@@ -85,11 +102,12 @@ interface SmokeModule {
 }
 
 async function loadSmokeModule(): Promise<SmokeModule> {
-  return (await import(`${pathToFileURL(smokeScript).href}?t=${Date.now()}`)) as
-    unknown as SmokeModule;
+  return (await import(
+    `${pathToFileURL(smokeScript).href}?t=${Date.now()}`
+  )) as unknown as SmokeModule;
 }
 
-function fakeDocker() {
+function fakeDocker(options: { readonly logs?: string } = {}) {
   const calls: DockerCall[] = [];
   const run = async (
     args: readonly string[],
@@ -130,13 +148,17 @@ function fakeDocker() {
     if (args[0] === "compose" && args.includes("logs")) {
       return {
         stdout:
+          options.logs ??
           '{"level":"info","message":"TF search listening"}\n' +
-          '{"level":"info","message":"Server listening"}\n',
+            '{"level":"info","message":"Server listening"}\n',
         stderr: "",
       };
     }
     if (
-      (args[0] === "ps" || args[0] === "network" || args[0] === "volume") &&
+      (args[0] === "ps" ||
+        args[0] === "network" ||
+        args[0] === "volume" ||
+        args[0] === "image") &&
       args.includes("ls")
     ) {
       return { stdout: "", stderr: "" };
@@ -198,9 +220,9 @@ describe("tf-search disposable smoke contract", () => {
     const smoke = await loadSmokeModule();
     const contained = resolve(repositoryRoot, ".tmp", "tf-search-smoke-safe");
 
-    expect(
-      smoke.assertWorkspaceContainedPath(contained, repositoryRoot),
-    ).toBe(contained);
+    expect(smoke.assertWorkspaceContainedPath(contained, repositoryRoot)).toBe(
+      contained,
+    );
     expect(() =>
       smoke.assertWorkspaceContainedPath(
         resolve(repositoryRoot, "..", "outside"),
@@ -254,6 +276,82 @@ describe("tf-search disposable smoke contract", () => {
     await expect(access(join(repositoryRoot, ".tmp"))).rejects.toBeDefined();
   });
 
+  it("rejects symlink or junction escapes before writing or deleting", async ({
+    skip,
+  }) => {
+    const smoke = await loadSmokeModule();
+    const outerTemporaryRoot = join(
+      repositoryRoot,
+      ".superpowers",
+      "sdd",
+      "task-5-physical-containment-tmp",
+    );
+    await mkdir(outerTemporaryRoot, { recursive: true });
+    const fixtureRoot = await mkdtemp(
+      join(outerTemporaryRoot, "physical-containment-"),
+    );
+    const workspace = join(fixtureRoot, "workspace");
+    const outside = join(fixtureRoot, "outside");
+    const linkedTemporaryRoot = join(workspace, ".tmp");
+    const linkedRunDirectory = join(
+      linkedTemporaryRoot,
+      `tf-search-smoke-${randomUUID()}`,
+    );
+    const sentinel = join(outside, "sentinel");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    let temporaryRootIsLink = false;
+    let runDirectoryIsLink = false;
+
+    await mkdir(workspace);
+    await mkdir(outside);
+    await writeFile(sentinel, "preserve");
+    try {
+      try {
+        await symlink(outside, linkedTemporaryRoot, linkType);
+        temporaryRootIsLink = true;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "EPERM" || code === "EACCES") {
+          skip();
+          return;
+        }
+        throw error;
+      }
+
+      await expect(
+        smoke.prepareSecretDirectory({}, { repositoryRoot: workspace }),
+      ).rejects.toThrow(/symbolic|reparse|physical/i);
+      expect(await readFile(sentinel, "utf8")).toBe("preserve");
+
+      await unlink(linkedTemporaryRoot);
+      temporaryRootIsLink = false;
+      await mkdir(linkedTemporaryRoot);
+      await symlink(outside, linkedRunDirectory, linkType);
+      runDirectoryIsLink = true;
+
+      await expect(
+        smoke.removeVerifiedDirectory(linkedRunDirectory, {
+          repositoryRoot: workspace,
+        }),
+      ).rejects.toThrow(/symbolic|reparse|physical/i);
+      expect(await readFile(sentinel, "utf8")).toBe("preserve");
+    } finally {
+      if (runDirectoryIsLink) {
+        await unlink(linkedRunDirectory).catch(() => undefined);
+      }
+      if (temporaryRootIsLink) {
+        await unlink(linkedTemporaryRoot).catch(() => undefined);
+      }
+      await rm(fixtureRoot, { force: true, recursive: true });
+      await rmdir(outerTemporaryRoot).catch((error: unknown) => {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
+          throw error;
+        }
+      });
+    }
+  });
+
   it("uses one unique project, verifies the full stack contract, and audits cleanup", async () => {
     const smoke = await loadSmokeModule();
     const docker = fakeDocker();
@@ -272,19 +370,20 @@ describe("tf-search disposable smoke contract", () => {
       },
     });
 
-    expect(result.project).toMatch(
-      /^apollo-tf-search-smoke-\d+-[a-f0-9]{8}$/,
-    );
+    expect(result.project).toMatch(/^apollo-tf-search-smoke-\d+-[a-f0-9]{8}$/);
     expect(result.project).not.toBe("hostile-inherited-project");
     expect(result.observations).toEqual(observations);
     expect(result.cleanup).toEqual({
       containers: 0,
+      images: 0,
       networks: 0,
       volumes: 0,
       temporaryDirectories: 0,
     });
 
-    const composeCalls = docker.calls.filter(({ args }) => args[0] === "compose");
+    const composeCalls = docker.calls.filter(
+      ({ args }) => args[0] === "compose",
+    );
     expect(
       composeCalls.map(({ args }) =>
         args.includes("config")
@@ -309,16 +408,41 @@ describe("tf-search disposable smoke contract", () => {
     }
     const down = composeCalls.find(({ args }) => args.includes("down"));
     expect(down?.args).toEqual(
-      expect.arrayContaining(["down", "-v", "--remove-orphans"]),
+      expect.arrayContaining([
+        "down",
+        "-v",
+        "--remove-orphans",
+        "--rmi",
+        "local",
+      ]),
     );
     expect(
       docker.calls.filter(
         ({ args }) =>
           args[0] === "ps" ||
           (args[0] === "network" && args[1] === "ls") ||
-          (args[0] === "volume" && args[1] === "ls"),
+          (args[0] === "volume" && args[1] === "ls") ||
+          (args[0] === "image" && args[1] === "ls"),
       ),
-    ).toHaveLength(3);
+    ).toHaveLength(5);
+    expect(
+      docker.calls.filter(
+        ({ args }) => args[0] === "image" && args[1] === "ls",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        args: expect.arrayContaining([
+          "--filter",
+          `label=com.docker.compose.project=${result.project}`,
+        ]),
+      }),
+      expect.objectContaining({
+        args: expect.arrayContaining([
+          "--filter",
+          `reference=${result.project}-*`,
+        ]),
+      }),
+    ]);
   });
 
   it("always tears down and audits after a failed runtime assertion", async () => {
@@ -336,18 +460,32 @@ describe("tf-search disposable smoke contract", () => {
       }),
     ).rejects.toThrow("runtime assertion failed");
 
-    const composeCalls = docker.calls.filter(({ args }) => args[0] === "compose");
-    expect(composeCalls.some(({ args }) => args.includes("down"))).toBe(true);
+    const composeCalls = docker.calls.filter(
+      ({ args }) => args[0] === "compose",
+    );
+    const down = composeCalls.find(({ args }) => args.includes("down"));
+    expect(down?.args).toEqual(
+      expect.arrayContaining([
+        "down",
+        "-v",
+        "--remove-orphans",
+        "--rmi",
+        "local",
+      ]),
+    );
     expect(
       docker.calls.some(
         ({ args }) => args[0] === "network" && args[1] === "ls",
       ),
     ).toBe(true);
     expect(
-      docker.calls.some(
-        ({ args }) => args[0] === "volume" && args[1] === "ls",
-      ),
+      docker.calls.some(({ args }) => args[0] === "volume" && args[1] === "ls"),
     ).toBe(true);
+    expect(
+      docker.calls.filter(
+        ({ args }) => args[0] === "image" && args[1] === "ls",
+      ),
+    ).toHaveLength(2);
   });
 
   it("captures project logs and tears down when startup fails", async () => {
@@ -384,6 +522,115 @@ describe("tf-search disposable smoke contract", () => {
     ).toBe(true);
   });
 
+  it("rejects success-path log canaries without surfacing their values", async () => {
+    const smoke = await loadSmokeModule();
+    const artist = "Artist Success Canary";
+    const docker = fakeDocker({
+      logs: `{"level":"info","artist":"${artist}"}\n`,
+    });
+
+    let message = "";
+    try {
+      await smoke.runTfSearchSmoke({
+        environment: process.env,
+        repositoryRoot,
+        docker: docker.run,
+        exerciseStack: async ({ registerLogCanaries }) => {
+          registerLogCanaries([artist]);
+          return successfulObservations();
+        },
+      });
+      expect.fail("success-path canary was not rejected");
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("sensitive smoke canary");
+    expect(message).not.toContain(artist);
+    expect(
+      docker.calls.some(
+        ({ args }) =>
+          args[0] === "compose" &&
+          args.includes("down") &&
+          args.includes("--rmi"),
+      ),
+    ).toBe(true);
+  });
+
+  it("checks failure logs and sanitizes fixture-bearing thrown errors", async () => {
+    const smoke = await loadSmokeModule();
+    const canaries = [
+      "Artist Failure Canary",
+      "Title Failure Canary",
+      "Artist Failure Canary Title Failure Canary",
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000002",
+      "00000000-0000-4000-8000-000000000003",
+      "00000000-0000-4000-8000-000000000004",
+      "session-handle-failure-canary",
+      "csrf-failure-canary",
+      "authorization-token-failure-canary",
+    ];
+    const docker = fakeDocker({
+      logs: `{"level":"error","session":"${canaries[7]}"}\n`,
+    });
+
+    let message = "";
+    try {
+      await smoke.runTfSearchSmoke({
+        environment: process.env,
+        repositoryRoot,
+        docker: docker.run,
+        exerciseStack: async ({ registerLogCanaries }) => {
+          registerLogCanaries(canaries);
+          throw new Error(`runtime failed for ${canaries[9]}`);
+        },
+      });
+      expect.fail("failure-path canary was not rejected");
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("sensitive smoke canary");
+    for (const canary of canaries) {
+      expect(message).not.toContain(canary);
+    }
+    expect(
+      docker.calls.filter(
+        ({ args }) =>
+          args[0] === "compose" &&
+          (args.includes("logs") || args.includes("down")),
+      ).length,
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("registers generated session canaries before the Redis seed command", async () => {
+    const smoke = await loadSmokeModule();
+    const events: string[] = [];
+    let canaries: readonly string[] = [];
+
+    await expect(
+      smoke.seedPolicySession(
+        async () => {
+          events.push("compose");
+          throw new Error("redis seed failed");
+        },
+        (values) => {
+          events.push("register");
+          canaries = [...values];
+        },
+      ),
+    ).rejects.toThrow("redis seed failed");
+
+    expect(events).toEqual(["register", "compose"]);
+    expect(canaries).toHaveLength(7);
+    expect(new Set(canaries).size).toBe(7);
+    expect(
+      canaries.filter((value) => /^[0-9a-f-]{36}$/.test(value)),
+    ).toHaveLength(4);
+    expect(canaries.filter((value) => value.length === 43)).toHaveLength(3);
+  });
+
   it("keeps real Docker execution explicitly gated", async () => {
     const source = await readFile(smokeScript, "utf8");
 
@@ -391,7 +638,7 @@ describe("tf-search disposable smoke contract", () => {
     expect(source).toContain("deterministic fixture");
     expect(source).toContain("(async () => {");
     expect(source).toContain(
-      '})().catch((error) => { console.error(error); process.exitCode = 1; });',
+      "})().catch((error) => { console.error(error); process.exitCode = 1; });",
     );
     expect(source).toContain("down");
     expect(source).toContain("--remove-orphans");
@@ -411,7 +658,7 @@ describe("tf-search disposable smoke contract", () => {
       });
       expect(result.stderr).toBe("");
       expect(result.stdout).toMatch(
-        /TF search deterministic fixture smoke passed .+?"containers":0,"networks":0,"volumes":0,"temporaryDirectories":0/,
+        /TF search deterministic fixture smoke passed .+?"containers":0,"images":0,"networks":0,"volumes":0,"temporaryDirectories":0/,
       );
     },
     10 * 60_000,
