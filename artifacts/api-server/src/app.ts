@@ -87,12 +87,7 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
         return callback(null, false);
       },
       credentials: true,
-      allowedHeaders: [
-        "Content-Type",
-        "Authorization",
-        "X-Client-Session",
-        "X-CSRF-Token",
-      ],
+      allowedHeaders: ["Content-Type", "Authorization", "X-CSRF-Token"],
     }),
   );
 

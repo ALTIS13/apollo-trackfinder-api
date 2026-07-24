@@ -48,6 +48,8 @@ export interface AuthRouteDependencies {
     | "consumeTransaction"
     | "createSession"
     | "getSession"
+    | "observeSession"
+    | "refreshSession"
     | "revokeSession"
   >;
   readonly webOrigin: string;

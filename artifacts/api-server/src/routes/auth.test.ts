@@ -138,6 +138,7 @@ function createDependencies(
       session: currentSession ?? session(),
     }),
     getSession: vi.fn().mockResolvedValue(currentSession),
+    observeSession: vi.fn(),
     refreshSession: vi.fn(),
     revokeSession: vi.fn().mockResolvedValue(true),
     issueWebSocketTicket: vi.fn(),

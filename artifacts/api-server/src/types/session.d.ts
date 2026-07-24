@@ -1,9 +1,16 @@
 import "express-session";
+import type { TfPrincipal } from "../lib/tf-policy.js";
 
 declare module "express-session" {
-  // Legacy provider state only; Apollo TF authentication uses TfSessionStore.
   interface SessionData {
-    session_id: string;
-    spotify_state: string;
+    spotify_state?: string;
+  }
+}
+
+declare global {
+  namespace Express {
+    interface Request {
+      tfPrincipal?: TfPrincipal;
+    }
   }
 }
