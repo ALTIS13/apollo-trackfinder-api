@@ -18,6 +18,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const ACCOUNT_ID = "10000000-0000-4000-8000-000000000001";
+const OTHER_ACCOUNT_ID = "90000000-0000-4000-8000-000000000009";
 const SESSION_ID = "20000000-0000-4000-8000-000000000002";
 const INSTALLATION_ID = "30000000-0000-4000-8000-000000000003";
 const resourceSuffix = randomBytes(8).toString("hex");
@@ -143,6 +144,20 @@ function opaque(): string {
 
 function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function noncanonicalAlias(value: string): string {
+  const alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const index = alphabet.indexOf(value.at(-1)!);
+  expect(index).toBeGreaterThanOrEqual(0);
+  expect(index % 4).toBe(0);
+  const alias = `${value.slice(0, -1)}${alphabet[index + 1]}`;
+  expect(Buffer.from(alias, "base64url")).toEqual(
+    Buffer.from(value, "base64url"),
+  );
+  expect(alias).not.toBe(value);
+  return alias;
 }
 
 function transactionInput() {
@@ -607,6 +622,60 @@ describe("TfSessionStore sessions", () => {
         }),
       ),
     ).rejects.toThrow("TF authentication storage unavailable");
+  });
+});
+
+describe("TfSessionStore provider OAuth state", () => {
+  it("issues canonical digest-keyed account-bound state for exactly five minutes", async () => {
+    const state = await store.issueProviderOAuthState("spotify", ACCOUNT_ID);
+
+    expect(state).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(Buffer.from(state, "base64url")).toHaveLength(32);
+    expect(Buffer.from(state, "base64url").toString("base64url")).toBe(state);
+    const keys = await redis.keys("tf-auth:provider-oauth:spotify:*");
+    expect(keys).toEqual([`tf-auth:provider-oauth:spotify:${digest(state)}`]);
+    expect(keys[0]).not.toContain(state);
+    expect(await redis.get(keys[0]!)).toBe(ACCOUNT_ID);
+    expect(await redis.ttl(keys[0]!)).toBeGreaterThanOrEqual(299);
+    expect(await redis.ttl(keys[0]!)).toBeLessThanOrEqual(300);
+  });
+
+  it("rejects a noncanonical byte alias without consuming the exact state", async () => {
+    const state = await store.issueProviderOAuthState("spotify", ACCOUNT_ID);
+    const alias = noncanonicalAlias(state);
+
+    await expect(
+      store.consumeProviderOAuthState("spotify", ACCOUNT_ID, alias),
+    ).resolves.toBe(false);
+    await expect(
+      store.consumeProviderOAuthState("spotify", ACCOUNT_ID, state),
+    ).resolves.toBe(true);
+  });
+
+  it("does not let the wrong account consume another account's state", async () => {
+    const state = await store.issueProviderOAuthState("spotify", ACCOUNT_ID);
+
+    await expect(
+      store.consumeProviderOAuthState("spotify", OTHER_ACCOUNT_ID, state),
+    ).resolves.toBe(false);
+    await expect(
+      store.consumeProviderOAuthState("spotify", ACCOUNT_ID, state),
+    ).resolves.toBe(true);
+  });
+
+  it("atomically consumes provider state once under concurrent callbacks", async () => {
+    const state = await store.issueProviderOAuthState("spotify", ACCOUNT_ID);
+
+    const outcomes = await Promise.all(
+      Array.from({ length: 24 }, () =>
+        store.consumeProviderOAuthState("spotify", ACCOUNT_ID, state),
+      ),
+    );
+
+    expect(outcomes.filter(Boolean)).toHaveLength(1);
+    await expect(
+      store.consumeProviderOAuthState("spotify", ACCOUNT_ID, state),
+    ).resolves.toBe(false);
   });
 });
 

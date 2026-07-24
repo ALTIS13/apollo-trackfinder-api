@@ -11,12 +11,19 @@ import { z } from "zod";
 import type Redis from "ioredis";
 
 const TRANSACTION_TTL_SECONDS = 300;
+const PROVIDER_OAUTH_STATE_TTL_SECONDS = 300;
 const WEBSOCKET_TICKET_TTL_SECONDS = 30;
 const SESSION_MAX_TTL_SECONDS = 8 * 60 * 60;
 const POLICY_REFRESH_SECONDS = 300;
 const RANDOM_WRITE_ATTEMPTS = 4;
 const OPAQUE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
+const providerOAuthBindingSchema = z
+  .object({
+    provider: z.literal("spotify"),
+    accountId: z.string().uuid(),
+  })
+  .strict();
 
 const transactionInputSchema = z
   .object({
@@ -82,6 +89,18 @@ if value then
   redis.call("DEL", KEYS[1])
 end
 return value
+`;
+
+const CONSUME_BOUND_VALUE_SCRIPT = `
+local current = redis.call("GET", KEYS[1])
+if not current then
+  return 0
+end
+if current ~= ARGV[1] then
+  return -1
+end
+redis.call("DEL", KEYS[1])
+return 1
 `;
 
 const COMPARE_REVISION_AND_REPLACE_SCRIPT = `
@@ -169,6 +188,10 @@ export interface TfSessionObservation {
   readonly session: TfSession;
 }
 
+export type ProviderOAuthName = z.infer<
+  typeof providerOAuthBindingSchema
+>["provider"];
+
 export interface WebSocketTicket {
   readonly accountId: string;
   readonly sessionId: string;
@@ -202,6 +225,19 @@ function sessionKey(handle: string): string {
 
 function ticketKey(ticket: string): string {
   return `tf-auth:ticket:${digest(ticket)}`;
+}
+
+function providerOAuthStateKey(
+  provider: ProviderOAuthName,
+  state: string,
+): string {
+  return `tf-auth:provider-oauth:${provider}:${digest(state)}`;
+}
+
+function isCanonicalOpaque(value: string): boolean {
+  if (!OPAQUE_PATTERN.test(value)) return false;
+  const decoded = Buffer.from(value, "base64url");
+  return decoded.byteLength === 32 && decoded.toString("base64url") === value;
 }
 
 function sortedEntitlements(values: readonly string[]): string[] {
@@ -471,6 +507,61 @@ export class TfSessionStore {
         throw new Error("invalid revoke result");
       }
       return result === 1;
+    } catch {
+      throw new TfSessionStoreUnavailableError();
+    }
+  }
+
+  async issueProviderOAuthState(
+    provider: ProviderOAuthName,
+    accountId: string,
+  ): Promise<string> {
+    try {
+      const binding = providerOAuthBindingSchema.parse({
+        provider,
+        accountId,
+      });
+      for (let attempt = 0; attempt < RANDOM_WRITE_ATTEMPTS; attempt += 1) {
+        const state = opaqueValue();
+        const result = await this.redis.set(
+          providerOAuthStateKey(binding.provider, state),
+          binding.accountId,
+          "EX",
+          PROVIDER_OAUTH_STATE_TTL_SECONDS,
+          "NX",
+        );
+        if (result === "OK") return state;
+        if (result !== null) throw new Error("invalid set result");
+      }
+      throw new Error("random collision");
+    } catch {
+      throw new TfSessionStoreUnavailableError();
+    }
+  }
+
+  async consumeProviderOAuthState(
+    provider: ProviderOAuthName,
+    accountId: string,
+    state: string,
+  ): Promise<boolean> {
+    if (!isCanonicalOpaque(state)) return false;
+    const binding = providerOAuthBindingSchema.safeParse({
+      provider,
+      accountId,
+    });
+    if (!binding.success) return false;
+    try {
+      const result = parseScriptInteger(
+        await this.redis.eval(
+          CONSUME_BOUND_VALUE_SCRIPT,
+          1,
+          providerOAuthStateKey(binding.data.provider, state),
+          binding.data.accountId,
+        ),
+      );
+      if (result === 1) return true;
+      if (result === 0 || result === -1) return false;
+      throw new Error("invalid provider state result");
     } catch {
       throw new TfSessionStoreUnavailableError();
     }

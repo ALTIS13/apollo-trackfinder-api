@@ -76,6 +76,7 @@ afterEach(async () => {
     servers.splice(0).map(
       (server) =>
         new Promise<void>((resolve, reject) => {
+          server.closeAllConnections();
           server.close((error) => (error ? reject(error) : resolve()));
         }),
     ),
@@ -179,5 +180,71 @@ describe("Yandex account ownership", () => {
     expect(
       JSON.stringify(dependencies.tokenStore.delete.mock.calls),
     ).not.toContain(OTHER_ACCOUNT_ID);
+  });
+
+  it("sanitizes submitted-token persistence rejection", async () => {
+    const dependencies = yandexDependencies();
+    const tokenCanary = `yandex-token-${randomBytes(24).toString("base64url")}`;
+    const databaseCanary = `yandex-db-${randomBytes(24).toString("base64url")}`;
+    dependencies.fetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          result: {
+            account: {
+              uid: 12345,
+              login: "yandex-user",
+              displayName: "Yandex User",
+            },
+          },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    dependencies.tokenStore.upsert.mockRejectedValue(
+      new Error(`${databaseCanary}:${tokenCanary}`),
+    );
+    const baseUrl = await startYandexServer(dependencies);
+
+    const response = await fetch(`${baseUrl}/yandex/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: tokenCanary }),
+    });
+    const body = await response.text();
+
+    expect(response.status).toBe(503);
+    expect(body).toBe('{"error":"yandex_unavailable"}');
+    expect(body).not.toContain(tokenCanary);
+    expect(body).not.toContain(databaseCanary);
+    expect(JSON.stringify(dependencies.log.error.mock.calls)).not.toContain(
+      tokenCanary,
+    );
+    expect(JSON.stringify(dependencies.log.error.mock.calls)).not.toContain(
+      databaseCanary,
+    );
+  });
+
+  it("sanitizes provider-token deletion rejection", async () => {
+    const dependencies = yandexDependencies();
+    const databaseCanary = `yandex-delete-${randomBytes(24).toString(
+      "base64url",
+    )}`;
+    dependencies.tokenStore.delete.mockRejectedValue(new Error(databaseCanary));
+    const baseUrl = await startYandexServer(dependencies);
+
+    const response = await fetch(`${baseUrl}/yandex/logout`, {
+      method: "POST",
+    });
+    const body = await response.text();
+
+    expect(response.status).toBe(503);
+    expect(body).toBe('{"error":"yandex_unavailable"}');
+    expect(body).not.toContain(databaseCanary);
+    expect(JSON.stringify(dependencies.log.error.mock.calls)).not.toContain(
+      databaseCanary,
+    );
   });
 });

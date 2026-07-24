@@ -51,6 +51,8 @@ export interface AuthRouteDependencies {
     | "observeSession"
     | "refreshSession"
     | "revokeSession"
+    | "issueProviderOAuthState"
+    | "consumeProviderOAuthState"
   >;
   readonly webOrigin: string;
   readonly secureCookies: boolean;

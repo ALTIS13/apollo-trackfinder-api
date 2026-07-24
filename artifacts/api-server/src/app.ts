@@ -1,7 +1,11 @@
 import cookieParser from "cookie-parser";
 import cors from "cors";
-import express, { type Express } from "express";
-import session from "express-session";
+import express, {
+  type Express,
+  type NextFunction,
+  type Request,
+  type Response,
+} from "express";
 import type { Logger } from "pino";
 import pinoHttp from "pino-http";
 
@@ -32,6 +36,27 @@ function isExactLoopbackOrigin(origin: string): boolean {
 
 export interface ApiAppOptions extends ApiRouterOptions {
   readonly requestLogger?: Logger;
+}
+
+export function sanitizedApiErrorHandler(
+  _error: unknown,
+  request: Request,
+  response: Response,
+  _next: NextFunction,
+): void {
+  request.log.error(
+    {
+      errorType: "UnhandledApiError",
+      method: request.method,
+      path: request.path,
+    },
+    "API request failed",
+  );
+  if (response.headersSent) {
+    response.destroy();
+    return;
+  }
+  response.status(500).json({ error: "internal_error" });
 }
 
 export function createApiApp(options: ApiAppOptions = {}): Express {
@@ -95,22 +120,7 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   app.use(express.urlencoded({ extended: true }));
   app.use(cookieParser());
 
-  const sessionSecret =
-    process.env["SESSION_SECRET"] ?? "dev-secret-change-in-production";
-  app.use(
-    session({
-      secret: sessionSecret,
-      resave: false,
-      saveUninitialized: false,
-      cookie: {
-        secure: process.env["NODE_ENV"] === "production",
-        httpOnly: true,
-        maxAge: 30 * 24 * 60 * 60 * 1_000,
-        sameSite: "lax",
-      },
-    }),
-  );
-
-  app.use("/api", createApiRouter({ auth: options.auth }));
+  app.use("/api", createApiRouter(options));
+  app.use("/api", sanitizedApiErrorHandler);
   return app;
 }

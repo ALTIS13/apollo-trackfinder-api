@@ -94,6 +94,8 @@ function policyAuthDependencies() {
       observeSession: vi.fn(),
       refreshSession: vi.fn(),
       revokeSession: vi.fn(),
+      issueProviderOAuthState: vi.fn(),
+      consumeProviderOAuthState: vi.fn(),
     },
     webOrigin: "https://tf.apollot.ru",
     secureCookies: true,

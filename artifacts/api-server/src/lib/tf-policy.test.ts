@@ -321,6 +321,57 @@ describe("requireTfCapability", () => {
     ).toHaveBeenCalledOnce();
   });
 
+  it("samples snapshot freshness after asynchronous session observation", async () => {
+    let currentTime = NOW;
+    const currentDependencies = dependencies(
+      observation({
+        entitlements: ["tf.search"],
+        assertionExpiresAt: new Date(NOW + 30_001).toISOString(),
+      }),
+    );
+    currentDependencies.now = () => currentTime;
+    currentDependencies.sessionStore.observeSession.mockImplementation(
+      async () => {
+        currentTime = NOW + 2_000;
+        return observation({
+          entitlements: ["tf.search"],
+          assertionExpiresAt: new Date(NOW + 30_001).toISOString(),
+        });
+      },
+    );
+    const origin = await startPolicyServer(currentDependencies);
+
+    const response = await protectedRequest(origin, "/api/tracks/suggest");
+
+    expect(response.status).toBe(200);
+    expect(currentDependencies.platform.introspect).toHaveBeenCalledOnce();
+    expect(
+      currentDependencies.sessionStore.refreshSession,
+    ).toHaveBeenCalledOnce();
+  });
+
+  it("rechecks refreshed live-session expiry after asynchronous refresh", async () => {
+    let currentTime = NOW;
+    const currentDependencies = dependencies();
+    currentDependencies.now = () => currentTime;
+    currentDependencies.sessionStore.refreshSession.mockImplementation(
+      async () => {
+        currentTime = NOW + 180_000;
+        return session({
+          assertionExpiresAt: new Date(NOW + 120_000).toISOString(),
+        });
+      },
+    );
+    const origin = await startPolicyServer(currentDependencies);
+
+    const response = await protectedRequest(origin, "/api/tracks/recent");
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "policy_unavailable",
+    });
+  });
+
   it("introspects every critical policy even with a fresh snapshot", async () => {
     const currentDependencies = dependencies();
     const origin = await startPolicyServer(currentDependencies);

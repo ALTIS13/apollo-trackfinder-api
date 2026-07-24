@@ -141,6 +141,8 @@ function createDependencies(
     observeSession: vi.fn(),
     refreshSession: vi.fn(),
     revokeSession: vi.fn().mockResolvedValue(true),
+    issueProviderOAuthState: vi.fn(),
+    consumeProviderOAuthState: vi.fn(),
     issueWebSocketTicket: vi.fn(),
     consumeWebSocketTicket: vi.fn(),
   };

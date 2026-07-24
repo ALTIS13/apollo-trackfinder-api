@@ -1,14 +1,22 @@
 import { Router, type IRouter } from "express";
 import healthRouter from "./health.js";
 import tracksRouter from "./tracks.js";
-import spotifyRouter from "./spotify.js";
-import yandexRouter from "./yandex.js";
+import {
+  createSpotifyRouter,
+  type SpotifyRouteDependencies,
+} from "./spotify.js";
+import { createYandexRouter, type YandexRouteDependencies } from "./yandex.js";
 import { adminRouter } from "./admin.js";
 import { createAuthRouter, type AuthRouteDependencies } from "./auth.js";
 import { requireTfCapability } from "../lib/tf-policy.js";
 
 export interface ApiRouterOptions {
   readonly auth?: AuthRouteDependencies;
+  readonly spotify?: Omit<
+    Partial<SpotifyRouteDependencies>,
+    "providerOAuthStateStore"
+  >;
+  readonly yandex?: Partial<YandexRouteDependencies>;
 }
 
 export function createApiRouter(options: ApiRouterOptions = {}): IRouter {
@@ -31,8 +39,15 @@ export function createApiRouter(options: ApiRouterOptions = {}): IRouter {
     );
   }
   router.use(tracksRouter);
-  router.use(spotifyRouter);
-  router.use(yandexRouter);
+  router.use(
+    createSpotifyRouter({
+      ...options.spotify,
+      ...(options.auth === undefined
+        ? {}
+        : { providerOAuthStateStore: options.auth.sessionStore }),
+    }),
+  );
+  router.use(createYandexRouter(options.yandex));
   router.use(adminRouter);
   return router;
 }

@@ -360,6 +360,14 @@ function principalFrom(session: TfSession): TfPrincipal {
   });
 }
 
+function checkedNow(now: () => number): number {
+  const value = now();
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error("invalid clock");
+  }
+  return value;
+}
+
 export function requireTfCapability(
   dependencies: TfPolicyDependencies,
 ): RequestHandler {
@@ -383,22 +391,22 @@ export function requireTfCapability(
     }
 
     try {
-      const now = (dependencies.now ?? Date.now)();
-      if (!Number.isFinite(now) || now < 0) throw new Error("invalid clock");
+      const now = dependencies.now ?? Date.now;
       const observation =
         await dependencies.sessionStore.observeSession(handle);
       if (observation === null) {
         sendUnauthorized(response);
         return;
       }
-      if (timestamp(observation.session.expiresAt) <= now) {
+      const decisionTime = checkedNow(now);
+      if (timestamp(observation.session.expiresAt) <= decisionTime) {
         sendUnauthorized(response);
         return;
       }
 
       let authorizedSession = observation.session;
       const snapshotFresh =
-        timestamp(observation.session.assertionExpiresAt) - now >
+        timestamp(observation.session.assertionExpiresAt) - decisionTime >
         SNAPSHOT_MINIMUM_FRESHNESS_MS;
       if (policy.live || !snapshotFresh) {
         const introspection = await dependencies.platform.introspect({
@@ -425,9 +433,15 @@ export function requireTfCapability(
           observation.revision,
           introspection,
         );
+        const refreshedTime = checkedNow(now);
         if (
           refreshed === null ||
-          !exactRefreshedBinding(observation, introspection, refreshed, now)
+          !exactRefreshedBinding(
+            observation,
+            introspection,
+            refreshed,
+            refreshedTime,
+          )
         ) {
           sendPolicyUnavailable(response);
           return;

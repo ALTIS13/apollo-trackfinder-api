@@ -1,13 +1,11 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
-
 import { db } from "@workspace/db";
 import { spotifyTokensTable } from "@workspace/db/schema";
 import { eq } from "drizzle-orm";
-import { Router, type IRouter, type Request, type Response } from "express";
+import { Router, type IRouter, type Response } from "express";
 
 import { logger } from "../lib/logger.js";
+import type { TfSessionStore } from "../lib/tf-session-store.js";
 
-const OPAQUE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const PROVIDER_CODE_PATTERN = /^[\x21-\x7e]{1,2048}$/;
 const SCOPES = [
   "user-library-read",
@@ -47,6 +45,10 @@ export interface SpotifyRouteDependencies {
   readonly now: () => number;
   readonly fetch: typeof fetch;
   readonly log: Pick<typeof logger, "error">;
+  readonly providerOAuthStateStore: Pick<
+    TfSessionStore,
+    "issueProviderOAuthState" | "consumeProviderOAuthState"
+  >;
   readonly tokenStore: SpotifyTokenStore;
 }
 
@@ -109,6 +111,16 @@ const defaultSpotifyTokenStore: SpotifyTokenStore = {
   },
 };
 
+const unavailableProviderOAuthStateStore: SpotifyRouteDependencies["providerOAuthStateStore"] =
+  {
+    async issueProviderOAuthState() {
+      throw new Error("provider OAuth state unavailable");
+    },
+    async consumeProviderOAuthState() {
+      throw new Error("provider OAuth state unavailable");
+    },
+  };
+
 function defaultDependencies(): SpotifyRouteDependencies {
   return {
     clientId: process.env["SPOTIFY_CLIENT_ID"] ?? "",
@@ -119,6 +131,7 @@ function defaultDependencies(): SpotifyRouteDependencies {
     now: Date.now,
     fetch,
     log: logger,
+    providerOAuthStateStore: unavailableProviderOAuthStateStore,
     tokenStore: defaultSpotifyTokenStore,
   };
 }
@@ -132,27 +145,6 @@ function redirectUri(
   }
   const domain = dependencies.publicApiDomain ?? hostname;
   return `https://${domain}/api/spotify/callback`;
-}
-
-function fixedOpaqueEqual(left: string, right: string): boolean {
-  if (!OPAQUE_PATTERN.test(left) || !OPAQUE_PATTERN.test(right)) return false;
-  const leftBytes = Buffer.from(left, "base64url");
-  const rightBytes = Buffer.from(right, "base64url");
-  return (
-    leftBytes.byteLength === 32 &&
-    rightBytes.byteLength === 32 &&
-    timingSafeEqual(leftBytes, rightBytes)
-  );
-}
-
-function providerState(): string {
-  return randomBytes(32).toString("base64url");
-}
-
-function saveProviderSession(request: Request): Promise<void> {
-  return new Promise((resolve, reject) => {
-    request.session.save((error) => (error ? reject(error) : resolve()));
-  });
 }
 
 function webRedirect(
@@ -245,7 +237,7 @@ async function refreshIfExpired(
       );
       return null;
     }
-    return dependencies.tokenStore.update(accountId, {
+    return await dependencies.tokenStore.update(accountId, {
       ...row,
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken ?? row.refreshToken,
@@ -334,10 +326,12 @@ export function createSpotifyRouter(
       });
       return;
     }
-    const state = providerState();
-    request.session.spotify_state = state;
     try {
-      await saveProviderSession(request);
+      const state =
+        await dependencies.providerOAuthStateStore.issueProviderOAuthState(
+          "spotify",
+          request.tfPrincipal!.accountId,
+        );
       const parameters = new URLSearchParams({
         response_type: "code",
         client_id: dependencies.clientId,
@@ -356,20 +350,19 @@ export function createSpotifyRouter(
   router.get("/spotify/callback", async (request, response) => {
     const suppliedState =
       typeof request.query["state"] === "string" ? request.query["state"] : "";
-    const expectedState = request.session.spotify_state;
-    if (expectedState !== undefined) {
-      delete request.session.spotify_state;
-      try {
-        await saveProviderSession(request);
-      } catch {
-        webRedirect(dependencies, response, { spotify_error: "internal" });
-        return;
-      }
+    let stateConsumed: boolean;
+    try {
+      stateConsumed =
+        await dependencies.providerOAuthStateStore.consumeProviderOAuthState(
+          "spotify",
+          request.tfPrincipal!.accountId,
+          suppliedState,
+        );
+    } catch {
+      webRedirect(dependencies, response, { spotify_error: "internal" });
+      return;
     }
-    if (
-      expectedState === undefined ||
-      !fixedOpaqueEqual(expectedState, suppliedState)
-    ) {
+    if (!stateConsumed) {
       webRedirect(dependencies, response, {
         spotify_error: "invalid_state",
       });

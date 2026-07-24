@@ -183,12 +183,21 @@ export function createYandexRouter(
     const account = accountData.account;
     const displayName =
       account.fullName ?? account.displayName ?? account.login;
-    await dependencies.tokenStore.upsert(request.tfPrincipal!.accountId, {
-      oauthToken: token,
-      yandexUserId: String(account.uid),
-      displayName,
-      login: account.login,
-    });
+    try {
+      await dependencies.tokenStore.upsert(request.tfPrincipal!.accountId, {
+        oauthToken: token,
+        yandexUserId: String(account.uid),
+        displayName,
+        login: account.login,
+      });
+    } catch {
+      dependencies.log.error(
+        { errorType: "StorageUnavailable" },
+        "Yandex token persistence failed",
+      );
+      response.status(503).json({ error: "yandex_unavailable" });
+      return;
+    }
     response.json({
       ok: true,
       displayName,
@@ -214,7 +223,16 @@ export function createYandexRouter(
   });
 
   router.post("/yandex/logout", async (request, response) => {
-    await dependencies.tokenStore.delete(request.tfPrincipal!.accountId);
+    try {
+      await dependencies.tokenStore.delete(request.tfPrincipal!.accountId);
+    } catch {
+      dependencies.log.error(
+        { errorType: "StorageUnavailable" },
+        "Yandex token deletion failed",
+      );
+      response.status(503).json({ error: "yandex_unavailable" });
+      return;
+    }
     response.json({ ok: true });
   });
 

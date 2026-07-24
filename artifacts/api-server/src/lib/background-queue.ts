@@ -386,6 +386,22 @@ export interface JobStatus {
   sessionId?: string;
 }
 
+const ACCOUNT_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function hasExactDownloadOwner(
+  owner: unknown,
+  requester: unknown,
+): owner is string {
+  return (
+    typeof owner === "string" &&
+    ACCOUNT_ID_PATTERN.test(owner) &&
+    typeof requester === "string" &&
+    ACCOUNT_ID_PATTERN.test(requester) &&
+    owner === requester
+  );
+}
+
 /** Internal method for file serving — returns filePath only for same session */
 export async function getDownloadFilePath(
   jobId: string,
@@ -395,7 +411,7 @@ export async function getDownloadFilePath(
     try {
       const job = await downloadQueue.getJob(jobId);
       if (!job) return null;
-      if (job.data.sessionId && job.data.sessionId !== requesterSessionId)
+      if (!hasExactDownloadOwner(job.data.sessionId, requesterSessionId))
         return null;
       const state = await job.getState();
       if (state !== "completed") return null;
@@ -408,7 +424,7 @@ export async function getDownloadFilePath(
 
   const job = inMemoryJobs.get(jobId);
   if (!job) return null;
-  if (job.data.sessionId && job.data.sessionId !== requesterSessionId)
+  if (!hasExactDownloadOwner(job.data.sessionId, requesterSessionId))
     return null;
   if (job.status !== "completed") return null;
   return job.result?.filePath ?? null;
@@ -423,7 +439,7 @@ export async function getDownloadJobStatus(
       const job = await downloadQueue.getJob(jobId);
       if (!job) return { status: "unknown", progress: 0 };
       // Ownership check
-      if (job.data.sessionId && job.data.sessionId !== requesterSessionId) {
+      if (!hasExactDownloadOwner(job.data.sessionId, requesterSessionId)) {
         return { status: "unknown", progress: 0 };
       }
       const state = await job.getState();
@@ -464,7 +480,7 @@ export async function getDownloadJobStatus(
   const job = inMemoryJobs.get(jobId);
   if (!job) return { status: "unknown", progress: 0 };
   // Ownership check
-  if (job.data.sessionId && job.data.sessionId !== requesterSessionId) {
+  if (!hasExactDownloadOwner(job.data.sessionId, requesterSessionId)) {
     return { status: "unknown", progress: 0 };
   }
   // Specific position within waiting queue
@@ -511,7 +527,7 @@ export async function listSessionDownloadJobs(sessionId: string): Promise<
         [failed, "failed"],
       ] as const) {
         for (const j of jobs as import("bullmq").Job[]) {
-          if (j.data.sessionId !== sessionId) continue;
+          if (!hasExactDownloadOwner(j.data.sessionId, sessionId)) continue;
           const result = j.returnvalue as DownloadJobResult | null;
           const pos =
             st === "waiting"
@@ -534,7 +550,7 @@ export async function listSessionDownloadJobs(sessionId: string): Promise<
 
   // In-memory fallback
   for (const [jobId, job] of inMemoryJobs) {
-    if (job.data.sessionId !== sessionId) continue;
+    if (!hasExactDownloadOwner(job.data.sessionId, sessionId)) continue;
     const queuePos = inMemoryQueue.findIndex((j) => j.id === jobId);
     results.push({
       jobId,
