@@ -6,12 +6,17 @@
   "scripts": {
     "build": "node ./build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --maxWorkers=8"
+    "test": "vitest run --maxWorkers=8 --pool=threads"
   },
   "dependencies": {
-    "@workspace/tf-search-contract": "workspace:*"
+    "@workspace/module-runtime-contract": "workspace:*",
+    "@workspace/tf-search-contract": "workspace:*",
+    "express": "^5",
+    "pino": "^9",
+    "zod": "catalog:"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "catalog:",
     "esbuild": "^0.27.3",
     "vitest": "^4.0.18"

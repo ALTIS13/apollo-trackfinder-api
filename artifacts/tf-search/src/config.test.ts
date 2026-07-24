@@ -1,0 +1,172 @@
+import { describe, expect, it } from "vitest";
+import { parseTfSearchRuntimeConfig } from "./config.js";
+
+const commandSecret = "c".repeat(32);
+const heartbeatSecret = "h".repeat(32);
+
+function environment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return {
+    PORT: "8080",
+    TF_SEARCH_INTERNAL_AUTH_SECRET_FILE: "/run/secrets/command",
+    TF_SEARCH_HEARTBEAT_SECRET_FILE: "/run/secrets/heartbeat",
+    TF_SEARCH_HEARTBEAT_API_ORIGIN: "https://api.example.test",
+    APOLLO_API_VERSION: "2026.7.24",
+    ...overrides,
+  };
+}
+
+function secretReader(values: Readonly<Record<string, string>>) {
+  return async (path: string): Promise<string> => {
+    const value = values[path];
+    if (value === undefined) throw new Error("unreadable");
+    return value;
+  };
+}
+
+describe("TF search runtime configuration", () => {
+  it("loads, trims, and validates distinct file-backed secrets", async () => {
+    await expect(
+      parseTfSearchRuntimeConfig(
+        environment(),
+        secretReader({
+          "/run/secrets/command": ` ${commandSecret}\n`,
+          "/run/secrets/heartbeat": `\n${heartbeatSecret} `,
+        }),
+      ),
+    ).resolves.toEqual({
+      port: 8080,
+      internalAuthSecret: commandSecret,
+      heartbeatSecret,
+      heartbeatApiOrigin: "https://api.example.test",
+      version: "2026.7.24",
+    });
+  });
+
+  it.each([
+    ["missing command secret path", environment({ TF_SEARCH_INTERNAL_AUTH_SECRET_FILE: undefined })],
+    ["missing heartbeat secret path", environment({ TF_SEARCH_HEARTBEAT_SECRET_FILE: undefined })],
+    ["unreadable secret", environment()],
+  ])("rejects %s", async (_name, env) => {
+    await expect(parseTfSearchRuntimeConfig(env, secretReader({}))).rejects.toThrow(
+      "invalid runtime configuration",
+    );
+  });
+
+  it.each([
+    ["empty", ""],
+    ["short", "s".repeat(31)],
+    ["long", "s".repeat(513)],
+  ])("rejects a %s secret", async (_name, invalidSecret) => {
+    await expect(
+      parseTfSearchRuntimeConfig(
+        environment(),
+        secretReader({
+          "/run/secrets/command": invalidSecret,
+          "/run/secrets/heartbeat": heartbeatSecret,
+        }),
+      ),
+    ).rejects.toThrow("invalid runtime configuration");
+  });
+
+  it("rejects matching command and heartbeat secrets", async () => {
+    await expect(
+      parseTfSearchRuntimeConfig(
+        environment(),
+        secretReader({
+          "/run/secrets/command": commandSecret,
+          "/run/secrets/heartbeat": commandSecret,
+        }),
+      ),
+    ).rejects.toThrow("invalid runtime configuration");
+  });
+
+  it.each([undefined, "0", "8080.5", "65536", "text"])
+  ("rejects invalid port %s", async (PORT) => {
+    await expect(
+      parseTfSearchRuntimeConfig(
+        environment({ PORT }),
+        secretReader({
+          "/run/secrets/command": commandSecret,
+          "/run/secrets/heartbeat": heartbeatSecret,
+        }),
+      ),
+    ).rejects.toThrow("invalid runtime configuration");
+  });
+
+  it.each([
+    "https://user:pass@api.example.test",
+    "https://api.example.test/path",
+    "https://api.example.test/?query=yes",
+    "https://api.example.test/#fragment",
+    "https://api.example.test/",
+  ])("rejects non-origin heartbeat URL %s", async (origin) => {
+    await expect(
+      parseTfSearchRuntimeConfig(
+        environment({ TF_SEARCH_HEARTBEAT_API_ORIGIN: origin }),
+        secretReader({
+          "/run/secrets/command": commandSecret,
+          "/run/secrets/heartbeat": heartbeatSecret,
+        }),
+      ),
+    ).rejects.toThrow("invalid runtime configuration");
+  });
+
+  it("permits private HTTP only with its exact opt-in flag", async () => {
+    const read = secretReader({
+      "/run/secrets/command": commandSecret,
+      "/run/secrets/heartbeat": heartbeatSecret,
+    });
+
+    await expect(
+      parseTfSearchRuntimeConfig(
+        environment({ TF_SEARCH_HEARTBEAT_API_ORIGIN: "http://api:8080" }),
+        read,
+      ),
+    ).rejects.toThrow("invalid runtime configuration");
+
+    await expect(
+      parseTfSearchRuntimeConfig(
+        environment({
+          TF_SEARCH_HEARTBEAT_API_ORIGIN: "http://api:8080",
+          TF_SEARCH_HEARTBEAT_ALLOW_INSECURE_HTTP: "true",
+        }),
+        read,
+      ),
+    ).resolves.toMatchObject({ heartbeatApiOrigin: "http://api:8080" });
+
+    await expect(
+      parseTfSearchRuntimeConfig(
+        environment({
+          TF_SEARCH_HEARTBEAT_API_ORIGIN: "http://public.example.test",
+          TF_SEARCH_HEARTBEAT_ALLOW_INSECURE_HTTP: "true",
+        }),
+        read,
+      ),
+    ).rejects.toThrow("invalid runtime configuration");
+  });
+
+  it("accepts HTTPS without the insecure transport flag and valid deployed metadata", async () => {
+    await expect(
+      parseTfSearchRuntimeConfig(
+        environment({ APOLLO_DEPLOYED_AT: "2026-07-24T12:34:56+03:00" }),
+        secretReader({
+          "/run/secrets/command": commandSecret,
+          "/run/secrets/heartbeat": heartbeatSecret,
+        }),
+      ),
+    ).resolves.toMatchObject({ deployedAt: "2026-07-24T12:34:56+03:00" });
+  });
+
+  it.each(["2026-07-24T12:34:56", "not-a-date"])
+  ("rejects invalid deployed timestamp %s", async (APOLLO_DEPLOYED_AT) => {
+    await expect(
+      parseTfSearchRuntimeConfig(
+        environment({ APOLLO_DEPLOYED_AT }),
+        secretReader({
+          "/run/secrets/command": commandSecret,
+          "/run/secrets/heartbeat": heartbeatSecret,
+        }),
+      ),
+    ).rejects.toThrow("invalid runtime configuration");
+  });
+});
