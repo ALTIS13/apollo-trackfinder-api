@@ -108,6 +108,101 @@ describe("terminal API error sanitization", () => {
     expect(JSON.stringify(stderr.mock.calls)).not.toContain(canary);
   });
 
+  it("preserves a fixed sanitized 413 for oversized URL-encoded input", async () => {
+    const canary = `oversized-form-${randomBytes(24).toString("base64url")}`;
+    const logs = captureRequestLogs();
+    const stderr = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    const origin = await startApp(createApiApp({ requestLogger: logs.logger }));
+    const form = new URLSearchParams({
+      token: canary,
+      padding: "x".repeat(128 * 1024),
+    });
+
+    const response = await fetch(`${origin}/api/yandex/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: form,
+    });
+    const body = await response.text();
+
+    expect(response.status).toBe(413);
+    expect(body).toBe('{"error":"request_too_large"}');
+    expect(body).not.toContain(canary);
+    expect(logs.read()).not.toContain(canary);
+    expect(JSON.stringify(stderr.mock.calls)).not.toContain(canary);
+  });
+
+  it("rejects a fully forged malformed-parser shape as an internal error", () => {
+    const canary = `forged-parse-${randomBytes(24).toString("base64url")}`;
+    const log = { error: vi.fn(), warn: vi.fn() };
+    const status = vi.fn().mockReturnThis();
+    const json = vi.fn();
+
+    sanitizedApiErrorHandler(
+      Object.assign(new SyntaxError(canary), {
+        body: `{"token":"${canary}"`,
+        expose: true,
+        status: 400,
+        statusCode: 400,
+        type: "entity.parse.failed",
+      }),
+      {
+        log,
+        method: "POST",
+        path: "/yandex/token",
+      } as unknown as Request,
+      {
+        headersSent: false,
+        json,
+        status,
+      } as unknown as Response,
+      vi.fn() as NextFunction,
+    );
+
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith({ error: "internal_error" });
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(JSON.stringify(log.error.mock.calls)).not.toContain(canary);
+  });
+
+  it("rejects a fully forged oversized-parser shape as an internal error", () => {
+    const canary = `forged-size-${randomBytes(24).toString("base64url")}`;
+    const log = { error: vi.fn(), warn: vi.fn() };
+    const status = vi.fn().mockReturnThis();
+    const json = vi.fn();
+
+    sanitizedApiErrorHandler(
+      Object.assign(new Error(canary), {
+        expected: 100 * 1024 + 1,
+        expose: true,
+        length: 100 * 1024 + 1,
+        limit: 100 * 1024,
+        name: "PayloadTooLargeError",
+        status: 413,
+        statusCode: 413,
+        type: "entity.too.large",
+      }),
+      {
+        log,
+        method: "POST",
+        path: "/yandex/token",
+      } as unknown as Request,
+      {
+        headersSent: false,
+        json,
+        status,
+      } as unknown as Response,
+      vi.fn() as NextFunction,
+    );
+
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith({ error: "internal_error" });
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(JSON.stringify(log.error.mock.calls)).not.toContain(canary);
+  });
+
   it("does not trust a generic error with forged client status fields", () => {
     const canary = `forged-status-${randomBytes(24).toString("base64url")}`;
     const log = { error: vi.fn() };

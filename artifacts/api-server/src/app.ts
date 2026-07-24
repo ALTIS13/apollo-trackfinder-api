@@ -21,6 +21,7 @@ const PRODUCTION_ORIGINS = [
   "https://apollot.ru",
 ];
 const API_BODY_LIMIT_BYTES = 100 * 1024;
+const bodyParserErrors = new WeakSet<object>();
 
 interface SanitizedApiError {
   readonly status: 400 | 413 | 500;
@@ -115,7 +116,11 @@ function isOversizedBodyError(error: object): boolean {
 
 function classifyApiError(error: unknown): SanitizedApiError {
   try {
-    if (typeof error === "object" && error !== null) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      bodyParserErrors.delete(error)
+    ) {
       if (isMalformedJsonError(error)) {
         return {
           status: 400,
@@ -139,6 +144,18 @@ function classifyApiError(error: unknown): SanitizedApiError {
     body: { error: "internal_error" },
     errorType: "UnhandledApiError",
   };
+}
+
+function markBodyParserError(
+  error: unknown,
+  _request: Request,
+  _response: Response,
+  next: NextFunction,
+): void {
+  if (typeof error === "object" && error !== null) {
+    bodyParserErrors.add(error);
+  }
+  next(error);
 }
 
 function isExactLoopbackOrigin(origin: string): boolean {
@@ -240,7 +257,9 @@ export function createApiApp(options: ApiAppOptions = {}): Express {
   );
 
   app.use(express.json({ limit: API_BODY_LIMIT_BYTES }));
+  app.use(markBodyParserError);
   app.use(express.urlencoded({ extended: true, limit: API_BODY_LIMIT_BYTES }));
+  app.use(markBodyParserError);
   app.use(cookieParser());
 
   app.use("/api", createApiRouter(options));
