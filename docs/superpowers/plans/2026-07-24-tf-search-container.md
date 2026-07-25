@@ -772,7 +772,7 @@ root/nested Compose renders, explicit real local Docker smoke, five-category
 zero-residue audit, runtime/security scans, and pre-doc diff check passed.
 Independent re-review and publication remain outside this evidence refresh.
 
-- [ ] **Step 4: Independent whole-branch review**
+- [x] **Step 4: Independent whole-branch review**
 
 Generate a merge-base-to-HEAD review package. The reviewer must return:
 
