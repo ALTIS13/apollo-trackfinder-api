@@ -362,9 +362,9 @@ describe("tf-integrations deployment contract", () => {
           "/run/secrets/tf_integrations_internal_auth_secret",
         TF_INTEGRATIONS_ORIGIN: "http://tf-integrations:8080",
       });
-      for (const name of integrationSecrets) {
-        expect(template.secrets?.[name]?.file).toBe(
-          `\${TF_SECRET_DIRECTORY:?}/${name}`,
+      for (const [name, secret] of Object.entries(template.secrets ?? {})) {
+        expect(secret.file).toBe(
+          `\${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/${name}`,
         );
       }
     }

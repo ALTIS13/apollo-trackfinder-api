@@ -122,10 +122,16 @@ describe("admin telemetry container contract", () => {
       'authRedis.ping().then((reply) => reply === "PONG")',
     );
     expect(modulesDocumentation).toContain(
-      "`tf-integrations`: authenticated HTTP + отдельные heartbeat keys для provider adapters, минимальный entitlement `tf.integrations`",
+      "Модуль получает только шесть runtime secrets:\n`tf_integrations_runtime_database_url`, `tf_integrations_token_keyring`,\n`tf_integrations_spotify_client_id`,\n`tf_integrations_spotify_client_secret`,\n`tf_integrations_internal_auth_secret` и\n`tf_integrations_heartbeat_secret`.",
     );
     expect(modulesDocumentation).toContain(
-      "production\nstartup требует ровно шесть файлов: `tf_postgres_password`, `tf_database_url`,\n`tf_client_secret`, `tf_search_internal_auth_secret`,",
+      "Модуль отправляет подписанный heartbeat `account-integrations` сразу после\nготовности и затем каждые 30 секунд. API считает последнее состояние свежим\n90 секунд.",
+    );
+    expect(modulesDocumentation).toContain(
+      "Сеть `tf-integrations-control` является internal и содержит только `api` и\n`tf-integrations`. Internal `tf-integrations-data` содержит только module,\nmigrator и dedicated PostgreSQL. Только module подключён к\n`tf-integrations-egress`; у module, migrator и database нет host ports.",
+    );
+    expect(modulesDocumentation).toContain(
+      "Без override оба Compose templates используют безопасный non-secret default\n`/var/lib/apollo-tf/secrets`; production startup требует шесть базовых TF/search\nfiles и десять `tf_integrations_*` files.",
     );
   });
 

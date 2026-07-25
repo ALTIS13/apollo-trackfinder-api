@@ -4,51 +4,58 @@ Last updated: 2026-07-25.
 
 ## TF integrations Task 7 release validation
 
-Status: `BLOCKED` on final production source
-`daf663ea92a7e35b7432c169aaf8ec3298465217`. Task 7 did not change production
-code, tests, or `MODULES.md`.
+Status: `DONE_WITH_CONCERNS` on the final fix-round tree based on
+`1ef211b119f4879f0e87574a41ef9ab4caa7c9ea`.
 
-- Reviewed task ranges: Task 1 `af90cb9..6bf4161`, Task 2
+- Historical evidence is preserved: the first validation at `daf663e` was
+  correctly recorded as `BLOCKED` by `1ef211b` after one stale API
+  documentation assertion and both exact no-env Compose renders failed. Its
+  raw outputs were `707 passed / 13 skipped / 1 failed`; the former status
+  arithmetic said 12 skipped and is corrected here.
+- Reviewed ranges remain Task 1 `af90cb9..6bf4161`, Task 2
   `6bf4161..2e9b2da`, Task 3 `2e9b2da..ce4c388`, Task 4
   `ce4c388..bc577c3`, Task 5 `bc577c3..bcb3b3c`, and Task 6
-  `bcb3b3c..daf663e`. Every task ended review-clean after its recorded fix
-  rounds. Task 1's policy/reachability handoff closed in Task 5; open deferred
-  minors are Task 2's weak unit plaintext assertion, Task 4's possible late
-  shutdown heartbeat, Task 5's production-`index.ts` wiring/cold-import test
-  limitations, and Task 6's unbounded role-init file/SQL waits.
-- Exact required suites: contract `10/10`; integrations DB `18 passed / 1
-  PostgreSQL-gated`; integrations `76 passed / 9 real-Docker-gated`; API `378
-  passed / 2 skipped / 1 failed`; tf-search `140 passed / 1 real-Docker-gated`;
-  music-player `85/85`. Required-suite total: `707 passed / 12 skipped / 1
-  failed` across 64 files. The API failure reproduced in isolation (`19
-  passed / 1 failed`): its admin config contract expects the removed
-  future-module sentence instead of the implemented `tf-integrations`
-  documentation. It was not masked by changing production/tests/docs.
-- Skip reasons: integrations DB lacks
-  `TF_INTEGRATIONS_TEST_DATABASE_URL`; the default integrations and tf-search
-  suites leave their explicit real-Docker gates disabled; API lacks
-  `APOLLO_REDIS_INTEGRATION_URL`; one Windows linked-file test skips after
-  symlink `EPERM`/`EACCES`.
-- Workspace typecheck and all three required builds passed. Fresh primary
-  outputs: integrations `index.mjs` 90,018 bytes and `migrate.mjs` 8,961
-  bytes; API `index.mjs` 4,277,724 bytes; music-player JS 517,554 bytes
-  (164.43 kB gzip) and CSS 121,197 bytes (18.62 kB gzip). The music build kept
-  its sourcemap-location and greater-than-500-kB chunk warnings.
-- Both exact `docker compose ... config --quiet` commands failed because the
-  required `TF_SECRET_DIRECTORY` was unset. With an explicit non-secret local
-  placeholder, root and nested templates rendered successfully at 17,065 and
-  15,658 UTF-8 bytes. Parsed renders expose zero integration host ports, give
-  the API no provider credential/token keyring/integration DB URL, and give the
-  module no shared TF/Platform DB, Redis, browser/session, Docker/SSH/Caddy/
-  Coolify/UFW/control-plane credential.
-- Current authoritative real Docker gate passed `16/16` in `127.33s` under
-  project `apollo-tf-integrations-smoke-26468-261cf56a`. It re-proved migration
-  ordering/ACLs, signed response rejection, authenticated ciphertext,
-  provider-independent readiness, heartbeat reset/recovery, exact live inspect
+  `bcb3b3c..daf663e`; blocked Task 7 record `daf663e..1ef211b`; fix round 1/5
+  `1ef211b..HEAD`. Every Task 1-6 range ended review-clean. Nonblocking
+  deferred minors remain Task 2's weak unit plaintext assertion, Task 4's
+  possible late shutdown heartbeat, Task 5's production-`index.ts`
+  wiring/cold-import test limits, and Task 6's unbounded role-init file/SQL
+  waits.
+- Fix-round RED reproduced API `19 passed / 1 failed`, both no-env Compose
+  interpolation failures, integrations deployment `9 passed / 1 failed`,
+  tf-search deployment `17 passed / 2 failed`, and the strengthened API
+  documentation assertion `19 passed / 1 failed`. Focused GREEN is API
+  `20/20`, integrations deployment `10/10`, and tf-search deployment `19/19`.
+- Final exact suites: contract `10/10`; integrations DB `18 passed / 1
+  PostgreSQL-gated`; integrations `76 passed / 9 real-Docker-gated`; API `379
+  passed / 2 skipped`; tf-search `140 passed / 1 real-Docker-gated`;
+  music-player `85/85`. Total: `708 passed / 13 skipped / 0 failed` across 64
+  files. Skips are the absent disposable PostgreSQL/Redis URLs, the default-off
+  real Docker gates, and one Windows linked-file case gated by symlink
+  `EPERM`/`EACCES`.
+- Workspace typecheck and all three builds passed. Fresh primary outputs:
+  integrations `index.mjs` 90,018 bytes and `migrate.mjs` 8,961 bytes; API
+  `index.mjs` 4,277,724 bytes; music-player JS 517,554 bytes (164.43 kB gzip)
+  and CSS 121,197 bytes (18.62 kB gzip). Existing music-player sourcemap and
+  greater-than-500-kB chunk warnings remain nonblocking.
+- All 16 secret declarations in both Compose templates use the same non-secret
+  default `${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}`. Both exact
+  no-env `config --quiet` commands pass with no output/warning; explicit root
+  and nested overrides each resolve `16/16` files to the supplied path. Root
+  and nested rendered YAML sizes are 16,377 and 14,970 bytes.
+- Parsed renders expose zero integration host ports, give API no provider
+  credential/token keyring/integration DB URL, and give the module no shared
+  TF/Platform DB, Redis, browser/session, Docker/SSH/Caddy/Coolify/UFW or
+  control-plane credential. API production source/dist provider-secret,
+  provider-token-table, and direct provider-endpoint scans are zero.
+- Fresh authoritative Docker smoke passed `16/16` in `118.66s` under project
+  `apollo-tf-integrations-smoke-28032-8bce1921`. It re-proved migration
+  ordering/ACLs, signed-command rejection, authenticated ciphertext,
+  provider-independent readiness, heartbeat reset/recovery, exact inspect
   boundaries, zero host ports, and Node 24 LTS. Its 37 raw/digest markers were
-  absent from six rendered/runtime/tracked-byte surfaces; a separate fresh
-  8-canary plus 8-digest scan found zero matches in 588 tracked files plus the
-  ignored Task 7 report, 22 bundle files, both renders, and Git diff.
+  absent from six runtime/tracked-byte surfaces; a separate 8-canary plus
+  8-digest pass found zero matches in 588 tracked files plus the ignored Task 7
+  report, 22 bundle files, both renders, and Git diff.
 - Docker Desktop does not provide native-Linux secret UID/GID evidence:
   file-source mounts are remapped and declared metadata is not applied. The
   verified Desktop alternative is exact owner-scoped read-only mounts with
@@ -65,10 +72,9 @@ code, tests, or `MODULES.md`.
   `tf.apollot.ru`. They resolve to the owner-configured target/CNAME; no
   private inventory is recorded.
 - No HomeNode, Coolify, Caddy, UFW, DNS, or other remote infrastructure
-  mutation was performed. After a separately reviewed fix for the blocking
-  validation contracts, the next stage is `tf-download-worker`, followed by a
-  read-only HomeNode/Coolify/Caddy preflight and explicit user approval before
-  any rollout mutation.
+  mutation was performed. The next stage is `tf-download-worker`, followed by
+  a read-only HomeNode/Coolify/Caddy preflight and explicit user approval
+  before any rollout mutation.
 
 ## Что сделано
 

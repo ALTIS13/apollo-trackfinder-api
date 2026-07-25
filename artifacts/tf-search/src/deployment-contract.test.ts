@@ -326,7 +326,7 @@ describe("tf-search deployment contract", () => {
         "tf_module_heartbeat_keys",
       ]) {
         expect(template.secrets?.[secretName]?.file).toBe(
-          `\${TF_SECRET_DIRECTORY:?}/${secretName}`,
+          `\${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/${secretName}`,
         );
       }
       expect(serialized).not.toContain("raw-command-canary");

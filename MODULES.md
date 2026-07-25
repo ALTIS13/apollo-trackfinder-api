@@ -788,10 +788,13 @@ sudo sh -eu -c '
 docker compose up -d --build
 ```
 
-`TF_SECRET_DIRECTORY` обязателен для обоих Compose templates: production
-startup требует шесть базовых TF/search files из примера и десять
-`tf_integrations_*` files: три PostgreSQL passwords, отдельные migrator/runtime
-URL, token keyring, два Spotify credential files, command key и heartbeat key.
+`TF_SECRET_DIRECTORY` переопределяет каталог secret sources в обоих Compose
+templates.
+Без override оба Compose templates используют безопасный non-secret default
+`/var/lib/apollo-tf/secrets`; production startup требует шесть базовых TF/search
+files и десять `tf_integrations_*` files. Integration-набор включает
+три PostgreSQL passwords, отдельные migrator/runtime URL, token keyring, два
+Spotify credential files, command key и heartbeat key.
 Для native rootful Docker каталог остаётся `root:root` mode `0700`; privileged
 shell выполняет glob expansion, `chown` и `chmod` после записи. PostgreSQL-only
 password files принадлежат `999:999`, остальные `tf_*` files --
