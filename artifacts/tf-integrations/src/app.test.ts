@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { createSignedBodySignature } from "@workspace/module-runtime-contract";
@@ -38,6 +39,7 @@ const response: TfIntegrationsSuccessResponse = {
 interface TestService {
   execute(
     input: TfIntegrationsCommand,
+    context: { readonly signal: AbortSignal },
   ): Promise<TfIntegrationsSuccessResponse | TfIntegrationsErrorResponse>;
 }
 
@@ -69,6 +71,9 @@ function app(
   options: {
     readonly execute?: TestService["execute"];
     readonly readiness?: ReturnType<typeof createTfIntegrationsReadiness>;
+    readonly commandTimeoutMs?: number;
+    readonly maxConcurrentCommands?: number;
+    readonly shutdownSignal?: AbortSignal;
   } = {},
 ) {
   return createTfIntegrationsApp({
@@ -80,6 +85,15 @@ function app(
         isMigrationCurrent: async () => true,
         probeDatabase: async () => true,
       }),
+    ...(options.commandTimeoutMs === undefined
+      ? {}
+      : { commandTimeoutMs: options.commandTimeoutMs }),
+    ...(options.maxConcurrentCommands === undefined
+      ? {}
+      : { maxConcurrentCommands: options.maxConcurrentCommands }),
+    ...(options.shutdownSignal === undefined
+      ? {}
+      : { shutdownSignal: options.shutdownSignal }),
   });
 }
 
@@ -93,6 +107,52 @@ async function request(
   const { port } = server.address() as AddressInfo;
   try {
     return await fetch(`http://127.0.0.1:${port}${path}`, init);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) =>
+        error === undefined ? resolve() : reject(error),
+      );
+    });
+  }
+}
+
+async function rawTargetRequest(
+  instance: ReturnType<typeof createTfIntegrationsApp>,
+  target: string,
+  rawRequestBody: Buffer,
+  headers: Readonly<Record<string, string>>,
+): Promise<{ readonly status: number; readonly body: string }> {
+  const server = instance.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    return await new Promise((resolve, reject) => {
+      const outgoing = httpRequest(
+        {
+          hostname: "127.0.0.1",
+          port,
+          method: "POST",
+          path: target,
+          headers: {
+            ...headers,
+            "content-length": String(rawRequestBody.byteLength),
+          },
+        },
+        (incoming) => {
+          const chunks: Buffer[] = [];
+          incoming.on("data", (chunk: Buffer) => chunks.push(chunk));
+          incoming.once("error", reject);
+          incoming.once("end", () => {
+            resolve({
+              status: incoming.statusCode ?? 0,
+              body: Buffer.concat(chunks).toString("utf8"),
+            });
+          });
+        },
+      );
+      outgoing.once("error", reject);
+      outgoing.end(rawRequestBody);
+    });
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) =>
@@ -143,6 +203,27 @@ describe("TF integrations private HTTP runtime", () => {
       }).toEqual({ method, path, status: 404, allow: null });
     }
 
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects query, fragment, and every other extra command target without canonicalizing HMAC input", async () => {
+    const execute = vi.fn<TestService["execute"]>(async () => response);
+    const instance = app({ execute });
+    const body = Buffer.from(JSON.stringify(command), "utf8");
+
+    for (const target of [
+      "/v1/commands?debug=1",
+      "/v1/commands#fragment",
+      "/v1/commands/extra",
+    ]) {
+      const result = await rawTargetRequest(
+        instance,
+        target,
+        body,
+        signedHeaders(target, body, 20 + target.length),
+      );
+      expect(result).toEqual({ status: 404, body: "" });
+    }
     expect(execute).not.toHaveBeenCalled();
   });
 
@@ -269,6 +350,233 @@ describe("TF integrations private HTTP runtime", () => {
     });
     expect(wrongCase.status).toBe(404);
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("claims replay state only after a strict command identifies its canonical account partition", async () => {
+    const execute = vi.fn<TestService["execute"]>(async () => response);
+    const instance = app({ execute });
+    const reusedNonce = 40;
+    const malformedBody = Buffer.from('{"schemaVersion":1}', "utf8");
+    const malformed = await request(instance, "/v1/commands", {
+      method: "POST",
+      headers: signedHeaders(
+        "/v1/commands",
+        malformedBody,
+        reusedNonce,
+      ),
+      body: malformedBody,
+    });
+    expect(malformed.status).toBe(400);
+
+    const body = Buffer.from(JSON.stringify(command), "utf8");
+    const accepted = await request(instance, "/v1/commands", {
+      method: "POST",
+      headers: signedHeaders("/v1/commands", body, reusedNonce),
+      body,
+    });
+    expect(accepted.status).toBe(200);
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("propagates a fixed sub-10-second command deadline and runtime shutdown abort", async () => {
+    const timeoutSignals: AbortSignal[] = [];
+    const timeoutResult = await request(
+      app({
+        commandTimeoutMs: 25,
+        execute: async (_input, context) => {
+          if (context === undefined) {
+            return {
+              schemaVersion: 1,
+              requestId,
+              accountId,
+              operation: "spotify.status",
+              error: { code: "provider_unavailable" },
+            };
+          }
+          timeoutSignals.push(context.signal);
+          await new Promise<void>((resolve) => {
+            context.signal.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
+          });
+          return {
+            schemaVersion: 1,
+            requestId,
+            accountId,
+            operation: "spotify.status",
+            error: { code: "provider_unavailable" },
+          };
+        },
+      }),
+      "/v1/commands",
+      {
+        method: "POST",
+        headers: signedHeaders(
+          "/v1/commands",
+          Buffer.from(JSON.stringify(command), "utf8"),
+          51,
+        ),
+        body: JSON.stringify(command),
+      },
+    );
+    expect(timeoutResult.status).toBe(200);
+    expect(timeoutSignals).toHaveLength(1);
+    expect(timeoutSignals[0]?.aborted).toBe(true);
+
+    const shutdown = new AbortController();
+    let started: (() => void) | undefined;
+    const executionStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const shutdownPending = request(
+      app({
+        shutdownSignal: shutdown.signal,
+        execute: async (_input, context) => {
+          started?.();
+          if (context === undefined) {
+            return {
+              schemaVersion: 1,
+              requestId,
+              accountId,
+              operation: "spotify.status",
+              error: { code: "provider_unavailable" },
+            };
+          }
+          await new Promise<void>((resolve) => {
+            context.signal.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
+          });
+          return {
+            schemaVersion: 1,
+            requestId,
+            accountId,
+            operation: "spotify.status",
+            error: { code: "provider_unavailable" },
+          };
+        },
+      }),
+      "/v1/commands",
+      {
+        method: "POST",
+        headers: signedHeaders(
+          "/v1/commands",
+          Buffer.from(JSON.stringify(command), "utf8"),
+          52,
+        ),
+        body: JSON.stringify(command),
+      },
+    );
+    await executionStarted;
+    shutdown.abort();
+    await expect(shutdownPending).resolves.toHaveProperty("status", 200);
+  });
+
+  it("aborts command work when the HTTP client disconnects", async () => {
+    let observedSignal: AbortSignal | undefined;
+    let started: (() => void) | undefined;
+    const executionStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let aborted: (() => void) | undefined;
+    const executionAborted = new Promise<void>((resolve) => {
+      aborted = resolve;
+    });
+    const instance = app({
+      execute: async (_input, context) => {
+        started?.();
+        if (context === undefined) {
+          aborted?.();
+          return response;
+        }
+        observedSignal = context.signal;
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener(
+            "abort",
+            () => {
+              aborted?.();
+              resolve();
+            },
+            { once: true },
+          );
+        });
+        return response;
+      },
+    });
+    const server = instance.listen(0, "127.0.0.1");
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const { port } = server.address() as AddressInfo;
+    const body = Buffer.from(JSON.stringify(command), "utf8");
+    const outgoing = httpRequest({
+      hostname: "127.0.0.1",
+      port,
+      method: "POST",
+      path: "/v1/commands",
+      headers: {
+        ...signedHeaders("/v1/commands", body, 53),
+        "content-length": String(body.byteLength),
+      },
+    });
+    outgoing.on("error", () => undefined);
+    outgoing.end(body);
+    await executionStarted;
+    outgoing.destroy();
+    await executionAborted;
+    expect(observedSignal?.aborted).toBe(true);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it("bounds concurrent module commands before invoking provider service work", async () => {
+    let calls = 0;
+    let started: (() => void) | undefined;
+    const firstTwoStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const instance = app({
+      maxConcurrentCommands: 2,
+      execute: async () => {
+        calls += 1;
+        if (calls === 2) started?.();
+        await blocked;
+        return response;
+      },
+    });
+    const server = instance.listen(0, "127.0.0.1");
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const { port } = server.address() as AddressInfo;
+    const body = Buffer.from(JSON.stringify(command), "utf8");
+    const send = (nonceByte: number) =>
+      fetch(`http://127.0.0.1:${port}/v1/commands`, {
+        method: "POST",
+        headers: signedHeaders("/v1/commands", body, nonceByte),
+        body,
+      });
+
+    const first = send(61);
+    const second = send(62);
+    await firstTwoStarted;
+    let rejectionTimer: ReturnType<typeof setTimeout> | undefined;
+    const third = send(63);
+    const rejected = await Promise.race([
+      third,
+      new Promise<"timeout">((resolve) => {
+        rejectionTimer = setTimeout(() => resolve("timeout"), 100);
+      }),
+    ]);
+    if (rejectionTimer !== undefined) clearTimeout(rejectionTimer);
+    release?.();
+    expect(rejected).not.toBe("timeout");
+    expect((rejected as Response).status).toBe(503);
+    await expect((rejected as Response).json()).resolves.toEqual({
+      error: "integrations_unavailable",
+    });
+    expect(calls).toBe(2);
+    await Promise.all([first, second, third]);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
   it("returns a schema-validated correlated success or sanitized internal error", async () => {

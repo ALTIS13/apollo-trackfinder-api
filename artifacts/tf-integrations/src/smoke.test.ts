@@ -85,6 +85,7 @@ interface SmokeObservations extends CommandObservations {
   readonly inspectResourceLimits: boolean;
   readonly inspectSecretOwnership: boolean;
   readonly migrationExitCode: number;
+  readonly providerAccountGenerationCas: boolean;
   readonly ready: boolean;
   readonly rolePrivilegesEnforced: boolean;
   readonly runtimeNodeMajor: number;
@@ -944,6 +945,75 @@ async function ciphertextObservations(
   };
 }
 
+async function providerAccountGenerationCasObservation(
+  compose: (args: readonly string[]) => Promise<DockerResult>,
+): Promise<boolean> {
+  const statement = `
+DO $generation_cas$
+DECLARE
+  target_account uuid;
+  old_generation uuid;
+  replacement_generation uuid := gen_random_uuid();
+  stale_updates bigint;
+BEGIN
+  SELECT account_id, generation
+    INTO STRICT target_account, old_generation
+    FROM apollo_tf_integrations.provider_accounts
+    WHERE provider = 'yandex'
+    LIMIT 1;
+
+  UPDATE apollo_tf_integrations.provider_accounts
+    SET generation = replacement_generation
+    WHERE provider = 'yandex'
+      AND account_id = target_account
+      AND generation = old_generation;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'generation replacement failed';
+  END IF;
+
+  UPDATE apollo_tf_integrations.provider_accounts
+    SET updated_at = updated_at
+    WHERE provider = 'yandex'
+      AND account_id = target_account
+      AND generation = old_generation;
+  GET DIAGNOSTICS stale_updates = ROW_COUNT;
+  IF stale_updates <> 0 THEN
+    RAISE EXCEPTION 'stale generation update succeeded';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+      FROM apollo_tf_integrations.provider_accounts
+      WHERE provider = 'yandex'
+        AND account_id = target_account
+        AND generation = replacement_generation
+  ) THEN
+    RAISE EXCEPTION 'replacement generation was not retained';
+  END IF;
+END
+$generation_cas$;
+`;
+  const result = await compose([
+    "exec",
+    "-T",
+    "tf-integrations-postgres",
+    "psql",
+    "-X",
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-U",
+    "postgres",
+    "-d",
+    "apollo_tf_integrations",
+    "-c",
+    statement,
+  ]);
+  return (
+    result.stderr.trim().length === 0 &&
+    result.stdout.trim() === "DO"
+  );
+}
+
 function rolePrivilegeProbeSource(): string {
   return `
 import { readFileSync } from "node:fs";
@@ -1699,6 +1769,8 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
     ) as number;
     const commands = await commandObservations(compose);
     const ciphertext = await ciphertextObservations(compose, prepared);
+    const providerAccountGenerationCas =
+      await providerAccountGenerationCasObservation(compose);
     const rolePrivileges = await rolePrivilegeObservations(compose);
     const secretStats = await secretTargetStatObservations(
       compose,
@@ -1768,6 +1840,7 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
       inspectResourceLimits: inspectedContract.resourceLimits,
       inspectSecretOwnership: inspectedContract.secretOwnership,
       migrationExitCode,
+      providerAccountGenerationCas,
       ready: true,
       rolePrivilegesEnforced: rolePrivileges.enforced,
       runtimeNodeMajor: rolePrivileges.nodeMajor,
@@ -2229,6 +2302,10 @@ describe.skipIf(!realDockerEnabled)(
     it("stores a provider-token fixture only as authenticated ciphertext", () => {
       expect(result.observations.ciphertextAtRest).toBe(true);
       expect(result.observations.ciphertextAuthenticated).toBe(true);
+    });
+
+    it("rejects a stale provider-account generation in real PostgreSQL", () => {
+      expect(result.observations.providerAccountGenerationCas).toBe(true);
     });
 
     it("sends account-integrations heartbeat and recovers after API heartbeat state reset", () => {

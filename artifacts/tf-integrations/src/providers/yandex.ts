@@ -2,6 +2,12 @@ import type {
   NormalizedTrack,
   YandexPlaylist,
 } from "@workspace/tf-integrations-contract";
+import {
+  ProviderHttpFailure,
+  cancelProviderResponseBody,
+  fetchProviderResponse,
+  readBoundedProviderJson,
+} from "./provider-http.js";
 
 const API_ORIGIN = "https://api.music.yandex.net";
 const CLIENT_HEADER = "YandexMusicAndroid/24023621";
@@ -398,6 +404,7 @@ export class YandexProvider {
 
   async validateToken(input: {
     readonly oauthToken: string;
+    readonly signal?: AbortSignal;
   }): Promise<YandexAccount> {
     assertToken(input.oauthToken);
     return accountResult(
@@ -405,6 +412,7 @@ export class YandexProvider {
         "account.status",
         input.oauthToken,
         new URL("/account/status", API_ORIGIN),
+        input.signal,
       ),
     );
   }
@@ -414,6 +422,7 @@ export class YandexProvider {
     readonly userId: string;
     readonly offset: number;
     readonly limit: number;
+    readonly signal?: AbortSignal;
   }): Promise<YandexTracksPage> {
     assertToken(input.oauthToken);
     const userId = numericUserId(input.userId);
@@ -423,6 +432,7 @@ export class YandexProvider {
         "liked.list",
         input.oauthToken,
         new URL(`/users/${userId}/likes/tracks`, API_ORIGIN),
+        input.signal,
       ),
     );
     const page = references.slice(input.offset, input.offset + input.limit);
@@ -447,7 +457,12 @@ export class YandexProvider {
       limit: input.limit,
       total: references.length,
       tracks: trackDetails(
-        await this.#get("tracks.details", input.oauthToken, url),
+        await this.#get(
+          "tracks.details",
+          input.oauthToken,
+          url,
+          input.signal,
+        ),
       ),
     };
   }
@@ -455,6 +470,7 @@ export class YandexProvider {
   async playlists(input: {
     readonly oauthToken: string;
     readonly userId: string;
+    readonly signal?: AbortSignal;
   }): Promise<YandexPlaylistsResult> {
     assertToken(input.oauthToken);
     const userId = numericUserId(input.userId);
@@ -463,6 +479,7 @@ export class YandexProvider {
         "playlists.list",
         input.oauthToken,
         new URL(`/users/${userId}/playlists/list`, API_ORIGIN),
+        input.signal,
       ),
     );
   }
@@ -473,6 +490,7 @@ export class YandexProvider {
     readonly kind: number;
     readonly offset: number;
     readonly limit: number;
+    readonly signal?: AbortSignal;
   }): Promise<YandexTracksPage> {
     assertToken(input.oauthToken);
     assertIdentifier(input.uid);
@@ -483,6 +501,7 @@ export class YandexProvider {
         "playlist-tracks.list",
         input.oauthToken,
         new URL(`/users/${input.uid}/playlists/${input.kind}`, API_ORIGIN),
+        input.signal,
       ),
       input.offset,
       input.limit,
@@ -493,22 +512,29 @@ export class YandexProvider {
     operation: YandexProviderOperation,
     oauthToken: string,
     url: URL,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     let response: Response;
     try {
-      response = await this.#fetch(url, {
-        headers: {
-          Accept: "application/json",
-          Authorization: `OAuth ${oauthToken}`,
-          "X-Yandex-Music-Client": CLIENT_HEADER,
+      response = await fetchProviderResponse(
+        this.#fetch,
+        url,
+        {
+          headers: {
+            Accept: "application/json",
+            Authorization: `OAuth ${oauthToken}`,
+            "X-Yandex-Music-Client": CLIENT_HEADER,
+          },
+          redirect: "error",
         },
-        redirect: "error",
-      });
+        signal,
+      );
     } catch {
       this.#log("provider_unavailable", operation);
       throw new YandexProviderError("provider_unavailable");
     }
     if (!response.ok) {
+      cancelProviderResponseBody(response);
       const code =
         response.status >= 400 && response.status < 500
           ? "provider_rejected"
@@ -517,10 +543,14 @@ export class YandexProvider {
       throw new YandexProviderError(code);
     }
     try {
-      return (await response.json()) as unknown;
-    } catch {
-      this.#log("invalid_provider_response", operation);
-      throw new YandexProviderError("invalid_provider_response");
+      return await readBoundedProviderJson(response, signal);
+    } catch (error) {
+      const code =
+        error instanceof ProviderHttpFailure && error.kind === "aborted"
+          ? "provider_unavailable"
+          : "invalid_provider_response";
+      this.#log(code, operation);
+      throw new YandexProviderError(code);
     }
   }
 

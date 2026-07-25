@@ -14,6 +14,8 @@ const rawBody = Buffer.from(
   "utf8",
 );
 const nonce = "A".repeat(43);
+const accountId = "20000000-0000-4000-8000-000000000002";
+const otherAccountId = "30000000-0000-4000-8000-000000000003";
 
 function signedInput(
   overrides: Partial<InternalAuthenticationInput> = {},
@@ -49,50 +51,176 @@ function authenticator(now = 1_000_000) {
   });
 }
 
+function nonceFor(index: number): string {
+  const bytes = Buffer.alloc(32);
+  bytes.writeUInt32BE(index, 28);
+  return bytes.toString("base64url");
+}
+
+function verified(
+  auth: HmacInternalRequestAuthenticator,
+  input: InternalAuthenticationInput,
+) {
+  const proof = auth.verify(input);
+  expect(proof).toBeDefined();
+  return proof!;
+}
+
 describe("TF integrations internal authentication", () => {
   it("accepts a valid signed raw JSON body once within 60 seconds", () => {
     const auth = authenticator(1_060_000);
+    const proof = verified(auth, signedInput());
 
-    expect(auth.authenticate(signedInput())).toBe(true);
-    expect(auth.authenticate(signedInput())).toBe(false);
+    expect(auth.claim(accountId, proof)).toBe(true);
+    expect(auth.claim(accountId, proof)).toBe(false);
   });
 
-  it("rejects replay, stale/future time, malformed nonce/signature, wrong path, and modified body", () => {
-    expect(authenticator(1_060_001).authenticate(signedInput())).toBe(false);
+  it("authenticates exact raw bytes and time before any replay claim", () => {
+    expect(authenticator(1_060_001).verify(signedInput())).toBeUndefined();
     expect(
-      authenticator(939_999).authenticate(signedInput({ timestamp: "1000" })),
-    ).toBe(false);
+      authenticator(939_999).verify(signedInput({ timestamp: "1000" })),
+    ).toBeUndefined();
     expect(
-      authenticator().authenticate(signedInput({ nonce: "A".repeat(42) })),
-    ).toBe(false);
+      authenticator().verify(signedInput({ nonce: "A".repeat(42) })),
+    ).toBeUndefined();
     expect(
-      authenticator().authenticate(
+      authenticator().verify(
         signedInput({ signature: `v1=${"0".repeat(63)}` }),
       ),
-    ).toBe(false);
+    ).toBeUndefined();
 
     const original = signedInput();
     expect(
-      authenticator().authenticate({
+      authenticator().verify({
         ...original,
         path: "/v1/commands/",
       }),
-    ).toBe(false);
+    ).toBeUndefined();
     expect(
-      authenticator().authenticate({
+      authenticator().verify({
         ...original,
         rawBody: Buffer.from(`${rawBody.toString("utf8")} `, "utf8"),
       }),
+    ).toBeUndefined();
+  });
+
+  it("partitions bounded replay capacity by canonical account without evicting live nonces", async () => {
+    const auth = authenticator();
+
+    for (let index = 0; index < 32; index += 1) {
+      expect(
+        auth.claim(
+          accountId,
+          verified(auth, signedInput({ nonce: nonceFor(index) })),
+        ),
+      ).toBe(true);
+    }
+    expect(
+      auth.claim(
+        accountId,
+        verified(auth, signedInput({ nonce: nonceFor(32) })),
+      ),
     ).toBe(false);
+    expect(
+      auth.claim(
+        otherAccountId,
+        verified(auth, signedInput({ nonce: nonceFor(33) })),
+      ),
+    ).toBe(true);
+
+    const concurrentProof = verified(
+      auth,
+      signedInput({ nonce: nonceFor(34) }),
+    );
+    const concurrent = await Promise.all(
+      Array.from({ length: 16 }, async () =>
+        auth.claim(otherAccountId, concurrentProof),
+      ),
+    );
+    expect(concurrent.filter(Boolean)).toHaveLength(1);
 
     const full = authenticator();
-    for (let index = 0; index < 256; index += 1) {
-      const uniqueNonce = Buffer.from(
-        Array.from({ length: 32 }, (_, byte) => (index + byte) % 256),
-      ).toString("base64url");
-      expect(full.authenticate(signedInput({ nonce: uniqueNonce }))).toBe(true);
+    let firstProof: ReturnType<typeof verified> | undefined;
+    for (let account = 0; account < 8; account += 1) {
+      const partition =
+        `${String(account).padStart(8, "0")}-0000-4000-8000-000000000001`;
+      for (let entry = 0; entry < 32; entry += 1) {
+        const proof = verified(
+          full,
+          signedInput({ nonce: nonceFor(account * 32 + entry) }),
+        );
+        firstProof ??= proof;
+        expect(full.claim(partition, proof)).toBe(true);
+      }
     }
-    expect(full.authenticate(signedInput({ nonce: "B".repeat(43) }))).toBe(
+    const ninthAccount = "90000000-0000-4000-8000-000000000009";
+    expect(
+      full.claim(
+        ninthAccount,
+        verified(full, signedInput({ nonce: nonceFor(300) })),
+      ),
+    ).toBe(false);
+    expect(
+      full.claim(
+        "00000000-0000-4000-8000-000000000001",
+        firstProof!,
+      ),
+    ).toBe(false);
+  });
+
+  it("retains each nonce exactly through its signed 60-second validity window", () => {
+    let wallNow = 1_000_000;
+    let monotonicNow = 5_000;
+    const auth = new HmacInternalRequestAuthenticator({
+      secret,
+      now: () => wallNow,
+      monotonicNow: () => monotonicNow,
+    });
+    const futureProof = verified(
+      auth,
+      signedInput({ timestamp: "1060", nonce: nonceFor(400) }),
+    );
+    expect(auth.claim(accountId, futureProof)).toBe(true);
+
+    wallNow += 60_001;
+    monotonicNow += 60_001;
+    const stillReplayValid = verified(
+      auth,
+      signedInput({ timestamp: "1060", nonce: nonceFor(400) }),
+    );
+    expect(auth.claim(accountId, stillReplayValid)).toBe(false);
+
+    wallNow = 1_120_001;
+    monotonicNow = 125_002;
+    expect(
+      auth.verify(
+        signedInput({ timestamp: "1060", nonce: nonceFor(400) }),
+      ),
+    ).toBeUndefined();
+
+    for (let index = 0; index < 32; index += 1) {
+      expect(
+        auth.claim(
+          accountId,
+          verified(
+            auth,
+            signedInput({
+              timestamp: "1120",
+              nonce: nonceFor(500 + index),
+            }),
+          ),
+        ),
+      ).toBe(true);
+    }
+    expect(
+      auth.claim(
+        accountId,
+        verified(
+          auth,
+          signedInput({ timestamp: "1120", nonce: nonceFor(600) }),
+        ),
+      ),
+    ).toBe(
       false,
     );
   });

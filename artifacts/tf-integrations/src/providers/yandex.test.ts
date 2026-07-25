@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   YandexProvider,
@@ -450,5 +450,62 @@ describe("YandexProvider", () => {
     expect(exposed).not.toContain(tokenCanary);
     expect(exposed).not.toContain(bodyCanary);
     expect(exposed).not.toContain(pathCanary);
+  });
+
+  it("forwards aborts and cancels non-OK, oversized, and stalled Yandex bodies", async () => {
+    const token = `oauth-${randomUUID()}`;
+    const nonOk = new Response("provider-error-body", { status: 503 });
+    const nonOkCancel = vi.spyOn(nonOk.body!, "cancel");
+    const nonOkProvider = makeProvider([nonOk]).provider;
+    await expect(
+      nonOkProvider.validateToken({ oauthToken: token }),
+    ).rejects.toMatchObject({ code: "provider_unavailable" });
+    expect(nonOkCancel).toHaveBeenCalledOnce();
+
+    const declaredOversized = new Response("{}", {
+      status: 200,
+      headers: { "content-length": String(1024 * 1024 + 1) },
+    });
+    const oversizedCancel = vi.spyOn(
+      declaredOversized.body!,
+      "cancel",
+    );
+    const oversizedProvider = makeProvider([declaredOversized]).provider;
+    await expect(
+      oversizedProvider.validateToken({ oauthToken: token }),
+    ).rejects.toMatchObject({ code: "invalid_provider_response" });
+    expect(oversizedCancel).toHaveBeenCalledOnce();
+
+    let cancelled = false;
+    const stalled = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => undefined),
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const controller = new AbortController();
+    const stalledProvider = makeProvider([
+      new Response(stalled, { status: 200 }),
+    ]).provider;
+    const pending = stalledProvider.validateToken({
+      oauthToken: token,
+      signal: controller.signal,
+    });
+    controller.abort();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      pending.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      ),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ timeout: true }), 100);
+      }),
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+    expect(outcome).toMatchObject({
+      error: expect.objectContaining({ code: "provider_unavailable" }),
+    });
+    expect(cancelled).toBe(true);
   });
 });

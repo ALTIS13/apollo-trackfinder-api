@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   ProviderError,
@@ -88,6 +88,26 @@ function expectRedirectError(requests: readonly RecordedRequest[]): void {
   expect(requests.length).toBeGreaterThan(0);
   for (const request of requests) {
     expect(request.init.redirect).toBe("error");
+  }
+}
+
+async function providerOutcomeWithin(
+  pending: Promise<unknown>,
+  timeoutMs = 100,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      pending.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      ),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ timeout: true }), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -379,6 +399,112 @@ describe("SpotifyProvider", () => {
         limit: 1,
       }),
     ).rejects.toMatchObject({ code: "provider_rejected" });
+  });
+
+  it("forwards the command abort signal to every fixed Spotify request", async () => {
+    const controller = new AbortController();
+    const { provider, requests } = makeProvider([
+      jsonResponse({ items: [], total: 0 }),
+    ]);
+
+    await provider.likedTracks({
+      accessToken: "access",
+      offset: 0,
+      limit: 1,
+      signal: controller.signal,
+    });
+
+    expect(requests[0]?.init.signal).toBe(controller.signal);
+  });
+
+  it("cancels non-OK and oversized declared response bodies before throwing", async () => {
+    const nonOk = new Response("provider-error-body", { status: 503 });
+    const nonOkCancel = vi.spyOn(nonOk.body!, "cancel");
+    const nonOkProvider = makeProvider([nonOk]).provider;
+    await expect(
+      nonOkProvider.likedTracks({
+        accessToken: "access",
+        offset: 0,
+        limit: 1,
+      }),
+    ).rejects.toMatchObject({ code: "provider_unavailable" });
+    expect(nonOkCancel).toHaveBeenCalledOnce();
+
+    const declaredOversized = new Response("{}", {
+      status: 200,
+      headers: { "content-length": String(1024 * 1024 + 1) },
+    });
+    const oversizedCancel = vi.spyOn(
+      declaredOversized.body!,
+      "cancel",
+    );
+    const oversizedProvider = makeProvider([declaredOversized]).provider;
+    await expect(
+      oversizedProvider.playlists({ accessToken: "access" }),
+    ).rejects.toMatchObject({ code: "invalid_provider_response" });
+    expect(oversizedCancel).toHaveBeenCalledOnce();
+  });
+
+  it("bounds streaming JSON and cancels stalled or non-terminating bodies on abort", async () => {
+    let oversizedCancelled = false;
+    const oversizedStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(1024 * 1024 + 1));
+      },
+      cancel() {
+        oversizedCancelled = true;
+      },
+    });
+    const oversizedProvider = makeProvider([
+      new Response(oversizedStream, { status: 200 }),
+    ]).provider;
+    const oversizedOutcome = await providerOutcomeWithin(
+      oversizedProvider.likedTracks({
+        accessToken: "access",
+        offset: 0,
+        limit: 1,
+      }),
+    );
+    expect(oversizedOutcome).toMatchObject({
+      error: expect.objectContaining({
+        code: "invalid_provider_response",
+      }),
+    });
+    expect(oversizedCancelled).toBe(true);
+
+    let stalledCancelled = false;
+    const stalledStream = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => undefined),
+      cancel() {
+        stalledCancelled = true;
+      },
+    });
+    const stalledProvider = makeProvider([
+      new Response(stalledStream, { status: 200 }),
+    ]).provider;
+    const controller = new AbortController();
+    const stalled = stalledProvider.likedTracks({
+      accessToken: "access",
+      offset: 0,
+      limit: 1,
+      signal: controller.signal,
+    });
+    controller.abort();
+    const stalledOutcome = await providerOutcomeWithin(stalled);
+    expect(stalledOutcome).toMatchObject({
+      error: expect.objectContaining({ code: "provider_unavailable" }),
+    });
+    expect(stalledCancelled).toBe(true);
+  });
+
+  it("drains finite malformed JSON and returns only a stable provider error", async () => {
+    const malformed = makeProvider([
+      new Response("{", { status: 200 }),
+    ]).provider;
+
+    await expect(
+      malformed.playlists({ accessToken: "access" }),
+    ).rejects.toMatchObject({ code: "invalid_provider_response" });
   });
 
   it("rejects dot-segment playlist IDs before constructing a provider path", async () => {

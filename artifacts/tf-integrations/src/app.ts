@@ -16,14 +16,21 @@ import {
   type TfIntegrationsSuccessResponse,
 } from "@workspace/tf-integrations-contract";
 
-import type { InternalRequestAuthenticator } from "./internal-auth.js";
+import type {
+  InternalRequestAuthenticator,
+  VerifiedInternalRequest,
+} from "./internal-auth.js";
 
 const BODY_LIMIT = 64 * 1024;
 const DEFAULT_READINESS_TIMEOUT_MS = 2_000;
+const COMMAND_TIMEOUT_MS = 8_000;
+const MAX_COMMAND_TIMEOUT_MS = 9_000;
+const MAX_CONCURRENT_COMMANDS = 32;
 
 export interface TfIntegrationsCommandService {
   execute(
     command: TfIntegrationsCommand,
+    context: { readonly signal: AbortSignal },
   ): Promise<TfIntegrationsSuccessResponse | TfIntegrationsErrorResponse>;
 }
 
@@ -41,6 +48,9 @@ export interface CreateTfIntegrationsAppOptions {
   readonly service: TfIntegrationsCommandService;
   readonly auth: InternalRequestAuthenticator;
   readonly readiness: TfIntegrationsReadiness;
+  readonly commandTimeoutMs?: number;
+  readonly maxConcurrentCommands?: number;
+  readonly shutdownSignal?: AbortSignal;
 }
 
 export function createTfIntegrationsReadiness(
@@ -81,11 +91,8 @@ function setResponseHeaders(res: Response): void {
   });
 }
 
-function requestPath(req: Request): string {
-  const queryIndex = req.originalUrl.indexOf("?");
-  return queryIndex === -1
-    ? req.originalUrl
-    : req.originalUrl.slice(0, queryIndex);
+function requestTarget(req: Request): string {
+  return req.originalUrl;
 }
 
 function requirePermittedRoute(
@@ -93,7 +100,7 @@ function requirePermittedRoute(
   res: Response,
   next: NextFunction,
 ): void {
-  const path = requestPath(req);
+  const path = requestTarget(req);
   if (
     (req.method === "GET" && (path === "/healthz" || path === "/readyz")) ||
     (req.method === "POST" && path === TF_INTEGRATIONS_COMMAND_PATH)
@@ -151,18 +158,18 @@ function parseJsonBody(value: Buffer): unknown | undefined {
 function authenticate(
   req: Request,
   auth: InternalRequestAuthenticator,
-): boolean {
+): VerifiedInternalRequest | undefined {
   try {
-    return auth.authenticate({
+    return auth.verify({
       method: req.method,
-      path: requestPath(req),
+      path: requestTarget(req),
       timestamp: req.get("X-Apollo-Internal-Timestamp"),
       nonce: req.get("X-Apollo-Internal-Nonce"),
       signature: req.get("X-Apollo-Internal-Signature"),
       rawBody: rawBody(req),
     });
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -185,9 +192,72 @@ async function isReady(readiness: TfIntegrationsReadiness): Promise<boolean> {
   }
 }
 
+function boundedInteger(
+  value: number,
+  minimum: number,
+  maximum: number,
+  label: string,
+): number {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < minimum ||
+    value > maximum
+  ) {
+    throw new Error(`invalid ${label}`);
+  }
+  return value;
+}
+
+interface CommandAbortScope {
+  readonly signal: AbortSignal;
+  dispose(): void;
+}
+
+function createCommandAbortScope(
+  req: Request,
+  res: Response,
+  timeoutMs: number,
+  shutdownSignal?: AbortSignal,
+): CommandAbortScope {
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  const abortOnClose = (): void => {
+    if (!res.writableEnded) abort();
+  };
+  const timeout = setTimeout(abort, timeoutMs);
+
+  req.once("aborted", abort);
+  res.once("close", abortOnClose);
+  shutdownSignal?.addEventListener("abort", abort, { once: true });
+  if (req.aborted || shutdownSignal?.aborted) abort();
+
+  return {
+    signal: controller.signal,
+    dispose(): void {
+      clearTimeout(timeout);
+      req.off("aborted", abort);
+      res.off("close", abortOnClose);
+      shutdownSignal?.removeEventListener("abort", abort);
+    },
+  };
+}
+
 export function createTfIntegrationsApp(
   options: CreateTfIntegrationsAppOptions,
 ): Express {
+  const commandTimeoutMs = boundedInteger(
+    options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS,
+    1,
+    MAX_COMMAND_TIMEOUT_MS,
+    "command timeout",
+  );
+  const maxConcurrentCommands = boundedInteger(
+    options.maxConcurrentCommands ?? MAX_CONCURRENT_COMMANDS,
+    1,
+    MAX_CONCURRENT_COMMANDS,
+    "command concurrency",
+  );
+  let activeCommands = 0;
   const app = express();
   app.set("case sensitive routing", true);
   app.set("strict routing", true);
@@ -212,12 +282,9 @@ export function createTfIntegrationsApp(
     rejectUnsupportedTransport,
     express.raw({ type: () => true, limit: BODY_LIMIT, inflate: false }),
     async (req, res) => {
-      if (!authenticate(req, options.auth)) {
+      const proof = authenticate(req, options.auth);
+      if (proof === undefined) {
         res.status(401).json({ error: "unauthorized" });
-        return;
-      }
-      if (!(await isReady(options.readiness))) {
-        res.status(503).json({ error: "integrations_unavailable" });
         return;
       }
 
@@ -228,9 +295,33 @@ export function createTfIntegrationsApp(
         res.status(400).json({ error: "invalid_request" });
         return;
       }
+      if (!options.auth.claim(command.data.accountId, proof)) {
+        res.status(401).json({ error: "unauthorized" });
+        return;
+      }
+      if (activeCommands >= maxConcurrentCommands) {
+        res.status(503).json({ error: "integrations_unavailable" });
+        return;
+      }
 
+      activeCommands += 1;
+      const scope = createCommandAbortScope(
+        req,
+        res,
+        commandTimeoutMs,
+        options.shutdownSignal,
+      );
       try {
-        const rawResponse = await options.service.execute(command.data);
+        if (
+          !(await isReady(options.readiness)) ||
+          scope.signal.aborted
+        ) {
+          res.status(503).json({ error: "integrations_unavailable" });
+          return;
+        }
+        const rawResponse = await options.service.execute(command.data, {
+          signal: scope.signal,
+        });
         const success =
           tfIntegrationsSuccessResponseSchema.safeParse(rawResponse);
         const failure =
@@ -249,7 +340,12 @@ export function createTfIntegrationsApp(
         }
         res.status(200).json(parsed);
       } catch {
-        res.status(500).json({ error: "internal_error" });
+        if (!res.headersSent && !res.destroyed) {
+          res.status(500).json({ error: "internal_error" });
+        }
+      } finally {
+        scope.dispose();
+        activeCommands -= 1;
       }
     },
   );

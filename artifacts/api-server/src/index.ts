@@ -9,6 +9,10 @@ import {
 import { logger } from "./lib/logger.js";
 import { runMigrations } from "./lib/migrate.js";
 import {
+  assertRequiredModuleHeartbeatKeys,
+  parseModuleHeartbeatKeys,
+} from "./lib/module-heartbeat.js";
+import {
   PlatformAuthClient,
   parseTfAuthRuntimeConfig,
 } from "./lib/platform-auth-client.js";
@@ -35,6 +39,11 @@ import { attachWebSocketServer } from "./ws.js";
 import type { WebSocketServerHandle } from "./ws.js";
 
 async function start(): Promise<void> {
+  assertRequiredModuleHeartbeatKeys(
+    parseModuleHeartbeatKeys(
+      process.env["APOLLO_MODULE_HEARTBEAT_KEYS"],
+    ),
+  );
   const [authConfig, integrationsConfig, searchConfig] = await Promise.all([
     parseTfAuthRuntimeConfig(process.env),
     parseTfIntegrationsClientConfig(process.env),

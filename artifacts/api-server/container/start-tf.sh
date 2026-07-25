@@ -70,7 +70,8 @@ if (
 const entries = Object.entries(parsed);
 if (
   entries.length > 128 ||
-  !Object.prototype.hasOwnProperty.call(parsed, "search-media")
+  !Object.prototype.hasOwnProperty.call(parsed, "search-media") ||
+  !Object.prototype.hasOwnProperty.call(parsed, "account-integrations")
 ) {
   fail();
 }

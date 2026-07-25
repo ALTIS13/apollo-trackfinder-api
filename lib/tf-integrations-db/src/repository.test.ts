@@ -34,6 +34,8 @@ class RepositoryPoolDouble {
 }
 
 const accountId = "7a28499b-9603-489a-89b0-e57d72ccaf22";
+const firstGeneration = "11111111-1111-4111-8111-111111111111";
+const secondGeneration = "22222222-2222-4222-8222-222222222222";
 
 function envelope(): EncryptedTokenEnvelopeV1 {
   return {
@@ -51,6 +53,7 @@ function record(
   return {
     accountId,
     provider: "spotify",
+    generation: firstGeneration,
     tokenEnvelope: envelope(),
     providerUserId: "spotify-user-42",
     displayName: "Integration Person",
@@ -58,38 +61,48 @@ function record(
   };
 }
 
-function repository(double: RepositoryPoolDouble) {
-  return new PostgresProviderAccountRepository(double as unknown as Pool);
+function repository(
+  double: RepositoryPoolDouble,
+  generations: readonly string[] = [firstGeneration],
+) {
+  const remaining = [...generations];
+  return new PostgresProviderAccountRepository(
+    double as unknown as Pool,
+    () => remaining.shift()!,
+  );
 }
 
 describe("PostgresProviderAccountRepository", () => {
-  it("uses parameterized SQL and never sends a plaintext token parameter", async () => {
-    const plaintextCanary = `plaintext-token-${randomUUID()}`;
+  it("uses parameterized SQL and creates a fresh unguessable generation for every replacement", async () => {
     const pool = new RepositoryPoolDouble();
     const stored = record();
+    const target = repository(pool, [firstGeneration, secondGeneration]);
 
-    await repository(pool).upsert(stored);
+    await target.upsert(stored);
+    await target.upsert(stored);
 
-    expect(pool.queries).toHaveLength(1);
+    expect(pool.queries).toHaveLength(2);
     const query = pool.queries[0]!;
     expect(query.text).toMatch(
       /insert into apollo_tf_integrations\.provider_accounts/i,
     );
     expect(query.text).toMatch(
-      /values \(\$1, \$2, \$3::jsonb, \$4, \$5, \$6\)/i,
+      /values \(\$1, \$2, \$3::uuid, \$4::jsonb, \$5, \$6, \$7\)/i,
     );
     expect(query.text).not.toContain(accountId);
     expect(query.text).not.toContain(stored.providerUserId);
     expect(query.text).not.toContain(stored.displayName);
-    expect(JSON.stringify(query.values)).not.toContain(plaintextCanary);
     expect(query.values).toEqual([
       stored.accountId,
       stored.provider,
+      firstGeneration,
       JSON.stringify(stored.tokenEnvelope),
       stored.providerUserId,
       stored.displayName,
       null,
     ]);
+    expect(pool.queries[1]?.values?.[2]).toBe(secondGeneration);
+    expect(pool.queries[1]?.values?.[2]).not.toBe(firstGeneration);
   });
 
   it("maps one canonical account-provider row and updates metadata atomically", async () => {
@@ -102,6 +115,7 @@ describe("PostgresProviderAccountRepository", () => {
       {
         account_id: stored.accountId,
         provider: stored.provider,
+        generation: firstGeneration,
         token_envelope: stored.tokenEnvelope,
         provider_user_id: stored.providerUserId,
         display_name: stored.displayName,
@@ -112,7 +126,7 @@ describe("PostgresProviderAccountRepository", () => {
 
     await expect(
       repository(pool).get(stored.accountId, stored.provider),
-    ).resolves.toEqual(stored);
+    ).resolves.toEqual({ ...stored, generation: firstGeneration });
     expect(pool.queries[0]?.values).toEqual([
       stored.accountId,
       stored.provider,
@@ -121,7 +135,7 @@ describe("PostgresProviderAccountRepository", () => {
     pool.queries.length = 0;
     await repository(pool).upsert(stored);
     expect(pool.queries[0]?.text).toMatch(
-      /on conflict \(account_id, provider\) do update[\s\S]*token_envelope = excluded\.token_envelope[\s\S]*provider_user_id = excluded\.provider_user_id[\s\S]*display_name = excluded\.display_name[\s\S]*provider_login = excluded\.provider_login[\s\S]*updated_at = now\(\)/i,
+      /on conflict \(account_id, provider\) do update[\s\S]*generation = excluded\.generation[\s\S]*token_envelope = excluded\.token_envelope[\s\S]*provider_user_id = excluded\.provider_user_id[\s\S]*display_name = excluded\.display_name[\s\S]*provider_login = excluded\.provider_login[\s\S]*updated_at = now\(\)/i,
     );
     expect(pool.queries[0]?.text.match(/\b(insert|update)\b/gi)).toHaveLength(
       2,
@@ -135,6 +149,7 @@ describe("PostgresProviderAccountRepository", () => {
       {
         account_id: legacy.accountId,
         provider: legacy.provider,
+        generation: firstGeneration,
         token_envelope: legacy.tokenEnvelope,
         provider_user_id: legacy.providerUserId,
         display_name: legacy.displayName,
@@ -144,7 +159,7 @@ describe("PostgresProviderAccountRepository", () => {
 
     await expect(
       repository(pool).get(legacy.accountId, "yandex"),
-    ).resolves.toEqual(legacy);
+    ).resolves.toEqual({ ...legacy, generation: firstGeneration });
     await expect(
       repository(pool).upsert(legacy),
     ).rejects.toMatchObject({ code: "constraint_violation" });
@@ -172,6 +187,46 @@ describe("PostgresProviderAccountRepository", () => {
         values: [accountId, "spotify"],
       },
     ]);
+  });
+
+  it("refreshes only the exact loaded generation and can never insert a missing row", async () => {
+    const pool = new RepositoryPoolDouble();
+    const target = repository(pool);
+    pool.rowCount = 0;
+
+    await expect(
+      target.updateTokenEnvelopeIfGeneration(
+        accountId,
+        "spotify",
+        firstGeneration,
+        envelope(),
+      ),
+    ).resolves.toBe(false);
+
+    expect(pool.queries).toEqual([
+      {
+        text: expect.stringMatching(
+          /update apollo_tf_integrations\.provider_accounts[\s\S]*set token_envelope = \$4::jsonb[\s\S]*where account_id = \$1[\s\S]*and provider = \$2[\s\S]*and generation = \$3::uuid/i,
+        ),
+        values: [
+          accountId,
+          "spotify",
+          firstGeneration,
+          expect.any(String),
+        ],
+      },
+    ]);
+    expect(pool.queries[0]?.text).not.toMatch(/\binsert\b/i);
+
+    pool.rowCount = 1;
+    await expect(
+      target.updateTokenEnvelopeIfGeneration(
+        accountId,
+        "spotify",
+        firstGeneration,
+        envelope(),
+      ),
+    ).resolves.toBe(true);
   });
 
   it("reports readiness only when the expected migration is recorded", async () => {

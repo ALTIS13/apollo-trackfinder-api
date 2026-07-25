@@ -26,6 +26,7 @@ import {
 const accountId = "5d8b0f1c-31cc-4c12-a826-65b922719af5";
 const otherAccountId = "a40594ce-951f-4acf-82c3-816372e2c17d";
 const requestId = "8be4ab5a-8550-4adf-92c7-a87eb23b40a1";
+const initialGeneration = "11111111-1111-4111-8111-111111111111";
 
 const normalizedTrack = {
   id: "track-1",
@@ -68,6 +69,7 @@ class MemoryRepository implements ProviderAccountRepository {
   readonly records = new Map<string, ProviderAccountRecord>();
   readonly events: string[] = [];
   deleteRecords = true;
+  generation = 1;
 
   key(account: string, provider: Provider): string {
     return `${account}:${provider}`;
@@ -81,9 +83,32 @@ class MemoryRepository implements ProviderAccountRepository {
     return this.records.get(this.key(account, provider)) ?? null;
   }
 
-  async upsert(record: ProviderAccountRecord): Promise<void> {
+  async upsert(
+    record: Omit<ProviderAccountRecord, "generation">,
+  ): Promise<void> {
     this.events.push(`upsert:${record.accountId}:${record.provider}`);
-    this.records.set(this.key(record.accountId, record.provider), record);
+    const generation = `${String(this.generation).padStart(8, "0")}-0000-4000-8000-000000000001`;
+    this.generation += 1;
+    this.records.set(this.key(record.accountId, record.provider), {
+      ...record,
+      generation,
+    });
+  }
+
+  async updateTokenEnvelopeIfGeneration(
+    account: string,
+    provider: Provider,
+    generation: string,
+    tokenEnvelope: ProviderAccountRecord["tokenEnvelope"],
+  ): Promise<boolean> {
+    const key = this.key(account, provider);
+    const current = this.records.get(key);
+    const matched = current?.generation === generation;
+    this.events.push(`cas:${account}:${provider}:${String(matched)}`);
+    if (matched) {
+      this.records.set(key, { ...current, tokenEnvelope });
+    }
+    return matched;
   }
 
   async delete(account: string, provider: Provider): Promise<boolean> {
@@ -221,6 +246,12 @@ function service(
   spotify: SpotifyProviderAdapter = spotifyAdapter(),
   yandex: YandexProviderAdapter = yandexAdapter(),
   logger?: ConstructorParameters<typeof TfIntegrationsService>[0]["logger"],
+  limits: Partial<
+    Pick<
+      ConstructorParameters<typeof TfIntegrationsService>[0],
+      "providerConcurrency" | "providerQueueLimit"
+    >
+  > = {},
 ): TfIntegrationsService {
   return new TfIntegrationsService({
     repository,
@@ -228,6 +259,7 @@ function service(
     spotify,
     yandex,
     logger,
+    ...limits,
   });
 }
 
@@ -240,6 +272,7 @@ function storedRecord(
     return {
       accountId: targetAccountId,
       provider,
+      generation: initialGeneration,
       tokenEnvelope: tokenVault.encrypt("spotify", targetAccountId, {
         accessToken: "stored-access",
         refreshToken: "stored-refresh",
@@ -252,6 +285,7 @@ function storedRecord(
   return {
     accountId: targetAccountId,
     provider,
+    generation: initialGeneration,
     tokenEnvelope: tokenVault.encrypt("yandex", targetAccountId, {
       oauthToken: "stored-yandex-token",
     }),
@@ -332,6 +366,7 @@ describe("TfIntegrationsService", () => {
     repository.records.set(`${accountId}:spotify`, {
       accountId,
       provider: "spotify",
+      generation: initialGeneration,
       tokenEnvelope: tokenVault.encrypt("spotify", accountId, expiring),
       providerUserId: "spotify-user",
       displayName: "Spotify User",
@@ -376,12 +411,222 @@ describe("TfIntegrationsService", () => {
     ]);
     expect(repository.events).toEqual([
       `get:${accountId}:spotify`,
-      `upsert:${accountId}:spotify`,
+      `cas:${accountId}:spotify:true`,
     ]);
     expect(result).toMatchObject({
       operation: "spotify.liked.list",
       result: { total: 1, tracks: [normalizedTrack] },
     });
+  });
+
+  it("never restores a disconnected row when an in-flight refresh completes", async () => {
+    const tokenVault = vault();
+    const repository = new MemoryRepository();
+    repository.records.set(
+      `${accountId}:spotify`,
+      storedRecord(tokenVault, "spotify"),
+    );
+    let finishRefresh: ((value: SpotifySecret) => void) | undefined;
+    let refreshStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      refreshStarted = resolve;
+    });
+    const likedCalls: string[] = [];
+    const target = service(
+      repository,
+      tokenVault,
+      spotifyAdapter({
+        async refresh() {
+          refreshStarted?.();
+          const secret = await new Promise<SpotifySecret>((resolve) => {
+            finishRefresh = resolve;
+          });
+          return { refreshed: true, secret };
+        },
+        async likedTracks(input) {
+          likedCalls.push(input.accessToken);
+          return { offset: 0, limit: 1, total: 0, tracks: [] };
+        },
+      }),
+    );
+
+    const pending = target.execute(
+      command("spotify.liked.list", { offset: 0, limit: 1 }),
+    );
+    await started;
+    await target.execute(command("spotify.disconnect", {}));
+    finishRefresh?.({
+      accessToken: "stale-refreshed-access",
+      refreshToken: "stored-refresh",
+      expiresAt: "2026-07-25T14:00:00.000Z",
+    });
+
+    await expect(pending).resolves.toMatchObject({
+      operation: "spotify.liked.list",
+      error: { code: "not_connected" },
+    });
+    expect(repository.records.has(`${accountId}:spotify`)).toBe(false);
+    expect(likedCalls).toEqual([]);
+    expect(repository.events).toContain(
+      `cas:${accountId}:spotify:false`,
+    );
+  });
+
+  it("never overwrites a reconnected row when an older refresh completes", async () => {
+    const tokenVault = vault();
+    const repository = new MemoryRepository();
+    repository.records.set(
+      `${accountId}:spotify`,
+      storedRecord(tokenVault, "spotify"),
+    );
+    let finishRefresh: ((value: SpotifySecret) => void) | undefined;
+    let refreshStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      refreshStarted = resolve;
+    });
+    const target = service(
+      repository,
+      tokenVault,
+      spotifyAdapter({
+        async refresh() {
+          refreshStarted?.();
+          const secret = await new Promise<SpotifySecret>((resolve) => {
+            finishRefresh = resolve;
+          });
+          return { refreshed: true, secret };
+        },
+      }),
+    );
+
+    const pending = target.execute(
+      command("spotify.liked.list", { offset: 0, limit: 1 }),
+    );
+    await started;
+    await target.execute(
+      command("spotify.oauth.complete", {
+        code: "new-connection-code",
+        callbackUri: "https://tf.apollot.ru/api/spotify/callback",
+      }),
+    );
+    const replacement = repository.records.get(`${accountId}:spotify`)!;
+    const replacementSecret = tokenVault.decrypt(
+      "spotify",
+      accountId,
+      replacement.tokenEnvelope,
+    );
+    finishRefresh?.({
+      accessToken: "stale-refreshed-access",
+      refreshToken: "stored-refresh",
+      expiresAt: "2026-07-25T14:00:00.000Z",
+    });
+
+    await expect(pending).resolves.toMatchObject({
+      operation: "spotify.liked.list",
+      error: { code: "not_connected" },
+    });
+    expect(repository.records.get(`${accountId}:spotify`)).toEqual(
+      replacement,
+    );
+    expect(replacement.generation).not.toBe(initialGeneration);
+    expect(replacementSecret).toMatchObject({
+      accessToken: "spotify-access",
+      refreshToken: "spotify-refresh",
+    });
+  });
+
+  it("propagates one command abort signal through refresh and provider I/O", async () => {
+    const tokenVault = vault();
+    const repository = new MemoryRepository();
+    repository.records.set(
+      `${accountId}:spotify`,
+      storedRecord(tokenVault, "spotify"),
+    );
+    const controller = new AbortController();
+    const received: AbortSignal[] = [];
+    const target = service(
+      repository,
+      tokenVault,
+      spotifyAdapter({
+        async refresh(secret, context) {
+          received.push(context.signal);
+          return { refreshed: false, secret };
+        },
+        async likedTracks(input) {
+          expect(input.signal).toBeDefined();
+          received.push(input.signal!);
+          return {
+            offset: input.offset,
+            limit: input.limit,
+            total: 0,
+            tracks: [],
+          };
+        },
+      }),
+    );
+
+    await expect(
+      target.execute(
+        command("spotify.liked.list", { offset: 0, limit: 1 }),
+        { signal: controller.signal },
+      ),
+    ).resolves.toMatchObject({
+      operation: "spotify.liked.list",
+      result: { total: 0 },
+    });
+    expect(received).toEqual([controller.signal, controller.signal]);
+  });
+
+  it("bounds provider I/O concurrency and queues only a finite command backlog", async () => {
+    const tokenVault = vault();
+    const repository = new MemoryRepository();
+    repository.records.set(
+      `${accountId}:spotify`,
+      storedRecord(tokenVault, "spotify"),
+    );
+    let active = 0;
+    let maximumActive = 0;
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let firstTwoStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      firstTwoStarted = resolve;
+    });
+    const target = service(
+      repository,
+      tokenVault,
+      spotifyAdapter({
+        async likedTracks(input) {
+          active += 1;
+          maximumActive = Math.max(maximumActive, active);
+          if (active === 2) firstTwoStarted?.();
+          await blocked;
+          active -= 1;
+          return {
+            offset: input.offset,
+            limit: input.limit,
+            total: 0,
+            tracks: [],
+          };
+        },
+      }),
+      yandexAdapter(),
+      undefined,
+      { providerConcurrency: 2, providerQueueLimit: 2 },
+    );
+
+    const commands = Array.from({ length: 3 }, () =>
+      target.execute(
+        command("spotify.liked.list", { offset: 0, limit: 1 }),
+        { signal: new AbortController().signal },
+      ),
+    );
+    await started;
+    expect(maximumActive).toBe(2);
+    release?.();
+    await expect(Promise.all(commands)).resolves.toHaveLength(3);
+    expect(maximumActive).toBe(2);
   });
 
   it("returns disconnected without a stored provider account", async () => {
@@ -504,6 +749,7 @@ describe("TfIntegrationsService", () => {
     repository.records.set(`${accountId}:yandex`, {
       accountId,
       provider: "yandex",
+      generation: initialGeneration,
       tokenEnvelope: tokenVault.encrypt("yandex", accountId, {
         oauthToken: "stored-yandex-token",
       }),

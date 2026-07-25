@@ -8,6 +8,7 @@ import type {
   Provider,
   ProviderAccountRecord,
   ProviderAccountRepository,
+  ProviderAccountWrite,
 } from "@workspace/tf-integrations-db";
 
 import {
@@ -42,41 +43,52 @@ export interface SpotifyProviderAdapter {
   exchangeCode(input: {
     readonly code: string;
     readonly callbackUri: string;
+    readonly signal?: AbortSignal;
   }): Promise<SpotifyExchangeResult>;
-  refresh(secret: SpotifySecret): Promise<SpotifyRefreshResult>;
+  refresh(
+    secret: SpotifySecret,
+    context: { readonly signal: AbortSignal },
+  ): Promise<SpotifyRefreshResult>;
   likedTracks(input: {
     readonly accessToken: string;
     readonly offset: number;
     readonly limit: number;
+    readonly signal?: AbortSignal;
   }): Promise<TracksPage>;
   playlists(input: {
     readonly accessToken: string;
+    readonly signal?: AbortSignal;
   }): Promise<SpotifyPlaylistsResult>;
   playlistTracks(input: {
     readonly accessToken: string;
     readonly playlistId: string;
     readonly offset: number;
     readonly limit: number;
+    readonly signal?: AbortSignal;
   }): Promise<TracksPage>;
   topTracks(input: {
     readonly accessToken: string;
     readonly timeRange: "short_term" | "medium_term" | "long_term";
+    readonly signal?: AbortSignal;
   }): Promise<SpotifyTracksResult>;
 }
 
 export interface YandexProviderAdapter {
   validateToken(input: {
     readonly oauthToken: string;
+    readonly signal?: AbortSignal;
   }): Promise<YandexAccount>;
   likedTracks(input: {
     readonly oauthToken: string;
     readonly userId: string;
     readonly offset: number;
     readonly limit: number;
+    readonly signal?: AbortSignal;
   }): Promise<YandexTracksPage>;
   playlists(input: {
     readonly oauthToken: string;
     readonly userId: string;
+    readonly signal?: AbortSignal;
   }): Promise<YandexPlaylistsResult>;
   playlistTracks(input: {
     readonly oauthToken: string;
@@ -84,6 +96,7 @@ export interface YandexProviderAdapter {
     readonly kind: number;
     readonly offset: number;
     readonly limit: number;
+    readonly signal?: AbortSignal;
   }): Promise<YandexTracksPage>;
 }
 
@@ -93,6 +106,117 @@ export interface TfIntegrationsServiceOptions {
   readonly spotify: SpotifyProviderAdapter;
   readonly yandex: YandexProviderAdapter;
   readonly logger?: IntegrationsLogger;
+  readonly providerConcurrency?: number;
+  readonly providerQueueLimit?: number;
+}
+
+export interface TfIntegrationsExecutionContext {
+  readonly signal: AbortSignal;
+}
+
+const DEFAULT_PROVIDER_CONCURRENCY = 8;
+const DEFAULT_PROVIDER_QUEUE_LIMIT = 24;
+const MAX_PROVIDER_CONCURRENCY = 32;
+const inertSignal = new AbortController().signal;
+
+interface ProviderWaiter {
+  readonly signal: AbortSignal;
+  readonly resolve: (release: () => void) => void;
+  readonly reject: (error: Error) => void;
+  readonly onAbort: () => void;
+}
+
+function providerCapacityError(): Error {
+  return new Error("Provider capacity unavailable");
+}
+
+class ProviderIoLimiter {
+  readonly #concurrency: number;
+  readonly #queueLimit: number;
+  readonly #queue: ProviderWaiter[] = [];
+  #active = 0;
+
+  constructor(concurrency: number, queueLimit: number) {
+    if (
+      !Number.isSafeInteger(concurrency) ||
+      concurrency < 1 ||
+      concurrency > MAX_PROVIDER_CONCURRENCY ||
+      !Number.isSafeInteger(queueLimit) ||
+      queueLimit < 0 ||
+      queueLimit > MAX_PROVIDER_CONCURRENCY
+    ) {
+      throw new Error("Invalid provider concurrency configuration");
+    }
+    this.#concurrency = concurrency;
+    this.#queueLimit = queueLimit;
+  }
+
+  async run<T>(
+    signal: AbortSignal,
+    operation: () => Promise<T> | T,
+  ): Promise<T> {
+    const release = await this.#acquire(signal);
+    try {
+      if (signal.aborted) throw providerCapacityError();
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  #acquire(signal: AbortSignal): Promise<() => void> {
+    if (signal.aborted) {
+      return Promise.reject(providerCapacityError());
+    }
+    if (this.#active < this.#concurrency) {
+      this.#active += 1;
+      return Promise.resolve(this.#releaseOnce());
+    }
+    if (this.#queue.length >= this.#queueLimit) {
+      return Promise.reject(providerCapacityError());
+    }
+
+    return new Promise((resolve, reject) => {
+      const waiter: ProviderWaiter = {
+        signal,
+        resolve,
+        reject,
+        onAbort: () => {
+          const index = this.#queue.indexOf(waiter);
+          if (index !== -1) this.#queue.splice(index, 1);
+          reject(providerCapacityError());
+        },
+      };
+      signal.addEventListener("abort", waiter.onAbort, { once: true });
+      this.#queue.push(waiter);
+    });
+  }
+
+  #releaseOnce(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#active -= 1;
+      this.#startNext();
+    };
+  }
+
+  #startNext(): void {
+    while (
+      this.#active < this.#concurrency &&
+      this.#queue.length > 0
+    ) {
+      const waiter = this.#queue.shift()!;
+      waiter.signal.removeEventListener("abort", waiter.onAbort);
+      if (waiter.signal.aborted) {
+        waiter.reject(providerCapacityError());
+        continue;
+      }
+      this.#active += 1;
+      waiter.resolve(this.#releaseOnce());
+    }
+  }
 }
 
 class ServiceError extends Error {
@@ -127,6 +251,7 @@ export class TfIntegrationsService {
   readonly #spotify: SpotifyProviderAdapter;
   readonly #yandex: YandexProviderAdapter;
   readonly #logger: IntegrationsLogger;
+  readonly #providerLimiter: ProviderIoLimiter;
 
   constructor(options: TfIntegrationsServiceOptions) {
     this.#repository = options.repository;
@@ -134,10 +259,15 @@ export class TfIntegrationsService {
     this.#spotify = options.spotify;
     this.#yandex = options.yandex;
     this.#logger = options.logger ?? noopIntegrationsLogger;
+    this.#providerLimiter = new ProviderIoLimiter(
+      options.providerConcurrency ?? DEFAULT_PROVIDER_CONCURRENCY,
+      options.providerQueueLimit ?? DEFAULT_PROVIDER_QUEUE_LIMIT,
+    );
   }
 
   async execute(
     command: TfIntegrationsCommand,
+    context: TfIntegrationsExecutionContext = { signal: inertSignal },
   ): Promise<TfIntegrationsSuccessResponse | TfIntegrationsErrorResponse> {
     try {
       switch (command.operation) {
@@ -147,8 +277,11 @@ export class TfIntegrationsService {
           });
 
         case "spotify.oauth.complete": {
-          const exchange = await this.#provider(() =>
-            this.#spotify.exchangeCode(command.input),
+          const exchange = await this.#provider(context.signal, () =>
+            this.#spotify.exchangeCode({
+              ...command.input,
+              signal: context.signal,
+            }),
           );
           const response = this.#success(command, {
             account: this.#connectedSpotifyAccount(exchange.account),
@@ -175,49 +308,70 @@ export class TfIntegrationsService {
           return this.#success(command, { ok: true });
 
         case "spotify.liked.list": {
-          const secret = await this.#refreshedSpotifySecret(command.accountId);
-          const result = await this.#provider(() =>
+          const secret = await this.#refreshedSpotifySecret(
+            command.accountId,
+            context.signal,
+          );
+          const result = await this.#provider(context.signal, () =>
             this.#spotify.likedTracks({
               accessToken: secret.accessToken,
               ...command.input,
+              signal: context.signal,
             }),
           );
           return this.#success(command, result);
         }
 
         case "spotify.playlists.list": {
-          const secret = await this.#refreshedSpotifySecret(command.accountId);
-          const result = await this.#provider(() =>
-            this.#spotify.playlists({ accessToken: secret.accessToken }),
+          const secret = await this.#refreshedSpotifySecret(
+            command.accountId,
+            context.signal,
+          );
+          const result = await this.#provider(context.signal, () =>
+            this.#spotify.playlists({
+              accessToken: secret.accessToken,
+              signal: context.signal,
+            }),
           );
           return this.#success(command, result);
         }
 
         case "spotify.playlist-tracks.list": {
-          const secret = await this.#refreshedSpotifySecret(command.accountId);
-          const result = await this.#provider(() =>
+          const secret = await this.#refreshedSpotifySecret(
+            command.accountId,
+            context.signal,
+          );
+          const result = await this.#provider(context.signal, () =>
             this.#spotify.playlistTracks({
               accessToken: secret.accessToken,
               ...command.input,
+              signal: context.signal,
             }),
           );
           return this.#success(command, result);
         }
 
         case "spotify.top-tracks.list": {
-          const secret = await this.#refreshedSpotifySecret(command.accountId);
-          const result = await this.#provider(() =>
+          const secret = await this.#refreshedSpotifySecret(
+            command.accountId,
+            context.signal,
+          );
+          const result = await this.#provider(context.signal, () =>
             this.#spotify.topTracks({
               accessToken: secret.accessToken,
               ...command.input,
+              signal: context.signal,
             }),
           );
           return this.#success(command, result);
         }
 
         case "yandex.token.upsert": {
-          const account = await this.#provider(() =>
-            this.#yandex.validateToken({ oauthToken: command.input.token }),
+          const account = await this.#provider(context.signal, () =>
+            this.#yandex.validateToken({
+              oauthToken: command.input.token,
+              signal: context.signal,
+            }),
           );
           const response = this.#success(command, {
             account: this.#connectedYandexAccount(account),
@@ -247,11 +401,12 @@ export class TfIntegrationsService {
           const { record, secret } = await this.#yandexAccount(
             command.accountId,
           );
-          const result = await this.#provider(() =>
+          const result = await this.#provider(context.signal, () =>
             this.#yandex.likedTracks({
               oauthToken: secret.oauthToken,
               userId: record.providerUserId,
               ...command.input,
+              signal: context.signal,
             }),
           );
           return this.#success(command, result);
@@ -261,10 +416,11 @@ export class TfIntegrationsService {
           const { record, secret } = await this.#yandexAccount(
             command.accountId,
           );
-          const result = await this.#provider(() =>
+          const result = await this.#provider(context.signal, () =>
             this.#yandex.playlists({
               oauthToken: secret.oauthToken,
               userId: record.providerUserId,
+              signal: context.signal,
             }),
           );
           return this.#success(command, result);
@@ -272,10 +428,11 @@ export class TfIntegrationsService {
 
         case "yandex.playlist-tracks.list": {
           const { secret } = await this.#yandexAccount(command.accountId);
-          const result = await this.#provider(() =>
+          const result = await this.#provider(context.signal, () =>
             this.#yandex.playlistTracks({
               oauthToken: secret.oauthToken,
               ...command.input,
+              signal: context.signal,
             }),
           );
           return this.#success(command, result);
@@ -372,10 +529,15 @@ export class TfIntegrationsService {
     });
   }
 
-  async #refreshedSpotifySecret(accountId: string): Promise<SpotifySecret> {
+  async #refreshedSpotifySecret(
+    accountId: string,
+    signal: AbortSignal,
+  ): Promise<SpotifySecret> {
     const record = await this.#requiredRecord(accountId, "spotify");
     const secret = this.#decryptSpotify(accountId, record);
-    const refresh = await this.#provider(() => this.#spotify.refresh(secret));
+    const refresh = await this.#provider(signal, () =>
+      this.#spotify.refresh(secret, { signal }),
+    );
     if (
       !isObject(refresh) ||
       typeof refresh.refreshed !== "boolean" ||
@@ -388,7 +550,15 @@ export class TfIntegrationsService {
     }
     const refreshedSecret = refresh.secret as SpotifySecret;
     const tokenEnvelope = this.#encryptSpotify(accountId, refreshedSecret);
-    await this.#upsert({ ...record, tokenEnvelope });
+    const updated = await this.#updateTokenEnvelopeIfGeneration(
+      accountId,
+      "spotify",
+      record.generation,
+      tokenEnvelope,
+    );
+    if (!updated) {
+      throw new ServiceError("not_connected");
+    }
     return refreshedSecret;
   }
 
@@ -425,9 +595,27 @@ export class TfIntegrationsService {
     }
   }
 
-  async #upsert(record: ProviderAccountRecord): Promise<void> {
+  async #upsert(record: ProviderAccountWrite): Promise<void> {
     try {
       await this.#repository.upsert(record);
+    } catch {
+      throw new ServiceError("storage_unavailable");
+    }
+  }
+
+  async #updateTokenEnvelopeIfGeneration(
+    accountId: string,
+    provider: Provider,
+    generation: string,
+    tokenEnvelope: ProviderAccountRecord["tokenEnvelope"],
+  ): Promise<boolean> {
+    try {
+      return await this.#repository.updateTokenEnvelopeIfGeneration(
+        accountId,
+        provider,
+        generation,
+        tokenEnvelope,
+      );
     } catch {
       throw new ServiceError("storage_unavailable");
     }
@@ -487,9 +675,12 @@ export class TfIntegrationsService {
     }
   }
 
-  async #provider<T>(operation: () => T | Promise<T>): Promise<T> {
+  async #provider<T>(
+    signal: AbortSignal,
+    operation: () => T | Promise<T>,
+  ): Promise<T> {
     try {
-      return await operation();
+      return await this.#providerLimiter.run(signal, operation);
     } catch (error) {
       throw new ServiceError(providerErrorCode(error));
     }
@@ -513,6 +704,7 @@ export class TfIntegrationsService {
 export async function execute(
   service: TfIntegrationsService,
   command: TfIntegrationsCommand,
+  context?: TfIntegrationsExecutionContext,
 ): Promise<TfIntegrationsSuccessResponse | TfIntegrationsErrorResponse> {
-  return service.execute(command);
+  return service.execute(command, context);
 }

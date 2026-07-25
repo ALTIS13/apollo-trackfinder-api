@@ -377,6 +377,29 @@ describe("HttpTfIntegrationsClient", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("cancels declared-oversized and malformed 200 bodies before throwing a sanitized error", async () => {
+    const responses = [
+      new Response("{}", {
+        status: 200,
+        headers: { "content-length": String(1024 * 1024 + 1) },
+      }),
+      new Response("{", { status: 200 }),
+      new Response("{}", { status: 200 }),
+    ];
+
+    for (const response of responses) {
+      const cancel = vi.spyOn(response.body!, "cancel");
+      const gateway = client(
+        vi.fn<typeof fetch>().mockResolvedValue(response),
+      );
+
+      await expect(gateway.execute(statusCommand())).rejects.toEqual(
+        expect.objectContaining({ code: "integrations_unavailable" }),
+      );
+      expect(cancel).toHaveBeenCalledOnce();
+    }
+  });
+
   it("maps every transport failure to integrations_unavailable without leaking command values", async () => {
     const tokenCanary = "yandex-secret-token-canary";
     const codeCanary = "spotify-code-canary";

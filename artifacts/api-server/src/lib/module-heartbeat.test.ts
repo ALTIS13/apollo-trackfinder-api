@@ -3,6 +3,7 @@ import {
   createModuleHeartbeatSignature,
   moduleHeartbeatPayloadSchema,
   ModuleHeartbeatService,
+  assertRequiredModuleHeartbeatKeys,
   parseModuleHeartbeatKeys,
 } from "./module-heartbeat";
 
@@ -555,6 +556,53 @@ describe("ModuleHeartbeatService", () => {
     });
   });
 
+  it("recovers account-integrations only after a new valid heartbeat following 90-second expiry", () => {
+    const state = createService();
+    const first = createHeartbeatInput({
+      moduleId: "account-integrations",
+      secret: ACCOUNT_INTEGRATIONS_SECRET,
+      nonce: nonceFor("account-first"),
+    });
+    expect(state.service.ingest(first)).toMatchObject({ kind: "accepted" });
+    expect(
+      state.service
+        .snapshot()
+        .find(
+          (observation) =>
+            observation.moduleId === "account-integrations",
+        ),
+    ).toMatchObject({ status: "healthy", requestsPerMinute: 42 });
+
+    state.advanceBy(90_001);
+    expect(
+      state.service
+        .snapshot()
+        .find(
+          (observation) =>
+            observation.moduleId === "account-integrations",
+        ),
+    ).toMatchObject({ status: "unknown", requestsPerMinute: 0 });
+
+    expect(
+      state.service.ingest(
+        createHeartbeatInput({
+          moduleId: "account-integrations",
+          secret: ACCOUNT_INTEGRATIONS_SECRET,
+          timestamp: timestampFor(state.wallNow),
+          nonce: nonceFor("account-recovery"),
+        }),
+      ),
+    ).toMatchObject({ kind: "accepted" });
+    expect(
+      state.service
+        .snapshot()
+        .find(
+          (observation) =>
+            observation.moduleId === "account-integrations",
+        ),
+    ).toMatchObject({ status: "healthy", requestsPerMinute: 42 });
+  });
+
   it("uses an injected wall clock as the elapsed fallback when monotonic time is omitted", () => {
     let now = INITIAL_NOW;
     const service = new ModuleHeartbeatService({
@@ -710,5 +758,37 @@ describe("parseModuleHeartbeatKeys", () => {
     ["long secret", JSON.stringify({ "search-media": "s".repeat(513) })],
   ])("returns no keys for %s", (_label, raw) => {
     expect(parseModuleHeartbeatKeys(raw)).toEqual(new Map());
+  });
+
+  it("requires both enrolled external module keys without leaking either value", () => {
+    expect(() =>
+      assertRequiredModuleHeartbeatKeys(
+        new Map([
+          ["search-media", SEARCH_MEDIA_SECRET],
+          ["account-integrations", ACCOUNT_INTEGRATIONS_SECRET],
+        ]),
+      ),
+    ).not.toThrow();
+
+    for (const keys of [
+      new Map([["search-media", SEARCH_MEDIA_SECRET]]),
+      new Map([
+        ["search-media", SEARCH_MEDIA_SECRET],
+        ["account-integrations", ""],
+      ]),
+      new Map<string, string>(),
+    ]) {
+      let caught: unknown;
+      try {
+        assertRequiredModuleHeartbeatKeys(keys);
+      } catch (error) {
+        caught = error;
+      }
+      expect(String(caught)).toBe("Error: invalid runtime configuration");
+      expect(String(caught)).not.toContain(SEARCH_MEDIA_SECRET);
+      expect(String(caught)).not.toContain(
+        ACCOUNT_INTEGRATIONS_SECRET,
+      );
+    }
   });
 });

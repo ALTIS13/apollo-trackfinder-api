@@ -48,6 +48,11 @@ export const INTEGRATIONS_MIGRATION_MANIFEST: readonly MigrationManifestEntry[] 
       checksum:
         "5cb5900b1ab737b6a0695eff13b4211e9d04d6c00eb1126d3941a60d47ffb070",
     },
+    {
+      name: "0005_provider_account_generation.sql",
+      checksum:
+        "6b40b55e21d0222d383127b48e5a3f14e1a856a1f8dd7c2174e38d74b0825f27",
+    },
   ]);
 
 function migrationContractError(

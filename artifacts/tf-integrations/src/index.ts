@@ -107,6 +107,7 @@ export async function startTfIntegrationsRuntime(
     | ReturnType<ReturnType<typeof createTfIntegrationsApp>["listen"]>
     | undefined;
   let heartbeat: TfIntegrationsHeartbeatHandle | undefined;
+  const commandAbortController = new AbortController();
 
   try {
     const repository = dependencies.createRepository(pool);
@@ -125,6 +126,7 @@ export async function startTfIntegrationsRuntime(
         secret: config.internalAuthSecret,
       }),
       readiness,
+      shutdownSignal: commandAbortController.signal,
     });
     listener = app.listen(config.port);
     await new Promise<void>((resolve, reject) => {
@@ -141,6 +143,7 @@ export async function startTfIntegrationsRuntime(
       ready: () => readiness.check(),
     });
     const shutdown = createTfIntegrationsShutdown({
+      abortCommands: () => commandAbortController.abort(),
       closeListener: () => closeServer(listener!),
       heartbeat,
       closePool: () => pool.end(),
@@ -170,6 +173,7 @@ export async function startTfIntegrationsRuntime(
     process.stdout.write("TF integrations listening\n");
     return { readiness, shutdown };
   } catch (error) {
+    commandAbortController.abort();
     try {
       if (listener !== undefined) await closeServer(listener);
     } finally {

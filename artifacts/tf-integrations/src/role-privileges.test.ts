@@ -51,4 +51,22 @@ describe("tf-integrations runtime database privileges", () => {
       /grant\s+(?:insert|update|delete|truncate)[^;]*schema_migrations/i,
     );
   });
+
+  it("bounds role password files and every PostgreSQL bootstrap wait", async () => {
+    const roleInit = await readFile(roleInitPath, "utf8");
+
+    expect(roleInit).toMatch(
+      /read_secret\(\)[\s\S]*wc -c[\s\S]*-lt "\$minimum"[\s\S]*-gt "\$maximum"/i,
+    );
+    expect(roleInit).toMatch(
+      /read_secret \/run\/secrets\/tf_integrations_migrator_password 1 512/i,
+    );
+    expect(roleInit).toMatch(
+      /read_secret \/run\/secrets\/tf_integrations_runtime_password 1 512/i,
+    );
+    expect(roleInit).toMatch(/PGCONNECT_TIMEOUT=10/i);
+    expect(roleInit).toMatch(/statement_timeout=30000/i);
+    expect(roleInit).toMatch(/lock_timeout=5000/i);
+    expect(roleInit).not.toMatch(/cat "\$1"\s*\n\s*if \[ -z/i);
+  });
 });

@@ -37,6 +37,10 @@ const CANONICAL_HEARTBEAT_PATH_PATTERN =
 const DUMMY_SECRET = randomBytes(32).toString("hex");
 
 const heartbeatKeysSchema = z.record(z.string(), z.string().min(32).max(512));
+const REQUIRED_EXTERNAL_MODULE_IDS = [
+  "search-media",
+  "account-integrations",
+] as const;
 
 export interface ModuleHeartbeatIngestInput {
   moduleId: string;
@@ -110,6 +114,23 @@ export function parseModuleHeartbeatKeys(
     return new Map(entries);
   } catch {
     return new Map();
+  }
+}
+
+export function assertRequiredModuleHeartbeatKeys(
+  keys: ReadonlyMap<string, string>,
+): void {
+  if (
+    REQUIRED_EXTERNAL_MODULE_IDS.some((moduleId) => {
+      const secret = keys.get(moduleId);
+      return (
+        typeof secret !== "string" ||
+        secret.length < 32 ||
+        secret.length > 512
+      );
+    })
+  ) {
+    throw new Error("invalid runtime configuration");
   }
 }
 

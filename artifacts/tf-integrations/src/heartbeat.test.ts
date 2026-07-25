@@ -104,9 +104,42 @@ describe("TF integrations heartbeat and shutdown", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("stops heartbeat timers and closes the pool during graceful shutdown", async () => {
+  it("rechecks stopped after awaited readiness and sends no late shutdown heartbeat", async () => {
+    let releaseReadiness: ((ready: boolean) => void) | undefined;
+    let readinessStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      readinessStarted = resolve;
+    });
+    const fetch = vi.fn<typeof globalThis.fetch>(
+      async () => new Response("", { status: 202 }),
+    );
+    const heartbeat = startTfIntegrationsHeartbeat({
+      apiOrigin: "https://api.example.test",
+      secret: heartbeatSecret,
+      version: "build-4",
+      ready: async () => {
+        readinessStarted?.();
+        return new Promise<boolean>((resolve) => {
+          releaseReadiness = resolve;
+        });
+      },
+      fetch,
+    });
+
+    await started;
+    const stopping = heartbeat.stop();
+    releaseReadiness?.(true);
+    await stopping;
+
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("aborts commands before stopping listener, heartbeat, and pool during graceful shutdown", async () => {
     const order: string[] = [];
     const shutdown = createTfIntegrationsShutdown({
+      abortCommands() {
+        order.push("commands");
+      },
       closeListener: async () => {
         order.push("listener");
       },
@@ -121,6 +154,6 @@ describe("TF integrations heartbeat and shutdown", () => {
     });
 
     await Promise.all([shutdown(), shutdown()]);
-    expect(order).toEqual(["listener", "heartbeat", "pool"]);
+    expect(order).toEqual(["commands", "listener", "heartbeat", "pool"]);
   });
 });

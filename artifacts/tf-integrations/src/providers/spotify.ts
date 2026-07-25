@@ -4,6 +4,12 @@ import type {
 } from "@workspace/tf-integrations-contract";
 
 import type { SpotifySecret } from "../token-keyring.js";
+import {
+  ProviderHttpFailure,
+  cancelProviderResponseBody,
+  fetchProviderResponse,
+  readBoundedProviderJson,
+} from "./provider-http.js";
 
 const ACCOUNTS_ORIGIN = "https://accounts.spotify.com";
 const API_ORIGIN = "https://api.spotify.com";
@@ -454,6 +460,7 @@ export class SpotifyProvider {
   async exchangeCode(input: {
     readonly code: string;
     readonly callbackUri: string;
+    readonly signal?: AbortSignal;
   }): Promise<SpotifyExchangeResult> {
     assertTextInput(input.code, MAX_TOKEN_LENGTH);
     if (input.callbackUri !== this.#callbackUri) {
@@ -476,6 +483,7 @@ export class SpotifyProvider {
           client_secret: this.#clientSecret,
         }),
       },
+      input.signal,
     );
     const tokens = tokenResponse(value, true);
     const account = accountProfile(
@@ -483,6 +491,7 @@ export class SpotifyProvider {
         "account.profile",
         tokens.accessToken,
         new URL(`${API_ROOT}/me`),
+        input.signal,
       ),
     );
     return {
@@ -497,7 +506,10 @@ export class SpotifyProvider {
     };
   }
 
-  async refresh(secret: SpotifySecret): Promise<SpotifyRefreshResult> {
+  async refresh(
+    secret: SpotifySecret,
+    context: { readonly signal?: AbortSignal } = {},
+  ): Promise<SpotifyRefreshResult> {
     assertTokenInput(secret.accessToken);
     assertTokenInput(secret.refreshToken);
     const expiresAt = Date.parse(secret.expiresAt);
@@ -508,19 +520,24 @@ export class SpotifyProvider {
       return { refreshed: false, secret };
     }
 
-    const value = await this.#requestJson("oauth.refresh", TOKEN_ENDPOINT, {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/x-www-form-urlencoded",
+    const value = await this.#requestJson(
+      "oauth.refresh",
+      TOKEN_ENDPOINT,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: secret.refreshToken,
+          client_id: this.#clientId,
+          client_secret: this.#clientSecret,
+        }),
       },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: secret.refreshToken,
-        client_id: this.#clientId,
-        client_secret: this.#clientSecret,
-      }),
-    });
+      context.signal,
+    );
     const tokens = tokenResponse(value, false);
     return {
       refreshed: true,
@@ -538,6 +555,7 @@ export class SpotifyProvider {
     readonly accessToken: string;
     readonly offset: number;
     readonly limit: number;
+    readonly signal?: AbortSignal;
   }): Promise<TracksPage> {
     assertTokenInput(input.accessToken);
     assertPagination(input.offset, input.limit);
@@ -547,7 +565,12 @@ export class SpotifyProvider {
       limit: String(input.limit),
     }).toString();
     return trackPage(
-      await this.#apiGet("liked.list", input.accessToken, url),
+      await this.#apiGet(
+        "liked.list",
+        input.accessToken,
+        url,
+        input.signal,
+      ),
       input.offset,
       input.limit,
     );
@@ -555,12 +578,18 @@ export class SpotifyProvider {
 
   async playlists(input: {
     readonly accessToken: string;
+    readonly signal?: AbortSignal;
   }): Promise<SpotifyPlaylistsResult> {
     assertTokenInput(input.accessToken);
     const url = new URL(`${API_ROOT}/me/playlists`);
     url.search = new URLSearchParams({ limit: String(MAX_ITEMS) }).toString();
     return playlistsResult(
-      await this.#apiGet("playlists.list", input.accessToken, url),
+      await this.#apiGet(
+        "playlists.list",
+        input.accessToken,
+        url,
+        input.signal,
+      ),
     );
   }
 
@@ -569,6 +598,7 @@ export class SpotifyProvider {
     readonly playlistId: string;
     readonly offset: number;
     readonly limit: number;
+    readonly signal?: AbortSignal;
   }): Promise<TracksPage> {
     assertTokenInput(input.accessToken);
     assertTextInput(input.playlistId, MAX_IDENTIFIER_LENGTH);
@@ -585,7 +615,12 @@ export class SpotifyProvider {
       fields: PLAYLIST_FIELDS,
     }).toString();
     return trackPage(
-      await this.#apiGet("playlist-tracks.list", input.accessToken, url),
+      await this.#apiGet(
+        "playlist-tracks.list",
+        input.accessToken,
+        url,
+        input.signal,
+      ),
       input.offset,
       input.limit,
     );
@@ -594,6 +629,7 @@ export class SpotifyProvider {
   async topTracks(input: {
     readonly accessToken: string;
     readonly timeRange: "short_term" | "medium_term" | "long_term";
+    readonly signal?: AbortSignal;
   }): Promise<SpotifyTracksResult> {
     assertTokenInput(input.accessToken);
     if (
@@ -609,7 +645,12 @@ export class SpotifyProvider {
       time_range: input.timeRange,
     }).toString();
     return topTracksResult(
-      await this.#apiGet("top-tracks.list", input.accessToken, url),
+      await this.#apiGet(
+        "top-tracks.list",
+        input.accessToken,
+        url,
+        input.signal,
+      ),
     );
   }
 
@@ -617,28 +658,36 @@ export class SpotifyProvider {
     operation: SpotifyProviderOperation,
     accessToken: string,
     url: URL,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     return this.#requestJson(operation, url, {
       headers: {
         Accept: "application/json",
         Authorization: `Bearer ${accessToken}`,
       },
-    });
+    }, signal);
   }
 
   async #requestJson(
     operation: SpotifyProviderOperation,
     url: URL | string,
     init: RequestInit,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     let response: Response;
     try {
-      response = await this.#fetch(url, { ...init, redirect: "error" });
+      response = await fetchProviderResponse(
+        this.#fetch,
+        url,
+        { ...init, redirect: "error" },
+        signal,
+      );
     } catch {
       this.#log("provider_unavailable", operation);
       throw new ProviderError("provider_unavailable");
     }
     if (!response.ok) {
+      cancelProviderResponseBody(response);
       const code =
         response.status >= 400 && response.status < 500
           ? "provider_rejected"
@@ -647,10 +696,14 @@ export class SpotifyProvider {
       throw new ProviderError(code);
     }
     try {
-      return (await response.json()) as unknown;
-    } catch {
-      this.#log("invalid_provider_response", operation);
-      throw new ProviderError("invalid_provider_response");
+      return await readBoundedProviderJson(response, signal);
+    } catch (error) {
+      const code =
+        error instanceof ProviderHttpFailure && error.kind === "aborted"
+          ? "provider_unavailable"
+          : "invalid_provider_response";
+      this.#log(code, operation);
+      throw new ProviderError(code);
     }
   }
 

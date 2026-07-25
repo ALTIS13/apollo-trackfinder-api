@@ -14,6 +14,7 @@ export {
   type Provider,
   type ProviderAccountRecord,
   type ProviderAccountRepository,
+  type ProviderAccountWrite,
 } from "./repository.js";
 
 export type IntegrationsPoolProfile = "runtime" | "migration";

@@ -204,6 +204,15 @@ describe("createAdminDashboardSnapshot", () => {
       snapshot.modules.find((module) => module.id === "public-web")?.status,
     ).toBe("unknown");
     expect(
+      snapshot.modules.find(
+        (module) => module.id === "account-integrations",
+      )?.status,
+    ).toBe("unknown");
+    expect(
+      snapshot.modules.find((module) => module.id === "search-media")
+        ?.status,
+    ).toBe("unknown");
+    expect(
       snapshot.modules.find((module) => module.id === "public-web")
         ?.lastDeploymentAt,
     ).toBeUndefined();
@@ -303,7 +312,7 @@ describe("createAdminDashboardSnapshot", () => {
     ).toMatchObject({ status: "warning", requestsPerMinute: 77 });
     expect(
       snapshot.metrics.find((metric) => metric.id === "active-modules")?.value,
-    ).toBe("6");
+    ).toBe("5");
   });
 
   it("keeps managed missing or stale state unknown without fabricated heartbeat data", async () => {

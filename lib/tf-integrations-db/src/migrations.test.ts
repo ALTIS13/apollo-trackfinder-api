@@ -117,6 +117,7 @@ describe("integrations migrations", () => {
         "0002_canonical_token_envelope.sql",
         "0003_yandex_provider_login.sql",
         "0004_runtime_privileges.sql",
+        "0005_provider_account_generation.sql",
       ],
       alreadyApplied: ["0001_integrations.sql"],
     });
@@ -130,6 +131,9 @@ describe("integrations migrations", () => {
       true,
     );
     expect(pool.client.history.has("0004_runtime_privileges.sql")).toBe(true);
+    expect(pool.client.history.has("0005_provider_account_generation.sql")).toBe(
+      true,
+    );
 
     pool.client.history.set(
       "0001_integrations.sql",

@@ -1860,11 +1860,16 @@ describe("TF deployment identity contract", () => {
     const heartbeatMap = JSON.stringify({
       "core-api": "c".repeat(32),
       "search-media": heartbeatSecret,
+      "account-integrations": "a".repeat(32),
     });
     const result = await runApiStartup({ heartbeatKeys: heartbeatMap });
 
     expect(JSON.parse(result.stdout)).toEqual({
-      heartbeatModules: ["core-api", "search-media"],
+      heartbeatModules: [
+        "core-api",
+        "search-media",
+        "account-integrations",
+      ],
       databaseHost: "db",
       databaseUser: "trackfinder",
     });
@@ -1905,7 +1910,18 @@ describe("TF deployment identity contract", () => {
     ["null", "null", undefined],
     [
       "missing search-media",
-      JSON.stringify({ "core-api": "c".repeat(32) }),
+      JSON.stringify({
+        "core-api": "c".repeat(32),
+        "account-integrations": "a".repeat(32),
+      }),
+      undefined,
+    ],
+    [
+      "stale search-only upgrade map",
+      JSON.stringify({
+        "core-api": "c".repeat(32),
+        "search-media": "h".repeat(32),
+      }),
       undefined,
     ],
     [

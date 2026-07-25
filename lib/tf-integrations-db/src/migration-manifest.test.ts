@@ -92,6 +92,7 @@ describe("integrations migration manifest", () => {
       "0002_canonical_token_envelope.sql",
       "0003_yandex_provider_login.sql",
       "0004_runtime_privileges.sql",
+      "0005_provider_account_generation.sql",
     ]);
 
     const providerLoginMigration = await readFile(
@@ -106,6 +107,23 @@ describe("integrations migration manifest", () => {
     );
     expect(providerLoginMigration).toMatch(
       /provider = 'yandex'[\s\S]*provider_login is null[\s\S]*char_length\(btrim\(provider_login\)\) between 1 and 500/i,
+    );
+
+    const generationMigration = await readFile(
+      new URL(
+        "0005_provider_account_generation.sql",
+        migrationDirectory,
+      ),
+      "utf8",
+    );
+    expect(generationMigration).toMatch(
+      /add column generation uuid not null default gen_random_uuid\(\)/i,
+    );
+    expect(generationMigration).toMatch(
+      /alter column generation drop default/i,
+    );
+    expect(generationMigration).not.toMatch(
+      /\b(?:access_token|refresh_token|oauth_token)\b/i,
     );
   });
 });

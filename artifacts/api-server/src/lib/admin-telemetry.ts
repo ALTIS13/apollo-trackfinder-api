@@ -210,8 +210,8 @@ export async function createAdminDashboardSnapshot(
   const modules: ServiceModule[] = [
     ["public-web", "Public Web", "unknown", "unknown"],
     ["core-api", "Core API", "healthy", version],
-    ["account-integrations", "Account Integrations", "healthy", version],
-    ["search-media", "Search Media", "healthy", version],
+    ["account-integrations", "Account Integrations", "unknown", "unknown"],
+    ["search-media", "Search Media", "unknown", "unknown"],
     [
       "download-worker",
       "Download Worker",

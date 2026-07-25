@@ -169,6 +169,7 @@ async function readBoundedJson(response: Response): Promise<unknown> {
     (!/^\d+$/.test(contentLength) ||
       Number(contentLength) > MAX_RESPONSE_BYTES)
   ) {
+    await cancelResponseBody(response);
     throw new TfIntegrationsUnavailableError();
   }
   if (response.body === null) throw new TfIntegrationsUnavailableError();
@@ -176,21 +177,30 @@ async function readBoundedJson(response: Response): Promise<unknown> {
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > MAX_RESPONSE_BYTES) {
-      await reader.cancel();
-      throw new TfIntegrationsUnavailableError();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new TfIntegrationsUnavailableError();
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // Cancellation can retain the lock until the pending read settles.
+    }
   }
 
   const raw = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), size);
   try {
     return JSON.parse(raw.toString("utf8"));
   } catch {
+    await cancelResponseBody(response);
     throw new TfIntegrationsUnavailableError();
   }
 }
@@ -288,6 +298,7 @@ export class HttpTfIntegrationsClient implements TfIntegrationsGateway {
           parsed.accountId !== command.accountId ||
           parsed.operation !== command.operation
         ) {
+          await cancelResponseBody(response);
           throw new TfIntegrationsUnavailableError();
         }
         return parsed as ResponseFor<TCommand>;

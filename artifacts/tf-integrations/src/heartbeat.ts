@@ -22,6 +22,7 @@ export interface TfIntegrationsHeartbeatHandle {
 }
 
 export interface TfIntegrationsShutdownOptions {
+  readonly abortCommands: () => void;
   readonly closeListener: () => Promise<void>;
   readonly heartbeat: TfIntegrationsHeartbeatHandle;
   readonly closePool: () => Promise<void>;
@@ -43,7 +44,9 @@ export function startTfIntegrationsHeartbeat(
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let activeController: AbortController | undefined;
     try {
-      if (stopped || !(await options.ready())) return;
+      if (stopped) return;
+      const ready = await options.ready();
+      if (stopped || !ready) return;
       const rawBody = Buffer.from(
         JSON.stringify({
           schemaVersion: 1,
@@ -129,6 +132,7 @@ export function createTfIntegrationsShutdown(
   let shutdown: Promise<void> | undefined;
   return () => {
     shutdown ??= (async () => {
+      options.abortCommands();
       try {
         await options.closeListener();
       } finally {

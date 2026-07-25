@@ -94,4 +94,59 @@ describePostgres("integrations disposable PostgreSQL boundary", () => {
       expect.arrayContaining(["access_token", "refresh_token", "oauth_token"]),
     );
   });
+
+  it("rejects stale refresh generations after disconnect and reconnect", async () => {
+    const repository = new PostgresProviderAccountRepository(pool);
+    const accountId = randomUUID();
+    const firstEnvelope = encryptCanary(accountId, `first-${randomUUID()}`);
+    const staleEnvelope = encryptCanary(accountId, `stale-${randomUUID()}`);
+    const replacementEnvelope = encryptCanary(
+      accountId,
+      `replacement-${randomUUID()}`,
+    );
+
+    await repository.upsert({
+      accountId,
+      provider: "yandex",
+      tokenEnvelope: firstEnvelope,
+      providerUserId: "integration-user",
+      providerLogin: "integration-login",
+      displayName: "Integration User",
+    });
+    const first = await repository.get(accountId, "yandex");
+    expect(first).not.toBeNull();
+
+    await repository.delete(accountId, "yandex");
+    await expect(
+      repository.updateTokenEnvelopeIfGeneration(
+        accountId,
+        "yandex",
+        first!.generation,
+        staleEnvelope,
+      ),
+    ).resolves.toBe(false);
+    await expect(repository.get(accountId, "yandex")).resolves.toBeNull();
+
+    await repository.upsert({
+      accountId,
+      provider: "yandex",
+      tokenEnvelope: replacementEnvelope,
+      providerUserId: "replacement-user",
+      providerLogin: "replacement-login",
+      displayName: "Replacement User",
+    });
+    const replacement = await repository.get(accountId, "yandex");
+    expect(replacement?.generation).not.toBe(first!.generation);
+    await expect(
+      repository.updateTokenEnvelopeIfGeneration(
+        accountId,
+        "yandex",
+        first!.generation,
+        staleEnvelope,
+      ),
+    ).resolves.toBe(false);
+    await expect(repository.get(accountId, "yandex")).resolves.toEqual(
+      replacement,
+    );
+  });
 });
