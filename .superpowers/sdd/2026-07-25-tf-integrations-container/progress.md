@@ -27,5 +27,9 @@ Task 6: complete (commits bcb3b3c..daf663e, review clean; 1 deferred minor)
 Task 7: fix round 1/5 (3 addressed, 0 open — stale documentation contract, root/nested Compose no-env default; blocked release record replaced by green validation; commits 1ef211b..7f2cdf2)
 Task 7: fix round 2/5 (1 addressed, 0 open — immutable validated tip and exact Task 7 ranges; commits 7f2cdf2..2300775)
 Task 7: complete (commits daf663e..2300775, review clean)
+Final review: changes required (4 Important, 6 Minor at 2300775).
+Final fix wave: commits 16f6fc8..09761e4; validation 732 passed / 15 gated or skipped / 0 failed; PostgreSQL 2/2; Docker smoke 17/17; DNS 16/16; zero project residue.
+Final scoped re-review: 7 addressed, 3 open — Important: account-partitioned replay quota still consumes nonce capacity before readiness/concurrency rejection and truncates fast liked-all after 32 pages; Important: command abort/deadline does not prevent later repository mutations/commits; Minor: two current next-stage lines still name tf-integrations.
+Final review: BLOCKED — two residual load-bearing findings require an explicitly continued hardening wave before merge/push.
 Final whole-branch fix wave: 10 findings addressed, 0 open in implementation — generation CAS, account-partitioned replay, bounded/cancelable provider I/O, two-key heartbeat enrollment, exact command target, gateway body disposal, shutdown heartbeat ordering, bounded role bootstrap, meaningful at-rest assertion, and current next-stage records (commit 16f6fc8).
 Final whole-branch validation: exact implementation tip 16f6fc88e85fe919ddcb86a85333a38f3218e715; required matrix 732 passed / 15 skipped or gated / 0 failed; disposable PostgreSQL 2/2; authoritative Docker smoke 17/17; DNS 16/16; exact zero residue; no remote infrastructure mutation.
