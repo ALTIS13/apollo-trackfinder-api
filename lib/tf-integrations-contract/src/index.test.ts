@@ -36,6 +36,7 @@ const yandexAccount = {
   connected: true,
   account: {
     id: "yandex-user-1",
+    login: "yandex-user",
     displayName: "Yandex User",
   },
 } as const;
@@ -277,6 +278,60 @@ describe("tf integrations contract", () => {
       tfIntegrationsErrorResponseSchema.safeParse({
         ...error,
         providerAccountId: accountId,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires a bounded Yandex-only login on connected account results", () => {
+    const yandexResponse = {
+      schemaVersion: 1,
+      requestId,
+      accountId,
+      operation: "yandex.status",
+      result: { account: yandexAccount },
+    } as const;
+    const spotifyResponse = {
+      schemaVersion: 1,
+      requestId,
+      accountId,
+      operation: "spotify.status",
+      result: { account: spotifyAccount },
+    } as const;
+
+    expect(tfIntegrationsSuccessResponseSchema.parse(yandexResponse)).toEqual(
+      yandexResponse,
+    );
+    for (const login of ["", " ".repeat(3), "x".repeat(501)]) {
+      expect(
+        tfIntegrationsSuccessResponseSchema.safeParse({
+          ...yandexResponse,
+          result: {
+            account: {
+              ...yandexAccount,
+              account: { ...yandexAccount.account, login },
+            },
+          },
+        }).success,
+      ).toBe(false);
+    }
+    const { login: _login, ...yandexWithoutLogin } = yandexAccount.account;
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse({
+        ...yandexResponse,
+        result: {
+          account: { ...yandexAccount, account: yandexWithoutLogin },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse({
+        ...spotifyResponse,
+        result: {
+          account: {
+            ...spotifyAccount,
+            account: { ...spotifyAccount.account, login: "spotify-login" },
+          },
+        },
       }).success,
     ).toBe(false);
   });

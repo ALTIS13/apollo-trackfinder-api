@@ -109,6 +109,7 @@ describe("YandexProvider", () => {
     await expect(provider.validateToken({ oauthToken: token })).resolves.toEqual(
       {
         id: "12345",
+        login: "yandex-login",
         displayName: "Full Name",
       },
     );
@@ -322,6 +323,23 @@ describe("YandexProvider", () => {
     await expect(
       malformedAccount.validateToken({ oauthToken: token }),
     ).rejects.toMatchObject({ code: "invalid_provider_response" });
+
+    for (const login of [" ", "x".repeat(501)]) {
+      const malformedLogin = makeProvider([
+        jsonResponse({
+          result: {
+            account: {
+              uid: 12345,
+              login,
+              displayName: "Display Name",
+            },
+          },
+        }),
+      ]).provider;
+      await expect(
+        malformedLogin.validateToken({ oauthToken: token }),
+      ).rejects.toMatchObject({ code: "invalid_provider_response" });
+    }
   });
 
   it("rejects a malformed liked-detail response independently", async () => {

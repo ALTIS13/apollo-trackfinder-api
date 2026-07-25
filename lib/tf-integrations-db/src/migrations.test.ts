@@ -106,20 +106,26 @@ afterEach(async () => {
 });
 
 describe("integrations migrations", () => {
-  it("accepts original 0001 history, applies 0002, and still rejects checksum drift", async () => {
+  it("accepts original history and applies bounded public provider login metadata", async () => {
     const originalChecksum =
       "6b21e525b90612e6aef5bf29263294824b3084343cb17f5b2910651951a4af1a";
     const pool = new MigrationPoolDouble();
     pool.client.history.set("0001_integrations.sql", originalChecksum);
 
     await expect(runIntegrationsMigrations(asPool(pool))).resolves.toEqual({
-      applied: ["0002_canonical_token_envelope.sql"],
+      applied: [
+        "0002_canonical_token_envelope.sql",
+        "0003_yandex_provider_login.sql",
+      ],
       alreadyApplied: ["0001_integrations.sql"],
     });
     expect(pool.client.history.get("0001_integrations.sql")).toBe(
       originalChecksum,
     );
     expect(pool.client.history.has("0002_canonical_token_envelope.sql")).toBe(
+      true,
+    );
+    expect(pool.client.history.has("0003_yandex_provider_login.sql")).toBe(
       true,
     );
 

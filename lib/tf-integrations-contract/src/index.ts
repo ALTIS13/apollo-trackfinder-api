@@ -313,17 +313,18 @@ const yandexPlaylistObjectSchema = z
   })
   .strict();
 
-const connectedAccountSchema = (provider: "spotify" | "yandex") =>
+const connectedAccountSchema = <
+  TProvider extends "spotify" | "yandex",
+  TAccount extends z.ZodTypeAny,
+>(
+  provider: TProvider,
+  account: TAccount,
+) =>
   z
     .object({
       provider: z.literal(provider),
       connected: z.literal(true),
-      account: z
-        .object({
-          id: identifierSchema,
-          displayName: boundedTextSchema(500),
-        })
-        .strict(),
+      account,
     })
     .strict();
 
@@ -332,8 +333,25 @@ const disconnectedAccountSchema = (provider: "spotify" | "yandex") =>
     .object({ provider: z.literal(provider), connected: z.literal(false) })
     .strict();
 
-const spotifyConnectedAccountSchema = connectedAccountSchema("spotify");
-const yandexConnectedAccountSchema = connectedAccountSchema("yandex");
+const spotifyConnectedAccountSchema = connectedAccountSchema(
+  "spotify",
+  z
+    .object({
+      id: identifierSchema,
+      displayName: boundedTextSchema(500),
+    })
+    .strict(),
+);
+const yandexConnectedAccountSchema = connectedAccountSchema(
+  "yandex",
+  z
+    .object({
+      id: identifierSchema,
+      login: boundedTextSchema(500),
+      displayName: boundedTextSchema(500),
+    })
+    .strict(),
+);
 const spotifyAccountSummaryObjectSchema = z.union([
   spotifyConnectedAccountSchema,
   disconnectedAccountSchema("spotify"),

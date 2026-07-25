@@ -52,6 +52,7 @@ export class YandexProviderError extends Error {
 
 export interface YandexAccount {
   readonly id: string;
+  readonly login: string;
   readonly displayName: string;
 }
 
@@ -194,6 +195,7 @@ function accountResult(value: unknown): YandexAccount {
   }
   return {
     id: String(uid),
+    login,
     displayName: fullName ?? displayName ?? login,
   };
 }

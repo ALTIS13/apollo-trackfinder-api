@@ -75,7 +75,9 @@ describe("PostgresProviderAccountRepository", () => {
     expect(query.text).toMatch(
       /insert into apollo_tf_integrations\.provider_accounts/i,
     );
-    expect(query.text).toMatch(/values \(\$1, \$2, \$3::jsonb, \$4, \$5\)/i);
+    expect(query.text).toMatch(
+      /values \(\$1, \$2, \$3::jsonb, \$4, \$5, \$6\)/i,
+    );
     expect(query.text).not.toContain(accountId);
     expect(query.text).not.toContain(stored.providerUserId);
     expect(query.text).not.toContain(stored.displayName);
@@ -86,12 +88,16 @@ describe("PostgresProviderAccountRepository", () => {
       JSON.stringify(stored.tokenEnvelope),
       stored.providerUserId,
       stored.displayName,
+      null,
     ]);
   });
 
   it("maps one canonical account-provider row and updates metadata atomically", async () => {
     const pool = new RepositoryPoolDouble();
-    const stored = record({ provider: "yandex" });
+    const stored = {
+      ...record({ provider: "yandex" }),
+      providerLogin: "yandex-user",
+    } as ProviderAccountRecord;
     pool.rows = [
       {
         account_id: stored.accountId,
@@ -99,6 +105,7 @@ describe("PostgresProviderAccountRepository", () => {
         token_envelope: stored.tokenEnvelope,
         provider_user_id: stored.providerUserId,
         display_name: stored.displayName,
+        provider_login: "yandex-user",
       },
     ];
     pool.rowCount = 1;
@@ -114,11 +121,39 @@ describe("PostgresProviderAccountRepository", () => {
     pool.queries.length = 0;
     await repository(pool).upsert(stored);
     expect(pool.queries[0]?.text).toMatch(
-      /on conflict \(account_id, provider\) do update[\s\S]*token_envelope = excluded\.token_envelope[\s\S]*provider_user_id = excluded\.provider_user_id[\s\S]*display_name = excluded\.display_name[\s\S]*updated_at = now\(\)/i,
+      /on conflict \(account_id, provider\) do update[\s\S]*token_envelope = excluded\.token_envelope[\s\S]*provider_user_id = excluded\.provider_user_id[\s\S]*display_name = excluded\.display_name[\s\S]*provider_login = excluded\.provider_login[\s\S]*updated_at = now\(\)/i,
     );
     expect(pool.queries[0]?.text.match(/\b(insert|update)\b/gi)).toHaveLength(
       2,
     );
+  });
+
+  it("keeps legacy Yandex metadata without login explicit and rejects cross-provider login", async () => {
+    const pool = new RepositoryPoolDouble();
+    const legacy = record({ provider: "yandex" });
+    pool.rows = [
+      {
+        account_id: legacy.accountId,
+        provider: legacy.provider,
+        token_envelope: legacy.tokenEnvelope,
+        provider_user_id: legacy.providerUserId,
+        display_name: legacy.displayName,
+        provider_login: null,
+      },
+    ];
+
+    await expect(
+      repository(pool).get(legacy.accountId, "yandex"),
+    ).resolves.toEqual(legacy);
+    await expect(
+      repository(pool).upsert(legacy),
+    ).rejects.toMatchObject({ code: "constraint_violation" });
+    await expect(
+      repository(pool).upsert({
+        ...record(),
+        providerLogin: "spotify-login",
+      } as ProviderAccountRecord),
+    ).rejects.toMatchObject({ code: "constraint_violation" });
   });
 
   it("deletes only the requested account-provider row", async () => {

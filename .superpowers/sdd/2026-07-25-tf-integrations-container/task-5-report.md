@@ -505,3 +505,254 @@ Round 1 self-review:
 - non-200 internal response bodies are canceled before the abort deadline is
   cleared.
 - no Task 6 or deferred Minor work was started.
+
+## Fix Round 2: Preserve Distinct Yandex Login Metadata
+
+The round-two review found that Task 5 still aliased the public Yandex
+`login` field to `displayName`. The provider adapter already validated the
+upstream login, but its result type discarded that value. This fix carries the
+strictly validated provider login independently through the shared contract,
+provider adapter, public account metadata, service results, and API mapping.
+
+### 1. Contract Boundary
+
+RED:
+
+```powershell
+pnpm --dir lib/tf-integrations-contract test
+```
+
+```text
+Test Files  1 failed (1)
+Tests       1 failed | 9 passed (10)
+```
+
+The strict success-response schema rejected the new Yandex `login` field as
+unrecognized. The failing tests also required login to be nonblank and no more
+than 500 characters, and proved that Spotify connected-account results reject
+the Yandex-only field.
+
+Production change: the connected-account helper now accepts a provider-specific
+strict account schema. Yandex connected results require distinct bounded
+`id`, `login`, and `displayName` values; Spotify retains only `id` and
+`displayName`.
+
+GREEN:
+
+```text
+Test Files  1 passed (1)
+Tests       10 passed (10)
+```
+
+### 2. Yandex Provider Adapter
+
+RED:
+
+```powershell
+pnpm --dir artifacts/tf-integrations test -- src/providers/yandex.test.ts
+```
+
+```text
+Test Files  1 failed (1)
+Tests       1 failed | 7 passed (8)
+```
+
+The adapter result omitted the independently validated provider login.
+
+Production change: the Yandex account result now includes the exact validated
+and trimmed upstream login. Existing blank and 500-character bounds remain in
+force, and a separate display name is still selected from validated
+`fullName`, `displayName`, or provider login in the adapter's established
+order.
+
+GREEN:
+
+```text
+Test Files  1 passed (1)
+Tests       8 passed (8)
+```
+
+### 3. Public Metadata Persistence
+
+RED:
+
+```powershell
+pnpm --dir lib/tf-integrations-db test -- src/repository.test.ts src/migrations.test.ts
+```
+
+```text
+Test Files  2 failed (2)
+Tests       4 failed | 11 passed (15)
+```
+
+The migration manifest had no provider-login migration, repository SQL did not
+persist the field, reads discarded it, and new Yandex writes without login
+were accepted.
+
+Production change: migration `0003_yandex_provider_login.sql` adds nullable
+`provider_login varchar(500)` public metadata with a provider-specific check.
+Spotify rows must keep it null. Yandex values, when present, must be nonblank
+and bounded to 500 characters. The column is nullable only so deployed rows
+can remain untouched; there is no backfill, fabrication, token import, or
+encrypted-envelope change. Repository writes require it for every new Yandex
+record and reject it for Spotify.
+
+GREEN:
+
+```text
+Test Files  2 passed (2)
+Tests       15 passed (15)
+```
+
+The first subsequent full database run caught an outdated manifest-order
+assertion that listed only migrations `0001` and `0002`. The test was extended
+to pin `0003`, its checksum, and its provider/bounds semantics. The complete
+database suite then passed with 18 tests passed and 1 integration test skipped.
+
+### 4. Service Result and Legacy Behavior
+
+RED:
+
+```powershell
+pnpm --dir artifacts/tf-integrations test -- src/service.test.ts
+```
+
+```text
+Test Files  1 failed (1)
+Tests       2 failed | 6 passed (8)
+```
+
+Yandex token-upsert and stored status results omitted login, and a legacy row
+without the new metadata still returned a connected success.
+
+Production change: Yandex token validation stores the exact provider login and
+returns it independently from display name. Stored Yandex status requires that
+metadata. Existing rows without login are not modified and do not fall back to
+display name or account ID; status fails closed as
+`invalid_provider_response`, which the API maps through its existing sanitized
+provider-unavailable behavior. Spotify account results remain unchanged.
+
+The first GREEN attempt exposed that returning the status promise without
+awaiting it let an asynchronous service error escape the operation sanitizer.
+Both provider status branches now await the shared status function inside the
+existing `try` boundary.
+
+GREEN:
+
+```text
+Test Files  1 passed (1)
+Tests       8 passed (8)
+```
+
+### 5. API Public Compatibility
+
+RED:
+
+```powershell
+pnpm --dir artifacts/api-server test -- src/routes/yandex.test.ts
+```
+
+```text
+Test Files  1 failed (1)
+Tests       2 failed | 4 passed (6)
+```
+
+Both connected token and status responses returned
+`login: "Yandex User"` instead of the distinct validated
+`login: "yandex-user"`.
+
+Production change: the API maps the contract-validated Yandex account login
+directly while preserving the existing response keys, statuses, display name,
+and provider user ID. It performs no provider fetch, credential handling, or
+provider-token table access.
+
+GREEN:
+
+```text
+Test Files  1 passed (1)
+Tests       6 passed (6)
+```
+
+### Round 2 Covering Focused Run
+
+```powershell
+pnpm --dir artifacts/api-server test -- src/lib/tf-integrations-client.test.ts src/routes/yandex.test.ts src/routes/spotify.test.ts src/app-auth-boundary.test.ts src/app-error.test.ts src/index.smoke.test.ts src/lib/migrate.test.ts src/build-runtime-boundary.test.ts
+```
+
+```text
+Test Files  8 passed (8)
+Tests       42 passed (42)
+```
+
+This retains Task 5 gateway correlation/limits/sanitization, public route
+compatibility, policy/CSRF zero-dispatch, account binding, OAuth-state
+ordering, startup migration ownership, and readiness-independence coverage.
+
+### Round 2 Final Verification
+
+```powershell
+pnpm install --offline --frozen-lockfile
+pnpm --dir lib/tf-integrations-contract test
+pnpm --dir lib/tf-integrations-contract typecheck
+pnpm --dir lib/tf-integrations-db test
+pnpm --dir lib/tf-integrations-db typecheck
+pnpm --dir artifacts/tf-integrations test
+pnpm --dir artifacts/tf-integrations typecheck
+pnpm --dir artifacts/tf-integrations build
+pnpm run typecheck:libs
+pnpm --dir artifacts/api-server test
+pnpm --dir artifacts/api-server typecheck
+pnpm --dir artifacts/api-server build
+rg -n -i --glob '!*.map' "spotify_tokens|yandex_tokens|oauth_token|refresh_token|spotifyTokensTable|yandexTokensTable|SPOTIFY_CLIENT_SECRET" artifacts/api-server/src artifacts/api-server/dist
+git diff --check
+```
+
+Results:
+
+- frozen offline install: passed for all 21 workspace projects;
+- integration contract: 1 file and 10 tests passed; typecheck passed;
+- integrations database: 3 files passed, 1 integration file skipped;
+  18 tests passed, 1 skipped; typecheck passed;
+- tf-integrations: 10 files and 58 tests passed; typecheck and production
+  build passed;
+- API: 28 files passed, 379 tests passed, 2 skipped; typecheck and production
+  build passed;
+- expanded API source/dist provider-token, token-column, token-store alias, and
+  provider-client-secret scan: no matches;
+- direct Spotify/Yandex route provider-fetch, provider API endpoint, and
+  token-store scan: no matches;
+- Task 6 deployment/infra and deferred Minor changed-file scan: no files;
+- diff whitespace/error check: passed.
+
+The first API typecheck used stale project-reference declarations from before
+the contract extension and correctly rejected access to `account.login`.
+`pnpm run typecheck:libs` rebuilt the committed contract declarations; the API
+then typechecked and built against the Yandex-specific field. No generated
+declaration output is tracked by this fix.
+
+Two initial eight-worker full API runs ended with a Vitest fork exit after
+otherwise passing test files. A diagnostic one-worker full run completed all
+379 tests, and the final unmodified `pnpm --dir artifacts/api-server test`
+command subsequently passed all 28 files at its configured eight workers. No
+test timeout, worker configuration, `beforeAll` budget, or deferred test file
+was changed.
+
+Round 2 self-review:
+
+- Yandex login and display name remain independently validated values from the
+  provider through token-upsert, storage, status, gateway validation, and both
+  public connected response shapes.
+- Yandex login is non-secret public metadata; encrypted token envelope
+  persistence and token-vault behavior are unchanged.
+- the shared success schema and repository reject Yandex-only login metadata
+  on Spotify.
+- migration `0003` is additive and nullable for deployed compatibility; it
+  performs no backfill, import, update, delete, or drop.
+- legacy Yandex rows without login remain untouched and status fails closed
+  through the sanitized provider-unavailable path. Display name and account ID
+  are never used as semantic fallback.
+- the API still performs no direct provider request and owns no provider
+  credential or provider-token table runtime.
+- Task 5 policy/CSRF/account/OAuth ordering, readiness independence, and public
+  response keys/statuses are unchanged.
+- no Task 6 or deferred Minor work was started.

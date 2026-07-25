@@ -65,6 +65,7 @@ describePostgres("integrations disposable PostgreSQL boundary", () => {
       provider: "yandex",
       tokenEnvelope: encryptCanary(accountId, plaintextCanary),
       providerUserId: "integration-user",
+      providerLogin: "integration-login",
       displayName: "Integration User",
     });
 
@@ -72,6 +73,7 @@ describePostgres("integrations disposable PostgreSQL boundary", () => {
       accountId,
       provider: "yandex",
       providerUserId: "integration-user",
+      providerLogin: "integration-login",
       displayName: "Integration User",
     });
 

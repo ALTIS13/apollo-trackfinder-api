@@ -127,7 +127,7 @@ export function createYandexRouter(
       response.json({
         ok: true,
         displayName: result.result.account.account.displayName,
-        login: result.result.account.account.displayName,
+        login: result.result.account.account.login,
         userId: result.result.account.account.id,
       });
     } catch {
@@ -153,7 +153,7 @@ export function createYandexRouter(
       response.json({
         connected: true,
         displayName: result.result.account.account.displayName,
-        login: result.result.account.account.displayName,
+        login: result.result.account.account.login,
         userId: result.result.account.account.id,
       });
     } catch (error) {

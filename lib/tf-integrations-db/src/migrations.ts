@@ -38,6 +38,11 @@ export const INTEGRATIONS_MIGRATION_MANIFEST: readonly MigrationManifestEntry[] 
       checksum:
         "0547c703054892db8b23119c730581ab89477ff3922216784f469cedd6444f88",
     },
+    {
+      name: "0003_yandex_provider_login.sql",
+      checksum:
+        "b432377566f927ebf1117cb092aa84748a854da96f169ec41ec56b69391acab0",
+    },
   ]);
 
 function migrationContractError(

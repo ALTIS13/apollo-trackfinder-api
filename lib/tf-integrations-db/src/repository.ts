@@ -23,6 +23,7 @@ export interface ProviderAccountRecord {
   readonly tokenEnvelope: EncryptedTokenEnvelopeV1;
   readonly providerUserId: string;
   readonly displayName: string;
+  readonly providerLogin?: string;
 }
 
 export interface ProviderAccountRepository {
@@ -166,12 +167,24 @@ function validateRecord(record: ProviderAccountRecord): ProviderAccountRecord {
   if (!isPlainObject(record)) {
     throw storageError("constraint_violation");
   }
+  const provider = validateProvider(record.provider);
+  const providerLogin =
+    record.providerLogin === undefined
+      ? undefined
+      : validateMetadata(record.providerLogin, 500);
+  if (
+    (provider === "yandex" && providerLogin === undefined) ||
+    (provider === "spotify" && providerLogin !== undefined)
+  ) {
+    throw storageError("constraint_violation");
+  }
   return Object.freeze({
     accountId: validateAccountId(record.accountId),
-    provider: validateProvider(record.provider),
+    provider,
     tokenEnvelope: validateEnvelope(record.tokenEnvelope),
     providerUserId: validateMetadata(record.providerUserId, 512),
     displayName: validateMetadata(record.displayName, 500),
+    ...(providerLogin === undefined ? {} : { providerLogin }),
   });
 }
 
@@ -181,6 +194,7 @@ interface ProviderAccountRow extends QueryResultRow {
   token_envelope: unknown;
   provider_user_id: unknown;
   display_name: unknown;
+  provider_login: unknown;
 }
 
 function mapRow(row: ProviderAccountRow): ProviderAccountRecord {
@@ -189,12 +203,21 @@ function mapRow(row: ProviderAccountRow): ProviderAccountRecord {
       typeof row.token_envelope === "string"
         ? (JSON.parse(row.token_envelope) as unknown)
         : row.token_envelope;
+    const provider = validateProvider(row.provider);
+    const providerLogin =
+      row.provider_login === null || row.provider_login === undefined
+        ? undefined
+        : validateMetadata(row.provider_login, 500);
+    if (provider === "spotify" && providerLogin !== undefined) {
+      throw storageError("storage_unavailable");
+    }
     return Object.freeze({
       accountId: validateAccountId(row.account_id),
-      provider: validateProvider(row.provider),
+      provider,
       tokenEnvelope: validateEnvelope(parsedEnvelope),
       providerUserId: validateMetadata(row.provider_user_id, 512),
       displayName: validateMetadata(row.display_name, 500),
+      ...(providerLogin === undefined ? {} : { providerLogin }),
     });
   } catch {
     throw storageError("storage_unavailable");
@@ -218,7 +241,7 @@ export class PostgresProviderAccountRepository implements ProviderAccountReposit
       const result = await this.#pool.query<ProviderAccountRow>(
         `
           select account_id, provider, token_envelope,
-                 provider_user_id, display_name
+                 provider_user_id, display_name, provider_login
           from apollo_tf_integrations.provider_accounts
           where account_id = $1 and provider = $2
         `,
@@ -247,12 +270,13 @@ export class PostgresProviderAccountRepository implements ProviderAccountReposit
         `
           insert into apollo_tf_integrations.provider_accounts
             (account_id, provider, token_envelope,
-             provider_user_id, display_name)
-          values ($1, $2, $3::jsonb, $4, $5)
+             provider_user_id, display_name, provider_login)
+          values ($1, $2, $3::jsonb, $4, $5, $6)
           on conflict (account_id, provider) do update
           set token_envelope = excluded.token_envelope,
               provider_user_id = excluded.provider_user_id,
               display_name = excluded.display_name,
+              provider_login = excluded.provider_login,
               updated_at = now()
         `,
         [
@@ -261,6 +285,7 @@ export class PostgresProviderAccountRepository implements ProviderAccountReposit
           JSON.stringify(validated.tokenEnvelope),
           validated.providerUserId,
           validated.displayName,
+          validated.providerLogin ?? null,
         ],
       );
     } catch (error) {

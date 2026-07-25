@@ -151,7 +151,7 @@ export class TfIntegrationsService {
             this.#spotify.exchangeCode(command.input),
           );
           const response = this.#success(command, {
-            account: this.#connectedAccount("spotify", exchange.account),
+            account: this.#connectedSpotifyAccount(exchange.account),
           });
           const tokenEnvelope = this.#encryptSpotify(
             command.accountId,
@@ -168,7 +168,7 @@ export class TfIntegrationsService {
         }
 
         case "spotify.status":
-          return this.#status(command, "spotify");
+          return await this.#status(command, "spotify");
 
         case "spotify.disconnect":
           await this.#delete(command.accountId, "spotify");
@@ -220,7 +220,7 @@ export class TfIntegrationsService {
             this.#yandex.validateToken({ oauthToken: command.input.token }),
           );
           const response = this.#success(command, {
-            account: this.#connectedAccount("yandex", account),
+            account: this.#connectedYandexAccount(account),
           });
           const tokenEnvelope = this.#encryptYandex(command.accountId, {
             oauthToken: command.input.token,
@@ -231,12 +231,13 @@ export class TfIntegrationsService {
             tokenEnvelope,
             providerUserId: account.id,
             displayName: account.displayName,
+            providerLogin: account.login,
           });
           return response;
         }
 
         case "yandex.status":
-          return this.#status(command, "yandex");
+          return await this.#status(command, "yandex");
 
         case "yandex.disconnect":
           await this.#delete(command.accountId, "yandex");
@@ -301,14 +302,27 @@ export class TfIntegrationsService {
     }
   }
 
-  #connectedAccount(
-    provider: "spotify" | "yandex",
+  #connectedSpotifyAccount(
     account: Readonly<{ id: string; displayName: string }>,
   ) {
     return {
-      provider,
+      provider: "spotify" as const,
       connected: true as const,
       account: { id: account.id, displayName: account.displayName },
+    };
+  }
+
+  #connectedYandexAccount(
+    account: Readonly<{ id: string; login: string; displayName: string }>,
+  ) {
+    return {
+      provider: "yandex" as const,
+      connected: true as const,
+      account: {
+        id: account.id,
+        login: account.login,
+        displayName: account.displayName,
+      },
     };
   }
 
@@ -334,14 +348,27 @@ export class TfIntegrationsService {
     provider: Provider,
   ): Promise<TfIntegrationsSuccessResponse> {
     const record = await this.#get(command.accountId, provider);
+    if (
+      record !== null &&
+      provider === "yandex" &&
+      record.providerLogin === undefined
+    ) {
+      throw new ServiceError("invalid_provider_response");
+    }
     return this.#success(command, {
       account:
         record === null
           ? { provider, connected: false }
-          : this.#connectedAccount(provider, {
-              id: record.providerUserId,
-              displayName: record.displayName,
-            }),
+          : provider === "spotify"
+            ? this.#connectedSpotifyAccount({
+                id: record.providerUserId,
+                displayName: record.displayName,
+              })
+            : this.#connectedYandexAccount({
+                id: record.providerUserId,
+                login: record.providerLogin!,
+                displayName: record.displayName,
+              }),
     });
   }
 

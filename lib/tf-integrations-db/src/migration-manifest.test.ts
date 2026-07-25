@@ -90,6 +90,21 @@ describe("integrations migration manifest", () => {
     expect(INTEGRATIONS_MIGRATION_MANIFEST.map(({ name }) => name)).toEqual([
       "0001_integrations.sql",
       "0002_canonical_token_envelope.sql",
+      "0003_yandex_provider_login.sql",
     ]);
+
+    const providerLoginMigration = await readFile(
+      new URL("0003_yandex_provider_login.sql", migrationDirectory),
+      "utf8",
+    );
+    expect(providerLoginMigration).toMatch(
+      /add column provider_login varchar\(500\)/i,
+    );
+    expect(providerLoginMigration).toMatch(
+      /provider = 'spotify'[\s\S]*provider_login is null/i,
+    );
+    expect(providerLoginMigration).toMatch(
+      /provider = 'yandex'[\s\S]*provider_login is null[\s\S]*char_length\(btrim\(provider_login\)\) between 1 and 500/i,
+    );
   });
 });

@@ -105,7 +105,11 @@ function defaultResult(command: GatewayCommand): unknown {
         account: {
           provider: "yandex",
           connected: true,
-          account: { id: "12345", displayName: "Yandex User" },
+          account: {
+            id: "12345",
+            login: "yandex-user",
+            displayName: "Yandex User",
+          },
         },
       };
     case "yandex.status":
@@ -113,7 +117,11 @@ function defaultResult(command: GatewayCommand): unknown {
         account: {
           provider: "yandex",
           connected: true,
-          account: { id: "12345", displayName: "Yandex User" },
+          account: {
+            id: "12345",
+            login: "yandex-user",
+            displayName: "Yandex User",
+          },
         },
       };
     case "yandex.disconnect":
@@ -326,7 +334,7 @@ describe("Yandex gateway routes", () => {
     await expect(accepted.json()).resolves.toEqual({
       ok: true,
       displayName: "Yandex User",
-      login: "Yandex User",
+      login: "yandex-user",
       userId: "12345",
     });
     expect(current.execute).toHaveBeenCalledWith({
@@ -353,7 +361,7 @@ describe("Yandex gateway routes", () => {
     await expect(status.json()).resolves.toEqual({
       connected: true,
       displayName: "Yandex User",
-      login: "Yandex User",
+      login: "yandex-user",
       userId: "12345",
     });
     await expect(logout.json()).resolves.toEqual({ ok: true });

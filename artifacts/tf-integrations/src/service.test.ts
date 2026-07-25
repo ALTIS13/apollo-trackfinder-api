@@ -161,7 +161,11 @@ function yandexAdapter(
 ): YandexProviderAdapter {
   return {
     async validateToken() {
-      return { id: "12345", displayName: "Yandex User" };
+      return {
+        id: "12345",
+        login: "yandex-user",
+        displayName: "Yandex User",
+      };
     },
     async likedTracks(input) {
       return {
@@ -252,6 +256,7 @@ function storedRecord(
       oauthToken: "stored-yandex-token",
     }),
     providerUserId: "12345",
+    providerLogin: "yandex-user",
     displayName: "Yandex User",
   };
 }
@@ -439,7 +444,11 @@ describe("TfIntegrationsService", () => {
       yandexAdapter({
         async validateToken(input) {
           events.push(`validated:${input.oauthToken}`);
-          return { id: "12345", displayName: "Yandex User" };
+          return {
+            id: "12345",
+            login: "yandex-user",
+            displayName: "Yandex User",
+          };
         },
       }),
     );
@@ -455,16 +464,60 @@ describe("TfIntegrationsService", () => {
         account: {
           provider: "yandex",
           connected: true,
-          account: { id: "12345", displayName: "Yandex User" },
+          account: {
+            id: "12345",
+            login: "yandex-user",
+            displayName: "Yandex User",
+          },
         },
       },
     });
     const stored = repository.records.get(`${accountId}:yandex`)!;
     expect(JSON.stringify(stored.tokenEnvelope)).not.toContain(oauthToken);
+    expect(stored.providerLogin).toBe("yandex-user");
     expect(tokenVault.decrypt("yandex", accountId, stored.tokenEnvelope)).toEqual(
       { oauthToken },
     );
     expect(JSON.stringify(result)).not.toContain(oauthToken);
+
+    await expect(
+      target.execute(command("yandex.status", {})),
+    ).resolves.toMatchObject({
+      operation: "yandex.status",
+      result: {
+        account: {
+          provider: "yandex",
+          connected: true,
+          account: {
+            id: "12345",
+            login: "yandex-user",
+            displayName: "Yandex User",
+          },
+        },
+      },
+    });
+  });
+
+  it("fails closed when legacy stored Yandex metadata has no login", async () => {
+    const tokenVault = vault();
+    const repository = new MemoryRepository();
+    repository.records.set(`${accountId}:yandex`, {
+      accountId,
+      provider: "yandex",
+      tokenEnvelope: tokenVault.encrypt("yandex", accountId, {
+        oauthToken: "stored-yandex-token",
+      }),
+      providerUserId: "12345",
+      displayName: "Yandex User",
+    });
+    const target = service(repository, tokenVault);
+
+    await expect(
+      target.execute(command("yandex.status", {})),
+    ).resolves.toMatchObject({
+      operation: "yandex.status",
+      error: { code: "invalid_provider_response" },
+    });
   });
 
   it("routes every documented operation and rejects operation/result mismatches", async () => {
@@ -505,7 +558,11 @@ describe("TfIntegrationsService", () => {
     const yandex = yandexAdapter({
       async validateToken() {
         providerCalls.push("yandex.token.upsert");
-        return { id: "12345", displayName: "Yandex User" };
+        return {
+          id: "12345",
+          login: "yandex-user",
+          displayName: "Yandex User",
+        };
       },
       async likedTracks(input) {
         providerCalls.push("yandex.liked.list");
