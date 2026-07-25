@@ -1,19 +1,22 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
+  link,
   lstat,
   mkdtemp,
   mkdir,
+  open,
   readFile,
   realpath,
   readdir,
-  rm,
+  rename,
   rmdir,
   symlink,
+  type FileHandle,
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -41,25 +44,70 @@ const apiStartupScript = join(
 );
 type TemporaryOptions = {
   readonly afterTemporaryRootVerified?: () => Promise<void>;
+  readonly interlock?: (event: {
+    readonly name?: string;
+    readonly path: string;
+    readonly phase: string;
+  }) => Promise<void>;
   readonly repositoryRoot?: string;
 };
 
 type TemporaryDirectoryRecord = {
   readonly directory: string;
+  readonly ownership: object;
   readonly repositoryRoot: string;
 };
 
+type FileIdentity = {
+  readonly device: string;
+  readonly inode: string;
+};
+
 type VerifiedWorkspace = {
+  readonly identity: FileIdentity;
   readonly lexicalRoot: string;
   readonly physicalRoot: string;
 };
 
 type VerifiedDirectory = {
+  readonly identity: FileIdentity;
   readonly lexicalCandidate: string;
   readonly physicalCandidate: string;
 };
 
+type VerifiedFile = {
+  readonly identity: FileIdentity;
+  readonly lexicalCandidate: string;
+  readonly physicalCandidate: string;
+};
+
+type VerifiedTreeEntry =
+  | (VerifiedDirectory & {
+      readonly kind: "directory";
+      readonly relativePath: string;
+    })
+  | (VerifiedFile & {
+      readonly kind: "file";
+      readonly relativePath: string;
+    });
+
+type TemporaryOwnershipRecord = {
+  readonly directory: VerifiedDirectory;
+  entries: Map<string, VerifiedTreeEntry>;
+  manifestSealed: boolean;
+  readonly markerToken: string;
+  readonly owner: VerifiedDirectory;
+  readonly ownership: object;
+  readonly temporary: VerifiedDirectory;
+  readonly workspace: VerifiedWorkspace;
+};
+
 const temporaryDirectories: TemporaryDirectoryRecord[] = [];
+const temporaryOwnershipRecords = new WeakMap<
+  object,
+  TemporaryOwnershipRecord
+>();
+const OWNERSHIP_MARKER = ".api-deployment-contract-owner";
 const workspaceTemporaryRoot = join(repositoryRoot, ".tmp");
 const apiDeploymentTemporaryRoot = join(
   workspaceTemporaryRoot,
@@ -211,32 +259,79 @@ function assertPhysicalContainment(
   }
 }
 
-async function verifiedWorkspaceRoot(root: string): Promise<VerifiedWorkspace> {
+function fileIdentity(stats: {
+  readonly dev: bigint | number;
+  readonly ino: bigint | number;
+}): FileIdentity {
+  return Object.freeze({
+    device: String(stats.dev),
+    inode: String(stats.ino),
+  });
+}
+
+function assertIdentity(
+  actual: FileIdentity,
+  expected: FileIdentity,
+  label: string,
+): void {
+  if (
+    actual.device !== expected.device ||
+    actual.inode !== expected.inode
+  ) {
+    throw new Error(`${label} identity was replaced`);
+  }
+}
+
+async function verifiedWorkspaceRoot(
+  root: string,
+  expected?: VerifiedWorkspace,
+): Promise<VerifiedWorkspace> {
   const lexicalRoot = resolve(root);
-  const rootStats = await lstat(lexicalRoot);
+  const rootStats = await lstat(lexicalRoot, { bigint: true });
   if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
     throw new Error("Workspace root cannot be symbolic or reparse-linked");
   }
   const physicalRoot = await realpath(lexicalRoot);
-  return { lexicalRoot, physicalRoot };
+  const identity = fileIdentity(rootStats);
+  if (expected !== undefined) {
+    if (
+      lexicalRoot !== expected.lexicalRoot ||
+      physicalRoot !== expected.physicalRoot
+    ) {
+      throw new Error("Workspace root was replaced");
+    }
+    assertIdentity(identity, expected.identity, "Workspace root");
+  }
+  return { identity, lexicalRoot, physicalRoot };
 }
 
 async function verifiedPhysicalDirectory(
   candidate: string,
   workspace: VerifiedWorkspace,
+  expected?: VerifiedDirectory,
 ): Promise<VerifiedDirectory> {
   const lexicalCandidate = assertContainedPath(
     candidate,
     workspace.lexicalRoot,
     "Temporary directory escaped the worktree",
   );
-  const candidateStats = await lstat(lexicalCandidate);
+  const candidateStats = await lstat(lexicalCandidate, { bigint: true });
   if (!candidateStats.isDirectory() || candidateStats.isSymbolicLink()) {
     throw new Error("Temporary directory cannot be symbolic or reparse-linked");
   }
   const physicalCandidate = await realpath(lexicalCandidate);
   assertPhysicalContainment(physicalCandidate, workspace.physicalRoot);
-  return { lexicalCandidate, physicalCandidate };
+  const identity = fileIdentity(candidateStats);
+  if (expected !== undefined) {
+    if (
+      lexicalCandidate !== expected.lexicalCandidate ||
+      physicalCandidate !== expected.physicalCandidate
+    ) {
+      throw new Error("Temporary directory was replaced");
+    }
+    assertIdentity(identity, expected.identity, "Temporary directory");
+  }
+  return { identity, lexicalCandidate, physicalCandidate };
 }
 
 function temporaryLayout(root: string): {
@@ -268,6 +363,20 @@ async function verifyExistingDirectory(
   }
 }
 
+async function ensureVerifiedDirectory(
+  candidate: string,
+  workspace: VerifiedWorkspace,
+): Promise<VerifiedDirectory> {
+  const existing = await verifyExistingDirectory(candidate, workspace);
+  if (existing !== undefined) return existing;
+  try {
+    await mkdir(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  return verifiedPhysicalDirectory(candidate, workspace);
+}
+
 async function prepareTemporaryContext(
   root: string,
   afterTemporaryRootVerified?: () => Promise<void>,
@@ -278,42 +387,31 @@ async function prepareTemporaryContext(
 }> {
   const workspace = await verifiedWorkspaceRoot(root);
   const layout = temporaryLayout(workspace.lexicalRoot);
-  const existingTemporary = await verifyExistingDirectory(
-    layout.temporaryRoot,
-    workspace,
-  );
-  await verifyExistingDirectory(layout.ownerRoot, workspace);
+  await ensureVerifiedDirectory(layout.temporaryRoot, workspace);
   if (afterTemporaryRootVerified !== undefined) {
-    if (existingTemporary === undefined) {
-      try {
-        await mkdir(layout.temporaryRoot);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      }
-      await verifiedPhysicalDirectory(layout.temporaryRoot, workspace);
-    }
     await afterTemporaryRootVerified();
   }
 
   let lastNotFound: unknown;
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    await verifyExistingDirectory(layout.temporaryRoot, workspace);
-    await verifyExistingDirectory(layout.ownerRoot, workspace);
     try {
-      await mkdir(layout.ownerRoot, { recursive: true });
-      const temporary = await verifiedPhysicalDirectory(
-        layout.temporaryRoot,
+      const currentWorkspace = await verifiedWorkspaceRoot(
+        workspace.lexicalRoot,
         workspace,
       );
-      const owner = await verifiedPhysicalDirectory(
+      const temporary = await ensureVerifiedDirectory(
+        layout.temporaryRoot,
+        currentWorkspace,
+      );
+      const owner = await ensureVerifiedDirectory(
         layout.ownerRoot,
-        workspace,
+        currentWorkspace,
       );
       assertPhysicalContainment(
         owner.physicalCandidate,
         temporary.physicalCandidate,
       );
-      return { owner, temporary, workspace };
+      return { owner, temporary, workspace: currentWorkspace };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       lastNotFound = error;
@@ -324,18 +422,29 @@ async function prepareTemporaryContext(
   });
 }
 
-async function verifiedTemporaryContext(root: string): Promise<{
+async function verifiedTemporaryContext(
+  root: string,
+  expected?: Pick<
+    TemporaryOwnershipRecord,
+    "owner" | "temporary" | "workspace"
+  >,
+): Promise<{
   readonly owner: VerifiedDirectory;
   readonly temporary: VerifiedDirectory;
   readonly workspace: VerifiedWorkspace;
 }> {
-  const workspace = await verifiedWorkspaceRoot(root);
+  const workspace = await verifiedWorkspaceRoot(root, expected?.workspace);
   const layout = temporaryLayout(workspace.lexicalRoot);
   const temporary = await verifiedPhysicalDirectory(
     layout.temporaryRoot,
     workspace,
+    expected?.temporary,
   );
-  const owner = await verifiedPhysicalDirectory(layout.ownerRoot, workspace);
+  const owner = await verifiedPhysicalDirectory(
+    layout.ownerRoot,
+    workspace,
+    expected?.owner,
+  );
   assertPhysicalContainment(
     owner.physicalCandidate,
     temporary.physicalCandidate,
@@ -352,27 +461,22 @@ async function verifiedRunContext(
   readonly temporary: VerifiedDirectory;
   readonly workspace: VerifiedWorkspace;
 }> {
-  const root = options.repositoryRoot ?? repositoryRoot;
-  const context = await verifiedTemporaryContext(root);
-  const run = await verifiedPhysicalDirectory(directory, context.workspace);
-  assertPhysicalContainment(
-    run.physicalCandidate,
-    context.owner.physicalCandidate,
-  );
-  return { ...context, run };
+  const record = temporaryOwnershipRecord(directory, options);
+  return verifyOwnedHierarchy(record);
 }
 
 async function verifiedPhysicalFile(
   candidate: string,
   run: VerifiedDirectory,
   workspace: VerifiedWorkspace,
-): Promise<void> {
+  expected?: VerifiedFile,
+): Promise<VerifiedFile> {
   const lexicalCandidate = assertContainedPath(
     candidate,
     run.lexicalCandidate,
     "Temporary fixture file escaped its run directory",
   );
-  const candidateStats = await lstat(lexicalCandidate);
+  const candidateStats = await lstat(lexicalCandidate, { bigint: true });
   if (!candidateStats.isFile() || candidateStats.isSymbolicLink()) {
     throw new Error(
       "Temporary fixture file cannot be symbolic or reparse-linked",
@@ -381,46 +485,351 @@ async function verifiedPhysicalFile(
   const physicalCandidate = await realpath(lexicalCandidate);
   assertPhysicalContainment(physicalCandidate, run.physicalCandidate);
   assertPhysicalContainment(physicalCandidate, workspace.physicalRoot);
+  const identity = fileIdentity(candidateStats);
+  if (expected !== undefined) {
+    if (
+      lexicalCandidate !== expected.lexicalCandidate ||
+      physicalCandidate !== expected.physicalCandidate
+    ) {
+      throw new Error("Temporary fixture file was replaced");
+    }
+    assertIdentity(identity, expected.identity, "Temporary fixture file");
+  }
+  return { identity, lexicalCandidate, physicalCandidate };
+}
+
+function temporaryOwnershipRecord(
+  directory: string,
+  options: TemporaryOptions = {},
+): TemporaryOwnershipRecord {
+  const root = resolve(options.repositoryRoot ?? repositoryRoot);
+  const lexicalDirectory = resolve(directory);
+  const tracked = temporaryDirectories.find(
+    (candidate) =>
+      candidate.directory === lexicalDirectory &&
+      candidate.repositoryRoot === root,
+  );
+  const record =
+    tracked === undefined
+      ? undefined
+      : temporaryOwnershipRecords.get(tracked.ownership);
+  if (
+    record === undefined ||
+    record.directory.lexicalCandidate !== lexicalDirectory
+  ) {
+    throw new Error(
+      "API fixture ownership or physical run record does not match",
+    );
+  }
+  return record;
+}
+
+async function runTemporaryInterlock(
+  options: TemporaryOptions,
+  phase: string,
+  path: string,
+  name?: string,
+): Promise<void> {
+  await options.interlock?.({ name, path, phase });
+}
+
+async function verifyOwnedHierarchy(
+  record: TemporaryOwnershipRecord,
+): Promise<{
+  readonly owner: VerifiedDirectory;
+  readonly run: VerifiedDirectory;
+  readonly temporary: VerifiedDirectory;
+  readonly workspace: VerifiedWorkspace;
+}> {
+  const context = await verifiedTemporaryContext(record.workspace.lexicalRoot, {
+    owner: record.owner,
+    temporary: record.temporary,
+    workspace: record.workspace,
+  });
+  const run = await verifiedPhysicalDirectory(
+    record.directory.lexicalCandidate,
+    context.workspace,
+    record.directory,
+  );
+  assertPhysicalContainment(
+    run.physicalCandidate,
+    context.owner.physicalCandidate,
+  );
+  return { ...context, run };
+}
+
+async function openedRegularIdentity(
+  handle: FileHandle,
+  label: string,
+): Promise<FileIdentity> {
+  const stats = await handle.stat({ bigint: true });
+  if (!stats.isFile()) throw new Error(`${label} is not a regular file`);
+  return fileIdentity(stats);
+}
+
+async function readAndVerifyOwnershipMarker(
+  record: TemporaryOwnershipRecord,
+): Promise<void> {
+  const marker = record.entries.get(OWNERSHIP_MARKER);
+  if (marker === undefined || marker.kind !== "file") {
+    throw new Error("API fixture ownership marker is missing");
+  }
+  const current = await verifyOwnedHierarchy(record);
+  await verifiedPhysicalFile(
+    marker.lexicalCandidate,
+    current.run,
+    current.workspace,
+    marker,
+  );
+  const handle = await open(marker.lexicalCandidate, "r");
+  try {
+    assertIdentity(
+      await openedRegularIdentity(handle, "API fixture ownership marker"),
+      marker.identity,
+      "API fixture ownership marker",
+    );
+    if ((await handle.readFile({ encoding: "utf8" })) !== record.markerToken) {
+      throw new Error("API fixture ownership marker token does not match");
+    }
+    const refreshed = await verifyOwnedHierarchy(record);
+    await verifiedPhysicalFile(
+      marker.lexicalCandidate,
+      refreshed.run,
+      refreshed.workspace,
+      marker,
+    );
+    assertIdentity(
+      await openedRegularIdentity(handle, "API fixture ownership marker"),
+      marker.identity,
+      "API fixture ownership marker",
+    );
+  } finally {
+    await handle.close();
+  }
+}
+
+async function scanTemporaryTree(
+  record: TemporaryOwnershipRecord,
+): Promise<Map<string, VerifiedTreeEntry>> {
+  const context = await verifyOwnedHierarchy(record);
+  const entries = new Map<string, VerifiedTreeEntry>();
+
+  async function walk(current: VerifiedDirectory): Promise<void> {
+    for (const entry of await readdir(current.lexicalCandidate, {
+      withFileTypes: true,
+    })) {
+      const path = assertContainedPath(
+        join(current.lexicalCandidate, entry.name),
+        context.run.lexicalCandidate,
+        "Temporary fixture entry escaped its run directory",
+      );
+      if (entry.isSymbolicLink()) {
+        throw new Error(
+          "Temporary fixture entry cannot be symbolic or reparse-linked",
+        );
+      }
+      const relativePath = relative(context.run.lexicalCandidate, path);
+      if (entry.isDirectory()) {
+        const directory = await verifiedPhysicalDirectory(
+          path,
+          context.workspace,
+        );
+        assertPhysicalContainment(
+          directory.physicalCandidate,
+          context.run.physicalCandidate,
+        );
+        entries.set(relativePath, {
+          ...directory,
+          kind: "directory",
+          relativePath,
+        });
+        await walk(directory);
+      } else if (entry.isFile()) {
+        const file = await verifiedPhysicalFile(
+          path,
+          context.run,
+          context.workspace,
+        );
+        entries.set(relativePath, {
+          ...file,
+          kind: "file",
+          relativePath,
+        });
+      } else {
+        throw new Error("Temporary fixture entry must be a file or directory");
+      }
+    }
+  }
+
+  await walk(context.run);
+  await verifyOwnedHierarchy(record);
+  return entries;
+}
+
+function assertTreeEntry(
+  actual: VerifiedTreeEntry,
+  expected: VerifiedTreeEntry,
+): void {
+  if (
+    actual.kind !== expected.kind ||
+    actual.lexicalCandidate !== expected.lexicalCandidate ||
+    actual.physicalCandidate !== expected.physicalCandidate
+  ) {
+    throw new Error("Temporary tree manifest entry was replaced");
+  }
+  assertIdentity(actual.identity, expected.identity, "Temporary tree entry");
+}
+
+async function verifyExactTemporaryTree(
+  record: TemporaryOwnershipRecord,
+): Promise<void> {
+  const actual = await scanTemporaryTree(record);
+  const expectedNames = [...record.entries.keys()].sort();
+  const actualNames = [...actual.keys()].sort();
+  if (
+    actualNames.length !== expectedNames.length ||
+    actualNames.some((name, index) => name !== expectedNames[index])
+  ) {
+    throw new Error("Temporary tree contains an unexpected manifest entry");
+  }
+  for (const name of expectedNames) {
+    assertTreeEntry(actual.get(name)!, record.entries.get(name)!);
+  }
+  await readAndVerifyOwnershipMarker(record);
 }
 
 async function verifyTemporaryTree(
   directory: string,
   options: TemporaryOptions = {},
 ): Promise<Awaited<ReturnType<typeof verifiedRunContext>>> {
-  const context = await verifiedRunContext(directory, options);
+  const record = temporaryOwnershipRecord(directory, options);
+  await verifyExactTemporaryTree(record);
+  return verifyOwnedHierarchy(record);
+}
 
-  async function walk(current: string): Promise<void> {
-    for (const entry of await readdir(current)) {
-      const path = assertContainedPath(
-        join(current, entry),
-        context.run.lexicalCandidate,
-        "Temporary fixture entry escaped its run directory",
-      );
-      const entryStats = await lstat(path);
-      if (entryStats.isSymbolicLink()) {
-        throw new Error(
-          "Temporary fixture entry cannot be symbolic or reparse-linked",
-        );
-      }
-      const physicalPath = await realpath(path);
-      assertPhysicalContainment(physicalPath, context.run.physicalCandidate);
-      if (entryStats.isDirectory()) {
-        await walk(path);
-      } else if (!entryStats.isFile()) {
-        throw new Error("Temporary fixture entry must be a file or directory");
-      }
+async function captureGeneratedTreeManifest(
+  directory: string,
+  options: TemporaryOptions = {},
+): Promise<void> {
+  const record = temporaryOwnershipRecord(directory, options);
+  if (record.manifestSealed) {
+    throw new Error("Generated tree manifest is already sealed");
+  }
+  await readAndVerifyOwnershipMarker(record);
+  const actual = await scanTemporaryTree(record);
+  for (const [name, expected] of record.entries) {
+    const current = actual.get(name);
+    if (current === undefined) {
+      throw new Error("Temporary tree manifest entry is missing");
     }
+    assertTreeEntry(current, expected);
+  }
+  record.entries = actual;
+  record.manifestSealed = true;
+  await verifyExactTemporaryTree(record);
+}
+
+async function createOwnedFixtureFile(
+  record: TemporaryOwnershipRecord,
+  name: string,
+  contents: string,
+  options: TemporaryOptions,
+): Promise<VerifiedFile> {
+  if (
+    name.length === 0 ||
+    name.includes("/") ||
+    name.includes("\\") ||
+    record.entries.has(name)
+  ) {
+    throw new Error("Invalid or duplicate API fixture file name");
+  }
+  if (name !== OWNERSHIP_MARKER) {
+    await readAndVerifyOwnershipMarker(record);
+  }
+  const current = await verifyOwnedHierarchy(record);
+  const path = assertContainedPath(
+    join(current.run.lexicalCandidate, name),
+    current.run.lexicalCandidate,
+    "Temporary fixture file escaped its run directory",
+  );
+  try {
+    const existing = await lstat(path);
+    if (existing.isSymbolicLink()) {
+      throw new Error(
+        "Temporary fixture file cannot be symbolic or reparse-linked",
+      );
+    }
+    throw new Error("Temporary fixture file already exists");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  await runTemporaryInterlock(options, "before-fixture-open", path, name);
+  await verifyOwnedHierarchy(record);
+
+  const handle = await open(path, "wx", 0o600);
+  let file: VerifiedFile;
+  try {
+    const identity = await openedRegularIdentity(handle, "API fixture file");
+    file = Object.freeze({
+      identity,
+      lexicalCandidate: path,
+      physicalCandidate: path,
+    });
+    record.entries.set(name, {
+      ...file,
+      kind: "file",
+      relativePath: name,
+    });
+    await runTemporaryInterlock(options, "after-fixture-open", path, name);
+
+    const refreshed = await verifyOwnedHierarchy(record);
+    const verified = await verifiedPhysicalFile(
+      path,
+      refreshed.run,
+      refreshed.workspace,
+    );
+    assertIdentity(verified.identity, identity, "API fixture file");
+    assertIdentity(
+      await openedRegularIdentity(handle, "API fixture file"),
+      identity,
+      "API fixture file",
+    );
+    file = Object.freeze({ ...verified, identity });
+    record.entries.set(name, {
+      ...file,
+      kind: "file",
+      relativePath: name,
+    });
+    if (name !== OWNERSHIP_MARKER) {
+      await readAndVerifyOwnershipMarker(record);
+    }
+
+    await handle.writeFile(contents, { encoding: "utf8" });
+    await handle.sync();
+    assertIdentity(
+      await openedRegularIdentity(handle, "API fixture file"),
+      identity,
+      "API fixture file",
+    );
+  } finally {
+    await handle.close();
   }
 
-  await walk(context.run.lexicalCandidate);
-  return context;
+  const written = await verifyOwnedHierarchy(record);
+  await verifiedPhysicalFile(
+    path,
+    written.run,
+    written.workspace,
+    file!,
+  );
+  return file!;
 }
 
 async function createTemporaryDirectory(
   prefix: string,
   options: TemporaryOptions = {},
 ): Promise<string> {
-  const root = options.repositoryRoot ?? repositoryRoot;
+  const root = resolve(options.repositoryRoot ?? repositoryRoot);
   let lastNotFound: unknown;
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -442,10 +851,29 @@ async function createTemporaryDirectory(
         directory.physicalCandidate,
         context.owner.physicalCandidate,
       );
+      const ownership = Object.freeze(Object.create(null)) as object;
+      const ownershipRecord: TemporaryOwnershipRecord = {
+        directory,
+        entries: new Map(),
+        manifestSealed: false,
+        markerToken: randomBytes(32).toString("base64url"),
+        owner: context.owner,
+        ownership,
+        temporary: context.temporary,
+        workspace: context.workspace,
+      };
+      temporaryOwnershipRecords.set(ownership, ownershipRecord);
       temporaryDirectories.push({
         directory: directory.lexicalCandidate,
+        ownership,
         repositoryRoot: context.workspace.lexicalRoot,
       });
+      await createOwnedFixtureFile(
+        ownershipRecord,
+        OWNERSHIP_MARKER,
+        ownershipRecord.markerToken,
+        { repositoryRoot: root },
+      );
       return directory.lexicalCandidate;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -463,78 +891,209 @@ async function writeTemporaryFixture(
   contents: string,
   options: TemporaryOptions = {},
 ): Promise<void> {
-  const context = await verifiedRunContext(directory, options);
+  const record = temporaryOwnershipRecord(directory, options);
+  const context = await verifyOwnedHierarchy(record);
   const fixturePath = assertContainedPath(
     path,
     context.run.lexicalCandidate,
     "Temporary fixture file escaped its run directory",
   );
+  const name = relative(context.run.lexicalCandidate, fixturePath);
+  await createOwnedFixtureFile(record, name, contents, options);
+}
+
+async function removeOwnedFile(
+  record: TemporaryOwnershipRecord,
+  entry: VerifiedTreeEntry,
+  options: TemporaryOptions,
+): Promise<void> {
+  if (entry.kind !== "file") throw new Error("Cleanup entry is not a file");
+  if (entry.relativePath !== OWNERSHIP_MARKER) {
+    await readAndVerifyOwnershipMarker(record);
+  }
+  const current = await verifyOwnedHierarchy(record);
+  await verifiedPhysicalFile(
+    entry.lexicalCandidate,
+    current.run,
+    current.workspace,
+    entry,
+  );
+  const handle = await open(entry.lexicalCandidate, "r");
   try {
-    const existing = await lstat(fixturePath);
-    if (existing.isSymbolicLink()) {
-      throw new Error(
-        "Temporary fixture file cannot be symbolic or reparse-linked",
-      );
+    assertIdentity(
+      await openedRegularIdentity(handle, "API cleanup file"),
+      entry.identity,
+      "API cleanup file",
+    );
+    await runTemporaryInterlock(
+      options,
+      "after-cleanup-file-open",
+      entry.lexicalCandidate,
+      entry.relativePath,
+    );
+    const refreshed = await verifyOwnedHierarchy(record);
+    await verifiedPhysicalFile(
+      entry.lexicalCandidate,
+      refreshed.run,
+      refreshed.workspace,
+      entry,
+    );
+    assertIdentity(
+      await openedRegularIdentity(handle, "API cleanup file"),
+      entry.identity,
+      "API cleanup file",
+    );
+    if (entry.relativePath === OWNERSHIP_MARKER) {
+      if (
+        (await handle.readFile({ encoding: "utf8" })) !== record.markerToken
+      ) {
+        throw new Error("API fixture ownership marker token does not match");
+      }
+    } else {
+      await readAndVerifyOwnershipMarker(record);
     }
-    throw new Error("Temporary fixture file already exists");
+    await unlink(entry.lexicalCandidate);
+  } finally {
+    await handle.close();
+  }
+  try {
+    await lstat(entry.lexicalCandidate);
+    throw new Error("API cleanup file still exists after unlink");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  record.entries.delete(entry.relativePath);
+}
 
-  const refreshed = await verifiedRunContext(directory, options);
-  await writeFile(fixturePath, contents, { flag: "wx" });
-  const written = await verifiedRunContext(directory, options);
-  await verifiedPhysicalFile(fixturePath, written.run, written.workspace);
-  assertPhysicalContainment(
-    written.run.physicalCandidate,
-    refreshed.owner.physicalCandidate,
+async function removeOwnedDirectory(
+  record: TemporaryOwnershipRecord,
+  entry: VerifiedTreeEntry,
+): Promise<void> {
+  if (entry.kind !== "directory") {
+    throw new Error("Cleanup entry is not a directory");
+  }
+  await readAndVerifyOwnershipMarker(record);
+  const current = await verifyOwnedHierarchy(record);
+  const directory = await verifiedPhysicalDirectory(
+    entry.lexicalCandidate,
+    current.workspace,
+    entry,
   );
+  assertPhysicalContainment(
+    directory.physicalCandidate,
+    current.run.physicalCandidate,
+  );
+  if ((await readdir(directory.lexicalCandidate)).length !== 0) {
+    throw new Error("Temporary manifest directory is not empty");
+  }
+  await rmdir(directory.lexicalCandidate);
+  record.entries.delete(entry.relativePath);
+}
+
+async function removeEmptyRecordedDirectory(
+  directory: VerifiedDirectory,
+  workspace: VerifiedWorkspace,
+): Promise<void> {
+  try {
+    await verifiedPhysicalDirectory(
+      directory.lexicalCandidate,
+      workspace,
+      directory,
+    );
+    await rmdir(directory.lexicalCandidate);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
+      throw error;
+    }
+  }
+}
+
+function entryDepth(entry: VerifiedTreeEntry): number {
+  return entry.relativePath.split(/[\\/]/u).length;
+}
+
+function forgetTemporaryRecord(record: TemporaryOwnershipRecord): void {
+  const index = temporaryDirectories.findIndex(
+    (candidate) => candidate.ownership === record.ownership,
+  );
+  if (index >= 0) temporaryDirectories.splice(index, 1);
+  temporaryOwnershipRecords.delete(record.ownership);
 }
 
 async function removeTemporaryDirectory(
   directory: string,
   options: TemporaryOptions = {},
 ): Promise<void> {
-  await verifyTemporaryTree(directory, options);
-  const context = await verifyTemporaryTree(directory, options);
-  await rm(context.run.lexicalCandidate, { force: true, recursive: true });
-}
+  const record = temporaryOwnershipRecord(directory, options);
+  await verifyExactTemporaryTree(record);
+  await runTemporaryInterlock(
+    options,
+    "after-cleanup-manifest-verified",
+    record.directory.lexicalCandidate,
+  );
+  await verifyExactTemporaryTree(record);
 
-async function removeEmptyTemporaryParents(root: string): Promise<void> {
-  const workspace = await verifiedWorkspaceRoot(root);
-  const layout = temporaryLayout(workspace.lexicalRoot);
-  for (const directory of [layout.ownerRoot, layout.temporaryRoot]) {
-    try {
-      const verified = await verifiedPhysicalDirectory(directory, workspace);
-      await rmdir(verified.lexicalCandidate);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
-        throw error;
-      }
-    }
+  const files = [...record.entries.values()]
+    .filter(
+      (entry) =>
+        entry.kind === "file" && entry.relativePath !== OWNERSHIP_MARKER,
+    )
+    .sort(
+      (left, right) =>
+        entryDepth(right) - entryDepth(left) ||
+        right.relativePath.localeCompare(left.relativePath),
+    );
+  for (const entry of files) {
+    await removeOwnedFile(record, entry, options);
   }
+
+  const directories = [...record.entries.values()]
+    .filter((entry) => entry.kind === "directory")
+    .sort(
+      (left, right) =>
+        entryDepth(right) - entryDepth(left) ||
+        right.relativePath.localeCompare(left.relativePath),
+    );
+  for (const entry of directories) {
+    await removeOwnedDirectory(record, entry);
+  }
+
+  await readAndVerifyOwnershipMarker(record);
+  const marker = record.entries.get(OWNERSHIP_MARKER);
+  if (marker === undefined) {
+    throw new Error("API fixture ownership marker is missing");
+  }
+  await removeOwnedFile(record, marker, options);
+
+  const current = await verifyOwnedHierarchy(record);
+  if ((await readdir(current.run.lexicalCandidate)).length !== 0) {
+    throw new Error("API fixture run is not empty after manifest cleanup");
+  }
+  await rmdir(current.run.lexicalCandidate);
+  const workspace = await verifiedWorkspaceRoot(
+    record.workspace.lexicalRoot,
+    record.workspace,
+  );
+  await removeEmptyRecordedDirectory(record.owner, workspace);
+  await removeEmptyRecordedDirectory(record.temporary, workspace);
+  forgetTemporaryRecord(record);
 }
 
 async function filesRecursively(directory: string): Promise<string[]> {
-  await verifyTemporaryTree(directory);
-  const entries = await readdir(directory);
-  const files: string[] = [];
-  for (const entry of entries) {
-    const path = join(directory, entry);
-    const entryStats = await lstat(path);
-    if (entryStats.isDirectory() && !entryStats.isSymbolicLink()) {
-      files.push(...(await filesRecursively(path)));
-    } else {
-      files.push(path);
-    }
-  }
-  return files;
+  const record = temporaryOwnershipRecord(directory);
+  await verifyExactTemporaryTree(record);
+  return [...record.entries.values()]
+    .filter(
+      (entry) =>
+        entry.kind === "file" && entry.relativePath !== OWNERSHIP_MARKER,
+    )
+    .map((entry) => entry.lexicalCandidate)
+    .sort();
 }
 
 afterEach(async () => {
-  const records = temporaryDirectories.splice(0);
-  const roots = new Set(records.map((record) => record.repositoryRoot));
+  const records = [...temporaryDirectories];
   for (const record of records) {
     try {
       await removeTemporaryDirectory(record.directory, {
@@ -542,16 +1101,155 @@ afterEach(async () => {
       });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-  }
-  for (const root of roots) {
-    try {
-      await removeEmptyTemporaryParents(root);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const ownership = temporaryOwnershipRecords.get(record.ownership);
+      if (ownership !== undefined) forgetTemporaryRecord(ownership);
     }
   }
 });
+
+async function createFilesystemRaceFixture(prefix: string): Promise<{
+  readonly externalMarker: string;
+  readonly fixtureRoot: string;
+  readonly outside: string;
+  readonly workspace: string;
+}> {
+  const outerTemporaryRoot = join(
+    repositoryRoot,
+    ".superpowers",
+    "sdd",
+    "task-6-api-fixture-filesystem-tmp",
+  );
+  await mkdir(outerTemporaryRoot, { recursive: true });
+  const fixtureRoot = await mkdtemp(join(outerTemporaryRoot, prefix));
+  const workspace = join(fixtureRoot, "workspace");
+  const outside = join(fixtureRoot, "outside");
+  const externalMarker = join(outside, "external-marker");
+  await mkdir(workspace);
+  await mkdir(outside);
+  await writeFile(externalMarker, "preserve");
+  return { externalMarker, fixtureRoot, outside, workspace };
+}
+
+async function removeSyntheticFixtureTree(directory: string): Promise<void> {
+  const workspace = await verifiedWorkspaceRoot(repositoryRoot);
+  const lexicalRoot = assertContainedPath(
+    directory,
+    workspace.lexicalRoot,
+    "Synthetic fixture root escaped the worktree",
+  );
+  const rootStats = await lstat(lexicalRoot, { bigint: true });
+  if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
+    throw new Error("Synthetic fixture root is not a regular directory");
+  }
+  const rootIdentity = fileIdentity(rootStats);
+  const physicalRoot = await realpath(lexicalRoot);
+  assertPhysicalContainment(physicalRoot, workspace.physicalRoot);
+  const lexicalParent = dirname(lexicalRoot);
+  const parent = await verifiedPhysicalDirectory(lexicalParent, workspace);
+  const manifest: Array<{
+    readonly identity: FileIdentity;
+    readonly kind: "directory" | "file" | "link";
+    readonly path: string;
+  }> = [];
+
+  async function walk(current: string): Promise<void> {
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      const path = assertContainedPath(
+        join(current, entry.name),
+        lexicalRoot,
+        "Synthetic fixture entry escaped its root",
+      );
+      const stats = await lstat(path, { bigint: true });
+      const identity = fileIdentity(stats);
+      if (stats.isSymbolicLink()) {
+        manifest.push({ identity, kind: "link", path });
+      } else if (stats.isFile()) {
+        const physicalPath = await realpath(path);
+        assertPhysicalContainment(physicalPath, physicalRoot);
+        manifest.push({ identity, kind: "file", path });
+      } else if (stats.isDirectory()) {
+        const physicalPath = await realpath(path);
+        assertPhysicalContainment(physicalPath, physicalRoot);
+        manifest.push({ identity, kind: "directory", path });
+        await walk(path);
+      } else {
+        throw new Error("Synthetic fixture entry has an unsupported type");
+      }
+    }
+  }
+
+  await walk(lexicalRoot);
+  assertIdentity(
+    fileIdentity(await lstat(lexicalRoot, { bigint: true })),
+    rootIdentity,
+    "Synthetic fixture root",
+  );
+  const byDepth = (left: { path: string }, right: { path: string }) =>
+    right.path.split(/[\\/]/u).length - left.path.split(/[\\/]/u).length ||
+    right.path.localeCompare(left.path);
+  for (const entry of manifest
+    .filter((candidate) => candidate.kind !== "directory")
+    .sort(byDepth)) {
+    const current = await lstat(entry.path, { bigint: true });
+    const kind = current.isSymbolicLink()
+      ? "link"
+      : current.isFile()
+        ? "file"
+        : "other";
+    if (kind !== entry.kind) {
+      throw new Error("Synthetic fixture entry type was replaced");
+    }
+    assertIdentity(
+      fileIdentity(current),
+      entry.identity,
+      "Synthetic fixture entry",
+    );
+    await unlink(entry.path);
+  }
+  for (const entry of manifest
+    .filter((candidate) => candidate.kind === "directory")
+    .sort(byDepth)) {
+    const current = await lstat(entry.path, { bigint: true });
+    if (!current.isDirectory() || current.isSymbolicLink()) {
+      throw new Error("Synthetic fixture directory was replaced");
+    }
+    assertIdentity(
+      fileIdentity(current),
+      entry.identity,
+      "Synthetic fixture directory",
+    );
+    if ((await readdir(entry.path)).length !== 0) {
+      throw new Error("Synthetic fixture directory changed after scan");
+    }
+    await rmdir(entry.path);
+  }
+  const finalRootStats = await lstat(lexicalRoot, { bigint: true });
+  if (!finalRootStats.isDirectory() || finalRootStats.isSymbolicLink()) {
+    throw new Error("Synthetic fixture root was replaced");
+  }
+  assertIdentity(
+    fileIdentity(finalRootStats),
+    rootIdentity,
+    "Synthetic fixture root",
+  );
+  if ((await readdir(lexicalRoot)).length !== 0) {
+    throw new Error("Synthetic fixture root changed after scan");
+  }
+  await rmdir(lexicalRoot);
+  try {
+    await verifiedPhysicalDirectory(
+      parent.lexicalCandidate,
+      workspace,
+      parent,
+    );
+    await rmdir(parent.lexicalCandidate);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
+      throw error;
+    }
+  }
+}
 
 describe("TF deployment identity contract", () => {
   it("keeps API deployment fixtures under the suite-owned parent", async () => {
@@ -562,6 +1260,16 @@ describe("TF deployment identity contract", () => {
 
     expect(fromOwner).not.toBe("..");
     expect(fromOwner.startsWith(`..${sep}`)).toBe(false);
+  });
+
+  it("creates a per-run ownership marker before fixture data", async () => {
+    const directory = await createTemporaryDirectory(
+      "apollo-tf-api-marker-",
+    );
+
+    expect(await readdir(directory)).toEqual([
+      ".api-deployment-contract-owner",
+    ]);
   });
 
   it("recreates an empty temp root removed before owner creation", async () => {
@@ -596,7 +1304,7 @@ describe("TF deployment identity contract", () => {
       expect(fromOwner).not.toBe("..");
       expect(fromOwner.startsWith(`..${sep}`)).toBe(false);
     } finally {
-      await rm(fixtureRoot, { force: true, recursive: true });
+      await removeSyntheticFixtureTree(fixtureRoot);
       await rmdir(outerTemporaryRoot).catch((error: unknown) => {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
@@ -682,7 +1390,7 @@ describe("TF deployment identity contract", () => {
       if (temporaryRootIsLink) {
         await unlink(linkedTemporaryRoot).catch(() => undefined);
       }
-      await rm(fixtureRoot, { force: true, recursive: true });
+      await removeSyntheticFixtureTree(fixtureRoot);
       await rmdir(outerTemporaryRoot).catch((error: unknown) => {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
@@ -739,7 +1447,7 @@ describe("TF deployment identity contract", () => {
       expect(await readFile(marker, "utf8")).toBe("preserve");
     } finally {
       if (fileIsLink) await unlink(linkedFile).catch(() => undefined);
-      await rm(fixtureRoot, { force: true, recursive: true });
+      await removeSyntheticFixtureTree(fixtureRoot);
       await rmdir(outerTemporaryRoot).catch((error: unknown) => {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
@@ -747,6 +1455,232 @@ describe("TF deployment identity contract", () => {
         }
       });
     }
+  });
+
+  it("rejects run replacement between verification and fixture open", async ({
+    skip,
+  }) => {
+    const fixture = await createFilesystemRaceFixture("run-write-race-");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    let directory = "";
+    let displacedRun = "";
+    let runIsLink = false;
+    let interlocked = false;
+
+    try {
+      directory = await createTemporaryDirectory("run-write-", {
+        repositoryRoot: fixture.workspace,
+      });
+      displacedRun = `${directory}-original`;
+      await expect(
+        writeTemporaryFixture(
+          directory,
+          join(directory, "fixture"),
+          "sensitive-canary",
+          {
+            repositoryRoot: fixture.workspace,
+            interlock: async ({ path, phase }) => {
+              if (phase !== "before-fixture-open") return;
+              interlocked = true;
+              await rename(directory, displacedRun);
+              try {
+                await symlink(fixture.outside, directory, linkType);
+                runIsLink = true;
+              } catch (error) {
+                await rename(displacedRun, directory);
+                const code = (error as NodeJS.ErrnoException).code;
+                if (code === "EPERM" || code === "EACCES") {
+                  skip();
+                  return;
+                }
+                throw error;
+              }
+              expect(path).toBe(join(directory, "fixture"));
+            },
+          },
+        ),
+      ).rejects.toThrow(/identity|physical|reparse|replaced|symbolic/i);
+      expect(interlocked).toBe(true);
+      expect(await readFile(fixture.externalMarker, "utf8")).toBe("preserve");
+      expect(await readdir(fixture.outside)).toEqual(["external-marker"]);
+    } finally {
+      if (runIsLink) {
+        await unlink(directory).catch(() => undefined);
+        await rename(displacedRun, directory).catch(() => undefined);
+      }
+      await removeSyntheticFixtureTree(fixture.fixtureRoot);
+    }
+  });
+
+  it("rejects file replacement after exclusive open without writing outside", async () => {
+    const fixture = await createFilesystemRaceFixture("file-write-race-");
+    let directory = "";
+    let displacedFile = "";
+    let fixturePath = "";
+    let interlocked = false;
+
+    try {
+      directory = await createTemporaryDirectory("file-write-", {
+        repositoryRoot: fixture.workspace,
+      });
+      fixturePath = join(directory, "fixture");
+      displacedFile = `${fixturePath}-original`;
+      await expect(
+        writeTemporaryFixture(directory, fixturePath, "sensitive-canary", {
+          repositoryRoot: fixture.workspace,
+          interlock: async ({ name, path, phase }) => {
+            if (phase !== "after-fixture-open" || name !== "fixture") return;
+            interlocked = true;
+            await rename(path, displacedFile);
+            await link(fixture.externalMarker, path);
+          },
+        }),
+      ).rejects.toThrow(/identity|replaced/i);
+      expect(interlocked).toBe(true);
+      expect(await readFile(fixture.externalMarker, "utf8")).toBe("preserve");
+      expect(await readFile(displacedFile, "utf8")).toBe("");
+    } finally {
+      if (fixturePath.length > 0 && displacedFile.length > 0) {
+        await unlink(fixturePath).catch(() => undefined);
+        await rename(displacedFile, fixturePath).catch(() => undefined);
+      }
+      await removeSyntheticFixtureTree(fixture.fixtureRoot);
+    }
+  });
+
+  it("rejects run replacement between manifest verification and cleanup", async ({
+    skip,
+  }) => {
+    const fixture = await createFilesystemRaceFixture("run-cleanup-race-");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    let directory = "";
+    let displacedRun = "";
+    let runIsLink = false;
+    let interlocked = false;
+
+    try {
+      directory = await createTemporaryDirectory("run-cleanup-", {
+        repositoryRoot: fixture.workspace,
+      });
+      displacedRun = `${directory}-original`;
+      await writeTemporaryFixture(
+        directory,
+        join(directory, "fixture"),
+        "owned",
+        { repositoryRoot: fixture.workspace },
+      );
+      await expect(
+        removeTemporaryDirectory(directory, {
+          repositoryRoot: fixture.workspace,
+          interlock: async ({ phase }) => {
+            if (phase !== "after-cleanup-manifest-verified") return;
+            interlocked = true;
+            await rename(directory, displacedRun);
+            try {
+              await symlink(fixture.outside, directory, linkType);
+              runIsLink = true;
+            } catch (error) {
+              await rename(displacedRun, directory);
+              const code = (error as NodeJS.ErrnoException).code;
+              if (code === "EPERM" || code === "EACCES") {
+                skip();
+                return;
+              }
+              throw error;
+            }
+          },
+        }),
+      ).rejects.toThrow(/identity|physical|reparse|replaced|symbolic/i);
+      expect(interlocked).toBe(true);
+      expect(await readFile(fixture.externalMarker, "utf8")).toBe("preserve");
+      expect(await readdir(fixture.outside)).toEqual(["external-marker"]);
+    } finally {
+      if (runIsLink) {
+        await unlink(directory).catch(() => undefined);
+        await rename(displacedRun, directory).catch(() => undefined);
+      }
+      await removeSyntheticFixtureTree(fixture.fixtureRoot);
+    }
+  });
+
+  it("rejects file replacement between verification and unlink", async () => {
+    const fixture = await createFilesystemRaceFixture("file-cleanup-race-");
+    let directory = "";
+    let displacedFile = "";
+    let fixturePath = "";
+    let interlocked = false;
+
+    try {
+      directory = await createTemporaryDirectory("file-cleanup-", {
+        repositoryRoot: fixture.workspace,
+      });
+      fixturePath = join(directory, "fixture");
+      displacedFile = `${fixturePath}-original`;
+      await writeTemporaryFixture(directory, fixturePath, "owned", {
+        repositoryRoot: fixture.workspace,
+      });
+      await expect(
+        removeTemporaryDirectory(directory, {
+          repositoryRoot: fixture.workspace,
+          interlock: async ({ name, path, phase }) => {
+            if (phase !== "after-cleanup-file-open" || name !== "fixture") {
+              return;
+            }
+            interlocked = true;
+            await rename(path, displacedFile);
+            await link(fixture.externalMarker, path);
+          },
+        }),
+      ).rejects.toThrow(/identity|replaced/i);
+      expect(interlocked).toBe(true);
+      expect(await readFile(fixture.externalMarker, "utf8")).toBe("preserve");
+      expect(await readFile(displacedFile, "utf8")).toBe("owned");
+    } finally {
+      if (fixturePath.length > 0 && displacedFile.length > 0) {
+        await unlink(fixturePath).catch(() => undefined);
+        await rename(displacedFile, fixturePath).catch(() => undefined);
+      }
+      await removeSyntheticFixtureTree(fixture.fixtureRoot);
+    }
+  });
+
+  it("rejects cleanup when the ownership marker changes", async () => {
+    const directory = await createTemporaryDirectory(
+      "apollo-tf-api-marker-mismatch-",
+    );
+    const marker = join(directory, ".api-deployment-contract-owner");
+    const originalMarker = await readFile(marker, "utf8");
+    await writeFile(marker, "attacker-marker");
+
+    await expect(removeTemporaryDirectory(directory)).rejects.toThrow(
+      /marker|ownership|identity/i,
+    );
+
+    await writeFile(marker, originalMarker);
+  });
+
+  it("rejects entries added after the cleanup manifest is built", async () => {
+    const directory = await createTemporaryDirectory(
+      "apollo-tf-api-manifest-race-",
+    );
+    const generatedDirectory = join(directory, "assets");
+    const generatedFile = join(generatedDirectory, "bundle.js");
+    const lateFile = join(generatedDirectory, "late.js");
+    await mkdir(generatedDirectory);
+    await writeFile(generatedFile, "generated");
+    await captureGeneratedTreeManifest(directory);
+
+    await expect(
+      removeTemporaryDirectory(directory, {
+        interlock: async ({ phase }) => {
+          if (phase === "after-cleanup-manifest-verified") {
+            await writeFile(lateFile, "unknown");
+          }
+        },
+      }),
+    ).rejects.toThrow(/allowlist|manifest|unexpected/i);
+
+    await unlink(lateFile);
   });
 
   it("preserves the root base identities while retaining Task 9 hardening", async () => {
@@ -877,9 +1811,10 @@ describe("TF deployment identity contract", () => {
     expect(dockerfile).toContain("ARG VITE_API_URL");
     expect(dockerfile).toContain("ENV VITE_API_URL=${VITE_API_URL}");
 
-    const outputDirectory = await createTemporaryDirectory(
+    const outputRunDirectory = await createTemporaryDirectory(
       "apollo-tf-web-bundle-",
     );
+    const outputDirectory = join(outputRunDirectory, "vite");
     await execFileAsync(
       process.execPath,
       [
@@ -901,9 +1836,10 @@ describe("TF deployment identity contract", () => {
       },
     );
 
+    await captureGeneratedTreeManifest(outputRunDirectory);
     const bundle = (
       await Promise.all(
-        (await filesRecursively(outputDirectory)).map((path) =>
+        (await filesRecursively(outputRunDirectory)).map((path) =>
           readFile(path, "utf8"),
         ),
       )
