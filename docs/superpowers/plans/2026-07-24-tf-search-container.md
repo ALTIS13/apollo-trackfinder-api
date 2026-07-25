@@ -785,11 +785,22 @@ READY TO MERGE YES
 Fix all Critical and Important findings in one consolidated pass, rerun their
 covering tests, and request re-review. Do not merge with an open finding.
 
-- [ ] **Step 5: Publish, merge, and revalidate**
+- [x] **Step 5: Publish feature, merge locally, and revalidate**
 
 Push `codex/feat/tf-search-container`, fast-forward merge into `main`, rerun the
 Task 6 matrix on merged `main`, push `main`, and confirm both remote refs. Do not
 remove the worktree until publication and merged-result validation are confirmed.
+
+The reviewed feature tip `6b43cdb84e142a9aed73b4ae3ee23ee7b48cc2ff`
+was published to `origin/codex/feat/tf-search-container`, fast-forwarded into
+local `main`, and revalidated there with the complete Task 6 release matrix.
+Fresh merged-result evidence includes contract/runtime/API/player tests, root
+typecheck, all builds and syntax checks, exact root/nested Compose renders,
+explicit real local Docker smoke, five-category zero-residue cleanup,
+runtime/security scans, and `git diff --check`. The whole-review verdict remains
+`SPEC PASS / QUALITY APPROVED / READY TO MERGE YES`. Per the controller's
+bounded Step 5 instruction, `origin/main` publication remains pending until the
+docs-only evidence commit and was not performed during this validation.
 
 ---
 
