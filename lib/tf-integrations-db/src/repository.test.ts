@@ -147,10 +147,15 @@ describe("PostgresProviderAccountRepository", () => {
 
     await expect(repo.isMigrationCurrent()).resolves.toBe(true);
     expect(pool.queries[0]?.values).toEqual([
-      INTEGRATIONS_MIGRATION_MANIFEST.at(-1)?.name,
-      INTEGRATIONS_MIGRATION_MANIFEST.at(-1)?.checksum,
+      JSON.stringify(INTEGRATIONS_MIGRATION_MANIFEST),
       INTEGRATIONS_MIGRATION_MANIFEST.length,
     ]);
+    expect(pool.queries[0]?.text).toMatch(
+      /jsonb_array_elements\(\$1::jsonb\)/i,
+    );
+    expect(pool.queries[0]?.text).toMatch(
+      /where persisted\.name = expected\.name[\s\S]*and persisted\.checksum = expected\.checksum/i,
+    );
 
     pool.rows = [{ current: false }];
     await expect(repo.isMigrationCurrent()).resolves.toBe(false);

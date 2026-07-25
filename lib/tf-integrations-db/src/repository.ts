@@ -286,22 +286,34 @@ export class PostgresProviderAccountRepository implements ProviderAccountReposit
   }
 
   async isMigrationCurrent(): Promise<boolean> {
-    const latest = INTEGRATIONS_MIGRATION_MANIFEST.at(-1);
-    if (latest === undefined) return false;
+    if (INTEGRATIONS_MIGRATION_MANIFEST.length === 0) return false;
     try {
       const result = await this.#pool.query<{ current: boolean }>(
         `
+          with expected as (
+            select entry ->> 'name' as name,
+                   entry ->> 'checksum' as checksum
+            from jsonb_array_elements($1::jsonb) as entry
+          ),
+          persisted as (
+            select name, checksum
+            from apollo_tf_integrations.schema_migrations
+          )
           select (
-            (select count(*)
-             from apollo_tf_integrations.schema_migrations) = $3
-            and exists (
-              select 1
-              from apollo_tf_integrations.schema_migrations
-              where name = $1 and checksum = $2
-            )
+            (select count(*) from persisted) = $2
+            and (select count(*) from expected) = $2
+            and (
+              select count(*)
+              from persisted, expected
+              where persisted.name = expected.name
+                and persisted.checksum = expected.checksum
+            ) = $2
           ) as current
         `,
-        [latest.name, latest.checksum, INTEGRATIONS_MIGRATION_MANIFEST.length],
+        [
+          JSON.stringify(INTEGRATIONS_MIGRATION_MANIFEST),
+          INTEGRATIONS_MIGRATION_MANIFEST.length,
+        ],
       );
       return result.rows[0]?.current === true;
     } catch (error) {

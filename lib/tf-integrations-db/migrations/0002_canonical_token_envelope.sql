@@ -1,16 +1,8 @@
-create table apollo_tf_integrations.provider_accounts (
-  account_id uuid not null,
-  provider text not null,
-  token_envelope jsonb not null,
-  provider_user_id varchar(512) not null,
-  display_name varchar(500) not null,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
+alter table apollo_tf_integrations.provider_accounts
+  drop constraint provider_accounts_token_envelope_check;
 
-  constraint provider_accounts_pkey primary key (account_id, provider),
-  constraint provider_accounts_provider_check
-    check (provider in ('spotify', 'yandex')),
-  constraint provider_accounts_token_envelope_check check (
+alter table apollo_tf_integrations.provider_accounts
+  add constraint provider_accounts_token_envelope_check check (
     jsonb_typeof(token_envelope) = 'object'
     and token_envelope = jsonb_build_object(
       'version', token_envelope -> 'version',
@@ -27,11 +19,19 @@ create table apollo_tf_integrations.provider_accounts (
     and jsonb_typeof(token_envelope -> 'ciphertext') = 'string'
     and char_length(token_envelope ->> 'ciphertext') between 1 and 32768
     and token_envelope ->> 'ciphertext' ~ '^[A-Za-z0-9_-]+$'
+    and char_length(token_envelope ->> 'ciphertext') % 4 <> 1
+    and (
+      char_length(token_envelope ->> 'ciphertext') % 4 = 0
+      or (
+        char_length(token_envelope ->> 'ciphertext') % 4 = 2
+        and right(token_envelope ->> 'ciphertext', 1) ~ '^[AQgw]$'
+      )
+      or (
+        char_length(token_envelope ->> 'ciphertext') % 4 = 3
+        and right(token_envelope ->> 'ciphertext', 1)
+          ~ '^[AEIMQUYcgkosw048]$'
+      )
+    )
     and jsonb_typeof(token_envelope -> 'tag') = 'string'
-    and token_envelope ->> 'tag' ~ '^[A-Za-z0-9_-]{22}$'
-  ),
-  constraint provider_accounts_provider_user_id_check
-    check (char_length(btrim(provider_user_id)) between 1 and 512),
-  constraint provider_accounts_display_name_check
-    check (char_length(btrim(display_name)) between 1 and 500)
-);
+    and token_envelope ->> 'tag' ~ '^[A-Za-z0-9_-]{21}[AQgw]$'
+  );

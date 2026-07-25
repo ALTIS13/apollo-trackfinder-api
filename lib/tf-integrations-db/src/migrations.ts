@@ -31,7 +31,12 @@ export const INTEGRATIONS_MIGRATION_MANIFEST: readonly MigrationManifestEntry[] 
     {
       name: "0001_integrations.sql",
       checksum:
-        "6b9c92ca1f343dce2c1c34d1b1abdb3599382d56a75d426ca87317805574be77",
+        "6b21e525b90612e6aef5bf29263294824b3084343cb17f5b2910651951a4af1a",
+    },
+    {
+      name: "0002_canonical_token_envelope.sql",
+      checksum:
+        "0547c703054892db8b23119c730581ab89477ff3922216784f469cedd6444f88",
     },
   ]);
 

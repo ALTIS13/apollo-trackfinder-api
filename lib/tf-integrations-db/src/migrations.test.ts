@@ -106,6 +106,32 @@ afterEach(async () => {
 });
 
 describe("integrations migrations", () => {
+  it("accepts original 0001 history, applies 0002, and still rejects checksum drift", async () => {
+    const originalChecksum =
+      "6b21e525b90612e6aef5bf29263294824b3084343cb17f5b2910651951a4af1a";
+    const pool = new MigrationPoolDouble();
+    pool.client.history.set("0001_integrations.sql", originalChecksum);
+
+    await expect(runIntegrationsMigrations(asPool(pool))).resolves.toEqual({
+      applied: ["0002_canonical_token_envelope.sql"],
+      alreadyApplied: ["0001_integrations.sql"],
+    });
+    expect(pool.client.history.get("0001_integrations.sql")).toBe(
+      originalChecksum,
+    );
+    expect(pool.client.history.has("0002_canonical_token_envelope.sql")).toBe(
+      true,
+    );
+
+    pool.client.history.set(
+      "0001_integrations.sql",
+      "drifted-original-checksum",
+    );
+    await expect(runIntegrationsMigrations(asPool(pool))).rejects.toMatchObject(
+      { code: "migration_checksum_mismatch" },
+    );
+  });
+
   it("applies immutable numbered migrations once and rejects checksum drift", async () => {
     const directory = await fixtureDirectory({
       "0001_first.sql": "select 'first integration migration';",

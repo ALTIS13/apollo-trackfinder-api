@@ -35,11 +35,21 @@ describe("integrations migration manifest", () => {
   });
 
   it("enforces canonical unpadded base64url envelope fields at the SQL boundary", async () => {
+    const migrationDirectory = new URL("../migrations/", import.meta.url);
+    const names = await readdir(migrationDirectory);
+    expect(names).toContain("0002_canonical_token_envelope.sql");
+
     const sql = await readFile(
-      new URL("../migrations/0001_integrations.sql", import.meta.url),
+      new URL("0002_canonical_token_envelope.sql", migrationDirectory),
       "utf8",
     );
 
+    expect(sql).toMatch(
+      /alter table apollo_tf_integrations\.provider_accounts[\s\S]*drop constraint provider_accounts_token_envelope_check/i,
+    );
+    expect(sql).toMatch(
+      /alter table apollo_tf_integrations\.provider_accounts[\s\S]*add constraint provider_accounts_token_envelope_check/i,
+    );
     expect(sql).toMatch(
       /token_envelope ->> 'nonce' ~ '\^\[A-Za-z0-9_-\]\{16\}\$'/i,
     );
@@ -72,8 +82,14 @@ describe("integrations migration manifest", () => {
     );
 
     expect(INTEGRATIONS_MIGRATION_MANIFEST).toEqual(recomputed);
+    expect(INTEGRATIONS_MIGRATION_MANIFEST[0]).toEqual({
+      name: "0001_integrations.sql",
+      checksum:
+        "6b21e525b90612e6aef5bf29263294824b3084343cb17f5b2910651951a4af1a",
+    });
     expect(INTEGRATIONS_MIGRATION_MANIFEST.map(({ name }) => name)).toEqual([
       "0001_integrations.sql",
+      "0002_canonical_token_envelope.sql",
     ]);
   });
 });
