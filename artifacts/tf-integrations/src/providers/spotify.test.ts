@@ -58,6 +58,7 @@ function makeProvider(
     provider: new SpotifyProvider({
       clientId: "spotify-client",
       clientSecret: "spotify-credential",
+      callbackUri,
       fetch: recorded.fetch,
       now: () => now,
       ...overrides,
@@ -119,6 +120,46 @@ describe("SpotifyProvider", () => {
     ).toThrow(ProviderError);
   });
 
+  it("requires the command callback to equal the configured runtime callback", async () => {
+    const { provider, requests } = makeProvider([]);
+    const otherOriginCallback =
+      "https://attacker.example/api/spotify/callback";
+
+    expect(() =>
+      provider.authorizationUrl({
+        state: "state",
+        callbackUri: otherOriginCallback,
+      }),
+    ).toThrow(ProviderError);
+    await expect(
+      provider.exchangeCode({
+        code: "bounded-code",
+        callbackUri: otherOriginCallback,
+      }),
+    ).rejects.toMatchObject({ code: "provider_rejected" });
+    expect(requests).toHaveLength(0);
+
+    expect(() =>
+      makeProvider([], {
+        callbackUri: "http://tf.example.test/api/spotify/callback",
+      }),
+    ).toThrow(ProviderError);
+
+    const deploymentCallback =
+      "https://api.deployment.example/api/spotify/callback";
+    const configuredProvider = makeProvider([], {
+      callbackUri: deploymentCallback,
+    }).provider;
+    expect(
+      new URL(
+        configuredProvider.authorizationUrl({
+          state: "state",
+          callbackUri: deploymentCallback,
+        }),
+      ).searchParams.get("redirect_uri"),
+    ).toBe(deploymentCallback);
+  });
+
   it("exchanges a bounded code and requires access, refresh, and expiry values", async () => {
     const accessToken = `access-${randomUUID()}`;
     const refreshToken = `refresh-${randomUUID()}`;
@@ -176,6 +217,54 @@ describe("SpotifyProvider", () => {
     await expect(
       provider.exchangeCode({ code: "x".repeat(8_193), callbackUri }),
     ).rejects.toMatchObject({ code: "provider_rejected" });
+  });
+
+  it.each([
+    {
+      field: "missing access token",
+      response: { refresh_token: "refresh", expires_in: 3_600 },
+    },
+    {
+      field: "non-string access token",
+      response: {
+        access_token: 42,
+        refresh_token: "refresh",
+        expires_in: 3_600,
+      },
+    },
+    {
+      field: "missing expiry",
+      response: { access_token: "access", refresh_token: "refresh" },
+    },
+    {
+      field: "non-integer expiry",
+      response: {
+        access_token: "access",
+        refresh_token: "refresh",
+        expires_in: "3600",
+      },
+    },
+    {
+      field: "zero expiry",
+      response: {
+        access_token: "access",
+        refresh_token: "refresh",
+        expires_in: 0,
+      },
+    },
+    {
+      field: "oversized expiry",
+      response: {
+        access_token: "access",
+        refresh_token: "refresh",
+        expires_in: 86_401,
+      },
+    },
+  ])("rejects an exchange response with $field", async ({ response }) => {
+    const { provider } = makeProvider([jsonResponse(response)]);
+    await expect(
+      provider.exchangeCode({ code: "bounded-code", callbackUri }),
+    ).rejects.toMatchObject({ code: "invalid_provider_response" });
   });
 
   it("refreshes within 60 seconds of expiry and preserves a missing replacement refresh token", async () => {
@@ -292,6 +381,39 @@ describe("SpotifyProvider", () => {
     ).rejects.toMatchObject({ code: "provider_rejected" });
   });
 
+  it("rejects dot-segment playlist IDs before constructing a provider path", async () => {
+    const { provider, requests } = makeProvider([
+      jsonResponse({
+        items: [{ track: spotifyTrack("playlist-track") }],
+        total: 1,
+      }),
+    ]);
+
+    for (const playlistId of [".", ".."]) {
+      await expect(
+        provider.playlistTracks({
+          accessToken: "access",
+          playlistId,
+          offset: 0,
+          limit: 1,
+        }),
+      ).rejects.toMatchObject({ code: "provider_rejected" });
+    }
+    expect(requests).toHaveLength(0);
+
+    await expect(
+      provider.playlistTracks({
+        accessToken: "access",
+        playlistId: "playlist..safe",
+        offset: 0,
+        limit: 1,
+      }),
+    ).resolves.toMatchObject({ total: 1 });
+    expect(requests[0]!.url).toBe(
+      "https://api.spotify.com/v1/playlists/playlist..safe/tracks?offset=0&limit=1&fields=items%28track%28id%2Cname%2Cartists%2Calbum%2Cduration_ms%2Cexternal_urls%29%29%2Ctotal",
+    );
+  });
+
   it("strictly validates and normalizes liked tracks, playlists, playlist tracks, and top tracks", async () => {
     const expectedTrack = {
       id: "track-1",
@@ -379,6 +501,46 @@ describe("SpotifyProvider", () => {
     ]).provider;
     await expect(
       malformed.likedTracks({ accessToken: "access", offset: 0, limit: 1 }),
+    ).rejects.toMatchObject({ code: "invalid_provider_response" });
+  });
+
+  it("rejects a malformed playlist-track response independently", async () => {
+    const malformedPlaylistTracks = makeProvider([
+      jsonResponse({
+        items: [
+          {
+            track: {
+              ...spotifyTrack(),
+              external_urls: {
+                spotify: "http://open.spotify.com/track/track-1",
+              },
+            },
+          },
+        ],
+        total: 1,
+      }),
+    ]).provider;
+    await expect(
+      malformedPlaylistTracks.playlistTracks({
+        accessToken: "access",
+        playlistId: "playlist-1",
+        offset: 0,
+        limit: 1,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_provider_response" });
+  });
+
+  it("rejects a malformed top-track response independently", async () => {
+    const malformedTopTracks = makeProvider([
+      jsonResponse({
+        items: [{ ...spotifyTrack(), artists: [{ name: 42 }] }],
+      }),
+    ]).provider;
+    await expect(
+      malformedTopTracks.topTracks({
+        accessToken: "access",
+        timeRange: "medium_term",
+      }),
     ).rejects.toMatchObject({ code: "invalid_provider_response" });
   });
 

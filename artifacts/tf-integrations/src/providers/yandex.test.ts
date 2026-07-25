@@ -307,6 +307,73 @@ describe("YandexProvider", () => {
     ).rejects.toMatchObject({ code: "invalid_provider_response" });
   });
 
+  it("rejects a malformed account response independently", async () => {
+    const token = `oauth-${randomUUID()}`;
+    const malformedAccount = makeProvider([
+      jsonResponse({
+        result: {
+          account: {
+            uid: "12345",
+            login: "yandex-login",
+          },
+        },
+      }),
+    ]).provider;
+    await expect(
+      malformedAccount.validateToken({ oauthToken: token }),
+    ).rejects.toMatchObject({ code: "invalid_provider_response" });
+  });
+
+  it("rejects a malformed liked-detail response independently", async () => {
+    const token = `oauth-${randomUUID()}`;
+    const malformedLikedDetails = makeProvider([
+      jsonResponse({
+        result: {
+          library: { tracks: [{ id: 101, albumId: 201 }] },
+        },
+      }),
+      jsonResponse({
+        result: [{ ...yandexTrack(), durationMs: "241999" }],
+      }),
+    ]).provider;
+    await expect(
+      malformedLikedDetails.likedTracks({
+        oauthToken: token,
+        userId: "12345",
+        offset: 0,
+        limit: 1,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_provider_response" });
+  });
+
+  it("rejects a malformed playlist-track response independently", async () => {
+    const token = `oauth-${randomUUID()}`;
+    const malformedPlaylistTrack = makeProvider([
+      jsonResponse({
+        result: {
+          kind: 8,
+          title: "Playlist",
+          tracks: [
+            {
+              id: 101,
+              timestamp: "2026-07-25T12:00:00Z",
+              track: { ...yandexTrack(), artists: [] },
+            },
+          ],
+        },
+      }),
+    ]).provider;
+    await expect(
+      malformedPlaylistTrack.playlistTracks({
+        oauthToken: token,
+        uid: 12345,
+        kind: 8,
+        offset: 0,
+        limit: 1,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_provider_response" });
+  });
+
   it("returns stable provider errors without token, raw response, or private path values", async () => {
     const tokenCanary = `oauth-${randomUUID()}`;
     const bodyCanary = `body-${randomUUID()}`;

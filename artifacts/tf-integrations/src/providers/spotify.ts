@@ -63,6 +63,7 @@ export class ProviderError extends Error {
 export interface SpotifyProviderOptions {
   readonly clientId: string;
   readonly clientSecret: string;
+  readonly callbackUri: string;
   readonly fetch: typeof fetch;
   readonly now?: () => number;
   readonly logger?: ProviderLogger;
@@ -412,6 +413,7 @@ function topTracksResult(value: unknown): SpotifyTracksResult {
 export class SpotifyProvider {
   readonly #clientId: string;
   readonly #clientSecret: string;
+  readonly #callbackUri: string;
   readonly #fetch: typeof fetch;
   readonly #now: () => number;
   readonly #logger?: ProviderLogger;
@@ -419,8 +421,12 @@ export class SpotifyProvider {
   constructor(options: SpotifyProviderOptions) {
     assertTextInput(options.clientId, MAX_TOKEN_LENGTH);
     assertTextInput(options.clientSecret, MAX_TOKEN_LENGTH);
+    if (!exactCallbackUri(options.callbackUri)) {
+      throw new ProviderError("provider_rejected");
+    }
     this.#clientId = options.clientId;
     this.#clientSecret = options.clientSecret;
+    this.#callbackUri = options.callbackUri;
     this.#fetch = options.fetch;
     this.#now = options.now ?? Date.now;
     this.#logger = options.logger;
@@ -431,7 +437,7 @@ export class SpotifyProvider {
     readonly callbackUri: string;
   }): string {
     assertTextInput(input.state, MAX_TOKEN_LENGTH);
-    if (!exactCallbackUri(input.callbackUri)) {
+    if (input.callbackUri !== this.#callbackUri) {
       throw new ProviderError("provider_rejected");
     }
     const url = new URL("/authorize", ACCOUNTS_ORIGIN);
@@ -439,7 +445,7 @@ export class SpotifyProvider {
       response_type: "code",
       client_id: this.#clientId,
       scope: SPOTIFY_SCOPES,
-      redirect_uri: input.callbackUri,
+      redirect_uri: this.#callbackUri,
       state: input.state,
     }).toString();
     return url.toString();
@@ -450,7 +456,7 @@ export class SpotifyProvider {
     readonly callbackUri: string;
   }): Promise<SpotifyExchangeResult> {
     assertTextInput(input.code, MAX_TOKEN_LENGTH);
-    if (!exactCallbackUri(input.callbackUri)) {
+    if (input.callbackUri !== this.#callbackUri) {
       throw new ProviderError("provider_rejected");
     }
     const value = await this.#requestJson(
@@ -465,7 +471,7 @@ export class SpotifyProvider {
         body: new URLSearchParams({
           grant_type: "authorization_code",
           code: input.code,
-          redirect_uri: input.callbackUri,
+          redirect_uri: this.#callbackUri,
           client_id: this.#clientId,
           client_secret: this.#clientSecret,
         }),
@@ -568,7 +574,11 @@ export class SpotifyProvider {
     assertTextInput(input.playlistId, MAX_IDENTIFIER_LENGTH);
     assertPagination(input.offset, input.limit);
     const playlistId = encodeURIComponent(input.playlistId);
-    const url = new URL(`${API_ROOT}/playlists/${playlistId}/tracks`);
+    const pathname = `/v1/playlists/${playlistId}/tracks`;
+    const url = new URL(pathname, API_ORIGIN);
+    if (url.pathname !== pathname) {
+      throw new ProviderError("provider_rejected");
+    }
     url.search = new URLSearchParams({
       offset: String(input.offset),
       limit: String(input.limit),
