@@ -798,9 +798,9 @@ Fresh merged-result evidence includes contract/runtime/API/player tests, root
 typecheck, all builds and syntax checks, exact root/nested Compose renders,
 explicit real local Docker smoke, five-category zero-residue cleanup,
 runtime/security scans, and `git diff --check`. The whole-review verdict remains
-`SPEC PASS / QUALITY APPROVED / READY TO MERGE YES`. Per the controller's
-bounded Step 5 instruction, `origin/main` publication remains pending until the
-docs-only evidence commit and was not performed during this validation.
+`SPEC PASS / QUALITY APPROVED / READY TO MERGE YES`. The merged-result evidence
+commit `28aa25b340b6182c8da7259405b1239876121ffd` was then published to
+`origin/main`; the feature ref remains at its reviewed tip.
 
 ---
 
