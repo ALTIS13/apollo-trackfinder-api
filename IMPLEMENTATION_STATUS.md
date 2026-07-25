@@ -4,78 +4,81 @@ Last updated: 2026-07-25.
 
 ## TF integrations Task 7 release validation
 
-Status: `DONE_WITH_CONCERNS`. The validated runtime/config/source tip is
-`7f2cdf2f0b87cf5429eff774aaab0e390ad37ac3`. The follow-up after that tip is
-documentation-only and does not claim that the runtime matrix was rerun on
-the documentation commit itself.
+Status: `DONE_WITH_CONCERNS`. The final whole-branch implementation and
+validation tip is
+`16f6fc88e85fe919ddcb86a85333a38f3218e715`, with exact fix range
+`230077513023231c800b51509b6e98e5e9f455bd..16f6fc88e85fe919ddcb86a85333a38f3218e715`.
+The following evidence commit is documentation-only and does not claim that
+the runtime matrix was rerun on itself.
 
-- Historical evidence is preserved: the first validation at `daf663e` was
-  correctly recorded as `BLOCKED` across exact checkpoint range
-  `daf663ea92a7e35b7432c169aaf8ec3298465217..1ef211b119f4879f0e87574a41ef9ab4caa7c9ea`
-  after one stale API documentation assertion and both exact no-env Compose
-  renders failed. Its raw outputs were `707 passed / 13 skipped / 1 failed`;
-  the former status arithmetic said 12 skipped and is corrected here.
-- Reviewed ranges remain Task 1 `af90cb9..6bf4161`, Task 2
-  `6bf4161..2e9b2da`, Task 3 `2e9b2da..ce4c388`, Task 4
-  `ce4c388..bc577c3`, Task 5 `bc577c3..bcb3b3c`, and Task 6
-  `bcb3b3c..daf663e`; exact blocked Task 7 checkpoint range
-  `daf663ea92a7e35b7432c169aaf8ec3298465217..1ef211b119f4879f0e87574a41ef9ab4caa7c9ea`;
-  exact Task 7 validation-fix range
-  `1ef211b119f4879f0e87574a41ef9ab4caa7c9ea..7f2cdf2f0b87cf5429eff774aaab0e390ad37ac3`.
-  Every Task 1-6 range ended review-clean. Nonblocking deferred minors remain
-  Task 2's weak unit plaintext assertion, Task 4's possible late shutdown
-  heartbeat, Task 5's production-`index.ts` wiring/cold-import test limits,
-  and Task 6's unbounded role-init file/SQL waits.
-- Fix-round RED reproduced API `19 passed / 1 failed`, both no-env Compose
-  interpolation failures, integrations deployment `9 passed / 1 failed`,
-  tf-search deployment `17 passed / 2 failed`, and the strengthened API
-  documentation assertion `19 passed / 1 failed`. Focused GREEN is API
-  `20/20`, integrations deployment `10/10`, and tf-search deployment `19/19`.
-- Final exact suites: contract `10/10`; integrations DB
-  `18 passed / 1 PostgreSQL-gated`; integrations
-  `76 passed / 9 real-Docker-gated`; API `379 passed / 2 skipped`; tf-search
+- Final-review fixes add immutable migration
+  `0005_provider_account_generation.sql` while leaving `0001`--`0004`
+  byte-unchanged. Repository upsert rotates an unguessable UUIDv4 generation;
+  refresh is update-only CAS, so disconnect cannot be restored and reconnect
+  cannot be overwritten. Service and repository interleavings are covered,
+  including `2/2` against disposable real PostgreSQL and a real-smoke CAS
+  assertion.
+- Internal command authentication now verifies exact raw-byte HMAC and time,
+  strictly parses the command, then claims replay state in the canonical
+  account partition. Live nonces are retained through signed validity without
+  eviction, bounded at `32/account` and `256/global`. Query, fragment,
+  trailing-slash, and extra command targets are rejected without HMAC path
+  canonicalization.
+- Every command has an `8s` deadline and disconnect/shutdown cancellation.
+  Module concurrency is `32`; provider I/O is `8 active + 24 queued`, with
+  `1 MiB` bounded streaming JSON and cancellation of non-OK, malformed,
+  oversized, stalled, and non-terminating bodies. Provider readiness remains
+  database-only.
+- API startup requires heartbeat keys for both `search-media` and
+  `account-integrations` and fails with a generic configuration error.
+  External modules start `unknown`, remain non-healthy until a valid heartbeat,
+  expire after `90s`, and recover on a new valid heartbeat. Shutdown cannot
+  send a heartbeat after awaited readiness.
+- The deferred plaintext-canary, late-heartbeat, and role-init timeout findings
+  are closed. Password files are bounded to `1..512` bytes and PostgreSQL role
+  bootstrap uses `10s` connection, `30s` statement, and `5s` lock limits.
+  Task 1 policy/CSRF remains closed; Task 5 cold-import coverage remains
+  nonblocking.
+- Final exact successful suites: contract `10/10`; integrations DB
+  `19 passed / 2 PostgreSQL-gated`; integrations
+  `95 passed / 10 real-Docker-gated`; API `383 passed / 2 skipped`; tf-search
   `140 passed / 1 real-Docker-gated`; music-player `85/85`. Total:
-  `708 passed / 13 skipped / 0 failed` across 64 files. Skips are the absent
-  disposable PostgreSQL/Redis URLs, the default-off real Docker gates, and one
-  Windows linked-file case gated by symlink `EPERM`/`EACCES`.
+  `732 passed / 15 skipped or gated / 0 failed` across 65 files. The first API
+  attempt had no assertion failure but one Windows Vitest worker exited after
+  `379 passed / 2 skipped`; the identical exact rerun passed
+  `383 passed / 2 skipped`.
 - Workspace typecheck and all three builds passed. Fresh primary outputs:
-  integrations `index.mjs` 90,018 bytes and `migrate.mjs` 8,961 bytes; API
-  `index.mjs` 4,277,724 bytes; music-player JS 517,554 bytes (164.43 kB gzip)
+  integrations `index.mjs` 104,179 bytes and `migrate.mjs` 9,101 bytes; API
+  `index.mjs` 4,278,465 bytes; music-player JS 517,554 bytes (164.43 kB gzip)
   and CSS 121,197 bytes (18.62 kB gzip). Existing music-player sourcemap and
   greater-than-500-kB chunk warnings remain nonblocking.
-- All 16 secret declarations in both Compose templates use the same non-secret
-  default `${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}`. Both exact
-  no-env `config --quiet` commands pass with no output/warning; explicit root
-  and nested overrides each resolve `16/16` files to the supplied path. Root
-  and nested rendered YAML sizes are 16,377 and 14,970 bytes.
-- Parsed renders expose zero integration host ports, give API no provider
-  credential/token keyring/integration DB URL, and give the module no shared
-  TF/Platform DB, Redis, browser/session, Docker/SSH/Caddy/Coolify/UFW or
-  control-plane credential. API production source/dist provider-secret,
-  provider-token-table, and direct provider-endpoint scans are zero.
-- Fresh authoritative Docker smoke passed `16/16` in `118.66s` under project
-  `apollo-tf-integrations-smoke-28032-8bce1921`. It re-proved migration
-  ordering/ACLs, signed-command rejection, authenticated ciphertext,
-  provider-independent readiness, heartbeat reset/recovery, exact inspect
-  boundaries, zero host ports, and Node 24 LTS. Its 37 raw/digest markers were
-  absent from six runtime/tracked-byte surfaces; a separate 8-canary plus
-  8-digest pass found zero matches in 588 tracked files plus the ignored Task 7
-  report, 22 bundle files, both renders, and Git diff.
-- Docker Desktop does not provide native-Linux secret UID/GID evidence:
-  file-source mounts are remapped and declared metadata is not applied. The
-  verified Desktop alternative is exact owner-scoped read-only mounts with
-  regular/readable/non-writable targets and inspect-confirmed read-only state.
-  The platform-gated native-Linux path still requires exact `999:999` or
-  `10001:10001` and mode `0400`.
-- Independent exact cleanup for the smoke project returned `containers=0`,
-  `images=0`, `networks=0`, `volumes=0`, `temporaryDirectories=0`,
-  `diagnosticContainers=0`, and `diagnosticNetworks=0`; unrelated Docker
-  resources were not pruned.
+- Both exact no-env Compose checks pass silently; explicit root and nested
+  overrides each resolve `16/16` secret files. LF-normalized root/nested YAML
+  sizes are 15,890/14,520 bytes and JSON sizes are 20,921/19,078 bytes.
+  Parsed renders have `32/32` default secret paths and zero host-port,
+  foreign-secret, or integration-network violations.
+- Fresh authoritative Docker smoke passed `17/17` in `121.40s` under project
+  `apollo-tf-integrations-smoke-45916-d33a8afb`. It re-proved migration/ACLs,
+  stale-generation CAS in PostgreSQL, signed-command rejection, authenticated
+  ciphertext, bounded topology, provider-independent readiness, heartbeat
+  reset/recovery, exact inspect boundaries, zero host ports, and Node 24 LTS.
+- Smoke-injected 37 raw/digest markers were absent from rendered config, logs,
+  responses, ciphertext projection, inspect, and tracked bytes. A separate
+  8-raw plus 8-digest pass found zero matches in 591 tracked files, 23 built
+  files, four renders, and the implementation diff. API/module source and dist
+  forbidden-dependency scans returned zero.
+- Independent exact cleanup returned `containers=0`, `images=0`,
+  `networks=0`, `volumes=0`, `temporaryDirectories=0`,
+  `diagnosticContainers=0`, and `diagnosticNetworks=0`. The supplemental
+  PostgreSQL containers also left zero names/resources. No unrelated Docker
+  resource was pruned.
 - Public read-only DNS checks through `1.1.1.1` and `8.8.8.8` passed `16/16`
-  for `apollot.ru`, `www.apollot.ru`, `admin.apollot.ru`, `api.apollot.ru`,
-  `api.tf.apollot.ru`, `coolify.apollot.ru`, `quasar.apollot.ru`, and
-  `tf.apollot.ru`. They resolve to the owner-configured target/CNAME; no
-  private inventory is recorded.
+  for the eight owner-created names. No DNS address or private inventory is
+  recorded.
+- Docker Desktop proves the owner-scoped read-only mount alternative only; it
+  does not prove native-Linux UID/GID/mode. Exact native evidence for
+  `999:999` or `10001:10001` with mode `0400` remains rollout-blocking and
+  merge-nonblocking.
 - No HomeNode, Coolify, Caddy, UFW, DNS, or other remote infrastructure
   mutation was performed. The next stage is `tf-download-worker`, followed by
   a read-only HomeNode/Coolify/Caddy preflight and explicit user approval

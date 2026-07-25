@@ -87,7 +87,16 @@ apollo-trackfinder/
 
 #### `module-heartbeats.ts` — Heartbeat независимых модулей
 
-`POST /api/internal/modules/:moduleId/heartbeat` принимает только JSON heartbeat от заранее настроенного модуля. Отправитель посылает его каждые 30 секунд. `moduleId` должен иметь отдельный ключ в API-only JSON map `APOLLO_MODULE_HEARTBEAT_KEYS`; пример формы значения: `{"search-media":"<per-module-secret>"}`. Пустая, невалидная или отсутствующая map безопасно отключает endpoint (`503 {"error":"heartbeat_disabled"}`), поэтому модульная телеметрия выключена по умолчанию.
+`POST /api/internal/modules/:moduleId/heartbeat` принимает только JSON heartbeat
+от заранее настроенного модуля. Отправитель посылает его каждые 30 секунд.
+`moduleId` должен иметь отдельный ключ в API-only JSON map
+`APOLLO_MODULE_HEARTBEAT_KEYS`; production startup требует entries
+`search-media` и `account-integrations`, например
+`{"search-media":"<search-secret>","account-integrations":"<integrations-secret>"}`.
+Пустая, невалидная, search-only или отсутствующая map завершает startup общей
+ошибкой `invalid runtime configuration` без вывода key names или values.
+Endpoint по-прежнему fail-closed, если ingestion создаётся отдельно без
+настроенной map.
 
 Запрос использует заголовки `X-Apollo-Heartbeat-Timestamp` (целое Unix-время в секундах), `X-Apollo-Heartbeat-Nonce` и `X-Apollo-Heartbeat-Signature`. Для raw UTF-8 body вычисляется `bodySha256` как lowercase hex SHA-256. Точная canonical string, включая символы новой строки, имеет вид:
 
@@ -535,12 +544,22 @@ API и Apollo Platform. One-shot `tf-integrations-migrate` подключает�
 provider-token tables и данные TF API не импортируются, не изменяются и не
 удаляются.
 
-Immutable migrations `0001`--`0003` не меняются. Additive
+Immutable migrations `0001`--`0004` не меняются. Additive
+`0005_provider_account_generation.sql` добавляет обязательный UUIDv4
+`generation` существующим provider-account rows и удаляет database default
+после backfill. Каждый repository upsert/reconnect создаёт новый
+криптографически случайный generation. Spotify refresh выполняет только
+`UPDATE ... WHERE generation = <loaded generation>` и никогда не вставляет
+missing row, поэтому in-flight refresh не восстанавливает disconnect и не
+перезаписывает reconnect.
+
 `0004_runtime_privileges.sql` удаляет прежние default table grants, отзывает
 все runtime grants на migration-owned tables и затем явно выдаёт только
 `SELECT/INSERT/UPDATE/DELETE` на `provider_accounts` и `SELECT` на
 `schema_migrations`. Обе таблицы остаются во владении migrator role; runtime
 не может pre-seed, insert, update, delete или truncate migration history.
+Role-init принимает password files размером только `1..512` bytes и задаёт
+PostgreSQL bootstrap limits: connection `10s`, statement `30s`, lock `5s`.
 Каждая будущая таблица требует отдельного reviewable grant.
 
 API вызывает exact `POST /v1/commands`. Поддерживаемые account-bound
@@ -570,7 +589,13 @@ API и модуль совместно получают только
 `METHOD + "\n" + path + "\n" + timestamp + "\n" + nonce + "\n" +
 sha256(rawBody)`. Timestamp и 32-byte base64url nonce находятся в
 `X-Apollo-Internal-Timestamp` и `X-Apollo-Internal-Nonce`; окно timestamp --
-60 секунд, replay nonce хранится в bounded process memory пять минут.
+60 секунд. Модуль сначала аутентифицирует exact raw bytes, timestamp и
+signature, затем строго разбирает command и только после этого claims nonce
+в canonical account partition. Live nonces не вытесняются и хранятся ровно
+до конца signed replay-valid окна; limits -- `32` на account и `256` global.
+Заполнение одного account partition не блокирует остальные accounts. Только
+literal `/v1/commands` допустим: query, fragment, trailing slash и любой
+дополнительный request target получают `404` без path canonicalization.
 Command key обязан отличаться от `tf_integrations_heartbeat_secret`.
 
 Модуль получает только шесть runtime secrets:
@@ -599,9 +624,20 @@ Provider token сохраняется только как AES-256-GCM envelope �
 
 Модуль отправляет подписанный heartbeat `account-integrations` сразу после
 готовности и затем каждые 30 секунд. API считает последнее состояние свежим
-90 секунд. Readiness модуля зависит только от exact migration history и
-bounded database probe; недоступность Spotify/Yandex не делает `/readyz`
-неуспешным.
+90 секунд. До первого valid heartbeat и после API restart внешний модуль
+имеет status `unknown`; после expiry он снова `unknown` и восстанавливается
+только новым valid heartbeat. Heartbeat stop повторно проверяет shutdown
+после awaited readiness и не создаёт поздний request. Readiness модуля зависит
+только от exact migration history и bounded database probe; недоступность
+Spotify/Yandex не делает `/readyz` неуспешным.
+
+Каждая command получает единый abort signal от HTTP disconnect, runtime
+shutdown и fixed `8s` deadline, который короче API gateway timeout `10s`.
+Module допускает не более `32` active commands; provider boundary -- `8`
+active calls плюс `24` queued. Spotify/Yandex читают response JSON streaming
+с limit `1 MiB`, передают signal во все fixed HTTPS endpoints и
+cancel/drain non-OK, malformed, oversized, stalled и non-terminating bodies.
+Provider availability и эти I/O limits не входят в readiness.
 
 Сеть `tf-integrations-control` является internal и содержит только `api` и
 `tf-integrations`. Internal `tf-integrations-data` содержит только module,
