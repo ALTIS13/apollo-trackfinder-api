@@ -84,15 +84,16 @@ function exactOrigin(value: string, allowInsecureHttp: boolean): string {
 function exactSpotifyCallback(value: string): string {
   try {
     const parsed = new URL(value);
+    const canonical = `${parsed.origin}/api/spotify/callback`;
     if (
       value.length <= 4_096 &&
+      value === canonical &&
       parsed.protocol === "https:" &&
       parsed.pathname === "/api/spotify/callback" &&
       parsed.username === "" &&
       parsed.password === "" &&
       parsed.search === "" &&
-      parsed.hash === "" &&
-      parsed.toString() === value
+      parsed.hash === ""
     ) {
       return value;
     }
@@ -100,6 +101,11 @@ function exactSpotifyCallback(value: string): string {
     // Report every malformed callback through the generic config error.
   }
   return invalidConfiguration();
+}
+
+function parseAllowInsecureHttp(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  return value === "true" ? true : invalidConfiguration();
 }
 
 async function loadFile(
@@ -223,9 +229,11 @@ export async function parseTfIntegrationsConfig(
   );
   const heartbeatApiOrigin = exactOrigin(
     requiredValue(env, "TF_INTEGRATIONS_HEARTBEAT_API_ORIGIN"),
-    env["TF_INTEGRATIONS_HEARTBEAT_ALLOW_INSECURE_HTTP"] === "true",
+    parseAllowInsecureHttp(
+      env["TF_INTEGRATIONS_HEARTBEAT_ALLOW_INSECURE_HTTP"],
+    ),
   );
-  const version = env["APOLLO_API_VERSION"]?.trim() || "unknown";
+  const version = requiredValue(env, "APOLLO_API_VERSION");
   if (version.length > 128) return invalidConfiguration();
   const deployedAt = parseDeployedAt(env["APOLLO_DEPLOYED_AT"]);
 

@@ -120,6 +120,32 @@ describe("TF integrations private HTTP runtime", () => {
     expect(result.headers.get("x-content-type-options")).toBe("nosniff");
   });
 
+  it("exposes only exact permitted routes and methods", async () => {
+    const execute = vi.fn<TestService["execute"]>(async () => response);
+    const instance = app({ execute });
+
+    for (const [method, path] of [
+      ["HEAD", "/healthz"],
+      ["HEAD", "/readyz"],
+      ["OPTIONS", "/healthz"],
+      ["OPTIONS", "/readyz"],
+      ["OPTIONS", "/v1/commands"],
+      ["POST", "/healthz"],
+      ["POST", "/readyz"],
+      ["GET", "/v1/commands"],
+    ] as const) {
+      const result = await request(instance, path, { method });
+      expect({
+        method,
+        path,
+        status: result.status,
+        allow: result.headers.get("allow"),
+      }).toEqual({ method, path, status: 404, allow: null });
+    }
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it("reports ready only after current migrations and a bounded database probe", async () => {
     const cases = [
       {

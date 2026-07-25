@@ -39,14 +39,6 @@ export function startTfIntegrationsHeartbeat(
   let controller: AbortController | undefined;
   let active: Promise<void> | undefined;
 
-  const schedule = (): void => {
-    if (stopped) return;
-    timer = setTimeout(() => {
-      timer = undefined;
-      launchAttempt();
-    }, HEARTBEAT_INTERVAL_MS);
-  };
-
   const attempt = async (): Promise<void> => {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let activeController: AbortController | undefined;
@@ -105,11 +97,11 @@ export function startTfIntegrationsHeartbeat(
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
       if (controller === activeController) controller = undefined;
-      if (!stopped) schedule();
     }
   };
 
   const launchAttempt = (): void => {
+    if (stopped || active !== undefined) return;
     const current = attempt();
     active = current;
     void current.finally(() => {
@@ -117,12 +109,13 @@ export function startTfIntegrationsHeartbeat(
     });
   };
 
+  timer = setInterval(launchAttempt, HEARTBEAT_INTERVAL_MS);
   launchAttempt();
 
   return {
     async stop(): Promise<void> {
       stopped = true;
-      if (timer !== undefined) clearTimeout(timer);
+      if (timer !== undefined) clearInterval(timer);
       timer = undefined;
       controller?.abort();
       await active;

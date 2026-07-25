@@ -88,6 +88,22 @@ function requestPath(req: Request): string {
     : req.originalUrl.slice(0, queryIndex);
 }
 
+function requirePermittedRoute(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
+  const path = requestPath(req);
+  if (
+    (req.method === "GET" && (path === "/healthz" || path === "/readyz")) ||
+    (req.method === "POST" && path === TF_INTEGRATIONS_COMMAND_PATH)
+  ) {
+    next();
+    return;
+  }
+  res.status(404).end();
+}
+
 function isIdentityEncoding(req: Request): boolean {
   const value = req.get("Content-Encoding");
   if (value === undefined) return true;
@@ -179,6 +195,7 @@ export function createTfIntegrationsApp(
     setResponseHeaders(res);
     next();
   });
+  app.use(requirePermittedRoute);
 
   app.get("/healthz", (_req, res) => {
     res.status(200).json({ status: "ok" });

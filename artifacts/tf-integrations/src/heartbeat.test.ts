@@ -67,6 +67,43 @@ describe("TF integrations heartbeat and shutdown", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("uses fixed 30-second start ticks without overlapping a slow attempt", async () => {
+    vi.useFakeTimers();
+    let completeFirst: (() => void) | undefined;
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            completeFirst = () => resolve(new Response("", { status: 202 }));
+          }),
+      )
+      .mockResolvedValue(new Response("", { status: 202 }));
+    const heartbeat = startTfIntegrationsHeartbeat({
+      apiOrigin: "https://api.example.test",
+      secret: heartbeatSecret,
+      version: "build-4",
+      ready: async () => true,
+      fetch,
+    });
+
+    await vi.runAllTicks();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    completeFirst?.();
+    await vi.runAllTicks();
+    await vi.advanceTimersByTimeAsync(24_999);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetch).toHaveBeenCalledTimes(2);
+
+    await heartbeat.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("stops heartbeat timers and closes the pool during graceful shutdown", async () => {
     const order: string[] = [];
     const shutdown = createTfIntegrationsShutdown({

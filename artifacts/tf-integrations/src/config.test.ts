@@ -136,6 +136,8 @@ describe("TF integrations runtime configuration", () => {
     for (const callback of [
       "http://api.example.test/api/spotify/callback",
       "https://api.example.test/api/spotify/callback/",
+      "https://api.example.test/api/spotify/callback?",
+      "https://api.example.test/api/spotify/callback#",
       "https://api.example.test/api/spotify/callback?code=secret",
       "https://user:pass@api.example.test/api/spotify/callback",
     ]) {
@@ -173,6 +175,30 @@ describe("TF integrations runtime configuration", () => {
       heartbeatApiOrigin: "https://api.example.test",
       deployedAt: "2026-07-25T12:34:56+03:00",
     });
+  });
+
+  it("requires exact insecure transport and API version values", async () => {
+    const read = reader(fileValues());
+
+    for (const flag of ["", "false", "TRUE", "1", " true"]) {
+      await expect(
+        parseTfIntegrationsConfig(
+          environment({
+            TF_INTEGRATIONS_HEARTBEAT_ALLOW_INSECURE_HTTP: flag,
+          }),
+          read,
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+    }
+
+    for (const version of [undefined, "", "   ", "v".repeat(129)]) {
+      await expect(
+        parseTfIntegrationsConfig(
+          environment({ APOLLO_API_VERSION: version }),
+          read,
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+    }
   });
 
   it("fails closed without database, keyring, or Spotify credential files", async () => {
