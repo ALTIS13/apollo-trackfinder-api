@@ -670,16 +670,37 @@ importers:
 
   artifacts/tf-integrations:
     dependencies:
+      '@workspace/module-runtime-contract':
+        specifier: workspace:*
+        version: link:../../lib/module-runtime-contract
       '@workspace/tf-integrations-contract':
         specifier: workspace:*
         version: link:../../lib/tf-integrations-contract
       '@workspace/tf-integrations-db':
         specifier: workspace:*
         version: link:../../lib/tf-integrations-db
+      express:
+        specifier: ^5
+        version: 5.2.1
+      pg:
+        specifier: ^8.20.0
+        version: 8.20.0
+      zod:
+        specifier: 'catalog:'
+        version: 3.25.76
     devDependencies:
+      '@types/express':
+        specifier: ^5.0.6
+        version: 5.0.6
       '@types/node':
         specifier: 'catalog:'
         version: 25.3.5
+      '@types/pg':
+        specifier: ^8.18.0
+        version: 8.18.0
+      esbuild:
+        specifier: 0.27.3
+        version: 0.27.3
       vitest:
         specifier: ^4.0.18
         version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))

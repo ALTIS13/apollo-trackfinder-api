@@ -4,15 +4,24 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "node ./build.mjs",
+    "start": "node ./dist/index.mjs",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@workspace/module-runtime-contract": "workspace:*",
     "@workspace/tf-integrations-contract": "workspace:*",
-    "@workspace/tf-integrations-db": "workspace:*"
+    "@workspace/tf-integrations-db": "workspace:*",
+    "express": "^5",
+    "pg": "^8.20.0",
+    "zod": "catalog:"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "catalog:",
+    "@types/pg": "^8.18.0",
+    "esbuild": "0.27.3",
     "vitest": "^4.0.18"
   }
 }
