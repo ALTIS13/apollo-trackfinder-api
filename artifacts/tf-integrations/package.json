@@ -8,6 +8,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@workspace/tf-integrations-contract": "workspace:*",
     "@workspace/tf-integrations-db": "workspace:*"
   },
   "devDependencies": {

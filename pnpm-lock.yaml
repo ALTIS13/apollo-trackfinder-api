@@ -670,6 +670,9 @@ importers:
 
   artifacts/tf-integrations:
     dependencies:
+      '@workspace/tf-integrations-contract':
+        specifier: workspace:*
+        version: link:../../lib/tf-integrations-contract
       '@workspace/tf-integrations-db':
         specifier: workspace:*
         version: link:../../lib/tf-integrations-db
