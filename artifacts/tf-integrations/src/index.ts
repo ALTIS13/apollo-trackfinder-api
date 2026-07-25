@@ -24,6 +24,7 @@ import {
   type TfIntegrationsHeartbeatOptions,
 } from "./heartbeat.js";
 import { HmacInternalRequestAuthenticator } from "./internal-auth.js";
+import { createSmokeFixtureProviders } from "./providers/smoke-fixtures.js";
 import { SpotifyProvider } from "./providers/spotify.js";
 import { YandexProvider } from "./providers/yandex.js";
 import { TfIntegrationsService } from "./service.js";
@@ -63,18 +64,25 @@ const defaultDependencies: TfIntegrationsRuntimeDependencies = {
   createPool: (databaseUrl) => createIntegrationsPool(databaseUrl, "runtime"),
   createRepository: (pool) => new PostgresProviderAccountRepository(pool),
   probeDatabase: probeIntegrationsDatabase,
-  createService: (config, repository) =>
-    new TfIntegrationsService({
+  createService: (config, repository) => {
+    const providers = config.smokeFixtures
+      ? createSmokeFixtureProviders()
+      : {
+          spotify: new SpotifyProvider({
+            clientId: config.spotifyClientId,
+            clientSecret: config.spotifyClientSecret,
+            callbackUri: config.spotifyCallbackUri,
+            fetch: globalThis.fetch,
+          }),
+          yandex: new YandexProvider({ fetch: globalThis.fetch }),
+        };
+    return new TfIntegrationsService({
       repository,
       tokenVault: new ProviderTokenVault(config.tokenKeyring),
-      spotify: new SpotifyProvider({
-        clientId: config.spotifyClientId,
-        clientSecret: config.spotifyClientSecret,
-        callbackUri: config.spotifyCallbackUri,
-        fetch: globalThis.fetch,
-      }),
-      yandex: new YandexProvider({ fetch: globalThis.fetch }),
-    }),
+      spotify: providers.spotify,
+      yandex: providers.yandex,
+    });
+  },
   startHeartbeat: startTfIntegrationsHeartbeat,
 };
 

@@ -18,6 +18,7 @@ export interface TfIntegrationsConfig {
   readonly heartbeatApiOrigin: string;
   readonly version: string;
   readonly deployedAt?: string;
+  readonly smokeFixtures: boolean;
 }
 
 type SecretReader = (path: string) => Promise<string>;
@@ -106,6 +107,14 @@ function exactSpotifyCallback(value: string): string {
 function parseAllowInsecureHttp(value: string | undefined): boolean {
   if (value === undefined) return false;
   return value === "true" ? true : invalidConfiguration();
+}
+
+function parseSmokeFixtures(env: NodeJS.ProcessEnv): boolean {
+  const value = env["TF_INTEGRATIONS_SMOKE_FIXTURES"];
+  if (value === undefined) return false;
+  return value === "true" && env["NODE_ENV"] === "test"
+    ? true
+    : invalidConfiguration();
 }
 
 async function loadFile(
@@ -236,6 +245,7 @@ export async function parseTfIntegrationsConfig(
   const version = requiredValue(env, "APOLLO_API_VERSION");
   if (version.length > 128) return invalidConfiguration();
   const deployedAt = parseDeployedAt(env["APOLLO_DEPLOYED_AT"]);
+  const smokeFixtures = parseSmokeFixtures(env);
 
   return {
     port,
@@ -249,5 +259,6 @@ export async function parseTfIntegrationsConfig(
     heartbeatApiOrigin,
     version,
     ...(deployedAt === undefined ? {} : { deployedAt }),
+    smokeFixtures,
   };
 }

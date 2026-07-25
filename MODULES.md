@@ -516,6 +516,107 @@ Platform signing JWK/JWKS и OAuth client registry, TF confidential client secre
 
 Public Platform issuer и server-to-server control origin разделены. В production оба используют одобренный HTTPS. Внутренний `http://platform-api:8080` разрешён только явным disposable bridge flag в development; deterministic PKCE verifier также доступен только из bridge secret file и не заменяет production `randomBytes`.
 
+### Контейнерный `tf-integrations`
+
+Compose поставляет три независимо размещаемых сервиса:
+
+```text
+tf-integrations-postgres
+tf-integrations-migrate
+tf-integrations
+```
+
+`tf-integrations-postgres` -- отдельный PostgreSQL 16 Bookworm с базой
+`apollo_tf_integrations`; он не разделяет volume, database, role или URL с TF
+API и Apollo Platform. One-shot `tf-integrations-migrate` подключается ролью
+`apollo_tf_integrations_migrator`, а runtime `tf-integrations` -- отдельной
+ролью `apollo_tf_integrations_runtime`. Мигратор обязан успешно завершиться
+после database health check до старта runtime. Существующие legacy
+provider-token tables и данные TF API не импортируются, не изменяются и не
+удаляются.
+
+API вызывает exact `POST /v1/commands`. Поддерживаемые account-bound
+операции:
+
+```text
+spotify.oauth.authorize
+spotify.oauth.complete
+spotify.status
+spotify.disconnect
+spotify.liked.list
+spotify.playlists.list
+spotify.playlist-tracks.list
+spotify.top-tracks.list
+yandex.token.upsert
+yandex.status
+yandex.disconnect
+yandex.liked.list
+yandex.playlists.list
+yandex.playlist-tracks.list
+```
+
+API и модуль совместно получают только
+`tf_integrations_internal_auth_secret`; API читает его через
+`TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE`. Подпись передаётся в
+`X-Apollo-Internal-Signature` как `v1=<hex HMAC-SHA256>` над canonical bytes
+`METHOD + "\n" + path + "\n" + timestamp + "\n" + nonce + "\n" +
+sha256(rawBody)`. Timestamp и 32-byte base64url nonce находятся в
+`X-Apollo-Internal-Timestamp` и `X-Apollo-Internal-Nonce`; окно timestamp --
+60 секунд, replay nonce хранится в bounded process memory пять минут.
+Command key обязан отличаться от `tf_integrations_heartbeat_secret`.
+
+Модуль получает только шесть runtime secrets:
+`tf_integrations_runtime_database_url`, `tf_integrations_token_keyring`,
+`tf_integrations_spotify_client_id`,
+`tf_integrations_spotify_client_secret`,
+`tf_integrations_internal_auth_secret` и
+`tf_integrations_heartbeat_secret`. Keyring file имеет exact JSON-формат:
+
+```json
+{
+  "activeKeyId": "rotation-id",
+  "keys": {
+    "rotation-id": "<32-byte base64url key>"
+  }
+}
+```
+
+Допустимо от одного до четырёх разных 32-byte keys. Новая запись использует
+`activeKeyId`; чтение поддерживает остальные keys для контролируемой rotation.
+Provider token сохраняется только как AES-256-GCM envelope версии 1 с
+12-byte nonce, 16-byte authentication tag и AAD
+`apollo-tf-integrations-token:v1:<provider>:<accountId>`. Provider и account
+тем самым криптографически привязаны к ciphertext; plaintext token не
+сохраняется.
+
+Модуль отправляет подписанный heartbeat `account-integrations` сразу после
+готовности и затем каждые 30 секунд. API считает последнее состояние свежим
+90 секунд. Readiness модуля зависит только от exact migration history и
+bounded database probe; недоступность Spotify/Yandex не делает `/readyz`
+неуспешным.
+
+Сеть `tf-integrations-control` является internal и содержит только `api` и
+`tf-integrations`. Internal `tf-integrations-data` содержит только module,
+migrator и dedicated PostgreSQL. Только module подключён к
+`tf-integrations-egress`; у module, migrator и database нет host ports.
+Runtime и migrator запускаются как numeric UID/GID `10001:10001` с
+read-only root/app filesystem, `init`, `cap_drop: ALL`,
+`no-new-privileges` и bounded tmpfs.
+
+На одной ноде допустимы только exact origins
+`http://tf-integrations:8080` с
+`TF_INTEGRATIONS_ALLOW_INSECURE_HTTP=true` и `http://api:8080` с
+`TF_INTEGRATIONS_HEARTBEAT_ALLOW_INSECURE_HTTP=true`. Для будущего
+cross-node размещения возможен только separately approved HTTPS ingress
+`https://integrations.tf.apollot.ru` с обычной проверкой сертификата и
+hostname, без insecure flags и redirects. Такой ingress, а также Caddy, UFW,
+DNS и remote rollout требуют отдельного approval; Task 6 их не изменяет.
+
+`TF_INTEGRATIONS_SMOKE_FIXTURES=true` принимается только вместе с exact
+`NODE_ENV=test`. Production отклоняет этот flag. Fixture adapters не выполняют
+provider calls и нужны только для disposable local smoke с encrypted
+at-rest записью.
+
 ### Контейнерный `tf-search`
 
 `tf-search` разворачивается отдельным контейнером и получает только
@@ -540,7 +641,6 @@ HomeNode, Coolify, Caddy, UFW и DNS не изменялись.
 
 ### Будущие контейнерные TF-модули
 
-- `tf-integrations`: authenticated HTTP + отдельные heartbeat keys для provider adapters, минимальный entitlement `tf.integrations`; доступ только к согласованным account-bound integration operations, без общих provider credentials и общей БД.
 - `tf-download-worker`: authenticated queue/HTTP boundary + heartbeat key, минимальный entitlement `tf.downloads`; отдельное временное/data storage, без Docker socket, SSH и control-plane доступа.
 
 Модули не разделяют database credentials и не получают Docker/Coolify/Caddy/SSH доступ. На одной Coolify node связь строится через private service DNS. Между разными нодами требуется отдельно одобренный TLS upstream; Docker Compose network не является межузловой сетью.
@@ -558,12 +658,15 @@ services:
   db:
   redis:
   api:
+  tf-integrations-postgres:
+  tf-integrations-migrate:
+  tf-integrations:
   tf-search:
   web:
   admin:
 ```
 
-Root template сохраняет исходные deployment identities: PostgreSQL service `db`, role/database `trackfinder` и logical volume `pgdata`. Он больше не содержит hardcoded database password или wildcard API binding. TF database/client secrets приходят из `TF_SECRET_DIRECTORY`, API/web/admin ports по умолчанию привязаны к `127.0.0.1`, data plane отделён от edge network. `VITE_API_URL` передаётся как Docker build argument и компилируется в web bundle; runtime environment nginx не может изменить уже собранный URL. Compose передаёт одинаковый server-side `ADMIN_DASHBOARD_TOKEN` API и admin nginx; браузер его не получает. `APOLLO_MODULE_HEARTBEAT_KEYS_FILE` указывает API на `/run/secrets/tf_module_heartbeat_keys`; raw map не задаётся в Compose. `tf-search` подключён только к `tf-search-control` и `tf-search-egress`, а API ожидает его readiness без обратной startup-зависимости поискового контейнера. Пустой service token отключает backend endpoint; пустые operator credentials закрывают UI. Deployment в Coolify/HomeNode пока не выполнялся.
+Root template сохраняет исходные deployment identities: PostgreSQL service `db`, role/database `trackfinder` и logical volume `pgdata`. Он больше не содержит hardcoded database password или wildcard API binding. TF database/client secrets приходят из `TF_SECRET_DIRECTORY`, API/web/admin ports по умолчанию привязаны к `127.0.0.1`, data plane отделён от edge network. `VITE_API_URL` передаётся как Docker build argument и компилируется в web bundle; runtime environment nginx не может изменить уже собранный URL. Compose передаёт одинаковый server-side `ADMIN_DASHBOARD_TOKEN` API и admin nginx; браузер его не получает. `APOLLO_MODULE_HEARTBEAT_KEYS_FILE` указывает API на `/run/secrets/tf_module_heartbeat_keys`; raw map не задаётся в Compose. `tf-search` подключён только к `tf-search-control` и `tf-search-egress`, а `tf-integrations` -- только к своим control/data/egress сетям. API ожидает readiness обоих модулей без обратной startup-зависимости module -> API. Пустой service token отключает backend endpoint; пустые operator credentials закрывают UI. Deployment в Coolify/HomeNode пока не выполнялся.
 
 ### `artifacts/api-server/docker-compose.yml`
 
@@ -572,17 +675,18 @@ services:
   db:
   redis:
   api:
+  tf-integrations-postgres:
+  tf-integrations-migrate:
+  tf-integrations:
   tf-search:
 ```
 
-Вложенный template сохраняет собственные исходные identities: services `db`/`redis`/`api`/`tf-search`, PostgreSQL role `apollo`, database `apollo_trackfinder` и volumes `postgres_data`/`redis_data`. Он использует file secrets, loopback API binding и отдельные `tf-data`/`tf-edge`. Admin service входит только в корневой `docker-compose.yml`. `ADMIN_DASHBOARD_TOKEN` передаётся только API service, а heartbeat map подключается к API через `APOLLO_MODULE_HEARTBEAT_KEYS_FILE`. Вложенный `tf-search` сохраняет те же secret и network boundaries, что корневой template.
+Вложенный template сохраняет собственные исходные identities: services `db`/`redis`/`api`/`tf-search`, PostgreSQL role `apollo`, database `apollo_trackfinder` и volumes `postgres_data`/`redis_data`. Он добавляет те же три integration services и отдельный `tf-integrations-postgres-data`, что и root template. Он использует file secrets, loopback API binding и отдельные `tf-data`/`tf-edge`. Admin service входит только в корневой `docker-compose.yml`. `ADMIN_DASHBOARD_TOKEN` передаётся только API service, а heartbeat map подключается к API через `APOLLO_MODULE_HEARTBEAT_KEYS_FILE`. Вложенные `tf-search` и `tf-integrations` сохраняют те же secret и network boundaries, что корневой template.
 
 **Переменные окружения:**
 
 | Переменная | Обязательно | Описание |
 |------------|-------------|----------|
-| `SPOTIFY_CLIENT_ID` | Для Spotify | ID приложения Spotify |
-| `SPOTIFY_CLIENT_SECRET` | Для Spotify | Секрет приложения Spotify |
 | `SERVER_URL` | Для self-hosted Spotify | Публичный URL сервера (`https://api.yourdomain.com`). Callback для Spotify Dashboard: `${SERVER_URL}/api/spotify/callback` |
 | `DATABASE_URL_FILE` | Да | Путь к file-backed TF database URL; entrypoint читает до импорта bundle |
 | `PORT` | Авто | 8080 |
@@ -590,10 +694,19 @@ services:
 | `ADMIN_DASHBOARD_TOKEN` | До production deployment | Server-side token, который nginx пересылает как `X-Admin-Dashboard-Token`; не попадает в browser bundle |
 | `ADMIN_ACCESS_USER` | Для доступа к admin UI | Operator username для nginx Basic Auth; допустимы буквы, цифры и `_.@-` |
 | `ADMIN_ACCESS_PASSWORD` | Для доступа к admin UI | Operator password; хэшируется при старте контейнера и удаляется из окружения nginx process |
-| `APOLLO_MODULE_HEARTBEAT_KEYS_FILE` | В Compose | API-only путь к JSON map `{ "search-media": "<heartbeat-secret>" }`; entrypoint отклоняет unreadable, empty и oversized файл |
+| `APOLLO_MODULE_HEARTBEAT_KEYS_FILE` | В Compose | API-only путь к JSON map с keys `search-media` и `account-integrations`; entrypoint отклоняет unreadable, empty и oversized файл |
 | `TF_SEARCH_INTERNAL_AUTH_SECRET_FILE` | В Compose | Общий только для API и `tf-search` HMAC command key |
 | `TF_SEARCH_ORIGIN` | В Compose | Same-node `http://tf-search:8080`; HTTP разрешён только вместе с `TF_SEARCH_ALLOW_INSECURE_HTTP=true` |
 | `TF_SEARCH_HEARTBEAT_SECRET_FILE` | Для `tf-search` | Отдельный heartbeat key, который не монтируется в API |
+| `TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE` | В Compose | Distinct command key, смонтированный только в API и `tf-integrations` |
+| `TF_INTEGRATIONS_ORIGIN` | В API Compose | Same-node exact `http://tf-integrations:8080`; HTTP разрешён только с `TF_INTEGRATIONS_ALLOW_INSECURE_HTTP=true` |
+| `TF_INTEGRATIONS_DATABASE_URL_FILE` | В module/migrator | Разные file-backed URL dedicated runtime и migrator roles |
+| `TF_INTEGRATIONS_TOKEN_KEYRING_FILE` | В module | AES-256-GCM keyring; не монтируется в API |
+| `TF_INTEGRATIONS_SPOTIFY_CLIENT_ID_FILE` | В module | File-backed Spotify client ID; не монтируется в API |
+| `TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET_FILE` | В module | File-backed Spotify client secret; не монтируется в API |
+| `TF_INTEGRATIONS_SPOTIFY_CALLBACK_URI` | В module | Exact public HTTPS `/api/spotify/callback` URI |
+| `TF_INTEGRATIONS_HEARTBEAT_SECRET_FILE` | В module | Отдельный `account-integrations` heartbeat key |
+| `TF_INTEGRATIONS_HEARTBEAT_API_ORIGIN` | В module | Same-node exact `http://api:8080`; HTTP разрешён только с `TF_INTEGRATIONS_HEARTBEAT_ALLOW_INSECURE_HTTP=true` |
 | `APOLLO_API_VERSION` | Нет | Версия in-process API-модулей в admin snapshot; default `unknown` |
 | `APOLLO_DEPLOYED_AT` | Нет | ISO timestamp фактического deployment; при отсутствии UI показывает `Нет данных` |
 
@@ -603,7 +716,10 @@ services:
 git clone https://github.com/ALTIS13/apollo-trackfinder-api
 cd apollo-trackfinder-api
 cp artifacts/api-server/.env.example .env
-# Заполни SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SERVER_URL
+# Заполни public origins/version variables; provider credentials загрузи
+# в shell из approved secret manager, а не из tracked .env.
+: "${TF_INTEGRATIONS_SPOTIFY_CLIENT_ID:?}"
+: "${TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET:?}"
 
 export TF_SECRET_DIRECTORY=/var/lib/apollo-tf/secrets
 sudo install -d -m 0700 -o root -g root "$TF_SECRET_DIRECTORY"
@@ -613,13 +729,33 @@ TF_POSTGRES_PASSWORD="$(openssl rand -hex 32)"
 TF_CLIENT_SECRET="$(openssl rand -hex 32)"
 TF_SEARCH_COMMAND_SECRET="$(openssl rand -hex 32)"
 TF_SEARCH_HEARTBEAT_SECRET="$(openssl rand -hex 32)"
+TFI_ADMIN_PASSWORD="$(openssl rand -hex 32)"
+TFI_MIGRATOR_PASSWORD="$(openssl rand -hex 32)"
+TFI_RUNTIME_PASSWORD="$(openssl rand -hex 32)"
+TFI_COMMAND_SECRET="$(openssl rand -hex 32)"
+TFI_HEARTBEAT_SECRET="$(openssl rand -hex 32)"
+TFI_TOKEN_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
 printf '%s' "$TF_POSTGRES_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_postgres_password" >/dev/null
 printf 'postgres://trackfinder:%s@db:5432/trackfinder' "$TF_POSTGRES_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_database_url" >/dev/null
 printf '%s' "$TF_CLIENT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_client_secret" >/dev/null
 printf '%s' "$TF_SEARCH_COMMAND_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_search_internal_auth_secret" >/dev/null
 printf '%s' "$TF_SEARCH_HEARTBEAT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_search_heartbeat_secret" >/dev/null
-printf '{"search-media":"%s"}' "$TF_SEARCH_HEARTBEAT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_module_heartbeat_keys" >/dev/null
-unset TF_POSTGRES_PASSWORD TF_CLIENT_SECRET TF_SEARCH_COMMAND_SECRET TF_SEARCH_HEARTBEAT_SECRET
+printf '%s' "$TFI_ADMIN_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_integrations_postgres_admin_password" >/dev/null
+printf '%s' "$TFI_MIGRATOR_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_integrations_migrator_password" >/dev/null
+printf '%s' "$TFI_RUNTIME_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_integrations_runtime_password" >/dev/null
+printf 'postgres://apollo_tf_integrations_migrator:%s@tf-integrations-postgres:5432/apollo_tf_integrations' "$TFI_MIGRATOR_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_integrations_migrator_database_url" >/dev/null
+printf 'postgres://apollo_tf_integrations_runtime:%s@tf-integrations-postgres:5432/apollo_tf_integrations' "$TFI_RUNTIME_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_integrations_runtime_database_url" >/dev/null
+printf '{"activeKeyId":"initial","keys":{"initial":"%s"}}' "$TFI_TOKEN_KEY" | sudo tee "$TF_SECRET_DIRECTORY/tf_integrations_token_keyring" >/dev/null
+printf '%s' "$TF_INTEGRATIONS_SPOTIFY_CLIENT_ID" | sudo tee "$TF_SECRET_DIRECTORY/tf_integrations_spotify_client_id" >/dev/null
+printf '%s' "$TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_integrations_spotify_client_secret" >/dev/null
+printf '%s' "$TFI_COMMAND_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_integrations_internal_auth_secret" >/dev/null
+printf '%s' "$TFI_HEARTBEAT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_integrations_heartbeat_secret" >/dev/null
+printf '{"search-media":"%s","account-integrations":"%s"}' "$TF_SEARCH_HEARTBEAT_SECRET" "$TFI_HEARTBEAT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_module_heartbeat_keys" >/dev/null
+unset TF_POSTGRES_PASSWORD TF_CLIENT_SECRET
+unset TF_SEARCH_COMMAND_SECRET TF_SEARCH_HEARTBEAT_SECRET
+unset TFI_ADMIN_PASSWORD TFI_MIGRATOR_PASSWORD TFI_RUNTIME_PASSWORD
+unset TFI_COMMAND_SECRET TFI_HEARTBEAT_SECRET TFI_TOKEN_KEY
+unset TF_INTEGRATIONS_SPOTIFY_CLIENT_ID TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET
 sudo chown root:root "$TF_SECRET_DIRECTORY"/tf_*
 sudo chmod 0444 "$TF_SECRET_DIRECTORY"/tf_*
 
@@ -627,9 +763,10 @@ docker compose up -d --build
 ```
 
 `TF_SECRET_DIRECTORY` обязателен для обоих Compose templates: production
-startup требует ровно шесть файлов: `tf_postgres_password`, `tf_database_url`,
-`tf_client_secret`, `tf_search_internal_auth_secret`,
-`tf_search_heartbeat_secret` и `tf_module_heartbeat_keys`. Для rootful Docker
+startup требует шесть базовых TF/search files из примера и десять
+`tf_integrations_*` files: три PostgreSQL passwords, отдельные migrator/runtime
+URL, token keyring, два Spotify credential files, command key и heartbeat key.
+Для rootful Docker
 каталог и эти файлы остаются под
 владельцем `root`; каталог `0700` закрывает host traversal, а файлы `0444`
 доступны non-root UID контейнеров только через точечные Compose secret mounts.
@@ -651,6 +788,11 @@ administrative channel, атомарно обновить `tf_database_url` и
 `tf_postgres_password` и password внутри `tf_database_url` должны совпадать;
 `tf_client_secret` регистрируется только как confidential Platform OAuth
 client secret и не передаётся browser-коду.
+
+Integration role-init также выполняется только для нового
+`tf-integrations-postgres-data`. При сохранённом volume ротация admin,
+migrator или runtime password требует согласованных `ALTER ROLE` и file/URL
+updates; простая замена secret files не меняет PostgreSQL roles.
 
 ---
 

@@ -67,8 +67,9 @@ services:
       PORT: "8080"
       REDIS_URL: redis://redis:6379/0
       SERVER_URL: "${SERVER_URL:-https://api.tf.apollot.ru}"
-      SPOTIFY_CLIENT_ID: "${SPOTIFY_CLIENT_ID:-}"
-      SPOTIFY_CLIENT_SECRET: "${SPOTIFY_CLIENT_SECRET:-}"
+      TF_INTEGRATIONS_ALLOW_INSECURE_HTTP: "true"
+      TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_integrations_internal_auth_secret
+      TF_INTEGRATIONS_ORIGIN: http://tf-integrations:8080
       TF_SEARCH_ALLOW_INSECURE_HTTP: "true"
       TF_SEARCH_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_search_internal_auth_secret
       TF_SEARCH_ORIGIN: http://tf-search:8080
@@ -76,6 +77,7 @@ services:
     secrets:
       - tf_client_secret
       - tf_database_url
+      - tf_integrations_internal_auth_secret
       - tf_module_heartbeat_keys
       - tf_search_internal_auth_secret
     tmpfs:
@@ -84,6 +86,7 @@ services:
     networks:
       - tf-data
       - tf-edge
+      - tf-integrations-control
       - tf-search-control
     security_opt:
       - no-new-privileges:true
@@ -93,6 +96,8 @@ services:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      tf-integrations:
         condition: service_healthy
       tf-search:
         condition: service_healthy
@@ -106,6 +111,144 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  tf-integrations-postgres:
+    build:
+      context: .
+      dockerfile: artifacts/tf-integrations/Dockerfile
+      target: postgres-role-init
+    image: ${TF_INTEGRATIONS_POSTGRES_IMAGE:-apollo-tf-integrations-postgres:local}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: apollo_tf_integrations
+      POSTGRES_PASSWORD_FILE: /run/secrets/tf_integrations_postgres_admin_password
+      POSTGRES_USER: postgres
+    secrets:
+      - tf_integrations_postgres_admin_password
+      - tf_integrations_migrator_password
+      - tf_integrations_runtime_password
+    volumes:
+      - tf-integrations-postgres-data:/var/lib/postgresql/data
+    networks:
+      - tf-integrations-data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -h 127.0.0.1 -U postgres -d apollo_tf_integrations
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  tf-integrations-migrate:
+    build:
+      context: .
+      dockerfile: artifacts/tf-integrations/Dockerfile
+      target: runtime
+    image: ${TF_INTEGRATIONS_IMAGE:-apollo-tf-integrations:local}
+    user: "10001:10001"
+    read_only: true
+    init: true
+    command: ["node", "/app/dist/migrate.mjs"]
+    environment:
+      TF_INTEGRATIONS_DATABASE_URL_FILE: /run/secrets/tf_integrations_migrator_database_url
+    secrets:
+      - tf_integrations_migrator_database_url
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-integrations-data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+          pids: 64
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    depends_on:
+      tf-integrations-postgres:
+        condition: service_healthy
+    restart: "no"
+
+  tf-integrations:
+    build:
+      context: .
+      dockerfile: artifacts/tf-integrations/Dockerfile
+      target: runtime
+    image: ${TF_INTEGRATIONS_IMAGE:-apollo-tf-integrations:local}
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    init: true
+    environment:
+      APOLLO_API_VERSION: "${TF_INTEGRATIONS_VERSION:-unknown}"
+      APOLLO_DEPLOYED_AT: "${TF_INTEGRATIONS_DEPLOYED_AT:-}"
+      NODE_ENV: production
+      PORT: "8080"
+      TF_INTEGRATIONS_DATABASE_URL_FILE: /run/secrets/tf_integrations_runtime_database_url
+      TF_INTEGRATIONS_HEARTBEAT_ALLOW_INSECURE_HTTP: "true"
+      TF_INTEGRATIONS_HEARTBEAT_API_ORIGIN: http://api:8080
+      TF_INTEGRATIONS_HEARTBEAT_SECRET_FILE: /run/secrets/tf_integrations_heartbeat_secret
+      TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_integrations_internal_auth_secret
+      TF_INTEGRATIONS_SPOTIFY_CALLBACK_URI: "${TF_INTEGRATIONS_SPOTIFY_CALLBACK_URI:-https://api.tf.apollot.ru/api/spotify/callback}"
+      TF_INTEGRATIONS_SPOTIFY_CLIENT_ID_FILE: /run/secrets/tf_integrations_spotify_client_id
+      TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET_FILE: /run/secrets/tf_integrations_spotify_client_secret
+      TF_INTEGRATIONS_TOKEN_KEYRING_FILE: /run/secrets/tf_integrations_token_keyring
+    secrets:
+      - tf_integrations_runtime_database_url
+      - tf_integrations_token_keyring
+      - tf_integrations_spotify_client_id
+      - tf_integrations_spotify_client_secret
+      - tf_integrations_internal_auth_secret
+      - tf_integrations_heartbeat_secret
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      tf-integrations-control:
+        gw_priority: 0
+      tf-integrations-data:
+        gw_priority: 0
+      tf-integrations-egress:
+        gw_priority: 1
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    stop_grace_period: 20s
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+          pids: 128
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    depends_on:
+      tf-integrations-migrate:
+        condition: service_completed_successfully
+      tf-integrations-postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:8080/readyz').then(r=>{if(!r.ok)process.exit(1)})
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
 
   tf-search:
     build:
@@ -197,6 +340,26 @@ secrets:
     file: ${TF_SECRET_DIRECTORY:?}/tf_client_secret
   tf_database_url:
     file: ${TF_SECRET_DIRECTORY:?}/tf_database_url
+  tf_integrations_postgres_admin_password:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_postgres_admin_password
+  tf_integrations_migrator_password:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_migrator_password
+  tf_integrations_runtime_password:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_runtime_password
+  tf_integrations_migrator_database_url:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_migrator_database_url
+  tf_integrations_runtime_database_url:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_runtime_database_url
+  tf_integrations_token_keyring:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_token_keyring
+  tf_integrations_spotify_client_id:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_spotify_client_id
+  tf_integrations_spotify_client_secret:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_spotify_client_secret
+  tf_integrations_internal_auth_secret:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_internal_auth_secret
+  tf_integrations_heartbeat_secret:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_heartbeat_secret
   tf_module_heartbeat_keys:
     file: ${TF_SECRET_DIRECTORY:?}/tf_module_heartbeat_keys
   tf_postgres_password:
@@ -209,11 +372,17 @@ secrets:
 volumes:
   pgdata:
   redis_data:
+  tf-integrations-postgres-data:
 
 networks:
   tf-data:
     internal: true
   tf-edge:
+  tf-integrations-control:
+    internal: true
+  tf-integrations-data:
+    internal: true
+  tf-integrations-egress: {}
   tf-search-control:
     internal: true
   tf-search-egress: {}

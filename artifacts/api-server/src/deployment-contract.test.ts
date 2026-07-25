@@ -1692,12 +1692,16 @@ describe("TF deployment identity contract", () => {
       "api",
       "db",
       "redis",
+      "tf-integrations",
+      "tf-integrations-migrate",
+      "tf-integrations-postgres",
       "tf-search",
       "web",
     ]);
     expect(Object.keys(template.volumes ?? {}).sort()).toEqual([
       "pgdata",
       "redis_data",
+      "tf-integrations-postgres-data",
     ]);
     expect(service(template, "db").environment).toMatchObject({
       POSTGRES_DB: "trackfinder",
@@ -1746,11 +1750,15 @@ describe("TF deployment identity contract", () => {
       "api",
       "db",
       "redis",
+      "tf-integrations",
+      "tf-integrations-migrate",
+      "tf-integrations-postgres",
       "tf-search",
     ]);
     expect(Object.keys(template.volumes ?? {}).sort()).toEqual([
       "postgres_data",
       "redis_data",
+      "tf-integrations-postgres-data",
     ]);
     expect(service(template, "db").environment).toMatchObject({
       POSTGRES_DB: "apollo_trackfinder",

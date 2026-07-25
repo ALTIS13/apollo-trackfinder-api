@@ -4,6 +4,8 @@ node_modules
 .tmp
 .cache
 .config
+**/.superpowers/
+**/.tmp/
 *.log
 .env
 .env.*
