@@ -9,6 +9,8 @@ import {
 const requestId = "a0000000-0000-4000-8000-000000000001";
 const accountId = "b0000000-0000-4000-8000-000000000002";
 const callbackUri = "https://tf.example.test/api/spotify/callback";
+const spotifyAuthorizationUrl =
+  "https://accounts.spotify.com/authorize?client_id=spotify-client-id&response_type=code&redirect_uri=https%3A%2F%2Ftf.example.test%2Fapi%2Fspotify%2Fcallback&state=state-value&scope=user-library-read%20playlist-read-private";
 
 const track = {
   id: "spotify-track-1",
@@ -170,23 +172,24 @@ describe("tf integrations contract", () => {
     const response = {
       schemaVersion: 1,
       requestId,
+      accountId,
       operation: "spotify.liked.list",
       result: { offset: 0, limit: 50, total: 50, tracks: [track] },
     } as const;
-      expect(tfIntegrationsSuccessResponseSchema.parse(response)).toEqual(
-        response,
-      );
-      expect(
-        tfIntegrationsSuccessResponseSchema.safeParse({
-          ...response,
-          result: {
-            ...response.result,
-            tracks: [{ ...track, providerUrl: null }],
-          },
-        }).success,
-      ).toBe(false);
-      expect(
-        tfIntegrationsSuccessResponseSchema.safeParse({
+    expect(tfIntegrationsSuccessResponseSchema.parse(response)).toEqual(
+      response,
+    );
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse({
+        ...response,
+        result: {
+          ...response.result,
+          tracks: [{ ...track, providerUrl: null }],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse({
         ...response,
         result: {
           ...response.result,
@@ -222,16 +225,236 @@ describe("tf integrations contract", () => {
     );
   });
 
-  it("correlates success and error responses by schema version, request ID, and operation", () => {
+  it("requires canonical account IDs on every success and error envelope", () => {
     const success = {
       schemaVersion: 1,
       requestId,
+      accountId,
       operation: "spotify.status",
       result: { account: spotifyAccount },
     } as const;
     const error = {
       schemaVersion: 1,
       requestId,
+      accountId,
+      operation: "yandex.status",
+      error: { code: "not_connected" },
+    } as const;
+    const withoutAccountId = <T extends { readonly accountId: string }>({
+      accountId: _accountId,
+      ...envelope
+    }: T) => envelope;
+
+    expect(tfIntegrationsSuccessResponseSchema.parse(success)).toEqual(success);
+    expect(tfIntegrationsErrorResponseSchema.parse(error)).toEqual(error);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse(withoutAccountId(success))
+        .success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsErrorResponseSchema.safeParse(withoutAccountId(error))
+        .success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse({
+        ...success,
+        accountId: accountId.toUpperCase(),
+      }).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsErrorResponseSchema.safeParse({
+        ...error,
+        accountId: "not-a-uuid",
+      }).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse({
+        ...success,
+        principalAccountId: accountId,
+      }).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsErrorResponseSchema.safeParse({
+        ...error,
+        providerAccountId: accountId,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects credential-bearing URL components on public provider and artwork URLs", () => {
+    const response = {
+      schemaVersion: 1,
+      requestId,
+      accountId,
+      operation: "spotify.liked.list",
+      result: { offset: 0, limit: 1, total: 1, tracks: [track] },
+    } as const;
+
+    expect(tfIntegrationsSuccessResponseSchema.parse(response)).toEqual(
+      response,
+    );
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse({
+        ...response,
+        result: {
+          ...response.result,
+          tracks: [
+            {
+              ...track,
+              thumbnailUrl: "https://user:pass@images.example.test/track.jpg",
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse({
+        ...response,
+        result: {
+          ...response.result,
+          tracks: [
+            {
+              ...track,
+              thumbnailUrl:
+                "https://images.example.test/track.jpg?token=secret",
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse({
+        ...response,
+        result: {
+          ...response.result,
+          tracks: [
+            {
+              ...track,
+              thumbnailUrl: "https://images.example.test/track.jpg#token",
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse({
+        ...response,
+        result: {
+          ...response.result,
+          tracks: [
+            {
+              ...track,
+              providerUrl:
+                "https://user:pass@open.spotify.com/track/spotify-track-1",
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse({
+        ...response,
+        result: {
+          ...response.result,
+          tracks: [
+            {
+              ...track,
+              providerUrl:
+                "https://open.spotify.com/track/spotify-track-1?access_token=secret",
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse({
+        ...response,
+        result: {
+          ...response.result,
+          tracks: [
+            {
+              ...track,
+              providerUrl:
+                "https://open.spotify.com/track/spotify-track-1#token",
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("allows only Spotify OAuth authorize URLs with allowlisted query keys", () => {
+    const response = {
+      schemaVersion: 1,
+      requestId,
+      accountId,
+      operation: "spotify.oauth.authorize",
+      result: { authorizationUrl: spotifyAuthorizationUrl },
+    } as const;
+    const withAuthorizationUrl = (authorizationUrl: string) => ({
+      ...response,
+      result: { authorizationUrl },
+    });
+
+    expect(tfIntegrationsSuccessResponseSchema.parse(response)).toEqual(
+      response,
+    );
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse(
+        withAuthorizationUrl(
+          spotifyAuthorizationUrl.replace(
+            "https://accounts.spotify.com",
+            "https://user:pass@accounts.spotify.com",
+          ),
+        ),
+      ).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse(
+        withAuthorizationUrl(
+          spotifyAuthorizationUrl.replace("/authorize", "/api/authorize"),
+        ),
+      ).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse(
+        withAuthorizationUrl(
+          spotifyAuthorizationUrl.replace(
+            "accounts.spotify.com",
+            "open.spotify.com",
+          ),
+        ),
+      ).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse(
+        withAuthorizationUrl(`${spotifyAuthorizationUrl}&client_secret=secret`),
+      ).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse(
+        withAuthorizationUrl(`${spotifyAuthorizationUrl}&access_token=secret`),
+      ).success,
+    ).toBe(false);
+    expect(
+      tfIntegrationsSuccessResponseSchema.safeParse(
+        withAuthorizationUrl(`${spotifyAuthorizationUrl}&unknown=value`),
+      ).success,
+    ).toBe(false);
+  });
+
+  it("correlates success and error responses by schema version, request ID, and operation", () => {
+    const success = {
+      schemaVersion: 1,
+      requestId,
+      accountId,
+      operation: "spotify.status",
+      result: { account: spotifyAccount },
+    } as const;
+    const error = {
+      schemaVersion: 1,
+      requestId,
+      accountId,
       operation: "yandex.status",
       error: { code: "not_connected" },
     } as const;
@@ -262,12 +485,14 @@ describe("tf integrations contract", () => {
     const success = {
       schemaVersion: 1,
       requestId,
+      accountId,
       operation: "yandex.token.upsert",
       result: { account: yandexAccount },
     } as const;
     const error = {
       schemaVersion: 1,
       requestId,
+      accountId,
       operation: "spotify.oauth.complete",
       error: { code: "provider_rejected" },
     } as const;

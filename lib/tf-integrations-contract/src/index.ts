@@ -15,9 +15,16 @@ const canonicalUuidSchema = z
 
 const boundedTextSchema = (max: number) => z.string().trim().min(1).max(max);
 const identifierSchema = boundedTextSchema(MAX_IDENTIFIER_LENGTH);
-const isHttpsUrl = (value: string): boolean => {
+const isPublicHttpsUrl = (value: string): boolean => {
   try {
-    return new URL(value).protocol === "https:";
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.search === "" &&
+      url.hash === ""
+    );
   } catch {
     return false;
   }
@@ -28,8 +35,9 @@ const nullableHttpsUrlSchema = z
   .min(1)
   .max(MAX_URL_LENGTH)
   .url()
-  .refine(isHttpsUrl, {
-    message: "Expected an HTTPS URL",
+  .refine(isPublicHttpsUrl, {
+    message:
+      "Expected a public HTTPS URL without credentials, query, or fragment",
   })
   .nullable();
 const paginationInputSchema = z
@@ -60,6 +68,62 @@ const spotifyCallbackUriSchema = z
       return false;
     }
   }, "Expected an exact HTTPS Spotify callback URI");
+
+const spotifyAuthorizationUrlSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(MAX_URL_LENGTH)
+  .url()
+  .refine((value) => {
+    try {
+      const url = new URL(value);
+      if (
+        url.origin !== "https://accounts.spotify.com" ||
+        url.pathname !== "/authorize" ||
+        url.username !== "" ||
+        url.password !== "" ||
+        url.hash !== ""
+      ) {
+        return false;
+      }
+
+      const allowedKeys = new Set([
+        "client_id",
+        "response_type",
+        "redirect_uri",
+        "state",
+        "scope",
+        "show_dialog",
+      ]);
+      const seenKeys = new Set<string>();
+      for (const [key, queryValue] of url.searchParams) {
+        if (
+          !allowedKeys.has(key) ||
+          seenKeys.has(key) ||
+          queryValue.length === 0
+        ) {
+          return false;
+        }
+        seenKeys.add(key);
+      }
+
+      return (
+        seenKeys.has("client_id") &&
+        url.searchParams.get("response_type") === "code" &&
+        spotifyCallbackUriSchema.safeParse(url.searchParams.get("redirect_uri"))
+          .success &&
+        boundedTextSchema(8_192).safeParse(url.searchParams.get("state"))
+          .success &&
+        boundedTextSchema(1_024).safeParse(url.searchParams.get("scope"))
+          .success &&
+        (!seenKeys.has("show_dialog") ||
+          ["true", "false"].includes(url.searchParams.get("show_dialog")!))
+      );
+    } catch {
+      return false;
+    }
+  }, "Expected a bounded Spotify OAuth authorization URL");
 
 export const tfIntegrationOperationSchema = z.enum([
   "spotify.oauth.authorize",
@@ -318,12 +382,13 @@ const yandexStatusResultSchema = z
   .strict();
 const disconnectResultSchema = z.object({ ok: z.literal(true) }).strict();
 const spotifyAuthorizationResultSchema = z
-  .object({ authorizationUrl: nullableHttpsUrlSchema.unwrap() })
+  .object({ authorizationUrl: spotifyAuthorizationUrlSchema })
   .strict();
 
 const responseBaseSchema = {
   schemaVersion: z.literal(1),
   requestId: canonicalUuidSchema,
+  accountId: canonicalUuidSchema,
 };
 
 const tfIntegrationsSuccessResponseObjectSchema = z.discriminatedUnion(
