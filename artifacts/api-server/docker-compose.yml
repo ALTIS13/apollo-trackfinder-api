@@ -77,7 +77,11 @@ services:
     secrets:
       - tf_client_secret
       - tf_database_url
-      - tf_integrations_internal_auth_secret
+      - source: tf_integrations_internal_auth_secret
+        target: tf_integrations_internal_auth_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
       - tf_module_heartbeat_keys
       - tf_search_internal_auth_secret
     tmpfs:
@@ -124,9 +128,21 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/tf_integrations_postgres_admin_password
       POSTGRES_USER: postgres
     secrets:
-      - tf_integrations_postgres_admin_password
-      - tf_integrations_migrator_password
-      - tf_integrations_runtime_password
+      - source: tf_integrations_postgres_admin_password
+        target: tf_integrations_postgres_admin_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: tf_integrations_migrator_password
+        target: tf_integrations_migrator_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: tf_integrations_runtime_password
+        target: tf_integrations_runtime_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
     volumes:
       - tf-integrations-postgres-data:/var/lib/postgresql/data
     networks:
@@ -153,7 +169,11 @@ services:
     environment:
       TF_INTEGRATIONS_DATABASE_URL_FILE: /run/secrets/tf_integrations_migrator_database_url
     secrets:
-      - tf_integrations_migrator_database_url
+      - source: tf_integrations_migrator_database_url
+        target: tf_integrations_migrator_database_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
     networks:
@@ -202,12 +222,36 @@ services:
       TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET_FILE: /run/secrets/tf_integrations_spotify_client_secret
       TF_INTEGRATIONS_TOKEN_KEYRING_FILE: /run/secrets/tf_integrations_token_keyring
     secrets:
-      - tf_integrations_runtime_database_url
-      - tf_integrations_token_keyring
-      - tf_integrations_spotify_client_id
-      - tf_integrations_spotify_client_secret
-      - tf_integrations_internal_auth_secret
-      - tf_integrations_heartbeat_secret
+      - source: tf_integrations_runtime_database_url
+        target: tf_integrations_runtime_database_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_integrations_token_keyring
+        target: tf_integrations_token_keyring
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_integrations_spotify_client_id
+        target: tf_integrations_spotify_client_id
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_integrations_spotify_client_secret
+        target: tf_integrations_spotify_client_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_integrations_internal_auth_secret
+        target: tf_integrations_internal_auth_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_integrations_heartbeat_secret
+        target: tf_integrations_heartbeat_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
     networks:

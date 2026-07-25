@@ -19,6 +19,12 @@ const dockerfilePath = join(
   "tf-integrations",
   "Dockerfile",
 );
+const buildScriptPath = join(
+  repositoryRoot,
+  "artifacts",
+  "tf-integrations",
+  "build.mjs",
+);
 const startupScriptPath = join(
   repositoryRoot,
   "artifacts",
@@ -37,8 +43,11 @@ const roleInitScriptPath = join(
 type ComposeSecret =
   | string
   | {
+      readonly gid?: string;
+      readonly mode?: string;
       readonly source?: string;
       readonly target?: string;
+      readonly uid?: string;
     };
 
 interface ComposeService {
@@ -137,6 +146,19 @@ function secretNames(value: ComposeService["secrets"]): readonly string[] {
   return (value ?? []).map((entry) =>
     typeof entry === "string" ? entry : (entry.source ?? ""),
   );
+}
+
+function expectedSecretMount(
+  name: string,
+  owner = "10001",
+): ComposeSecret {
+  return {
+    source: name,
+    target: name,
+    uid: owner,
+    gid: owner,
+    mode: "0400",
+  };
 }
 
 function servicesOnNetwork(
@@ -281,27 +303,37 @@ describe("tf-integrations deployment contract", () => {
       const module = service(template, "tf-integrations");
       const api = service(template, "api");
 
-      expect(secretNames(postgres.secrets)).toEqual([
-        "tf_integrations_postgres_admin_password",
-        "tf_integrations_migrator_password",
-        "tf_integrations_runtime_password",
-      ]);
-      expect(secretNames(migrate.secrets)).toEqual([
-        "tf_integrations_migrator_database_url",
-      ]);
-      expect(secretNames(module.secrets)).toEqual([
-        "tf_integrations_runtime_database_url",
-        "tf_integrations_token_keyring",
-        "tf_integrations_spotify_client_id",
-        "tf_integrations_spotify_client_secret",
-        "tf_integrations_internal_auth_secret",
-        "tf_integrations_heartbeat_secret",
-      ]);
-      expect(
-        secretNames(api.secrets).filter((name) =>
-          name.startsWith("tf_integrations_"),
+      expect(postgres.secrets).toEqual(
+        [
+          "tf_integrations_postgres_admin_password",
+          "tf_integrations_migrator_password",
+          "tf_integrations_runtime_password",
+        ].map((name) => expectedSecretMount(name, "999")),
+      );
+      expect(migrate.secrets).toEqual(
+        ["tf_integrations_migrator_database_url"].map((name) =>
+          expectedSecretMount(name),
         ),
-      ).toEqual(["tf_integrations_internal_auth_secret"]);
+      );
+      expect(module.secrets).toEqual(
+        [
+          "tf_integrations_runtime_database_url",
+          "tf_integrations_token_keyring",
+          "tf_integrations_spotify_client_id",
+          "tf_integrations_spotify_client_secret",
+          "tf_integrations_internal_auth_secret",
+          "tf_integrations_heartbeat_secret",
+        ].map((name) => expectedSecretMount(name)),
+      );
+      expect(
+        (api.secrets ?? []).filter(
+          (entry) =>
+            typeof entry !== "string" &&
+            entry.source?.startsWith("tf_integrations_"),
+        ),
+      ).toEqual([
+        expectedSecretMount("tf_integrations_internal_auth_secret"),
+      ]);
       expect(module.environment).toMatchObject({
         APOLLO_API_VERSION: "${TF_INTEGRATIONS_VERSION:-unknown}",
         APOLLO_DEPLOYED_AT: "${TF_INTEGRATIONS_DEPLOYED_AT:-}",
@@ -416,12 +448,19 @@ describe("tf-integrations deployment contract", () => {
       });
     }
 
-    const [dockerfile, startup, roleInit] = await Promise.all([
+    const [dockerfile, buildScript, startup, roleInit] = await Promise.all([
       readFile(dockerfilePath, "utf8"),
+      readFile(buildScriptPath, "utf8"),
       readFile(startupScriptPath, "utf8"),
       readFile(roleInitScriptPath, "utf8"),
     ]);
     expect(dockerfile).toContain("FROM postgres:16-bookworm AS postgres-role-init");
+    expect(dockerfile.match(/^FROM node:[^\s]+ AS (?:builder|runtime)$/gm)).toEqual([
+      "FROM node:24-bookworm-slim AS builder",
+      "FROM node:24-bookworm-slim AS runtime",
+    ]);
+    expect(dockerfile).not.toContain("node:20");
+    expect(buildScript).toContain('target: "node24"');
     expect(dockerfile).toContain("USER 10001:10001");
     expect(dockerfile).toContain("chmod -R a-w /app");
     expect(dockerfile).toContain(

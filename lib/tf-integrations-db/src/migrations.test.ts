@@ -106,7 +106,7 @@ afterEach(async () => {
 });
 
 describe("integrations migrations", () => {
-  it("accepts original history and applies bounded public provider login metadata", async () => {
+  it("accepts original history and applies later metadata and privilege migrations", async () => {
     const originalChecksum =
       "6b21e525b90612e6aef5bf29263294824b3084343cb17f5b2910651951a4af1a";
     const pool = new MigrationPoolDouble();
@@ -116,6 +116,7 @@ describe("integrations migrations", () => {
       applied: [
         "0002_canonical_token_envelope.sql",
         "0003_yandex_provider_login.sql",
+        "0004_runtime_privileges.sql",
       ],
       alreadyApplied: ["0001_integrations.sql"],
     });
@@ -128,6 +129,7 @@ describe("integrations migrations", () => {
     expect(pool.client.history.has("0003_yandex_provider_login.sql")).toBe(
       true,
     );
+    expect(pool.client.history.has("0004_runtime_privileges.sql")).toBe(true);
 
     pool.client.history.set(
       "0001_integrations.sql",

@@ -68,11 +68,6 @@ select format(
 
 revoke create on schema public from public;
 alter default privileges for role apollo_tf_integrations_migrator
-  grant usage on schemas to apollo_tf_integrations_runtime;
-alter default privileges for role apollo_tf_integrations_migrator
-  grant select, insert, update, delete on tables
-  to apollo_tf_integrations_runtime;
-alter default privileges for role apollo_tf_integrations_migrator
   revoke execute on functions from public;
 SQL
 

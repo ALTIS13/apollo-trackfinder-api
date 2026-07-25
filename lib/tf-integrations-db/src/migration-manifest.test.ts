@@ -91,6 +91,7 @@ describe("integrations migration manifest", () => {
       "0001_integrations.sql",
       "0002_canonical_token_envelope.sql",
       "0003_yandex_provider_login.sql",
+      "0004_runtime_privileges.sql",
     ]);
 
     const providerLoginMigration = await readFile(

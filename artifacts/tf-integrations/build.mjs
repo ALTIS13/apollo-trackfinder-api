@@ -21,7 +21,7 @@ await build({
   outExtension: { ".js": ".mjs" },
   outdir: outputDirectory,
   platform: "node",
-  target: "node20",
+  target: "node24",
   logLevel: "info",
 });
 await cp(

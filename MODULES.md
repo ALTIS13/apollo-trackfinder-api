@@ -535,6 +535,14 @@ API и Apollo Platform. One-shot `tf-integrations-migrate` подключает�
 provider-token tables и данные TF API не импортируются, не изменяются и не
 удаляются.
 
+Immutable migrations `0001`--`0003` не меняются. Additive
+`0004_runtime_privileges.sql` удаляет прежние default table grants, отзывает
+все runtime grants на migration-owned tables и затем явно выдаёт только
+`SELECT/INSERT/UPDATE/DELETE` на `provider_accounts` и `SELECT` на
+`schema_migrations`. Обе таблицы остаются во владении migrator role; runtime
+не может pre-seed, insert, update, delete или truncate migration history.
+Каждая будущая таблица требует отдельного reviewable grant.
+
 API вызывает exact `POST /v1/commands`. Поддерживаемые account-bound
 операции:
 
@@ -601,7 +609,19 @@ migrator и dedicated PostgreSQL. Только module подключён к
 `tf-integrations-egress`; у module, migrator и database нет host ports.
 Runtime и migrator запускаются как numeric UID/GID `10001:10001` с
 read-only root/app filesystem, `init`, `cap_drop: ALL`,
-`no-new-privileges` и bounded tmpfs.
+`no-new-privileges` и bounded tmpfs. Builder и runtime основаны на Node 24
+Krypton LTS Bookworm.
+
+Все integration secret assignments используют long-form Compose
+`source`/`target` и документируют owner/mode. Для file-backed Compose secrets
+эти `uid`/`gid`/`mode` поля не применяют ownership сами: на native Linux
+источники должны быть заранее созданы с host owner `10001:10001` для
+API/module/migrator и `999:999` для PostgreSQL-only password files, mode
+`0400`. Private parent остаётся `root:root` mode `0700`. Docker Desktop
+переназначает bind-backed owner/mode и предупреждает, что metadata
+игнорируется; local smoke поэтому честно отмечает non-native evidence и
+проверяет exact read-only mounts, regular/readable/non-writable targets и
+отсутствие лишних owners, но не заявляет native owner/mode validation.
 
 На одной ноде допустимы только exact origins
 `http://tf-integrations:8080` с
@@ -756,8 +776,14 @@ unset TF_SEARCH_COMMAND_SECRET TF_SEARCH_HEARTBEAT_SECRET
 unset TFI_ADMIN_PASSWORD TFI_MIGRATOR_PASSWORD TFI_RUNTIME_PASSWORD
 unset TFI_COMMAND_SECRET TFI_HEARTBEAT_SECRET TFI_TOKEN_KEY
 unset TF_INTEGRATIONS_SPOTIFY_CLIENT_ID TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET
-sudo chown root:root "$TF_SECRET_DIRECTORY"/tf_*
-sudo chmod 0444 "$TF_SECRET_DIRECTORY"/tf_*
+sudo sh -eu -c '
+  directory=$1
+  chown 10001:10001 "$directory"/tf_*
+  chmod 0400 "$directory"/tf_*
+  chown 999:999 \
+    "$directory"/tf_postgres_password \
+    "$directory"/tf_integrations_*_password
+' secret-permissions "$TF_SECRET_DIRECTORY"
 
 docker compose up -d --build
 ```
@@ -766,12 +792,14 @@ docker compose up -d --build
 startup требует шесть базовых TF/search files из примера и десять
 `tf_integrations_*` files: три PostgreSQL passwords, отдельные migrator/runtime
 URL, token keyring, два Spotify credential files, command key и heartbeat key.
-Для rootful Docker
-каталог и эти файлы остаются под
-владельцем `root`; каталог `0700` закрывает host traversal, а файлы `0444`
-доступны non-root UID контейнеров только через точечные Compose secret mounts.
-Для rootless Docker владельцем должен быть пользователь daemon/Compose при тех
-же mode. Для вложенного template URL использует
+Для native rootful Docker каталог остаётся `root:root` mode `0700`; privileged
+shell выполняет glob expansion, `chown` и `chmod` после записи. PostgreSQL-only
+password files принадлежат `999:999`, остальные `tf_*` files --
+`10001:10001`; все имеют mode `0400`. Для rootless Docker numeric host owners
+должны быть преобразованы в UID/GID mapping конкретного daemon, сохраняя
+owner-only `0400`. Long-form Compose metadata не заменяет это provisioning.
+Docker Desktop сохраняет функциональные read-only mounts, но не доказывает
+native Linux ownership. Для вложенного template URL использует
 `postgres://apollo:<password>@db:5432/apollo_trackfinder`.
 
 PostgreSQL применяет `POSTGRES_PASSWORD_FILE` только при инициализации пустого

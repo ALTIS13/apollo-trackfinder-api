@@ -3,7 +3,7 @@ FROM postgres:16-bookworm AS postgres-role-init
 COPY artifacts/tf-integrations/container/init-roles.sh /docker-entrypoint-initdb.d/010-tf-integrations-roles.sh
 RUN chmod 0555 /docker-entrypoint-initdb.d/010-tf-integrations-roles.sh
 
-FROM node:20-bookworm-slim AS builder
+FROM node:24-bookworm-slim AS builder
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
@@ -27,7 +27,7 @@ COPY artifacts/tf-integrations ./artifacts/tf-integrations
 RUN pnpm --dir artifacts/tf-integrations build
 RUN pnpm --filter @workspace/tf-integrations deploy --prod --legacy /runtime
 
-FROM node:20-bookworm-slim AS runtime
+FROM node:24-bookworm-slim AS runtime
 
 RUN groupadd --gid 10001 tf-integrations \
   && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin tf-integrations

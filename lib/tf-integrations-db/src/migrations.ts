@@ -43,6 +43,11 @@ export const INTEGRATIONS_MIGRATION_MANIFEST: readonly MigrationManifestEntry[] 
       checksum:
         "b432377566f927ebf1117cb092aa84748a854da96f169ec41ec56b69391acab0",
     },
+    {
+      name: "0004_runtime_privileges.sql",
+      checksum:
+        "5cb5900b1ab737b6a0695eff13b4211e9d04d6c00eb1126d3941a60d47ffb070",
+    },
   ]);
 
 function migrationContractError(

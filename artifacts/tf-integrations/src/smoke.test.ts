@@ -82,9 +82,16 @@ interface SmokeObservations extends CommandObservations {
   readonly inspectMigrationGating: boolean;
   readonly inspectNetworkIsolation: boolean;
   readonly inspectNoHostPorts: boolean;
+  readonly inspectResourceLimits: boolean;
   readonly inspectSecretOwnership: boolean;
   readonly migrationExitCode: number;
   readonly ready: boolean;
+  readonly rolePrivilegesEnforced: boolean;
+  readonly runtimeNodeMajor: number;
+  readonly secretOwnershipEvidence:
+    | "non-native-readonly-remap"
+    | "native-linux-owner-mode";
+  readonly secretTargetStatsVerified: boolean;
 }
 
 interface CleanupObservations {
@@ -106,6 +113,11 @@ interface DockerResult {
   readonly stdout: string;
 }
 
+interface LocalDockerRuntime {
+  readonly environment: NodeJS.ProcessEnv;
+  readonly nativeSecretOwnership: boolean;
+}
+
 interface PreparedSecrets {
   readonly allowedEntries: ReadonlySet<string>;
   readonly canaries: readonly string[];
@@ -114,6 +126,13 @@ interface PreparedSecrets {
   readonly marker: string;
   readonly secretNames: readonly string[];
   readonly token: string;
+}
+
+interface PrepareSecretsOptions {
+  readonly nativeSecretOwnership?: boolean;
+  readonly project?: string;
+  readonly rootDirectory?: string;
+  readonly write?: typeof writeSecret;
 }
 
 function generatedSecret(bytes = 32): string {
@@ -204,9 +223,31 @@ async function docker(
   };
 }
 
+async function describeLocalDocker(
+  environment: NodeJS.ProcessEnv,
+  endpoint: string,
+): Promise<LocalDockerRuntime> {
+  const info = await docker(
+    ["info", "--format", "{{json .OperatingSystem}}"],
+    environment,
+    30_000,
+  );
+  const operatingSystem: unknown = JSON.parse(info.stdout.trim());
+  if (typeof operatingSystem !== "string") {
+    throw new Error("Local Docker operating system is unavailable");
+  }
+  return {
+    environment,
+    nativeSecretOwnership:
+      process.platform === "linux" &&
+      endpoint.toLowerCase().startsWith("unix://") &&
+      !operatingSystem.toLowerCase().includes("docker desktop"),
+  };
+}
+
 async function localDockerEnvironment(
   source: NodeJS.ProcessEnv,
-): Promise<NodeJS.ProcessEnv> {
+): Promise<LocalDockerRuntime> {
   const selectors = canonicalEnvironment(source);
   if (selectors.context.length > 0) {
     const inspected = await docker(
@@ -224,9 +265,11 @@ async function localDockerEnvironment(
     if (typeof endpoint !== "string" || !isLocalDockerEndpoint(endpoint)) {
       throw new Error("TF integrations smoke requires local Docker");
     }
-    return selectors.environment;
+    return describeLocalDocker(selectors.environment, endpoint);
   }
-  if (selectors.host.length > 0) return selectors.environment;
+  if (selectors.host.length > 0) {
+    return describeLocalDocker(selectors.environment, selectors.host);
+  }
 
   const shown = await docker(
     ["context", "show"],
@@ -256,7 +299,7 @@ async function localDockerEnvironment(
   if (typeof endpoint !== "string" || !isLocalDockerEndpoint(endpoint)) {
     throw new Error("TF integrations smoke requires local Docker");
   }
-  return environment;
+  return describeLocalDocker(environment, endpoint);
 }
 
 async function writeSecret(
@@ -269,103 +312,208 @@ async function writeSecret(
   if (process.platform !== "win32") await chmod(path, 0o444);
 }
 
+async function removeEmptyDirectory(path: string): Promise<void> {
+  await rmdir(path).catch((error: unknown) => {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
+      throw error;
+    }
+  });
+}
+
+async function provisionNativeSecretOwnership(
+  environment: NodeJS.ProcessEnv,
+  project: string,
+  directory: string,
+  owners: readonly {
+    readonly name: string;
+    readonly uid: 999 | 10001;
+  }[],
+): Promise<void> {
+  const assignments = owners.map(({ name, uid }) => `${name}:${uid}`);
+  await docker(
+    [
+      "run",
+      "--rm",
+      "--name",
+      `${project}-secret-provisioner`,
+      "--label",
+      `com.docker.compose.project=${project}`,
+      "--network",
+      "none",
+      "--read-only",
+      "--mount",
+      `type=bind,source=${directory},target=/secrets`,
+      "postgres:16-bookworm",
+      "sh",
+      "-eu",
+      "-c",
+      'for assignment do name=${assignment%:*}; owner=${assignment#*:}; chown "$owner:$owner" "/secrets/$name"; chmod 0400 "/secrets/$name"; done',
+      "secret-provisioner",
+      ...assignments,
+    ],
+    environment,
+    2 * 60_000,
+  );
+}
+
 async function prepareSecrets(
   environment: NodeJS.ProcessEnv,
+  options: PrepareSecretsOptions = {},
 ): Promise<PreparedSecrets> {
-  await mkdir(temporaryRoot, { recursive: true });
-  await mkdir(temporaryOwner, { recursive: true });
-  const directory = assertContainedPath(
-    await mkdtemp(join(temporaryOwner, "run-")),
-    temporaryOwner,
+  const rootDirectory = options.rootDirectory ?? temporaryRoot;
+  const ownerDirectory = join(
+    rootDirectory,
+    `tf-integrations-smoke-${process.pid}`,
   );
-  if (process.platform !== "win32") await chmod(directory, 0o700);
-  const marker = generatedSecret();
-  const postgresPassword = generatedSecret();
-  const clientSecret = generatedSecret();
-  const searchCommandSecret = generatedSecret();
-  const searchHeartbeatSecret = generatedSecret();
-  const integrationAdminPassword = generatedSecret();
-  const integrationMigratorPassword = generatedSecret();
-  const integrationRuntimePassword = generatedSecret();
-  const integrationCommandSecret = generatedSecret();
-  const integrationHeartbeatSecret = generatedSecret();
-  const spotifyClientId = generatedSecret();
-  const spotifyClientSecret = generatedSecret();
-  const key = randomBytes(32);
-  const token = generatedSecret(48);
+  const write = options.write ?? writeSecret;
+  let directory: string | undefined;
+  let canaries: readonly string[] = [];
 
-  const tfDatabaseUrl =
-    `postgres://trackfinder:${encodeURIComponent(postgresPassword)}` +
-    "@db:5432/trackfinder";
-  const integrationMigratorUrl =
-    "postgres://apollo_tf_integrations_migrator:" +
-    `${encodeURIComponent(integrationMigratorPassword)}` +
-    "@tf-integrations-postgres:5432/apollo_tf_integrations";
-  const integrationRuntimeUrl =
-    "postgres://apollo_tf_integrations_runtime:" +
-    `${encodeURIComponent(integrationRuntimePassword)}` +
-    "@tf-integrations-postgres:5432/apollo_tf_integrations";
-  const keyring = JSON.stringify({
-    activeKeyId: "smoke-v1",
-    keys: { "smoke-v1": key.toString("base64url") },
-  });
-  const heartbeatKeys = JSON.stringify({
-    "account-integrations": integrationHeartbeatSecret,
-    "search-media": searchHeartbeatSecret,
-  });
-  const secrets = [
-    ["tf_client_secret", clientSecret],
-    ["tf_database_url", tfDatabaseUrl],
-    ["tf_module_heartbeat_keys", heartbeatKeys],
-    ["tf_postgres_password", postgresPassword],
-    ["tf_search_heartbeat_secret", searchHeartbeatSecret],
-    ["tf_search_internal_auth_secret", searchCommandSecret],
-    [
+  try {
+    await mkdir(rootDirectory, { recursive: true });
+    await mkdir(ownerDirectory, { recursive: true });
+    directory = assertContainedPath(
+      await mkdtemp(join(ownerDirectory, "run-")),
+      ownerDirectory,
+    );
+    if (process.platform !== "win32") await chmod(directory, 0o700);
+    const marker = generatedSecret();
+    const postgresPassword = generatedSecret();
+    const clientSecret = generatedSecret();
+    const searchCommandSecret = generatedSecret();
+    const searchHeartbeatSecret = generatedSecret();
+    const integrationAdminPassword = generatedSecret();
+    const integrationMigratorPassword = generatedSecret();
+    const integrationRuntimePassword = generatedSecret();
+    const integrationCommandSecret = generatedSecret();
+    const integrationHeartbeatSecret = generatedSecret();
+    const spotifyClientId = generatedSecret();
+    const spotifyClientSecret = generatedSecret();
+    const key = randomBytes(32);
+    const token = generatedSecret(48);
+
+    const tfDatabaseUrl =
+      `postgres://trackfinder:${encodeURIComponent(postgresPassword)}` +
+      "@db:5432/trackfinder";
+    const integrationMigratorUrl =
+      "postgres://apollo_tf_integrations_migrator:" +
+      `${encodeURIComponent(integrationMigratorPassword)}` +
+      "@tf-integrations-postgres:5432/apollo_tf_integrations";
+    const integrationRuntimeUrl =
+      "postgres://apollo_tf_integrations_runtime:" +
+      `${encodeURIComponent(integrationRuntimePassword)}` +
+      "@tf-integrations-postgres:5432/apollo_tf_integrations";
+    const keyring = JSON.stringify({
+      activeKeyId: "smoke-v1",
+      keys: { "smoke-v1": key.toString("base64url") },
+    });
+    const heartbeatKeys = JSON.stringify({
+      "account-integrations": integrationHeartbeatSecret,
+      "search-media": searchHeartbeatSecret,
+    });
+    const secrets = [
+      ["tf_client_secret", clientSecret],
+      ["tf_database_url", tfDatabaseUrl],
+      ["tf_module_heartbeat_keys", heartbeatKeys],
+      ["tf_postgres_password", postgresPassword],
+      ["tf_search_heartbeat_secret", searchHeartbeatSecret],
+      ["tf_search_internal_auth_secret", searchCommandSecret],
+      [
+        "tf_integrations_postgres_admin_password",
+        integrationAdminPassword,
+      ],
+      ["tf_integrations_migrator_password", integrationMigratorPassword],
+      ["tf_integrations_runtime_password", integrationRuntimePassword],
+      ["tf_integrations_migrator_database_url", integrationMigratorUrl],
+      ["tf_integrations_runtime_database_url", integrationRuntimeUrl],
+      ["tf_integrations_token_keyring", keyring],
+      ["tf_integrations_spotify_client_id", spotifyClientId],
+      ["tf_integrations_spotify_client_secret", spotifyClientSecret],
+      ["tf_integrations_internal_auth_secret", integrationCommandSecret],
+      ["tf_integrations_heartbeat_secret", integrationHeartbeatSecret],
+      ["tf_integrations_smoke_token", token],
+    ] as const;
+    const postgresOwned = new Set([
+      "tf_postgres_password",
       "tf_integrations_postgres_admin_password",
-      integrationAdminPassword,
-    ],
-    ["tf_integrations_migrator_password", integrationMigratorPassword],
-    ["tf_integrations_runtime_password", integrationRuntimePassword],
-    ["tf_integrations_migrator_database_url", integrationMigratorUrl],
-    ["tf_integrations_runtime_database_url", integrationRuntimeUrl],
-    ["tf_integrations_token_keyring", keyring],
-    ["tf_integrations_spotify_client_id", spotifyClientId],
-    ["tf_integrations_spotify_client_secret", spotifyClientSecret],
-    ["tf_integrations_internal_auth_secret", integrationCommandSecret],
-    ["tf_integrations_heartbeat_secret", integrationHeartbeatSecret],
-    ["tf_integrations_smoke_token", token],
-  ] as const;
-
-  await writeSecret(directory, ownershipMarker, marker);
-  for (const [name, value] of secrets) {
-    await writeSecret(directory, name, value);
-  }
-  if (process.platform !== "win32") {
-    expect((await stat(directory)).mode & 0o777).toBe(0o700);
-    for (const [name] of secrets) {
-      expect((await stat(join(directory, name))).mode & 0o777).toBe(0o444);
-    }
-  }
-
-  environment.TF_SECRET_DIRECTORY = directory;
-  return {
-    allowedEntries: new Set([
-      ownershipMarker,
-      "compose.smoke.yml",
-      ...secrets.map(([name]) => name),
-    ]),
-    canaries: [
+      "tf_integrations_migrator_password",
+      "tf_integrations_runtime_password",
+    ]);
+    const owners = secrets.map(([name]) => ({
+      name,
+      uid: postgresOwned.has(name) ? 999 : 10001,
+    })) as readonly {
+      readonly name: string;
+      readonly uid: 999 | 10001;
+    }[];
+    canaries = [
       marker,
       ...secrets.flatMap(([, value]) => [value, digest(value)]),
       key.toString("base64url"),
       digest(key.toString("base64url")),
-    ],
-    directory,
-    key,
-    marker,
-    secretNames: secrets.map(([name]) => name),
-    token,
-  };
+    ];
+
+    await write(directory, ownershipMarker, marker);
+    for (const [name, value] of secrets) {
+      await write(directory, name, value);
+    }
+    if (options.nativeSecretOwnership === true) {
+      if (options.project === undefined) {
+        throw new Error("Native secret provisioning requires a project");
+      }
+      await provisionNativeSecretOwnership(
+        environment,
+        options.project,
+        directory,
+        owners,
+      );
+    }
+    if (process.platform !== "win32") {
+      expect((await stat(directory)).mode & 0o777).toBe(0o700);
+    }
+    if (options.nativeSecretOwnership === true) {
+      for (const { name, uid } of owners) {
+        const current = await stat(join(directory, name));
+        if (
+          current.uid !== uid ||
+          current.gid !== uid ||
+          (current.mode & 0o777) !== 0o400
+        ) {
+          throw new Error("Native secret ownership provisioning failed");
+        }
+      }
+    }
+
+    environment.TF_SECRET_DIRECTORY = directory;
+    return {
+      allowedEntries: new Set([
+        ownershipMarker,
+        "compose.smoke.yml",
+        ...secrets.map(([name]) => name),
+      ]),
+      canaries,
+      directory,
+      key,
+      marker,
+      secretNames: secrets.map(([name]) => name),
+      token,
+    };
+  } catch (error) {
+    try {
+      if (directory !== undefined) {
+        await rm(assertContainedPath(directory, ownerDirectory), {
+          force: true,
+          recursive: true,
+        });
+      }
+      await removeEmptyDirectory(ownerDirectory);
+      await removeEmptyDirectory(rootDirectory);
+    } catch {
+      throw new Error("TF integrations partial secret cleanup failed");
+    }
+    throw sanitizeError(error, canaries);
+  }
 }
 
 async function removePreparedSecrets(prepared: PreparedSecrets): Promise<void> {
@@ -439,8 +587,11 @@ async function writeOverride(
           },
           secrets: [
             {
+              gid: "10001",
+              mode: "0400",
               source: "tf_integrations_smoke_token",
               target: "tf_integrations_smoke_token",
+              uid: "10001",
             },
           ],
         },
@@ -793,6 +944,296 @@ async function ciphertextObservations(
   };
 }
 
+function rolePrivilegeProbeSource(): string {
+  return `
+import { readFileSync } from "node:fs";
+import { Pool } from "pg";
+
+const connectionString = readFileSync(
+  "/run/secrets/tf_integrations_runtime_database_url",
+  "utf8",
+).trim();
+const pool = new Pool({ connectionString, max: 1 });
+
+const denied = async (statement) => {
+  const client = await pool.connect();
+  let permissionDenied = false;
+  try {
+    await client.query("BEGIN");
+    try {
+      await client.query(statement);
+    } catch (error) {
+      permissionDenied = error?.code === "42501";
+    }
+    return permissionDenied;
+  } finally {
+    await client.query("ROLLBACK").catch(() => {});
+    client.release();
+  }
+};
+
+try {
+  const grants = await pool.query(
+    "select table_name, privilege_type " +
+      "from information_schema.role_table_grants " +
+      "where grantee = current_user " +
+      "and table_schema = 'apollo_tf_integrations' " +
+      "order by table_name, privilege_type",
+  );
+  const grantsByTable = {};
+  for (const row of grants.rows) {
+    (grantsByTable[row.table_name] ??= []).push(row.privilege_type);
+  }
+  const owners = await pool.query(
+    "select tablename, tableowner from pg_tables " +
+      "where schemaname = 'apollo_tf_integrations' " +
+      "and tablename in ('provider_accounts', 'schema_migrations') " +
+      "order by tablename",
+  );
+  const schema = await pool.query(
+    "select " +
+      "has_schema_privilege(current_user, 'apollo_tf_integrations', 'USAGE') as usage, " +
+      "has_schema_privilege(current_user, 'apollo_tf_integrations', 'CREATE') as create",
+  );
+  const deniedWrites = await Promise.all([
+    denied(
+      "insert into apollo_tf_integrations.schema_migrations " +
+        "(name, checksum) values ('9999_preseed.sql', 'preseed')",
+    ),
+    denied(
+      "update apollo_tf_integrations.schema_migrations " +
+        "set checksum = checksum where name = '0001_integrations.sql'",
+    ),
+    denied(
+      "delete from apollo_tf_integrations.schema_migrations " +
+        "where name = '0001_integrations.sql'",
+    ),
+    denied("truncate apollo_tf_integrations.schema_migrations"),
+  ]);
+  const preseed = await pool.query(
+    "select count(*)::int as count " +
+      "from apollo_tf_integrations.schema_migrations " +
+      "where name = '9999_preseed.sql'",
+  );
+  const enforced =
+    JSON.stringify(grantsByTable) ===
+      JSON.stringify({
+        provider_accounts: ["DELETE", "INSERT", "SELECT", "UPDATE"],
+        schema_migrations: ["SELECT"],
+      }) &&
+    JSON.stringify(owners.rows) ===
+      JSON.stringify([
+        {
+          tablename: "provider_accounts",
+          tableowner: "apollo_tf_integrations_migrator",
+        },
+        {
+          tablename: "schema_migrations",
+          tableowner: "apollo_tf_integrations_migrator",
+        },
+      ]) &&
+    schema.rows[0]?.usage === true &&
+    schema.rows[0]?.create === false &&
+    deniedWrites.every(Boolean) &&
+    preseed.rows[0]?.count === 0;
+  process.stdout.write(
+    JSON.stringify({
+      enforced,
+      nodeMajor: Number(process.versions.node.split(".")[0]),
+    }),
+  );
+} catch {
+  process.stderr.write("role privilege probe failed\\n");
+  process.exitCode = 1;
+} finally {
+  await pool.end().catch(() => {});
+}
+`;
+}
+
+async function rolePrivilegeObservations(
+  compose: (args: readonly string[]) => Promise<DockerResult>,
+): Promise<{
+  readonly enforced: boolean;
+  readonly nodeMajor: number;
+}> {
+  const result = await compose([
+    "exec",
+    "-T",
+    "--user",
+    "10001:10001",
+    "tf-integrations",
+    "node",
+    "--input-type=module",
+    "-e",
+    rolePrivilegeProbeSource(),
+  ]);
+  if (result.stderr.trim().length > 0) {
+    throw new Error("Role privilege probe wrote stderr");
+  }
+  const parsed: unknown = JSON.parse(result.stdout);
+  if (
+    !isRecord(parsed) ||
+    typeof parsed.enforced !== "boolean" ||
+    typeof parsed.nodeMajor !== "number"
+  ) {
+    throw new Error("Role privilege probe result is malformed");
+  }
+  return {
+    enforced: parsed.enforced,
+    nodeMajor: parsed.nodeMajor,
+  };
+}
+
+const assignedIntegrationSecrets = {
+  api: [
+    "tf_client_secret",
+    "tf_database_url",
+    "tf_integrations_internal_auth_secret",
+    "tf_integrations_smoke_token",
+    "tf_module_heartbeat_keys",
+    "tf_search_internal_auth_secret",
+  ],
+  "tf-integrations": [
+    "tf_integrations_heartbeat_secret",
+    "tf_integrations_internal_auth_secret",
+    "tf_integrations_runtime_database_url",
+    "tf_integrations_spotify_client_id",
+    "tf_integrations_spotify_client_secret",
+    "tf_integrations_token_keyring",
+  ],
+  "tf-integrations-migrate": [
+    "tf_integrations_migrator_database_url",
+  ],
+  "tf-integrations-postgres": [
+    "tf_integrations_migrator_password",
+    "tf_integrations_postgres_admin_password",
+    "tf_integrations_runtime_password",
+  ],
+} as const;
+
+async function secretTargetStatObservations(
+  compose: (args: readonly string[]) => Promise<DockerResult>,
+  nativeSecretOwnership: boolean,
+): Promise<{
+  readonly evidence:
+    | "native-linux-owner-mode"
+    | "non-native-readonly-remap";
+  readonly verified: boolean;
+}> {
+  const script =
+    'for path do test -f "$path"; test -r "$path"; test ! -w "$path"; ' +
+    'stat -c "%u:%g:%a:%F" "$path"; done';
+  const assignments = [
+    {
+      names: assignedIntegrationSecrets.api,
+      service: "api",
+      uid: 10001,
+    },
+    {
+      names: assignedIntegrationSecrets["tf-integrations"],
+      service: "tf-integrations",
+      uid: 10001,
+    },
+    {
+      names: assignedIntegrationSecrets["tf-integrations-postgres"],
+      service: "tf-integrations-postgres",
+      uid: 999,
+    },
+  ] as const;
+  const results: Array<{
+    readonly names: readonly string[];
+    readonly output: DockerResult;
+    readonly service: string;
+    readonly uid: number;
+  }> = [];
+
+  for (const { names, service, uid } of assignments) {
+    results.push({
+      names,
+      output: await compose([
+        "exec",
+        "-T",
+        "--user",
+        `${uid}:${uid}`,
+        service,
+        "sh",
+        "-eu",
+        "-c",
+        script,
+        "secret-stat",
+        ...names.map((name) => `/run/secrets/${name}`),
+      ]),
+      service,
+      uid,
+    });
+  }
+  results.push({
+    names: assignedIntegrationSecrets["tf-integrations-migrate"],
+    output: await compose([
+      "--progress",
+      "quiet",
+      "run",
+      "--rm",
+      "--no-deps",
+      "--user",
+      "10001:10001",
+      "--entrypoint",
+      "sh",
+      "tf-integrations-migrate",
+      "-eu",
+      "-c",
+      script,
+      "secret-stat",
+      ...assignedIntegrationSecrets["tf-integrations-migrate"].map(
+        (name) => `/run/secrets/${name}`,
+      ),
+    ]),
+    service: "tf-integrations-migrate",
+    uid: 10001,
+  });
+
+  for (const { names, output, service, uid } of results) {
+    const stderrLines = output.stderr.trim().split(/\r?\n/).filter(Boolean);
+    const unsupportedMetadataWarning =
+      /^time="[^"]+" level=warning msg="secrets `uid`, `gid` and `mode` are not supported, they will be ignored"$/;
+    if (
+      stderrLines.some(
+        (line) =>
+          service !== "tf-integrations-migrate" ||
+          !unsupportedMetadataWarning.test(line),
+      )
+    ) {
+      throw new Error(`Secret stat probe wrote unexpected stderr for ${service}`);
+    }
+    const lines = output.stdout.trim().split(/\r?\n/).filter(Boolean);
+    if (lines.length !== names.length) {
+      throw new Error("Secret stat probe count is malformed");
+    }
+    for (const line of lines) {
+      const match = /^(\d+):(\d+):(\d+):regular file$/.exec(line);
+      if (match === null) {
+        throw new Error("Secret stat probe result is malformed");
+      }
+      if (
+        nativeSecretOwnership &&
+        (Number(match[1]) !== uid ||
+          Number(match[2]) !== uid ||
+          match[3] !== "400")
+      ) {
+        throw new Error("Native secret owner/mode contract failed");
+      }
+    }
+  }
+
+  return {
+    evidence: nativeSecretOwnership
+      ? "native-linux-owner-mode"
+      : "non-native-readonly-remap",
+    verified: true,
+  };
+}
+
 async function dashboardModule(
   apiOrigin: string,
   status: "healthy",
@@ -888,6 +1329,7 @@ function inspectRuntimeContract(
   readonly migrationGating: true;
   readonly networkIsolation: true;
   readonly noHostPorts: true;
+  readonly resourceLimits: true;
   readonly secretOwnership: true;
 } {
   const parsed: unknown = JSON.parse(projection);
@@ -912,7 +1354,7 @@ function inspectRuntimeContract(
     isRecord(container.HostConfig) ? container.HostConfig : {};
   const state = (container: Record<string, unknown>): Record<string, unknown> =>
     isRecord(container.State) ? container.State : {};
-  const integrationNetworks = (
+  const attachedNetworks = (
     container: Record<string, unknown>,
   ): readonly string[] => {
     const networkSettings = isRecord(container.NetworkSettings)
@@ -922,8 +1364,11 @@ function inspectRuntimeContract(
       ? networkSettings.Networks
       : {};
     return Object.keys(networks)
-      .filter((name) => name.startsWith(`${project}_tf-integrations-`))
-      .map((name) => name.slice(`${project}_`.length))
+      .map((name) =>
+        name.startsWith(`${project}_`)
+          ? name.slice(`${project}_`.length)
+          : name,
+      )
       .sort();
   };
   const secretTargets = (
@@ -968,6 +1413,21 @@ function inspectRuntimeContract(
       tmpfs["/tmp"].includes("size=16m")
     );
   };
+  const hasLimits = (
+    container: Record<string, unknown>,
+    expected: {
+      readonly memory: number;
+      readonly nanoCpus: number;
+      readonly pids: number;
+    },
+  ): boolean => {
+    const currentHost = host(container);
+    return (
+      currentHost.Memory === expected.memory &&
+      currentHost.NanoCpus === expected.nanoCpus &&
+      currentHost.PidsLimit === expected.pids
+    );
+  };
 
   const api = current("api");
   const module = current("tf-integrations");
@@ -977,20 +1437,39 @@ function inspectRuntimeContract(
     throw new Error("Docker inspect least-privilege contract failed");
   }
   if (
-    JSON.stringify(integrationNetworks(api)) !==
-      JSON.stringify(["tf-integrations-control"]) ||
-    JSON.stringify(integrationNetworks(module)) !==
+    JSON.stringify(attachedNetworks(api)) !==
+      JSON.stringify([
+        "tf-data",
+        "tf-edge",
+        "tf-integrations-control",
+        "tf-search-control",
+      ]) ||
+    JSON.stringify(attachedNetworks(module)) !==
       JSON.stringify([
         "tf-integrations-control",
         "tf-integrations-data",
         "tf-integrations-egress",
       ]) ||
-    JSON.stringify(integrationNetworks(migrate)) !==
+    JSON.stringify(attachedNetworks(migrate)) !==
       JSON.stringify(["tf-integrations-data"]) ||
-    JSON.stringify(integrationNetworks(postgres)) !==
+    JSON.stringify(attachedNetworks(postgres)) !==
       JSON.stringify(["tf-integrations-data"])
   ) {
     throw new Error("Docker inspect network-isolation contract failed");
+  }
+  if (
+    !hasLimits(module, {
+      memory: 512 * 1024 * 1024,
+      nanoCpus: 1_000_000_000,
+      pids: 128,
+    }) ||
+    !hasLimits(migrate, {
+      memory: 256 * 1024 * 1024,
+      nanoCpus: 500_000_000,
+      pids: 64,
+    })
+  ) {
+    throw new Error("Docker inspect resource-limit contract failed");
   }
   if (![module, migrate, postgres].every(noBindings)) {
     throw new Error("Docker inspect host-port contract failed");
@@ -1009,9 +1488,6 @@ function inspectRuntimeContract(
     "tf_integrations_postgres_admin_password",
     "tf_integrations_runtime_password",
   ];
-  const apiIntegrationSecrets = secretTargets(api).filter((name) =>
-    name.startsWith("tf_integrations_"),
-  );
   if (
     JSON.stringify(secretTargets(module)) !==
       JSON.stringify(expectedModuleSecrets) ||
@@ -1019,11 +1495,8 @@ function inspectRuntimeContract(
       JSON.stringify(["tf_integrations_migrator_database_url"]) ||
     JSON.stringify(secretTargets(postgres)) !==
       JSON.stringify(expectedPostgresSecrets) ||
-    JSON.stringify(apiIntegrationSecrets) !==
-      JSON.stringify([
-        "tf_integrations_internal_auth_secret",
-        "tf_integrations_smoke_token",
-      ])
+    JSON.stringify(secretTargets(api)) !==
+      JSON.stringify(assignedIntegrationSecrets.api)
   ) {
     throw new Error("Docker inspect secret-ownership contract failed");
   }
@@ -1062,6 +1535,7 @@ function inspectRuntimeContract(
     migrationGating: true,
     networkIsolation: true,
     noHostPorts: true,
+    resourceLimits: true,
     secretOwnership: true,
   };
 }
@@ -1135,7 +1609,8 @@ async function auditProject(
 }
 
 async function runDisposableSmoke(): Promise<SmokeResult> {
-  const environment = await localDockerEnvironment(process.env);
+  const localDocker = await localDockerEnvironment(process.env);
+  const environment = localDocker.environment;
   delete environment.COMPOSE_PROJECT_NAME;
   const project =
     `apollo-tf-integrations-smoke-${process.pid}-` +
@@ -1163,7 +1638,10 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
   };
 
   try {
-    prepared = await prepareSecrets(environment);
+    prepared = await prepareSecrets(environment, {
+      nativeSecretOwnership: localDocker.nativeSecretOwnership,
+      project,
+    });
     overridePath = await writeOverride(prepared);
     compose = (args) =>
       docker(composeArguments(overridePath!, project, args), environment);
@@ -1221,6 +1699,11 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
     ) as number;
     const commands = await commandObservations(compose);
     const ciphertext = await ciphertextObservations(compose, prepared);
+    const rolePrivileges = await rolePrivilegeObservations(compose);
+    const secretStats = await secretTargetStatObservations(
+      compose,
+      localDocker.nativeSecretOwnership,
+    );
     const healthy = await dashboardModule(apiOrigin, "healthy");
 
     await compose(["restart", "api"]);
@@ -1282,9 +1765,14 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
       inspectMigrationGating: inspectedContract.migrationGating,
       inspectNetworkIsolation: inspectedContract.networkIsolation,
       inspectNoHostPorts: inspectedContract.noHostPorts,
+      inspectResourceLimits: inspectedContract.resourceLimits,
       inspectSecretOwnership: inspectedContract.secretOwnership,
       migrationExitCode,
       ready: true,
+      rolePrivilegesEnforced: rolePrivileges.enforced,
+      runtimeNodeMajor: rolePrivileges.nodeMajor,
+      secretOwnershipEvidence: secretStats.evidence,
+      secretTargetStatsVerified: secretStats.verified,
     };
   } catch (error) {
     lifecycleError = error;
@@ -1477,6 +1965,214 @@ describe("tf-integrations smoke failure redaction", () => {
       canary,
     );
   });
+
+  it("removes every partial secret artifact when an injected write fails", async () => {
+    const rootDirectory = join(
+      temporaryRoot,
+      `tf-integrations-injected-${randomBytes(8).toString("hex")}`,
+    );
+    let calls = 0;
+    let capturedCanary = "";
+    let original: Error | undefined;
+    let caught: unknown;
+
+    try {
+      await prepareSecrets(
+        {},
+        {
+          rootDirectory,
+          write: async (directory, name, value) => {
+            calls += 1;
+            if (calls === 1) {
+              await writeSecret(directory, name, value);
+              return;
+            }
+            capturedCanary = value;
+            original = Object.assign(
+              new Error("Injected secret write failure"),
+              {
+                stderr: value,
+                stdout: value,
+              },
+            );
+            throw original;
+          },
+        },
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    try {
+      expect(calls).toBe(2);
+      expect(caught instanceof Error).toBe(true);
+      expect(caught === original).toBe(false);
+      expect(
+        caught instanceof Error &&
+          (Object.hasOwn(caught, "stderr") ||
+            Object.hasOwn(caught, "stdout")),
+      ).toBe(false);
+      expect(
+        caught instanceof Error &&
+          `${caught.message}\n${caught.stack ?? ""}`.includes(
+            capturedCanary,
+          ),
+      ).toBe(false);
+      let rootExists = true;
+      try {
+        await access(rootDirectory);
+      } catch {
+        rootExists = false;
+      }
+      expect(rootExists).toBe(false);
+    } finally {
+      await rm(rootDirectory, { force: true, recursive: true });
+    }
+  });
+});
+
+function inspectContractFixture(project: string): Array<Record<string, unknown>> {
+  const mounts = (names: readonly string[]) =>
+    names.map((name) => ({
+      Destination: `/run/secrets/${name}`,
+      RW: false,
+      Type: "bind",
+    }));
+  const networks = (names: readonly string[]) => ({
+    Networks: Object.fromEntries(
+      names.map((name) => [`${project}_${name}`, {}]),
+    ),
+  });
+  const hardenedHost = (
+    nanoCpus: number,
+    memory: number,
+    pids: number,
+  ) => ({
+    CapDrop: ["ALL"],
+    Init: true,
+    Memory: memory,
+    NanoCpus: nanoCpus,
+    PidsLimit: pids,
+    PortBindings: {},
+    ReadonlyRootfs: true,
+    SecurityOpt: ["no-new-privileges:true"],
+    Tmpfs: { "/tmp": "rw,noexec,nosuid,size=16m" },
+  });
+  const labels = (service: string) => ({
+    Labels: { "com.docker.compose.service": service },
+  });
+
+  return [
+    {
+      Config: labels("api"),
+      HostConfig: { PortBindings: {} },
+      Mounts: mounts([
+        "tf_client_secret",
+        "tf_database_url",
+        "tf_integrations_internal_auth_secret",
+        "tf_integrations_smoke_token",
+        "tf_module_heartbeat_keys",
+        "tf_search_internal_auth_secret",
+      ]),
+      NetworkSettings: networks([
+        "tf-data",
+        "tf-edge",
+        "tf-integrations-control",
+        "tf-search-control",
+      ]),
+      State: {},
+    },
+    {
+      Config: { ...labels("tf-integrations"), User: "10001:10001" },
+      HostConfig: hardenedHost(1_000_000_000, 512 * 1024 * 1024, 128),
+      Mounts: mounts([
+        "tf_integrations_heartbeat_secret",
+        "tf_integrations_internal_auth_secret",
+        "tf_integrations_runtime_database_url",
+        "tf_integrations_spotify_client_id",
+        "tf_integrations_spotify_client_secret",
+        "tf_integrations_token_keyring",
+      ]),
+      NetworkSettings: networks([
+        "tf-integrations-control",
+        "tf-integrations-data",
+        "tf-integrations-egress",
+      ]),
+      State: {
+        Health: { Status: "healthy" },
+        StartedAt: "2026-07-25T12:00:01.000Z",
+      },
+    },
+    {
+      Config: {
+        ...labels("tf-integrations-migrate"),
+        User: "10001:10001",
+      },
+      HostConfig: hardenedHost(500_000_000, 256 * 1024 * 1024, 64),
+      Mounts: mounts(["tf_integrations_migrator_database_url"]),
+      NetworkSettings: networks(["tf-integrations-data"]),
+      State: {
+        ExitCode: 0,
+        FinishedAt: "2026-07-25T12:00:00.000Z",
+        Status: "exited",
+      },
+    },
+    {
+      Config: labels("tf-integrations-postgres"),
+      HostConfig: { PortBindings: {} },
+      Mounts: mounts([
+        "tf_integrations_migrator_password",
+        "tf_integrations_postgres_admin_password",
+        "tf_integrations_runtime_password",
+      ]),
+      NetworkSettings: networks(["tf-integrations-data"]),
+      State: { Health: { Status: "healthy" } },
+    },
+  ];
+}
+
+describe("tf-integrations Docker inspect validation", () => {
+  it("rejects an accidental network even when its name is outside the integration prefix", () => {
+    const project = "inspect-contract";
+    const projection = inspectContractFixture(project);
+    const module = projection[1]!;
+    const networkSettings = module.NetworkSettings as {
+      Networks: Record<string, unknown>;
+    };
+    networkSettings.Networks["unexpected-control-plane"] = {};
+
+    expect(() =>
+      inspectRuntimeContract(JSON.stringify(projection), project),
+    ).toThrow("Docker inspect network-isolation contract failed");
+  });
+
+  it("rejects a missing live CPU or memory limit", () => {
+    const project = "inspect-contract";
+    const projection = inspectContractFixture(project);
+    const migrate = projection[2]!;
+    const hostConfig = migrate.HostConfig as Record<string, unknown>;
+    hostConfig.Memory = 0;
+
+    expect(() =>
+      inspectRuntimeContract(JSON.stringify(projection), project),
+    ).toThrow("Docker inspect resource-limit contract failed");
+  });
+
+  it("rejects an unassigned API secret even when its name is outside the integration prefix", () => {
+    const project = "inspect-contract";
+    const projection = inspectContractFixture(project);
+    const api = projection[0]!;
+    const mounts = api.Mounts as Array<Record<string, unknown>>;
+    mounts.push({
+      Destination: "/run/secrets/unexpected_control_plane_secret",
+      RW: false,
+      Type: "bind",
+    });
+
+    expect(() =>
+      inspectRuntimeContract(JSON.stringify(projection), project),
+    ).toThrow("Docker inspect secret-ownership contract failed");
+  });
 });
 
 const realDockerEnabled =
@@ -1500,8 +2196,24 @@ describe.skipIf(!realDockerEnabled)(
         inspectMigrationGating: true,
         inspectNetworkIsolation: true,
         inspectNoHostPorts: true,
+        inspectResourceLimits: true,
         inspectSecretOwnership: true,
+        runtimeNodeMajor: 24,
       });
+    });
+
+    it("keeps migration history migrator-owned and read-only to runtime", () => {
+      expect(result.observations.rolePrivilegesEnforced).toBe(true);
+    });
+
+    it("stats every assigned integration secret with platform-explicit evidence", () => {
+      expect(result.observations.secretTargetStatsVerified).toBe(true);
+      expect(
+        [
+          "non-native-readonly-remap",
+          "native-linux-owner-mode",
+        ],
+      ).toContain(result.observations.secretOwnershipEvidence);
     });
 
     it("rejects replay, tampered body, wrong key, unsupported encoding, and unsigned command", () => {
