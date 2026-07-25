@@ -27,8 +27,21 @@ create table apollo_tf_integrations.provider_accounts (
     and jsonb_typeof(token_envelope -> 'ciphertext') = 'string'
     and char_length(token_envelope ->> 'ciphertext') between 1 and 32768
     and token_envelope ->> 'ciphertext' ~ '^[A-Za-z0-9_-]+$'
+    and char_length(token_envelope ->> 'ciphertext') % 4 <> 1
+    and (
+      char_length(token_envelope ->> 'ciphertext') % 4 = 0
+      or (
+        char_length(token_envelope ->> 'ciphertext') % 4 = 2
+        and right(token_envelope ->> 'ciphertext', 1) ~ '^[AQgw]$'
+      )
+      or (
+        char_length(token_envelope ->> 'ciphertext') % 4 = 3
+        and right(token_envelope ->> 'ciphertext', 1)
+          ~ '^[AEIMQUYcgkosw048]$'
+      )
+    )
     and jsonb_typeof(token_envelope -> 'tag') = 'string'
-    and token_envelope ->> 'tag' ~ '^[A-Za-z0-9_-]{22}$'
+    and token_envelope ->> 'tag' ~ '^[A-Za-z0-9_-]{21}[AQgw]$'
   ),
   constraint provider_accounts_provider_user_id_check
     check (char_length(btrim(provider_user_id)) between 1 and 512),

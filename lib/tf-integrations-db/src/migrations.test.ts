@@ -19,12 +19,20 @@ type RecordedQuery = {
 };
 
 class MigrationClientDouble {
+  readonly events: string[] = [];
+  readonly failures = new Map<string, Error>();
   readonly history = new Map<string, string>();
   readonly queries: RecordedQuery[] = [];
   releaseCount = 0;
+  readonly releaseErrors: (Error | undefined)[] = [];
+  releaseFailure?: Error;
 
   async query(text: string, values?: readonly unknown[]): Promise<QueryResult> {
+    this.events.push(text);
     this.queries.push({ text, values });
+    const failure = this.failures.get(text);
+    if (failure !== undefined) throw failure;
+
     if (text.includes("select name, checksum")) {
       return {
         rows: [...this.history].map(([name, checksum]) => ({ name, checksum })),
@@ -38,8 +46,11 @@ class MigrationClientDouble {
     return { rows: [], rowCount: 0 } as unknown as QueryResult;
   }
 
-  release(): void {
+  release(error?: Error): void {
+    this.events.push("release");
     this.releaseCount += 1;
+    this.releaseErrors.push(error);
+    if (this.releaseFailure !== undefined) throw this.releaseFailure;
   }
 }
 
@@ -138,6 +149,108 @@ describe("integrations migrations", () => {
       values: ["apollo_tf_integrations_migrations"],
     });
     expect(pool.client.releaseCount).toBe(3);
+  });
+
+  it.each([
+    ["migration SQL", "select 'failing integration migration';"],
+    [
+      "history insert",
+      "insert into apollo_tf_integrations.schema_migrations (name, checksum) values ($1, $2)",
+    ],
+    ["COMMIT", "COMMIT"],
+  ])("rolls back a %s failure before unlock and release", async (_, target) => {
+    const migrationSql = "select 'failing integration migration';";
+    const directory = await fixtureDirectory({
+      "0001_failing.sql": migrationSql,
+    });
+    const manifest = await fixtureManifest(directory, ["0001_failing.sql"]);
+    const pool = new MigrationPoolDouble();
+    const failure = new Error(`forced failure: ${target}`);
+    pool.client.failures.set(target, failure);
+
+    await expect(
+      runIntegrationsMigrations(asPool(pool), directory, manifest),
+    ).rejects.toBe(failure);
+
+    expect(pool.client.events.slice(-3)).toEqual([
+      "ROLLBACK",
+      "select pg_advisory_unlock(hashtext($1))",
+      "release",
+    ]);
+    if (target === "COMMIT") {
+      expect(pool.client.events.filter((event) => event === "COMMIT")).toEqual([
+        "COMMIT",
+      ]);
+    } else {
+      expect(pool.client.events).not.toContain("COMMIT");
+    }
+    expect(pool.client.releaseErrors).toEqual([undefined]);
+  });
+
+  it("preserves the migration error and destroys the client when ROLLBACK fails", async () => {
+    const migrationSql = "select 'rollback failure migration';";
+    const directory = await fixtureDirectory({
+      "0001_rollback_failure.sql": migrationSql,
+    });
+    const manifest = await fixtureManifest(directory, [
+      "0001_rollback_failure.sql",
+    ]);
+    const pool = new MigrationPoolDouble();
+    const primaryFailure = new Error("migration SQL failed");
+    const rollbackFailure = new Error("ROLLBACK failed");
+    pool.client.failures.set(migrationSql, primaryFailure);
+    pool.client.failures.set("ROLLBACK", rollbackFailure);
+
+    await expect(
+      runIntegrationsMigrations(asPool(pool), directory, manifest),
+    ).rejects.toBe(primaryFailure);
+    expect(pool.client.events.slice(-3)).toEqual([
+      "ROLLBACK",
+      "select pg_advisory_unlock(hashtext($1))",
+      "release",
+    ]);
+    expect(pool.client.releaseErrors).toEqual([rollbackFailure]);
+  });
+
+  it("reports an advisory unlock failure and destroys the client before release", async () => {
+    const directory = await fixtureDirectory({
+      "0001_unlock_failure.sql": "select 'unlock failure migration';",
+    });
+    const manifest = await fixtureManifest(directory, [
+      "0001_unlock_failure.sql",
+    ]);
+    const pool = new MigrationPoolDouble();
+    const unlockFailure = new Error("advisory unlock failed");
+    pool.client.failures.set(
+      "select pg_advisory_unlock(hashtext($1))",
+      unlockFailure,
+    );
+
+    await expect(
+      runIntegrationsMigrations(asPool(pool), directory, manifest),
+    ).rejects.toBe(unlockFailure);
+    expect(pool.client.events.at(-1)).toBe("release");
+    expect(pool.client.releaseErrors).toEqual([unlockFailure]);
+  });
+
+  it("reports a release failure after successful migration cleanup", async () => {
+    const directory = await fixtureDirectory({
+      "0001_release_failure.sql": "select 'release failure migration';",
+    });
+    const manifest = await fixtureManifest(directory, [
+      "0001_release_failure.sql",
+    ]);
+    const pool = new MigrationPoolDouble();
+    const releaseFailure = new Error("release failed");
+    pool.client.releaseFailure = releaseFailure;
+
+    await expect(
+      runIntegrationsMigrations(asPool(pool), directory, manifest),
+    ).rejects.toBe(releaseFailure);
+    expect(pool.client.events.slice(-2)).toEqual([
+      "select pg_advisory_unlock(hashtext($1))",
+      "release",
+    ]);
   });
 
   it("uses a bounded integration pool and sanitized health probe", async () => {

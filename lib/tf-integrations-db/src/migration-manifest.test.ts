@@ -34,6 +34,29 @@ describe("integrations migration manifest", () => {
     expect(createdTables).toEqual(["apollo_tf_integrations.provider_accounts"]);
   });
 
+  it("enforces canonical unpadded base64url envelope fields at the SQL boundary", async () => {
+    const sql = await readFile(
+      new URL("../migrations/0001_integrations.sql", import.meta.url),
+      "utf8",
+    );
+
+    expect(sql).toMatch(
+      /token_envelope ->> 'nonce' ~ '\^\[A-Za-z0-9_-\]\{16\}\$'/i,
+    );
+    expect(sql).toMatch(
+      /token_envelope ->> 'tag' ~ '\^\[A-Za-z0-9_-\]\{21\}\[AQgw\]\$'/i,
+    );
+    expect(sql).toMatch(
+      /char_length\(token_envelope ->> 'ciphertext'\) % 4 <> 1/i,
+    );
+    expect(sql).toMatch(
+      /char_length\(token_envelope ->> 'ciphertext'\) % 4 = 2[\s\S]*right\(token_envelope ->> 'ciphertext', 1\) ~ '\^\[AQgw\]\$'/i,
+    );
+    expect(sql).toMatch(
+      /char_length\(token_envelope ->> 'ciphertext'\) % 4 = 3[\s\S]*right\(token_envelope ->> 'ciphertext', 1\)\s*~ '\^\[AEIMQUYcgkosw048\]\$'/i,
+    );
+  });
+
   it("checksums every immutable numbered migration in order", async () => {
     const migrationDirectory = new URL("../migrations/", import.meta.url);
     const names = (await readdir(migrationDirectory))
