@@ -145,7 +145,7 @@ importers:
         version: 7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)
       vitest:
         specifier: ^4.0.18
-        version: 4.1.10(@types/node@25.3.5)(jiti@2.6.1)(jsdom@29.1.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
 
   artifacts/api-server:
     dependencies:
@@ -233,7 +233,7 @@ importers:
         version: 3.1.0
       vitest:
         specifier: ^4.0.18
-        version: 4.1.10(@types/node@25.3.5)(jiti@2.6.1)(jsdom@29.1.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
       yaml:
         specifier: ^2.8.2
         version: 2.8.2
@@ -605,7 +605,7 @@ importers:
         version: 7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)
       vitest:
         specifier: ^4.0.18
-        version: 4.1.10(@types/node@25.3.5)(jiti@2.6.1)(jsdom@29.1.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
       wouter:
         specifier: ^3.3.5
         version: 3.9.0(react@19.1.0)
@@ -663,10 +663,23 @@ importers:
         version: 0.27.3
       vitest:
         specifier: ^4.1.10
-        version: 4.1.10(@types/node@25.3.5)(jiti@2.6.1)(jsdom@29.1.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
       ws:
         specifier: ^8.20.0
         version: 8.20.0
+
+  artifacts/tf-integrations:
+    dependencies:
+      '@workspace/tf-integrations-db':
+        specifier: workspace:*
+        version: link:../../lib/tf-integrations-db
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 25.3.5
+      vitest:
+        specifier: ^4.0.18
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
 
   artifacts/tf-search:
     dependencies:
@@ -697,7 +710,7 @@ importers:
         version: 0.27.3
       vitest:
         specifier: ^4.0.18
-        version: 4.1.10(@types/node@25.3.5)(jiti@2.6.1)(jsdom@29.1.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
       yaml:
         specifier: ^2.8.2
         version: 2.8.2
@@ -864,7 +877,7 @@ importers:
         version: 25.3.5
       vitest:
         specifier: ^4.0.18
-        version: 4.1.10(@types/node@25.3.5)(jiti@2.6.1)(jsdom@29.1.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
 
   lib/api-client-react:
     dependencies:
@@ -886,7 +899,7 @@ importers:
     devDependencies:
       vitest:
         specifier: ^4.0.18
-        version: 4.1.10(@types/node@25.3.5)(jiti@2.6.1)(jsdom@29.1.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
 
   lib/db:
     dependencies:
@@ -924,7 +937,7 @@ importers:
         version: 25.3.5
       vitest:
         specifier: ^4.0.18
-        version: 4.1.10(@types/node@25.3.5)(jiti@2.6.1)(jsdom@29.1.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
 
   lib/platform-contract:
     dependencies:
@@ -937,7 +950,7 @@ importers:
         version: 25.3.5
       vitest:
         specifier: ^4.0.18
-        version: 4.1.10(@types/node@25.3.5)(jiti@2.6.1)(jsdom@29.1.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
 
   lib/platform-db:
     dependencies:
@@ -956,7 +969,7 @@ importers:
         version: 8.18.0
       vitest:
         specifier: ^4.0.18
-        version: 4.1.10(@types/node@25.3.5)(jiti@2.6.1)(jsdom@29.1.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
 
   lib/tf-integrations-contract:
     dependencies:
@@ -969,7 +982,23 @@ importers:
         version: 25.3.5
       vitest:
         specifier: ^4.0.18
-        version: 4.1.10(@types/node@25.3.5)(jiti@2.6.1)(jsdom@29.1.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
+
+  lib/tf-integrations-db:
+    dependencies:
+      pg:
+        specifier: ^8.20.0
+        version: 8.20.0
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 25.3.5
+      '@types/pg':
+        specifier: ^8.18.0
+        version: 8.18.0
+      vitest:
+        specifier: ^4.0.18
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
 
   lib/tf-search-contract:
     dependencies:
@@ -982,7 +1011,7 @@ importers:
         version: 25.3.5
       vitest:
         specifier: ^4.0.18
-        version: 4.1.10(@types/node@25.3.5)(jiti@2.6.1)(jsdom@29.1.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
 
   scripts:
     devDependencies:
@@ -6889,6 +6918,7 @@ packages:
       '@vitest/ui': 4.1.10
       happy-dom: '*'
       jsdom: '*'
+      vite: ^6.0.0 || ^7.0.0 || ^8.0.0
     peerDependenciesMeta:
       '@edge-runtime/vm':
         optional: true
@@ -13568,7 +13598,7 @@ snapshots:
       tsx: 4.21.0
       yaml: 2.8.2
 
-  vitest@4.1.10(@types/node@25.3.5)(jiti@2.6.1)(jsdom@29.1.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2):
+  vitest@4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2)):
     dependencies:
       '@vitest/expect': 4.1.10
       '@vitest/mocker': 4.1.10(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
@@ -13594,17 +13624,7 @@ snapshots:
       '@types/node': 25.3.5
       jsdom: 29.1.1
     transitivePeerDependencies:
-      - jiti
-      - less
-      - lightningcss
       - msw
-      - sass
-      - sass-embedded
-      - stylus
-      - sugarss
-      - terser
-      - tsx
-      - yaml
 
   vlq@1.0.1: {}
 

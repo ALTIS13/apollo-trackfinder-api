@@ -13,6 +13,9 @@
       "path": "./lib/tf-integrations-contract"
     },
     {
+      "path": "./lib/tf-integrations-db"
+    },
+    {
       "path": "./lib/admin-dashboard-contract"
     },
     {
@@ -32,6 +35,9 @@
     },
     {
       "path": "./artifacts/platform-api"
+    },
+    {
+      "path": "./artifacts/tf-integrations"
     }
   ]
 }
