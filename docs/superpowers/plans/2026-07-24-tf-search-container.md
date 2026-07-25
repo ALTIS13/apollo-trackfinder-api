@@ -763,6 +763,15 @@ git add IMPLEMENTATION_STATUS.md docs/superpowers/plans/2026-07-24-tf-search-con
 git commit -m "docs: record tf search container validation"
 ```
 
+Latest Steps 1-3 release evidence was refreshed on exact clean implementation
+HEAD `10124a33a2d49a5c8d016e5eedd2af16df6242e2`: frozen install covered 18
+workspace projects; test counts were `9/9`, `6/6`, `2/2`, tf-search
+`140 passed / 1 skipped`, API `365 passed / 2 skipped`, and player `85/85`.
+Root typecheck, all three builds, both server `node --check` commands, exact
+root/nested Compose renders, explicit real local Docker smoke, five-category
+zero-residue audit, runtime/security scans, and pre-doc diff check passed.
+Independent re-review and publication remain outside this evidence refresh.
+
 - [ ] **Step 4: Independent whole-branch review**
 
 Generate a merge-base-to-HEAD review package. The reviewer must return:
