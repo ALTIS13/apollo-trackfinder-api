@@ -394,8 +394,8 @@ describe("terminal API error sanitization", () => {
       operation: "yandex.status",
       input: {},
     });
-    expect(response.status).toBe(200);
-    expect(body).toBe('{"connected":false}');
+    expect(response.status).toBe(500);
+    expect(body).toBe('{"error":"internal_error"}');
     expect(body).not.toContain(canary);
     expect(logOutput).not.toContain(canary);
     expect(JSON.stringify(stderr.mock.calls)).not.toContain(canary);

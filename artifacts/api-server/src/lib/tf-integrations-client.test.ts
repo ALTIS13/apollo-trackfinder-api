@@ -7,6 +7,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  assertDistinctTfCommandSecrets,
   HttpTfIntegrationsClient,
   TfIntegrationsUnavailableError,
   parseTfIntegrationsClientConfig,
@@ -168,6 +169,34 @@ describe("parseTfIntegrationsClientConfig", () => {
       ).rejects.toThrow("invalid runtime configuration");
     }
   });
+
+  it("rejects equal integrations and search command secrets without exposing either", () => {
+    const integrationsSecret = `integrations-${"i".repeat(32)}`;
+    const searchSecret = `search-${"s".repeat(32)}`;
+
+    expect(() =>
+      assertDistinctTfCommandSecrets(
+        { internalAuthSecret: integrationsSecret },
+        { internalAuthSecret: searchSecret },
+      ),
+    ).not.toThrow();
+
+    let caught: unknown;
+    try {
+      assertDistinctTfCommandSecrets(
+        { internalAuthSecret: integrationsSecret },
+        { internalAuthSecret: integrationsSecret },
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toEqual(
+      expect.objectContaining({ message: "invalid runtime configuration" }),
+    );
+    expect(String(caught)).not.toContain(integrationsSecret);
+    expect(String(caught)).not.toContain(searchSecret);
+  });
 });
 
 describe("HttpTfIntegrationsClient", () => {
@@ -317,6 +346,35 @@ describe("HttpTfIntegrationsClient", () => {
         expect.objectContaining({ code: "integrations_unavailable" }),
       );
     }
+  });
+
+  it("cancels a non-terminating non-200 response body without retaining resources", async () => {
+    vi.useFakeTimers();
+    const bodyCanary = "private-internal-error-body";
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(Buffer.from(bodyCanary));
+      },
+      cancel,
+    });
+    const gateway = client(
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response(body, { status: 503 })),
+    );
+
+    let caught: unknown;
+    try {
+      await gateway.execute(statusCommand());
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(caught).toBeInstanceOf(TfIntegrationsUnavailableError);
+    expect(String(caught)).not.toContain(bodyCanary);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("maps every transport failure to integrations_unavailable without leaking command values", async () => {

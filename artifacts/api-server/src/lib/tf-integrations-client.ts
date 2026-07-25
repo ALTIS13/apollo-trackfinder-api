@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import { createSignedBodySignature } from "@workspace/module-runtime-contract";
@@ -45,6 +45,10 @@ export interface TfIntegrationsClientDependencies {
   readonly randomNonce?: () => string;
 }
 
+interface TfCommandSecretConfig {
+  readonly internalAuthSecret: string;
+}
+
 export interface TfIntegrationsGateway {
   execute<TCommand extends GatewayCommand>(
     command: TCommand,
@@ -62,6 +66,23 @@ export class TfIntegrationsUnavailableError extends Error {
 
 function invalidConfiguration(): never {
   throw new Error("invalid runtime configuration");
+}
+
+export function assertDistinctTfCommandSecrets(
+  integrationsConfig: TfCommandSecretConfig,
+  searchConfig: TfCommandSecretConfig,
+): void {
+  const integrationsSecret = Buffer.from(
+    integrationsConfig.internalAuthSecret,
+    "utf8",
+  );
+  const searchSecret = Buffer.from(searchConfig.internalAuthSecret, "utf8");
+  if (
+    integrationsSecret.byteLength === searchSecret.byteLength &&
+    timingSafeEqual(integrationsSecret, searchSecret)
+  ) {
+    invalidConfiguration();
+  }
 }
 
 function requiredValue(env: NodeJS.ProcessEnv, name: string): string {
@@ -174,6 +195,14 @@ async function readBoundedJson(response: Response): Promise<unknown> {
   }
 }
 
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Cancellation is best-effort; the public failure remains sanitized.
+  }
+}
+
 function boundedTimeout(value: number): number {
   if (!Number.isSafeInteger(value) || value < 1 || value > MAX_TIMEOUT_MS) {
     throw new Error("invalid TF integrations client configuration");
@@ -242,6 +271,7 @@ export class HttpTfIntegrationsClient implements TfIntegrationsGateway {
           },
         );
         if (response.status !== 200) {
+          await cancelResponseBody(response);
           throw new TfIntegrationsUnavailableError();
         }
         const value = await readBoundedJson(response);

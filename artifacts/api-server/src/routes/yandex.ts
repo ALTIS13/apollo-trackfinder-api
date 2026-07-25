@@ -127,7 +127,7 @@ export function createYandexRouter(
       response.json({
         ok: true,
         displayName: result.result.account.account.displayName,
-        login: null,
+        login: result.result.account.account.displayName,
         userId: result.result.account.account.id,
       });
     } catch {
@@ -142,18 +142,26 @@ export function createYandexRouter(
         operation: "yandex.status",
         input: {},
       });
-      if (isFailure(result) || !result.result.account.connected) {
+      if (isFailure(result)) {
+        response.status(503).json({ error: "yandex_unavailable" });
+        return;
+      }
+      if (!result.result.account.connected) {
         response.json({ connected: false });
         return;
       }
       response.json({
         connected: true,
         displayName: result.result.account.account.displayName,
-        login: null,
+        login: result.result.account.account.displayName,
         userId: result.result.account.account.id,
       });
-    } catch {
-      response.json({ connected: false });
+    } catch (error) {
+      if (error instanceof TfIntegrationsUnavailableError) {
+        response.status(503).json({ error: "yandex_unavailable" });
+        return;
+      }
+      throw error;
     }
   });
 

@@ -326,7 +326,7 @@ describe("Yandex gateway routes", () => {
     await expect(accepted.json()).resolves.toEqual({
       ok: true,
       displayName: "Yandex User",
-      login: null,
+      login: "Yandex User",
       userId: "12345",
     });
     expect(current.execute).toHaveBeenCalledWith({
@@ -353,7 +353,7 @@ describe("Yandex gateway routes", () => {
     await expect(status.json()).resolves.toEqual({
       connected: true,
       displayName: "Yandex User",
-      login: null,
+      login: "Yandex User",
       userId: "12345",
     });
     await expect(logout.json()).resolves.toEqual({ ok: true });
@@ -395,13 +395,35 @@ describe("Yandex gateway routes", () => {
     });
   });
 
+  it("returns disconnected only for a validated disconnected status summary", async () => {
+    const current = yandexDependencies(async (command) => {
+      if (command.operation === "yandex.status") {
+        return success(command, {
+          account: { provider: "yandex", connected: false },
+        });
+      }
+      return success(command, defaultResult(command));
+    });
+    const baseUrl = await startRouterServer(current.dependencies);
+
+    const response = await fetch(`${baseUrl}/yandex/status`);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ connected: false });
+  });
+
   it("maps integration errors to existing sanitized Yandex errors", async () => {
     const canary = "private-yandex-token-canary";
+    let statusCalls = 0;
     const current = yandexDependencies(async (command) => {
       if (command.operation === "yandex.token.upsert") {
         return failure(command, "provider_rejected");
       }
       if (command.operation === "yandex.status") {
+        statusCalls += 1;
+        if (statusCalls === 1) {
+          return failure(command, "storage_unavailable");
+        }
         throw new TfIntegrationsUnavailableError();
       }
       if (command.operation === "yandex.disconnect") {
@@ -416,7 +438,8 @@ describe("Yandex gateway routes", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ token: canary }),
     });
-    const status = await fetch(`${baseUrl}/yandex/status`);
+    const failedStatus = await fetch(`${baseUrl}/yandex/status`);
+    const unavailableStatus = await fetch(`${baseUrl}/yandex/status`);
     const logout = await fetch(`${baseUrl}/yandex/logout`, { method: "POST" });
     const liked = await fetch(`${baseUrl}/yandex/liked`);
 
@@ -425,8 +448,12 @@ describe("Yandex gateway routes", () => {
       error: "auth_failed",
       message: "Could not authenticate with Yandex Music. Check your token.",
     });
-    expect(status.status).toBe(200);
-    await expect(status.json()).resolves.toEqual({ connected: false });
+    for (const status of [failedStatus, unavailableStatus]) {
+      expect(status.status).toBe(503);
+      await expect(status.json()).resolves.toEqual({
+        error: "yandex_unavailable",
+      });
+    }
     expect(logout.status).toBe(503);
     await expect(logout.json()).resolves.toEqual({
       error: "yandex_unavailable",

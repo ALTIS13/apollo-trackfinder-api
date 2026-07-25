@@ -72,6 +72,34 @@ function webRedirect(
   );
 }
 
+function verifiedAuthorizationUrl(
+  value: string,
+  expectedState: string,
+  expectedCallbackUri: string,
+): string | null {
+  try {
+    const url = new URL(value);
+    const states = url.searchParams.getAll("state");
+    const callbackUris = url.searchParams.getAll("redirect_uri");
+    if (
+      url.origin !== "https://accounts.spotify.com" ||
+      url.pathname !== "/authorize" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.hash !== "" ||
+      states.length !== 1 ||
+      states[0] !== expectedState ||
+      callbackUris.length !== 1 ||
+      callbackUris[0] !== expectedCallbackUri
+    ) {
+      return null;
+    }
+    return value;
+  } catch {
+    return null;
+  }
+}
+
 function isFailure(
   value: object,
 ): value is TfIntegrationsErrorResponse {
@@ -154,7 +182,16 @@ export function createSpotifyRouter(
         response.status(503).json({ error: "spotify_unavailable" });
         return;
       }
-      response.redirect(result.result.authorizationUrl);
+      const authorizationUrl = verifiedAuthorizationUrl(
+        result.result.authorizationUrl,
+        state,
+        redirectUri(dependencies, request.hostname),
+      );
+      if (authorizationUrl === null) {
+        response.status(503).json({ error: "spotify_unavailable" });
+        return;
+      }
+      response.redirect(authorizationUrl);
     } catch {
       response.status(503).json({ error: "spotify_unavailable" });
     }
@@ -228,7 +265,11 @@ export function createSpotifyRouter(
         operation: "spotify.status",
         input: {},
       });
-      if (isFailure(result) || !result.result.account.connected) {
+      if (isFailure(result)) {
+        response.status(503).json({ error: "spotify_unavailable" });
+        return;
+      }
+      if (!result.result.account.connected) {
         response.json({ connected: false });
         return;
       }
@@ -237,8 +278,12 @@ export function createSpotifyRouter(
         displayName: result.result.account.account.displayName,
         spotifyUserId: result.result.account.account.id,
       });
-    } catch {
-      response.json({ connected: false });
+    } catch (error) {
+      if (error instanceof TfIntegrationsUnavailableError) {
+        response.status(503).json({ error: "spotify_unavailable" });
+        return;
+      }
+      throw error;
     }
   });
 

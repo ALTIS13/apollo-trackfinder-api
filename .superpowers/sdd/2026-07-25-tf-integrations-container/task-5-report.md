@@ -259,3 +259,249 @@ setting was relaxed.
   token-table runtime use.
 - Legacy database migrations are untouched.
 - Task 6 deployment work was not started.
+
+## Review Fix Round 1 Of 5
+
+Review status: all six Important findings addressed. The two Minor findings
+about `index.ts` wiring mutation coverage and `beforeAll` cold-import budgets
+remain deferred as directed.
+
+This section supersedes three conclusions above: API startup DDL still owned
+legacy provider-token tables, failed status operations were incorrectly mapped
+to disconnection, and connected Yandex responses incorrectly emitted a null
+`login`.
+
+### 1. Remove Legacy Provider-Token Tables From API Runtime
+
+Tests were added first:
+
+- `src/lib/migrate.test.ts` captures the startup SQL and rejects provider-token
+  table or credential-column identifiers while retaining API-owned DDL.
+- `src/build-runtime-boundary.test.ts` performs a real production build and
+  scans every emitted file for snake_case and camelCase provider-token
+  identifiers and the Spotify client-secret identifier.
+
+RED:
+
+```powershell
+pnpm --dir artifacts/api-server test -- src/lib/migrate.test.ts src/build-runtime-boundary.test.ts
+```
+
+```text
+Test Files  2 failed (2)
+Tests       2 failed (2)
+```
+
+Both failures identified `spotify_tokens` in the startup SQL and fresh bundle.
+
+Production change: removed only the obsolete provider-token `CREATE TABLE`
+blocks from `src/lib/migrate.ts`. `runMigrations` remains for API-owned tables.
+No `DROP`, delete, data migration, automatic import, or legacy schema/migration
+change was added, so deployed provider tables and their data remain untouched.
+
+GREEN:
+
+```text
+Test Files  2 passed (2)
+Tests       2 passed (2)
+```
+
+### 2. Reject Equal Internal Command Secrets
+
+The test supplies separate secret canaries, proves distinct values compose,
+then proves equality fails with only `invalid runtime configuration`.
+
+RED:
+
+```powershell
+pnpm --dir artifacts/api-server test -- src/lib/tf-integrations-client.test.ts
+```
+
+```text
+Test Files  1 failed (1)
+Tests       1 failed | 6 passed (7)
+```
+
+The failure showed the equality guard did not exist.
+
+Production change: `assertDistinctTfCommandSecrets` compares the parsed secret
+bytes with `timingSafeEqual` and is called immediately after integrations and
+search config parsing, before Redis, database, listener, or gateway setup.
+Errors contain neither secret.
+
+GREEN:
+
+```text
+Test Files  1 passed (1)
+Tests       7 passed (7)
+```
+
+### 3. Correlate Spotify Authorization Redirects
+
+The route test substitutes each security-relevant component independently:
+state, callback URI, origin, and path.
+
+RED:
+
+```powershell
+pnpm --dir artifacts/api-server test -- src/routes/spotify.test.ts
+```
+
+```text
+Test Files  1 failed (1)
+Tests       1 failed | 6 passed (7)
+```
+
+The first substituted-state URL was blindly returned as a `302`.
+
+Production change: the route parses the returned URL and requires Spotify's
+exact `https://accounts.spotify.com/authorize` destination, no credentials or
+fragment, exactly one state and callback parameter, and exact equality with
+the API-issued state and API-derived callback URI. A mismatch returns the
+existing sanitized `503 {"error":"spotify_unavailable"}`.
+
+GREEN:
+
+```text
+Test Files  1 passed (1)
+Tests       7 passed (7)
+```
+
+### 4. Preserve Status Outage Semantics
+
+### 5. Preserve Connected Yandex Login Compatibility
+
+These related response-boundary tests were written and run together. They
+prove:
+
+- only a valid disconnected success summary returns `200 connected:false`;
+- typed gateway error results and integrations transport failures return the
+  existing provider-specific `503` body;
+- unexpected rejected operations reach the terminal sanitized
+  `500 {"error":"internal_error"}` boundary without canary leakage;
+- connected Yandex token acceptance and status responses retain a string
+  `login`.
+
+RED:
+
+```powershell
+pnpm --dir artifacts/api-server test -- src/routes/spotify.test.ts src/routes/yandex.test.ts src/app-error.test.ts
+```
+
+```text
+Test Files  3 failed (3)
+Tests       5 failed | 17 passed (22)
+```
+
+The failures were the two masked status outages, both null Yandex login
+responses, and the terminal-error fixture still receiving disconnected
+success.
+
+Production change: Spotify and Yandex status routes distinguish successful
+disconnected summaries from failures. `TfIntegrationsUnavailableError` and
+contract error results map to `spotify_unavailable`/`yandex_unavailable` with
+status 503; unexpected errors are rethrown to the terminal sanitizer. Yandex
+uses the contract-validated account display name for the public `login`
+string, never the provider account ID. A separate Yandex test explicitly
+accepts a validated disconnected summary as `200 {"connected":false}`.
+
+GREEN:
+
+```text
+Test Files  3 passed (3)
+Tests       22 passed (22)
+```
+
+### 6. Cancel Non-200 Internal Response Bodies
+
+The test creates a `503` response body that emits a private canary and never
+closes, then checks body cancellation, sanitized failure, and zero retained
+timers.
+
+RED:
+
+```powershell
+pnpm --dir artifacts/api-server test -- src/lib/tf-integrations-client.test.ts
+```
+
+```text
+Test Files  1 failed (1)
+Tests       1 failed | 7 passed (8)
+```
+
+The body cancellation callback had zero calls.
+
+Production change: non-200 responses now receive best-effort awaited body
+cancellation before the sanitized availability error is raised. The existing
+`finally` clears the 10-second abort timer afterward. Cancellation errors do
+not expose internal response details.
+
+GREEN:
+
+```text
+Test Files  1 passed (1)
+Tests       8 passed (8)
+```
+
+### Covering Focused Run
+
+```powershell
+pnpm --dir artifacts/api-server test -- src/lib/migrate.test.ts src/build-runtime-boundary.test.ts src/lib/tf-integrations-client.test.ts src/routes/spotify.test.ts src/routes/yandex.test.ts src/app-error.test.ts src/app-auth-boundary.test.ts src/index.smoke.test.ts
+```
+
+```text
+Test Files  8 passed (8)
+Tests       42 passed (42)
+```
+
+This reruns the policy/CSRF zero-dispatch ledger and readiness independence
+alongside all six fixes.
+
+### Round 1 Final Verification
+
+```powershell
+pnpm install --offline --frozen-lockfile
+pnpm --dir artifacts/api-server test
+pnpm --dir artifacts/api-server typecheck
+pnpm --dir artifacts/api-server build
+rg -n "spotify_tokens|yandex_tokens|oauth_token|refresh_token|spotifyTokensTable|yandexTokensTable|SPOTIFY_CLIENT_SECRET" artifacts/api-server/src artifacts/api-server/dist
+git diff --check
+```
+
+Results:
+
+- frozen offline install: passed for all 21 workspace projects;
+- full API suite: 28 files passed, 379 tests passed, 2 skipped;
+- API typecheck: passed;
+- API production build: passed;
+- expanded source/dist provider-token and credential scan: no matches;
+- direct Spotify/Yandex provider route fetch/endpoint/token-store scan:
+  no matches;
+- legacy `lib/db` schema and migrations: unchanged;
+- Task 6 deployment/infra scope scan: no files;
+- diff whitespace/error check: passed.
+
+The first full-suite run had 378 passing tests and one test-only timeout:
+the new production-bundle boundary test completed its child build just beyond
+Vitest's default five-second limit under eight-worker load. That one test now
+has a bounded 15-second budget and the normal full suite passes. No deferred
+cold-import budget, application timeout, or production transport timeout was
+changed.
+
+Round 1 self-review:
+
+- API startup DDL has no provider-token table ownership and performs no
+  destructive or import operation against deployed legacy tables.
+- integrations and search command secrets are distinct by value, not only by
+  file path, before runtime resources initialize.
+- Spotify authorize redirects are fixed-destination and correlated to the
+  API-owned state and callback.
+- OAuth state issue/consume ordering is unchanged.
+- policy, capability, CSRF, and principal-account ordering is unchanged.
+- valid disconnected status remains distinct from provider/storage outage.
+- unexpected status errors retain terminal canary sanitization.
+- connected Yandex public `login` remains a validated string without using
+  provider account IDs.
+- non-200 internal response bodies are canceled before the abort deadline is
+  cleared.
+- no Task 6 or deferred Minor work was started.

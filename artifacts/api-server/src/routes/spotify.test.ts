@@ -238,6 +238,59 @@ describe("Spotify gateway routes", () => {
     });
   });
 
+  it("rejects authorization URLs with substituted state, callback, origin, or path", async () => {
+    const authorizationUrl = (
+      origin: string,
+      path: string,
+      state: string,
+      callbackUri: string,
+    ) =>
+      `${origin}${path}?client_id=client&response_type=code` +
+      `&redirect_uri=${encodeURIComponent(callbackUri)}` +
+      `&state=${encodeURIComponent(state)}&scope=user-library-read`;
+    const substitutions = [
+      authorizationUrl(
+        "https://accounts.spotify.com",
+        "/authorize",
+        "substituted-state",
+        CALLBACK_URI,
+      ),
+      authorizationUrl(
+        "https://accounts.spotify.com",
+        "/authorize",
+        STATE,
+        "https://substituted.example/api/spotify/callback",
+      ),
+      authorizationUrl(
+        "https://substituted.example",
+        "/authorize",
+        STATE,
+        CALLBACK_URI,
+      ),
+      authorizationUrl(
+        "https://accounts.spotify.com",
+        "/substituted",
+        STATE,
+        CALLBACK_URI,
+      ),
+    ];
+    const current = spotifyDependencies(async (command) =>
+      success(command, {
+        authorizationUrl: substitutions.shift()!,
+      }),
+    );
+    const baseUrl = await startSpotifyServer(current.dependencies);
+
+    for (let index = 0; index < 4; index += 1) {
+      const response = await request(baseUrl, "/spotify/login");
+      expect(response.status).toBe(503);
+      await expect(response.json()).resolves.toEqual({
+        error: "spotify_unavailable",
+      });
+      expect(response.headers.get("location")).toBeNull();
+    }
+  });
+
   it("consumes state before completion and never dispatches an invalid or denied callback", async () => {
     const current = spotifyDependencies();
     current.dependencies.providerOAuthStateStore.consumeProviderOAuthState =
@@ -498,9 +551,14 @@ describe("Spotify gateway routes", () => {
 
   it("maps integration errors to existing sanitized public Spotify errors", async () => {
     const canary = "private-provider-code-canary";
+    let statusCalls = 0;
     const current = spotifyDependencies(async (command) => {
       switch (command.operation) {
         case "spotify.status":
+          statusCalls += 1;
+          if (statusCalls === 1) {
+            return failure(command, "provider_unavailable");
+          }
           throw new TfIntegrationsUnavailableError();
         case "spotify.disconnect":
           return failure(command, "storage_unavailable");
@@ -512,7 +570,8 @@ describe("Spotify gateway routes", () => {
     });
     const baseUrl = await startSpotifyServer(current.dependencies);
 
-    const status = await request(baseUrl, "/spotify/status");
+    const failedStatus = await request(baseUrl, "/spotify/status");
+    const unavailableStatus = await request(baseUrl, "/spotify/status");
     const logout = await request(baseUrl, "/spotify/logout", {
       method: "POST",
     });
@@ -522,8 +581,12 @@ describe("Spotify gateway routes", () => {
       `/spotify/callback?code=${canary}&state=${STATE}`,
     );
 
-    expect(status.status).toBe(200);
-    await expect(status.json()).resolves.toEqual({ connected: false });
+    for (const status of [failedStatus, unavailableStatus]) {
+      expect(status.status).toBe(503);
+      await expect(status.json()).resolves.toEqual({
+        error: "spotify_unavailable",
+      });
+    }
     expect(logout.status).toBe(503);
     await expect(logout.json()).resolves.toEqual({
       error: "spotify_unavailable",

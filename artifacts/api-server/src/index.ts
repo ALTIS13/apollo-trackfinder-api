@@ -19,6 +19,7 @@ import {
   createStrictRedisClient,
 } from "./lib/tf-session-store.js";
 import {
+  assertDistinctTfCommandSecrets,
   HttpTfIntegrationsClient,
   parseTfIntegrationsClientConfig,
 } from "./lib/tf-integrations-client.js";
@@ -39,6 +40,7 @@ async function start(): Promise<void> {
     parseTfIntegrationsClientConfig(process.env),
     parseTfSearchClientConfig(process.env),
   ]);
+  assertDistinctTfCommandSecrets(integrationsConfig, searchConfig);
   const rawPort = process.env["PORT"];
   if (rawPort === undefined) {
     throw new Error("invalid runtime configuration");
