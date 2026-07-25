@@ -4,35 +4,40 @@ Last updated: 2026-07-25.
 
 ## TF integrations Task 7 release validation
 
-Status: `DONE_WITH_CONCERNS` on the final fix-round tree based on
-`1ef211b119f4879f0e87574a41ef9ab4caa7c9ea`.
+Status: `DONE_WITH_CONCERNS`. The validated runtime/config/source tip is
+`7f2cdf2f0b87cf5429eff774aaab0e390ad37ac3`. The follow-up after that tip is
+documentation-only and does not claim that the runtime matrix was rerun on
+the documentation commit itself.
 
 - Historical evidence is preserved: the first validation at `daf663e` was
-  correctly recorded as `BLOCKED` by `1ef211b` after one stale API
-  documentation assertion and both exact no-env Compose renders failed. Its
-  raw outputs were `707 passed / 13 skipped / 1 failed`; the former status
-  arithmetic said 12 skipped and is corrected here.
+  correctly recorded as `BLOCKED` across exact checkpoint range
+  `daf663ea92a7e35b7432c169aaf8ec3298465217..1ef211b119f4879f0e87574a41ef9ab4caa7c9ea`
+  after one stale API documentation assertion and both exact no-env Compose
+  renders failed. Its raw outputs were `707 passed / 13 skipped / 1 failed`;
+  the former status arithmetic said 12 skipped and is corrected here.
 - Reviewed ranges remain Task 1 `af90cb9..6bf4161`, Task 2
   `6bf4161..2e9b2da`, Task 3 `2e9b2da..ce4c388`, Task 4
   `ce4c388..bc577c3`, Task 5 `bc577c3..bcb3b3c`, and Task 6
-  `bcb3b3c..daf663e`; blocked Task 7 record `daf663e..1ef211b`; fix round 1/5
-  `1ef211b..HEAD`. Every Task 1-6 range ended review-clean. Nonblocking
-  deferred minors remain Task 2's weak unit plaintext assertion, Task 4's
-  possible late shutdown heartbeat, Task 5's production-`index.ts`
-  wiring/cold-import test limits, and Task 6's unbounded role-init file/SQL
-  waits.
+  `bcb3b3c..daf663e`; exact blocked Task 7 checkpoint range
+  `daf663ea92a7e35b7432c169aaf8ec3298465217..1ef211b119f4879f0e87574a41ef9ab4caa7c9ea`;
+  exact Task 7 validation-fix range
+  `1ef211b119f4879f0e87574a41ef9ab4caa7c9ea..7f2cdf2f0b87cf5429eff774aaab0e390ad37ac3`.
+  Every Task 1-6 range ended review-clean. Nonblocking deferred minors remain
+  Task 2's weak unit plaintext assertion, Task 4's possible late shutdown
+  heartbeat, Task 5's production-`index.ts` wiring/cold-import test limits,
+  and Task 6's unbounded role-init file/SQL waits.
 - Fix-round RED reproduced API `19 passed / 1 failed`, both no-env Compose
   interpolation failures, integrations deployment `9 passed / 1 failed`,
   tf-search deployment `17 passed / 2 failed`, and the strengthened API
   documentation assertion `19 passed / 1 failed`. Focused GREEN is API
   `20/20`, integrations deployment `10/10`, and tf-search deployment `19/19`.
-- Final exact suites: contract `10/10`; integrations DB `18 passed / 1
-  PostgreSQL-gated`; integrations `76 passed / 9 real-Docker-gated`; API `379
-  passed / 2 skipped`; tf-search `140 passed / 1 real-Docker-gated`;
-  music-player `85/85`. Total: `708 passed / 13 skipped / 0 failed` across 64
-  files. Skips are the absent disposable PostgreSQL/Redis URLs, the default-off
-  real Docker gates, and one Windows linked-file case gated by symlink
-  `EPERM`/`EACCES`.
+- Final exact suites: contract `10/10`; integrations DB
+  `18 passed / 1 PostgreSQL-gated`; integrations
+  `76 passed / 9 real-Docker-gated`; API `379 passed / 2 skipped`; tf-search
+  `140 passed / 1 real-Docker-gated`; music-player `85/85`. Total:
+  `708 passed / 13 skipped / 0 failed` across 64 files. Skips are the absent
+  disposable PostgreSQL/Redis URLs, the default-off real Docker gates, and one
+  Windows linked-file case gated by symlink `EPERM`/`EACCES`.
 - Workspace typecheck and all three builds passed. Fresh primary outputs:
   integrations `index.mjs` 90,018 bytes and `migrate.mjs` 8,961 bytes; API
   `index.mjs` 4,277,724 bytes; music-player JS 517,554 bytes (164.43 kB gzip)
@@ -83,7 +88,7 @@ Status: `DONE_WITH_CONCERNS` on the final fix-round tree based on
 - Root и nested Compose содержат изолированный `tf-search` без host port, data/edge networks, DB/Redis/Platform/provider-account/control-plane credentials или host mounts. Command/heartbeat keys разделены и загружаются из file-backed secrets; same-node HTTP разрешён только явным local flag, cross-node режим требует exact HTTPS origin.
 - Task 1-5 прошли отдельные implementation/review циклы с итогом `SPEC COMPLIANT / QUALITY APPROVED`. Findings первого whole-branch review и последующих filesystem/cache follow-up закрыты в `53deb1f`, `a04debd`, `8c35ca8` и `10124a3`; финальный независимый whole-branch re-review на `bdd6073` завершился без findings: `SPEC PASS / QUALITY APPROVED / READY TO MERGE YES`.
 - Reviewed feature tip `6b43cdb84e142a9aed73b4ae3ee23ee7b48cc2ff` опубликован в `origin/codex/feat/tf-search-container`, затем fast-forward перенесён в локальный `main`. Полная merged-result validation выполнена на том же exact head; validated docs tip `28aa25b340b6182c8da7259405b1239876121ffd` опубликован в `origin/main`.
-- Исторический baseline перед cleanup: локальный `HEAD` совпадал с `origin/main` на commit `d6590464ef244e9d15d96e7dbc98377762efb066`.
+- Исторический baseline перед cleanup: локально checked-out commit совпадал с `origin/main` на `d6590464ef244e9d15d96e7dbc98377762efb066`.
 - Подтверждён remote проекта: `github.com/ALTIS13/apollo-trackfinder-api`.
 - Удалены Replit-артефакты из tracked-файлов: `.replit`, `.replitignore`, `replit.md`, `replit.nix`, `.replit-artifact/*`, `attached_assets/*`.
 - Удалена ignored локальная папка `.local` с кешами/логами.
