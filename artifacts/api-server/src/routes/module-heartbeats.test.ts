@@ -3,7 +3,8 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
 import express, { type Express } from "express";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import type { createApiApp as CreateApiApp } from "../app";
 import {
   createModuleHeartbeatSignature,
   ModuleHeartbeatService,
@@ -24,6 +25,14 @@ const validPayload = {
 };
 
 const servers: Server[] = [];
+let createProductionApiApp: typeof CreateApiApp;
+
+beforeAll(async () => {
+  process.env["DATABASE_URL"] ??=
+    "postgres://unused:unused@127.0.0.1:1/unused";
+  process.env["LOG_LEVEL"] ??= "silent";
+  ({ createApiApp: createProductionApiApp } = await import("../app"));
+});
 
 function createService() {
   return new ModuleHeartbeatService({
@@ -80,10 +89,7 @@ async function startHeartbeatServer(
 }
 
 async function startProductionServer() {
-  process.env["DATABASE_URL"] ??= "postgres://unused:unused@127.0.0.1:1/unused";
-  process.env["LOG_LEVEL"] ??= "silent";
-  const { createApiApp } = await import("../app");
-  return startServer(createApiApp());
+  return startServer(createProductionApiApp());
 }
 
 async function startServer(serverApp: Express) {

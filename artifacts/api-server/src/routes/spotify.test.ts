@@ -1,32 +1,38 @@
-import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
+import type {
+  TfIntegrationsCommand,
+  TfIntegrationsErrorResponse,
+  TfIntegrationsSuccessResponse,
+} from "@workspace/tf-integrations-contract";
 import express from "express";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { TfIntegrationsGateway } from "../lib/tf-integrations-client.js";
+import { TfIntegrationsUnavailableError } from "../lib/tf-integrations-client.js";
 import type { TfPrincipal } from "../lib/tf-policy.js";
 import {
   createSpotifyRouter,
   type SpotifyRouteDependencies,
-  type SpotifyTokenRecord,
 } from "./spotify.js";
 
 vi.hoisted(() => {
-  process.env["DATABASE_URL"] ??= "postgres://unused:unused@127.0.0.1:1/unused";
+  process.env["DATABASE_URL"] ??=
+    "postgres://unused:unused@127.0.0.1:1/unused";
 });
 
-const NOW = Date.parse("2026-07-24T03:00:00.000Z");
 const ACCOUNT_ID = "10000000-0000-4000-8000-000000000001";
 const OTHER_ACCOUNT_ID = "90000000-0000-4000-8000-000000000009";
-const PLATFORM_SESSION_ID = "20000000-0000-4000-8000-000000000002";
-const TF_SESSION_ID = "40000000-0000-4000-8000-000000000004";
+const REQUEST_ID = "20000000-0000-4000-8000-000000000002";
 const WEB_ORIGIN = "https://tf.apollot.ru";
-const ISSUED_STATE = randomBytes(32).toString("base64url");
+const API_ORIGIN = "https://api.tf.apollot.ru";
+const CALLBACK_URI = `${API_ORIGIN}/api/spotify/callback`;
+const STATE = Buffer.alloc(32, 4).toString("base64url");
 const principal = {
   accountId: ACCOUNT_ID,
-  tfSessionId: TF_SESSION_ID,
+  tfSessionId: "40000000-0000-4000-8000-000000000004",
   installationId: "30000000-0000-4000-8000-000000000003",
   entitlements: ["tf.integrations"],
   sessionExpiresAt: "2026-07-24T04:00:00.000Z",
@@ -34,60 +40,132 @@ const principal = {
 } as const;
 const servers: Server[] = [];
 
-function tokenRecord(
-  overrides: Partial<SpotifyTokenRecord> = {},
-): SpotifyTokenRecord {
+type GatewayCommand = TfIntegrationsCommand extends infer Command
+  ? Command extends TfIntegrationsCommand
+    ? Omit<Command, "schemaVersion" | "requestId">
+    : never
+  : never;
+
+const track = {
+  id: "track-1",
+  title: "Track",
+  artist: "Artist",
+  album: "Album",
+  duration: 180,
+  thumbnailUrl: "https://images.example.test/track.jpg",
+  providerUrl: "https://open.spotify.com/track/track-1",
+} as const;
+
+const playlist = {
+  id: "playlist-1",
+  name: "Playlist",
+  description: "Description",
+  trackCount: 2,
+  thumbnailUrl: "https://images.example.test/playlist.jpg",
+  owner: "Owner",
+} as const;
+
+function success(
+  command: GatewayCommand,
+  result: unknown,
+): TfIntegrationsSuccessResponse {
   return {
-    accessToken: "spotify-access-token",
-    refreshToken: "spotify-refresh-token",
-    expiresAt: new Date(NOW + 60 * 60 * 1_000),
-    spotifyUserId: "spotify-user",
-    displayName: "Spotify User",
-    ...overrides,
+    schemaVersion: 1,
+    requestId: REQUEST_ID,
+    accountId: command.accountId,
+    operation: command.operation,
+    result,
+  } as TfIntegrationsSuccessResponse;
+}
+
+function failure(
+  command: GatewayCommand,
+  code: TfIntegrationsErrorResponse["error"]["code"],
+): TfIntegrationsErrorResponse {
+  return {
+    schemaVersion: 1,
+    requestId: REQUEST_ID,
+    accountId: command.accountId,
+    operation: command.operation,
+    error: { code },
   };
 }
 
-function spotifyDependencies() {
-  let stateAvailable = true;
+function defaultResult(command: GatewayCommand): unknown {
+  switch (command.operation) {
+    case "spotify.oauth.authorize":
+      return {
+        authorizationUrl:
+          "https://accounts.spotify.com/authorize?client_id=client&response_type=code" +
+          `&redirect_uri=${encodeURIComponent(CALLBACK_URI)}` +
+          `&state=${STATE}&scope=user-library-read`,
+      };
+    case "spotify.oauth.complete":
+      return {
+        account: {
+          provider: "spotify",
+          connected: true,
+          account: { id: "spotify-user", displayName: "Spotify User" },
+        },
+      };
+    case "spotify.status":
+      return {
+        account: {
+          provider: "spotify",
+          connected: true,
+          account: { id: "spotify-user", displayName: "Spotify User" },
+        },
+      };
+    case "spotify.disconnect":
+      return { ok: true };
+    case "spotify.liked.list":
+    case "spotify.playlist-tracks.list":
+      return {
+        tracks: [track],
+        total: 2,
+        offset: command.input.offset,
+        limit: command.input.limit,
+      };
+    case "spotify.playlists.list":
+      return { playlists: [playlist], total: 1 };
+    case "spotify.top-tracks.list":
+      return { tracks: [track] };
+    default:
+      throw new Error(`unexpected operation: ${command.operation}`);
+  }
+}
+
+function spotifyDependencies(
+  execute: (command: GatewayCommand) => Promise<
+    TfIntegrationsSuccessResponse | TfIntegrationsErrorResponse
+  > = async (command) => success(command, defaultResult(command)),
+) {
+  const events: string[] = [];
+  const gateway = {
+    execute: vi.fn(async (command: GatewayCommand) => {
+      events.push(`execute:${command.operation}`);
+      return execute(command);
+    }),
+  } as unknown as TfIntegrationsGateway;
   return {
-    clientId: "spotify-client",
-    clientSecret: "spotify-secret",
-    serverUrl: "https://api.tf.apollot.ru",
-    webUrl: WEB_ORIGIN,
-    now: () => NOW,
-    fetch: vi.fn(),
-    log: {
-      error: vi.fn(),
-    },
-    providerOAuthStateStore: {
-      issueProviderOAuthState: vi.fn().mockImplementation(async () => {
-        stateAvailable = true;
-        return ISSUED_STATE;
-      }),
-      consumeProviderOAuthState: vi
-        .fn()
-        .mockImplementation(
-          async (provider: string, accountId: string, state: string) => {
-            if (
-              provider !== "spotify" ||
-              accountId !== ACCOUNT_ID ||
-              state !== ISSUED_STATE ||
-              !stateAvailable
-            ) {
-              return false;
-            }
-            stateAvailable = false;
-            return true;
-          },
-        ),
-    },
-    tokenStore: {
-      get: vi.fn().mockResolvedValue(null),
-      upsert: vi.fn().mockResolvedValue(undefined),
-      update: vi.fn().mockResolvedValue(null),
-      delete: vi.fn().mockResolvedValue(undefined),
-    },
-  } satisfies SpotifyRouteDependencies;
+    dependencies: {
+      gateway,
+      serverUrl: API_ORIGIN,
+      webUrl: WEB_ORIGIN,
+      providerOAuthStateStore: {
+        issueProviderOAuthState: vi.fn(async () => {
+          events.push("state:issue");
+          return STATE;
+        }),
+        consumeProviderOAuthState: vi.fn(async () => {
+          events.push("state:consume");
+          return true;
+        }),
+      },
+    } satisfies SpotifyRouteDependencies,
+    events,
+    execute: gateway.execute as ReturnType<typeof vi.fn>,
+  };
 }
 
 async function startSpotifyServer(
@@ -108,30 +186,15 @@ async function startSpotifyServer(
   return `http://127.0.0.1:${address.port}/api`;
 }
 
-function noncanonicalAlias(value: string): string {
-  const alphabet =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-  const index = alphabet.indexOf(value.at(-1)!);
-  expect(index % 4).toBe(0);
-  return `${value.slice(0, -1)}${alphabet[index + 1]}`;
-}
-
-async function beginSpotifyLogin(
+async function request(
   baseUrl: string,
-  headers: Readonly<Record<string, string>> = {},
-): Promise<{ readonly state: string; readonly response: Response }> {
-  const response = await fetch(
-    `${baseUrl}/spotify/login?sid=${OTHER_ACCOUNT_ID}&mobile=1`,
-    {
-      redirect: "manual",
-      headers,
-    },
-  );
-  const location = response.headers.get("location");
-  if (location === null) throw new Error("missing Spotify redirect");
-  const state = new URL(location).searchParams.get("state");
-  if (state === null) throw new Error("missing Spotify state");
-  return { state, response };
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  return fetch(`${baseUrl}${path}`, {
+    redirect: "manual",
+    ...init,
+  });
 }
 
 afterEach(async () => {
@@ -146,310 +209,330 @@ afterEach(async () => {
   );
 });
 
-describe("Spotify provider state", () => {
-  it("creates opaque 32-byte state without any account or session identifier", async () => {
-    const dependencies = spotifyDependencies();
-    const baseUrl = await startSpotifyServer(dependencies);
+describe("Spotify gateway routes", () => {
+  it("issues API-owned state before dispatching the account-bound authorization command", async () => {
+    const current = spotifyDependencies();
+    const baseUrl = await startSpotifyServer(current.dependencies);
 
-    const { state, response } = await beginSpotifyLogin(baseUrl, {
-      "x-client-session": OTHER_ACCOUNT_ID,
+    const response = await request(
+      baseUrl,
+      `/spotify/login?sid=${OTHER_ACCOUNT_ID}`,
+      { headers: { "x-client-session": OTHER_ACCOUNT_ID } },
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain(
+      "https://accounts.spotify.com/authorize?",
+    );
+    expect(current.events).toEqual([
+      "state:issue",
+      "execute:spotify.oauth.authorize",
+    ]);
+    expect(current.execute).toHaveBeenCalledWith({
+      accountId: ACCOUNT_ID,
+      operation: "spotify.oauth.authorize",
+      input: {
+        state: STATE,
+        callbackUri: CALLBACK_URI,
+      },
     });
+  });
 
-    expect(state).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(Buffer.from(state, "base64url")).toHaveLength(32);
-    expect(response.headers.get("set-cookie")).toBeNull();
-    expect(
-      dependencies.providerOAuthStateStore.issueProviderOAuthState,
-    ).toHaveBeenCalledWith("spotify", ACCOUNT_ID);
-    for (const identifier of [
-      ACCOUNT_ID,
-      OTHER_ACCOUNT_ID,
-      PLATFORM_SESSION_ID,
-      TF_SESSION_ID,
-    ]) {
-      expect(state).not.toContain(identifier);
-      expect(Buffer.from(state, "base64url").toString("utf8")).not.toContain(
-        identifier,
-      );
+  it("consumes state before completion and never dispatches an invalid or denied callback", async () => {
+    const current = spotifyDependencies();
+    current.dependencies.providerOAuthStateStore.consumeProviderOAuthState =
+      vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          current.events.push("state:consume");
+          return false;
+        })
+        .mockImplementation(async () => {
+          current.events.push("state:consume");
+          return true;
+        });
+    const baseUrl = await startSpotifyServer(current.dependencies);
+
+    const invalid = await request(
+      baseUrl,
+      "/spotify/callback?code=provider-code&state=invalid",
+    );
+    const denied = await request(
+      baseUrl,
+      `/spotify/callback?error=access_denied&state=${STATE}`,
+    );
+
+    expect(invalid.headers.get("location")).toBe(
+      `${WEB_ORIGIN}/favorites?spotify_error=invalid_state`,
+    );
+    expect(denied.headers.get("location")).toBe(
+      `${WEB_ORIGIN}/favorites?spotify_error=provider_denied`,
+    );
+    expect(current.execute).not.toHaveBeenCalled();
+
+    const completed = await request(
+      baseUrl,
+      `/spotify/callback?code=provider-code&state=${STATE}`,
+    );
+    expect(completed.headers.get("location")).toBe(
+      `${WEB_ORIGIN}/favorites?spotify_connected=1`,
+    );
+    expect(current.events.slice(-2)).toEqual([
+      "state:consume",
+      "execute:spotify.oauth.complete",
+    ]);
+    expect(current.execute).toHaveBeenCalledWith({
+      accountId: ACCOUNT_ID,
+      operation: "spotify.oauth.complete",
+      input: {
+        code: "provider-code",
+        callbackUri: CALLBACK_URI,
+      },
+    });
+  });
+
+  it("derives accountId only from tfPrincipal for every Spotify command", async () => {
+    const current = spotifyDependencies();
+    const baseUrl = await startSpotifyServer(current.dependencies);
+    const alias = `sid=${OTHER_ACCOUNT_ID}&accountId=${OTHER_ACCOUNT_ID}`;
+    const headers = { "x-client-session": OTHER_ACCOUNT_ID };
+
+    await request(baseUrl, `/spotify/login?${alias}`, { headers });
+    await request(
+      baseUrl,
+      `/spotify/callback?code=provider-code&state=${STATE}&${alias}`,
+      { headers },
+    );
+    await request(baseUrl, `/spotify/status?${alias}`, { headers });
+    await request(baseUrl, `/spotify/logout?${alias}`, {
+      method: "POST",
+      headers,
+    });
+    await request(baseUrl, `/spotify/liked?offset=0&limit=1&${alias}`, {
+      headers,
+    });
+    await request(baseUrl, `/spotify/liked-all?${alias}`, { headers });
+    await request(baseUrl, `/spotify/playlists?${alias}`, { headers });
+    await request(
+      baseUrl,
+      `/spotify/playlists/playlist-1/tracks?offset=0&limit=1&${alias}`,
+      { headers },
+    );
+    await request(
+      baseUrl,
+      `/spotify/top-tracks?time_range=short_term&${alias}`,
+      { headers },
+    );
+
+    expect(current.execute).toHaveBeenCalledTimes(9);
+    for (const [command] of current.execute.mock.calls as [
+      GatewayCommand,
+    ][]) {
+      expect(command.accountId).toBe(ACCOUNT_ID);
+      expect(JSON.stringify(command)).not.toContain(OTHER_ACCOUNT_ID);
     }
-    expect(dependencies.tokenStore.get).not.toHaveBeenCalled();
-    expect(dependencies.tokenStore.upsert).not.toHaveBeenCalled();
+    expect(
+      current.dependencies.providerOAuthStateStore.issueProviderOAuthState,
+    ).toHaveBeenCalledWith("spotify", ACCOUNT_ID);
+    expect(
+      current.dependencies.providerOAuthStateStore.consumeProviderOAuthState,
+    ).toHaveBeenCalledWith("spotify", ACCOUNT_ID, STATE);
   });
 
-  it("rejects a noncanonical alias without consuming the exact state", async () => {
-    const dependencies = spotifyDependencies();
-    dependencies.fetch.mockResolvedValueOnce(
-      new Response(null, { status: 502 }),
-    );
-    const baseUrl = await startSpotifyServer(dependencies);
-    const { state } = await beginSpotifyLogin(baseUrl);
+  it("preserves connected, disconnected, logout, library, and callback redirect shapes", async () => {
+    let statusCalls = 0;
+    const current = spotifyDependencies(async (command) => {
+      if (command.operation === "spotify.status") {
+        statusCalls += 1;
+        return success(command, {
+          account:
+            statusCalls === 1
+              ? {
+                  provider: "spotify",
+                  connected: true,
+                  account: {
+                    id: "spotify-user",
+                    displayName: "Spotify User",
+                  },
+                }
+              : { provider: "spotify", connected: false },
+        });
+      }
+      return success(command, defaultResult(command));
+    });
+    const baseUrl = await startSpotifyServer(current.dependencies);
 
-    const mismatch = await fetch(
-      `${baseUrl}/spotify/callback?code=provider-code&state=${noncanonicalAlias(state)}`,
-      {
-        redirect: "manual",
-      },
+    const connected = await request(baseUrl, "/spotify/status");
+    const disconnected = await request(baseUrl, "/spotify/status");
+    const logout = await request(baseUrl, "/spotify/logout", {
+      method: "POST",
+    });
+    const liked = await request(
+      baseUrl,
+      "/spotify/liked?offset=0&limit=1",
     );
-    const retry = await fetch(
-      `${baseUrl}/spotify/callback?code=provider-code&state=${state}`,
-      {
-        redirect: "manual",
-      },
+    const playlists = await request(baseUrl, "/spotify/playlists");
+    const playlistTracks = await request(
+      baseUrl,
+      "/spotify/playlists/playlist-1/tracks?offset=0&limit=1",
+    );
+    const topTracks = await request(
+      baseUrl,
+      "/spotify/top-tracks?time_range=long_term",
+    );
+    const callback = await request(
+      baseUrl,
+      `/spotify/callback?code=provider-code&state=${STATE}`,
     );
 
-    expect(mismatch.status).toBe(302);
-    expect(retry.status).toBe(302);
-    expect(mismatch.headers.get("location")).toContain(
-      "spotify_error=invalid_state",
-    );
-    expect(retry.headers.get("location")).toContain(
-      "spotify_error=token_exchange_failed",
-    );
-    expect(dependencies.fetch).toHaveBeenCalledOnce();
-    expect(dependencies.tokenStore.upsert).not.toHaveBeenCalled();
-  });
-
-  it("consumes successful state once and stores tokens for the principal account", async () => {
-    const dependencies = spotifyDependencies();
-    const accessToken = `access-${randomBytes(24).toString("base64url")}`;
-    const refreshToken = `refresh-${randomBytes(24).toString("base64url")}`;
-    dependencies.fetch
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            access_token: accessToken,
-            refresh_token: refreshToken,
-            expires_in: 3_600,
-          }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            id: "spotify-user",
-            display_name: "Spotify User",
-          }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          },
-        ),
-      );
-    const baseUrl = await startSpotifyServer(dependencies);
-    const { state } = await beginSpotifyLogin(baseUrl);
-
-    const callback = await fetch(
-      `${baseUrl}/spotify/callback?code=provider-code&state=${state}&sid=${OTHER_ACCOUNT_ID}`,
-      {
-        redirect: "manual",
-        headers: {
-          "x-client-session": OTHER_ACCOUNT_ID,
+    await expect(connected.json()).resolves.toEqual({
+      connected: true,
+      displayName: "Spotify User",
+      spotifyUserId: "spotify-user",
+    });
+    await expect(disconnected.json()).resolves.toEqual({ connected: false });
+    await expect(logout.json()).resolves.toEqual({ ok: true });
+    await expect(liked.json()).resolves.toEqual({
+      tracks: [
+        {
+          id: "track-1",
+          title: "Track",
+          artist: "Artist",
+          album: "Album",
+          durationMs: 180_000,
+          thumbnailUrl: "https://images.example.test/track.jpg",
+          spotifyUrl: "https://open.spotify.com/track/track-1",
         },
-      },
-    );
-    const replay = await fetch(
-      `${baseUrl}/spotify/callback?code=provider-code&state=${state}`,
-      {
-        redirect: "manual",
-      },
-    );
-
-    expect(callback.status).toBe(302);
+      ],
+      total: 2,
+      offset: 0,
+      limit: 1,
+      hasMore: true,
+    });
+    await expect(playlists.json()).resolves.toEqual({
+      playlists: [playlist],
+      total: 1,
+    });
+    await expect(playlistTracks.json()).resolves.toEqual({
+      tracks: [
+        {
+          id: "track-1",
+          title: "Track",
+          artist: "Artist",
+          album: "Album",
+          durationMs: 180_000,
+          thumbnailUrl: "https://images.example.test/track.jpg",
+          spotifyUrl: "https://open.spotify.com/track/track-1",
+        },
+      ],
+      total: 2,
+      offset: 0,
+      limit: 1,
+    });
+    await expect(topTracks.json()).resolves.toEqual({
+      tracks: [
+        {
+          id: "track-1",
+          title: "Track",
+          artist: "Artist",
+          album: "Album",
+          durationMs: 180_000,
+          thumbnailUrl: "https://images.example.test/track.jpg",
+          spotifyUrl: "https://open.spotify.com/track/track-1",
+        },
+      ],
+      timeRange: "long_term",
+    });
     expect(callback.headers.get("location")).toBe(
       `${WEB_ORIGIN}/favorites?spotify_connected=1`,
     );
-    expect(replay.status).toBe(302);
-    expect(replay.headers.get("location")).toContain(
-      "spotify_error=invalid_state",
-    );
-    expect(dependencies.fetch).toHaveBeenCalledTimes(2);
-    expect(
-      dependencies.providerOAuthStateStore.consumeProviderOAuthState,
-    ).toHaveBeenCalledWith("spotify", ACCOUNT_ID, state);
-    expect(dependencies.tokenStore.upsert).toHaveBeenCalledOnce();
-    expect(dependencies.tokenStore.upsert).toHaveBeenCalledWith(ACCOUNT_ID, {
-      accessToken,
-      refreshToken,
-      expiresAt: new Date(NOW + 3_600_000),
-      spotifyUserId: "spotify-user",
-      displayName: "Spotify User",
+  });
+
+  it("implements liked-all through bounded liked-list commands and preserves partial results", async () => {
+    let likedCalls = 0;
+    const current = spotifyDependencies(async (command) => {
+      if (command.operation !== "spotify.liked.list") {
+        return success(command, defaultResult(command));
+      }
+      likedCalls += 1;
+      if (likedCalls === 1) {
+        return success(command, {
+          tracks: Array.from({ length: 50 }, (_, index) => ({
+            ...track,
+            id: `track-${index}`,
+          })),
+          total: 120,
+          offset: 0,
+          limit: 50,
+        });
+      }
+      return failure(command, "provider_unavailable");
     });
-    expect(
-      JSON.stringify(dependencies.tokenStore.upsert.mock.calls),
-    ).not.toContain(OTHER_ACCOUNT_ID);
-    expect(callback.headers.get("location")).not.toContain(accessToken);
-    expect(callback.headers.get("location")).not.toContain(refreshToken);
-  });
+    const baseUrl = await startSpotifyServer(current.dependencies);
 
-  it("binds callback consumption to the current TF principal account", async () => {
-    const dependencies = spotifyDependencies();
-    const accountBaseUrl = await startSpotifyServer(dependencies);
-    const { state } = await beginSpotifyLogin(accountBaseUrl);
-    const otherBaseUrl = await startSpotifyServer(dependencies, {
-      ...principal,
-      accountId: OTHER_ACCOUNT_ID,
-    });
-
-    const callback = await fetch(
-      `${otherBaseUrl}/spotify/callback?code=provider-code&state=${state}`,
-      { redirect: "manual" },
-    );
-
-    expect(callback.status).toBe(302);
-    expect(callback.headers.get("location")).toContain(
-      "spotify_error=invalid_state",
-    );
-    expect(
-      dependencies.providerOAuthStateStore.consumeProviderOAuthState,
-    ).toHaveBeenCalledWith("spotify", OTHER_ACCOUNT_ID, state);
-    expect(dependencies.fetch).not.toHaveBeenCalled();
-    expect(dependencies.tokenStore.upsert).not.toHaveBeenCalled();
-  });
-
-  it("lets only one concurrent callback reach provider exchange", async () => {
-    const dependencies = spotifyDependencies();
-    dependencies.fetch
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            access_token: "concurrent-access",
-            refresh_token: "concurrent-refresh",
-            expires_in: 3_600,
-          }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ id: "spotify-user" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
-      );
-    const baseUrl = await startSpotifyServer(dependencies);
-    const { state } = await beginSpotifyLogin(baseUrl);
-
-    const callbacks = await Promise.all(
-      ["provider-code-a", "provider-code-b"].map((code) =>
-        fetch(`${baseUrl}/spotify/callback?code=${code}&state=${state}`, {
-          redirect: "manual",
-        }),
-      ),
-    );
-    const locations = callbacks.map((response) =>
-      response.headers.get("location"),
-    );
-
-    expect(
-      locations.filter((location) => location?.includes("spotify_connected=1")),
-    ).toHaveLength(1);
-    expect(
-      locations.filter((location) => location?.includes("invalid_state")),
-    ).toHaveLength(1);
-    expect(dependencies.fetch).toHaveBeenCalledTimes(2);
-    expect(dependencies.tokenStore.upsert).toHaveBeenCalledOnce();
-  });
-
-  it("does not log an upstream body or provider token on exchange failure", async () => {
-    const dependencies = spotifyDependencies();
-    const tokenCanary = `provider-${randomBytes(24).toString("base64url")}`;
-    dependencies.fetch.mockResolvedValueOnce(
-      new Response(JSON.stringify({ access_token: tokenCanary }), {
-        status: 502,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-    const baseUrl = await startSpotifyServer(dependencies);
-    const { state } = await beginSpotifyLogin(baseUrl);
-
-    const callback = await fetch(
-      `${baseUrl}/spotify/callback?code=provider-code&state=${state}`,
-      {
-        redirect: "manual",
-      },
-    );
-
-    expect(callback.status).toBe(302);
-    expect(callback.headers.get("location")).toContain(
-      "spotify_error=token_exchange_failed",
-    );
-    expect(JSON.stringify(dependencies.log.error.mock.calls)).not.toContain(
-      tokenCanary,
-    );
-    expect(await callback.text()).not.toContain(tokenCanary);
-  });
-});
-
-describe("Spotify account ownership", () => {
-  it("sanitizes a rejected token refresh persistence update", async () => {
-    const dependencies = spotifyDependencies();
-    const canary = `spotify-db-${randomBytes(24).toString("base64url")}`;
-    dependencies.tokenStore.get.mockResolvedValue(
-      tokenRecord({ expiresAt: new Date(NOW - 1_000) }),
-    );
-    dependencies.fetch.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          access_token: "refreshed-access-token",
-          expires_in: 3_600,
-        }),
-        {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        },
-      ),
-    );
-    dependencies.tokenStore.update.mockRejectedValue(new Error(canary));
-    const baseUrl = await startSpotifyServer(dependencies);
-
-    const response = await fetch(`${baseUrl}/spotify/status`);
-    const body = await response.text();
+    const response = await request(baseUrl, "/spotify/liked-all");
 
     expect(response.status).toBe(200);
-    expect(body).toBe('{"connected":false}');
-    expect(body).not.toContain(canary);
-    expect(JSON.stringify(dependencies.log.error.mock.calls)).not.toContain(
-      canary,
-    );
+    const body = (await response.json()) as {
+      tracks: unknown[];
+      total: number;
+    };
+    expect(body.tracks).toHaveLength(50);
+    expect(body.total).toBe(50);
+    const likedCommands = (
+      current.execute.mock.calls as [GatewayCommand][]
+    ).map(([command]) => command);
+    expect(likedCommands).toEqual([
+      {
+        accountId: ACCOUNT_ID,
+        operation: "spotify.liked.list",
+        input: { offset: 0, limit: 50 },
+      },
+      {
+        accountId: ACCOUNT_ID,
+        operation: "spotify.liked.list",
+        input: { offset: 50, limit: 50 },
+      },
+    ]);
   });
 
-  it("ignores header and query session selectors for token reads and logout", async () => {
-    const dependencies = spotifyDependencies();
-    dependencies.tokenStore.get.mockResolvedValue(tokenRecord());
-    const baseUrl = await startSpotifyServer(dependencies);
-    const headers = { "x-client-session": OTHER_ACCOUNT_ID };
+  it("maps integration errors to existing sanitized public Spotify errors", async () => {
+    const canary = "private-provider-code-canary";
+    const current = spotifyDependencies(async (command) => {
+      switch (command.operation) {
+        case "spotify.status":
+          throw new TfIntegrationsUnavailableError();
+        case "spotify.disconnect":
+          return failure(command, "storage_unavailable");
+        case "spotify.oauth.complete":
+          return failure(command, "provider_rejected");
+        default:
+          return failure(command, "not_connected");
+      }
+    });
+    const baseUrl = await startSpotifyServer(current.dependencies);
 
-    const status = await fetch(
-      `${baseUrl}/spotify/status?sid=${OTHER_ACCOUNT_ID}&sessionId=${OTHER_ACCOUNT_ID}`,
-      { headers },
-    );
-    const logout = await fetch(
-      `${baseUrl}/spotify/logout?sid=${OTHER_ACCOUNT_ID}`,
-      {
-        method: "POST",
-        headers,
-      },
+    const status = await request(baseUrl, "/spotify/status");
+    const logout = await request(baseUrl, "/spotify/logout", {
+      method: "POST",
+    });
+    const liked = await request(baseUrl, "/spotify/liked");
+    const callback = await request(
+      baseUrl,
+      `/spotify/callback?code=${canary}&state=${STATE}`,
     );
 
     expect(status.status).toBe(200);
-    await expect(status.json()).resolves.toMatchObject({
-      connected: true,
-      spotifyUserId: "spotify-user",
+    await expect(status.json()).resolves.toEqual({ connected: false });
+    expect(logout.status).toBe(503);
+    await expect(logout.json()).resolves.toEqual({
+      error: "spotify_unavailable",
     });
-    expect(logout.status).toBe(200);
-    expect(dependencies.tokenStore.get).toHaveBeenCalledWith(ACCOUNT_ID);
-    expect(dependencies.tokenStore.delete).toHaveBeenCalledWith(ACCOUNT_ID);
-    expect(
-      JSON.stringify(dependencies.tokenStore.get.mock.calls),
-    ).not.toContain(OTHER_ACCOUNT_ID);
-    expect(
-      JSON.stringify(dependencies.tokenStore.delete.mock.calls),
-    ).not.toContain(OTHER_ACCOUNT_ID);
+    expect(liked.status).toBe(401);
+    await expect(liked.json()).resolves.toEqual({ error: "not_connected" });
+    expect(callback.headers.get("location")).toBe(
+      `${WEB_ORIGIN}/favorites?spotify_error=token_exchange_failed`,
+    );
+    expect(callback.headers.get("location")).not.toContain(canary);
   });
 });

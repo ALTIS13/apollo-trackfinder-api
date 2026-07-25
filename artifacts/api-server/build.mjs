@@ -9,6 +9,41 @@ import { rm } from "node:fs/promises";
 globalThis.require = createRequire(import.meta.url);
 
 const artifactDir = path.dirname(fileURLToPath(import.meta.url));
+const repositoryRoot = path.resolve(artifactDir, "../..");
+const databaseIndex = path.resolve(repositoryRoot, "lib/db/src/index.ts");
+const apiDatabaseSchema = [
+  "trackCache.ts",
+  "playHistory.ts",
+  "likedTracks.ts",
+  "playlists.ts",
+].map((file) => path.resolve(repositoryRoot, "lib/db/src/schema", file));
+
+const apiDatabaseSchemaPlugin = {
+  name: "api-database-schema",
+  setup(build) {
+    const virtualSchema = {
+      path: "api-database-schema",
+      namespace: "api-database-schema",
+    };
+    build.onResolve(
+      { filter: /^@workspace\/db\/schema$/ },
+      () => virtualSchema,
+    );
+    build.onResolve({ filter: /^\.\/schema$/ }, (args) =>
+      path.resolve(args.importer) === databaseIndex ? virtualSchema : undefined,
+    );
+    build.onLoad(
+      { filter: /^api-database-schema$/, namespace: "api-database-schema" },
+      () => ({
+        contents: apiDatabaseSchema
+          .map((schemaPath) => `export * from ${JSON.stringify(schemaPath)};`)
+          .join("\n"),
+        loader: "ts",
+        resolveDir: repositoryRoot,
+      }),
+    );
+  },
+};
 
 async function buildAll() {
   const distDir = path.resolve(artifactDir, "dist");
@@ -103,6 +138,7 @@ async function buildAll() {
     ],
     sourcemap: "linked",
     plugins: [
+      apiDatabaseSchemaPlugin,
       // pino relies on workers to handle logging, instead of externalizing it we use a plugin to handle it
       esbuildPluginPino({ transports: ["pino-pretty"] })
     ],

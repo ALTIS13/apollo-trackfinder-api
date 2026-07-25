@@ -8,6 +8,7 @@ import type { NextFunction, Request, Response } from "express";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createApiApp, sanitizedApiErrorHandler } from "./app.js";
+import type { TfIntegrationsGateway } from "./lib/tf-integrations-client.js";
 import { createTfLogger } from "./lib/logger.js";
 
 vi.hoisted(() => {
@@ -309,8 +310,8 @@ describe("terminal API error sanitization", () => {
     expect(JSON.stringify(log.error.mock.calls)).not.toContain(canary);
   });
 
-  it("keeps rejected database query parameters out of response, logs, and stderr", async () => {
-    const canary = `drizzle-params-${randomBytes(24).toString("base64url")}`;
+  it("keeps rejected integration details out of response, logs, and stderr", async () => {
+    const canary = `integration-error-${randomBytes(24).toString("base64url")}`;
     const expiresAt = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
     const assertionExpiresAt = new Date(
       Date.now() + 5 * 60 * 1_000,
@@ -343,15 +344,11 @@ describe("terminal API error sanitization", () => {
     const stderr = vi
       .spyOn(process.stderr, "write")
       .mockImplementation(() => true);
-    const tokenStore = {
-      get: vi
-        .fn()
-        .mockRejectedValue(
-          new Error(`Failed query: params ${canary} yandex-token-canary`),
-        ),
-      upsert: vi.fn(),
-      delete: vi.fn(),
-    };
+    const execute = vi
+      .fn()
+      .mockRejectedValue(
+        new Error(`Failed query: params ${canary} yandex-token-canary`),
+      );
     const app = createApiApp({
       requestLogger: createTfLogger(destination),
       auth: {
@@ -377,11 +374,9 @@ describe("terminal API error sanitization", () => {
         webOrigin: "https://tf.apollot.ru",
         secureCookies: true,
       },
-      yandex: {
-        fetch: vi.fn(),
-        log: { error: vi.fn() },
-        tokenStore,
-      },
+      integrationsGateway: {
+        execute,
+      } as unknown as TfIntegrationsGateway,
     });
     const server = app.listen(0, "127.0.0.1");
     servers.push(server);
@@ -394,9 +389,13 @@ describe("terminal API error sanitization", () => {
     );
     const body = await response.text();
 
-    expect(tokenStore.get).toHaveBeenCalledWith(ACCOUNT_ID);
-    expect(response.status).toBe(500);
-    expect(body).toBe('{"error":"internal_error"}');
+    expect(execute).toHaveBeenCalledWith({
+      accountId: ACCOUNT_ID,
+      operation: "yandex.status",
+      input: {},
+    });
+    expect(response.status).toBe(200);
+    expect(body).toBe('{"connected":false}');
     expect(body).not.toContain(canary);
     expect(logOutput).not.toContain(canary);
     expect(JSON.stringify(stderr.mock.calls)).not.toContain(canary);

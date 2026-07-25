@@ -13,14 +13,16 @@ import { adminRouter } from "./admin.js";
 import { createAuthRouter, type AuthRouteDependencies } from "./auth.js";
 import { requireTfCapability } from "../lib/tf-policy.js";
 import { createWebSocketTicketRouter } from "./websocket-tickets.js";
+import type { TfIntegrationsGateway } from "../lib/tf-integrations-client.js";
 
 export interface ApiRouterOptions {
   readonly auth?: AuthRouteDependencies;
   readonly spotify?: Omit<
     Partial<SpotifyRouteDependencies>,
-    "providerOAuthStateStore"
+    "gateway" | "providerOAuthStateStore"
   >;
-  readonly yandex?: Partial<YandexRouteDependencies>;
+  readonly yandex?: Omit<Partial<YandexRouteDependencies>, "gateway">;
+  readonly integrationsGateway?: TfIntegrationsGateway;
   readonly tracks?: Partial<TrackRouteDependencies>;
   readonly readiness?: () => Promise<boolean>;
 }
@@ -59,12 +61,22 @@ export function createApiRouter(options: ApiRouterOptions = {}): IRouter {
   router.use(
     createSpotifyRouter({
       ...options.spotify,
+      ...(options.integrationsGateway === undefined
+        ? {}
+        : { gateway: options.integrationsGateway }),
       ...(options.auth === undefined
         ? {}
         : { providerOAuthStateStore: options.auth.sessionStore }),
     }),
   );
-  router.use(createYandexRouter(options.yandex));
+  router.use(
+    createYandexRouter({
+      ...options.yandex,
+      ...(options.integrationsGateway === undefined
+        ? {}
+        : { gateway: options.integrationsGateway }),
+    }),
+  );
   router.use(adminRouter);
   return router;
 }

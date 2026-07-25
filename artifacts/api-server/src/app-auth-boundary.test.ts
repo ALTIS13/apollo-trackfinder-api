@@ -7,6 +7,7 @@ import { Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createApiApp } from "./app.js";
+import type { TfIntegrationsGateway } from "./lib/tf-integrations-client.js";
 import { createTfLogger } from "./lib/logger.js";
 import type { TfSearchGateway } from "./lib/tf-search-client.js";
 import type { TfSession } from "./lib/tf-session-store.js";
@@ -34,6 +35,9 @@ interface AuthFixtureOptions {
   readonly policyEntitlements?: readonly string[];
   readonly snapshotFresh?: boolean;
   readonly searchGateway?: TfSearchGateway;
+  readonly integrationsGateway?: TfIntegrationsGateway;
+  readonly accountStatus?: "active" | "suspended";
+  readonly policyOutage?: boolean;
 }
 
 function session(options: AuthFixtureOptions = {}): TfSession {
@@ -64,14 +68,17 @@ function authDependencies(options: AuthFixtureOptions = {}) {
     accountId: ACCOUNT_ID,
     sessionId: PLATFORM_SESSION_ID,
     installationId: INSTALLATION_ID,
-    accountStatus: "active" as const,
+    accountStatus: options.accountStatus ?? ("active" as const),
     entitlements: [...(options.policyEntitlements ?? ["tf.search"])],
     expiresAt: currentSession.expiresAt,
   };
   const platform = {
     createAuthorizationUrl: vi.fn(),
     exchangeCode: vi.fn(),
-    introspect: vi.fn().mockResolvedValue(activePolicy),
+    introspect:
+      options.policyOutage === true
+        ? vi.fn().mockRejectedValue(new Error("policy unavailable"))
+        : vi.fn().mockResolvedValue(activePolicy),
   };
   const sessionStore = {
     createTransaction: vi.fn(),
@@ -116,6 +123,9 @@ async function startAuthenticatedApp(options: AuthFixtureOptions = {}) {
     ...(options.searchGateway === undefined
       ? {}
       : { tracks: { searchGateway: options.searchGateway } }),
+    ...(options.integrationsGateway === undefined
+      ? {}
+      : { integrationsGateway: options.integrationsGateway }),
   });
   const server = app.listen(0, "127.0.0.1");
   servers.push(server);
@@ -269,6 +279,211 @@ describe("credentialed TF browser boundary", () => {
     expect(searchGateway.search).not.toHaveBeenCalled();
     expect(searchGateway.discoverArtist).not.toHaveBeenCalled();
     expect(searchGateway.suggestions).not.toHaveBeenCalled();
+  });
+
+  it("blocks every provider operation before dispatch when session, capability, account, or policy fails", async () => {
+    const execute = vi.fn();
+    const integrationsGateway = { execute } as unknown as TfIntegrationsGateway;
+    const routes = [
+      { method: "GET", path: "/api/spotify/login" },
+      {
+        method: "GET",
+        path: "/api/spotify/callback?code=provider-code&state=state",
+      },
+      { method: "GET", path: "/api/spotify/status" },
+      { method: "POST", path: "/api/spotify/logout" },
+      { method: "GET", path: "/api/spotify/liked" },
+      { method: "GET", path: "/api/spotify/liked-all" },
+      { method: "GET", path: "/api/spotify/playlists" },
+      {
+        method: "GET",
+        path: "/api/spotify/playlists/playlist-1/tracks",
+      },
+      { method: "GET", path: "/api/spotify/top-tracks" },
+      {
+        method: "POST",
+        path: "/api/yandex/token",
+        body: JSON.stringify({ token: "yandex-provider-token" }),
+      },
+      { method: "GET", path: "/api/yandex/status" },
+      { method: "POST", path: "/api/yandex/logout" },
+      { method: "GET", path: "/api/yandex/liked" },
+      { method: "GET", path: "/api/yandex/playlists" },
+      {
+        method: "GET",
+        path: "/api/yandex/playlists/12345/7/tracks",
+      },
+    ] as const;
+    const blocked = [
+      {
+        current: await startAuthenticatedApp({
+          sessionEntitlements: ["tf.integrations"],
+          policyEntitlements: ["tf.integrations"],
+          integrationsGateway,
+        }),
+        session: false,
+      },
+      {
+        current: await startAuthenticatedApp({
+          sessionEntitlements: [],
+          policyEntitlements: ["tf.integrations"],
+          integrationsGateway,
+        }),
+        session: true,
+      },
+      {
+        current: await startAuthenticatedApp({
+          sessionEntitlements: ["tf.integrations"],
+          policyEntitlements: ["tf.integrations"],
+          snapshotFresh: false,
+          accountStatus: "suspended",
+          integrationsGateway,
+        }),
+        session: true,
+      },
+      {
+        current: await startAuthenticatedApp({
+          sessionEntitlements: ["tf.integrations"],
+          policyEntitlements: ["tf.integrations"],
+          snapshotFresh: false,
+          policyOutage: true,
+          integrationsGateway,
+        }),
+        session: true,
+      },
+    ];
+
+    for (const condition of blocked) {
+      for (const route of routes) {
+        const headers: Record<string, string> = {
+          origin: WEB_ORIGIN,
+          "content-type": "application/json",
+        };
+        if (condition.session) {
+          headers.cookie = browserCookies(
+            condition.current.sessionHandle,
+            condition.current.csrfToken,
+          );
+          headers["x-csrf-token"] = condition.current.csrfToken;
+        }
+        await fetch(`${condition.current.origin}${route.path}`, {
+          method: route.method,
+          headers,
+          ...("body" in route ? { body: route.body } : {}),
+          redirect: "manual",
+        });
+      }
+    }
+    expect(execute).not.toHaveBeenCalled();
+
+    const valid = await startAuthenticatedApp({
+      sessionEntitlements: ["tf.integrations"],
+      policyEntitlements: ["tf.integrations"],
+      integrationsGateway,
+    });
+    execute.mockResolvedValueOnce({
+      schemaVersion: 1,
+      requestId: "60000000-0000-4000-8000-000000000006",
+      accountId: ACCOUNT_ID,
+      operation: "yandex.status",
+      result: { account: { provider: "yandex", connected: false } },
+    });
+    const response = await fetch(`${valid.origin}/api/yandex/status`, {
+      headers: {
+        cookie: browserCookies(valid.sessionHandle, valid.csrfToken),
+        origin: WEB_ORIGIN,
+      },
+    });
+    execute.mockResolvedValueOnce({
+      schemaVersion: 1,
+      requestId: "70000000-0000-4000-8000-000000000007",
+      accountId: ACCOUNT_ID,
+      operation: "spotify.status",
+      result: { account: { provider: "spotify", connected: false } },
+    });
+    const spotifyResponse = await fetch(
+      `${valid.origin}/api/spotify/status`,
+      {
+        headers: {
+          cookie: browserCookies(valid.sessionHandle, valid.csrfToken),
+          origin: WEB_ORIGIN,
+        },
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(spotifyResponse.status).toBe(200);
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("blocks every provider mutation on CSRF failure before gateway dispatch", async () => {
+    const execute = vi.fn();
+    const integrationsGateway = { execute } as unknown as TfIntegrationsGateway;
+    const current = await startAuthenticatedApp({
+      sessionEntitlements: ["tf.integrations"],
+      policyEntitlements: ["tf.integrations"],
+      integrationsGateway,
+    });
+    const mutations = [
+      {
+        path: "/api/spotify/logout",
+        body: undefined,
+      },
+      {
+        path: "/api/yandex/token",
+        body: JSON.stringify({ token: "yandex-provider-token" }),
+      },
+      {
+        path: "/api/yandex/logout",
+        body: undefined,
+      },
+    ] as const;
+
+    for (const mutation of mutations) {
+      const response = await fetch(`${current.origin}${mutation.path}`, {
+        method: "POST",
+        headers: {
+          cookie: browserCookies(
+            current.sessionHandle,
+            current.csrfToken,
+          ),
+          origin: WEB_ORIGIN,
+          "content-type": "application/json",
+          "x-csrf-token": "invalid",
+        },
+        ...(mutation.body === undefined ? {} : { body: mutation.body }),
+      });
+      expect(response.status).toBe(403);
+    }
+    expect(execute).not.toHaveBeenCalled();
+
+    execute.mockResolvedValueOnce({
+      schemaVersion: 1,
+      requestId: "60000000-0000-4000-8000-000000000006",
+      accountId: ACCOUNT_ID,
+      operation: "yandex.token.upsert",
+      result: {
+        account: {
+          provider: "yandex",
+          connected: true,
+          account: { id: "12345", displayName: "Yandex User" },
+        },
+      },
+    });
+    const accepted = await fetch(`${current.origin}/api/yandex/token`, {
+      method: "POST",
+      headers: {
+        cookie: browserCookies(
+          current.sessionHandle,
+          current.csrfToken,
+        ),
+        origin: WEB_ORIGIN,
+        "content-type": "application/json",
+        "x-csrf-token": current.csrfToken,
+      },
+      body: JSON.stringify({ token: "yandex-provider-token" }),
+    });
+    expect(accepted.status).toBe(200);
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it("returns the current CSRF token from me and supports browser logout", async () => {

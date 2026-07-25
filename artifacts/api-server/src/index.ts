@@ -19,6 +19,10 @@ import {
   createStrictRedisClient,
 } from "./lib/tf-session-store.js";
 import {
+  HttpTfIntegrationsClient,
+  parseTfIntegrationsClientConfig,
+} from "./lib/tf-integrations-client.js";
+import {
   HttpTfSearchClient,
   parseTfSearchClientConfig,
 } from "./lib/tf-search-client.js";
@@ -30,8 +34,9 @@ import { attachWebSocketServer } from "./ws.js";
 import type { WebSocketServerHandle } from "./ws.js";
 
 async function start(): Promise<void> {
-  const [authConfig, searchConfig] = await Promise.all([
+  const [authConfig, integrationsConfig, searchConfig] = await Promise.all([
     parseTfAuthRuntimeConfig(process.env),
+    parseTfIntegrationsClientConfig(process.env),
     parseTfSearchClientConfig(process.env),
   ]);
   const rawPort = process.env["PORT"];
@@ -79,6 +84,9 @@ async function start(): Promise<void> {
       clientSecret: authConfig.clientSecret,
     });
     const sessionStore = new TfSessionStore(createStrictRedisClient(authRedis));
+    const integrationsGateway = new HttpTfIntegrationsClient(
+      integrationsConfig,
+    );
     const searchGateway = new HttpTfSearchClient(searchConfig);
     const app = createApiApp({
       nodeEnv: authConfig.nodeEnv,
@@ -102,6 +110,7 @@ async function start(): Promise<void> {
           ? {}
           : { pkceVerifier: () => authConfig.bridgePkceVerifier! }),
       },
+      integrationsGateway,
       tracks: { searchGateway },
     });
 

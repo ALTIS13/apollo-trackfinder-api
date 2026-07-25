@@ -1,113 +1,32 @@
-import { db } from "@workspace/db";
-import { spotifyTokensTable } from "@workspace/db/schema";
-import { eq } from "drizzle-orm";
+import type {
+  NormalizedTrack,
+  TfIntegrationsErrorResponse,
+} from "@workspace/tf-integrations-contract";
 import { Router, type IRouter, type Response } from "express";
 
-import { logger } from "../lib/logger.js";
+import {
+  TfIntegrationsUnavailableError,
+  type TfIntegrationsGateway,
+} from "../lib/tf-integrations-client.js";
 import type { TfSessionStore } from "../lib/tf-session-store.js";
 
 const PROVIDER_CODE_PATTERN = /^[\x21-\x7e]{1,2048}$/;
-const SCOPES = [
-  "user-library-read",
-  "playlist-read-private",
-  "playlist-read-collaborative",
-  "user-top-read",
-  "user-read-recently-played",
-].join(" ");
-
-export interface SpotifyTokenRecord {
-  readonly accessToken: string;
-  readonly refreshToken: string;
-  readonly expiresAt: Date;
-  readonly spotifyUserId: string | null;
-  readonly displayName: string | null;
-}
-
-export interface SpotifyTokenStore {
-  readonly get: (accountId: string) => Promise<SpotifyTokenRecord | null>;
-  readonly upsert: (
-    accountId: string,
-    tokens: SpotifyTokenRecord,
-  ) => Promise<void>;
-  readonly update: (
-    accountId: string,
-    tokens: SpotifyTokenRecord,
-  ) => Promise<SpotifyTokenRecord | null>;
-  readonly delete: (accountId: string) => Promise<void>;
-}
+const MAX_PAGE_SIZE = 50;
 
 export interface SpotifyRouteDependencies {
-  readonly clientId: string;
-  readonly clientSecret: string;
+  readonly gateway: TfIntegrationsGateway;
   readonly serverUrl?: string;
   readonly publicApiDomain?: string;
   readonly webUrl: string;
-  readonly now: () => number;
-  readonly fetch: typeof fetch;
-  readonly log: Pick<typeof logger, "error">;
   readonly providerOAuthStateStore: Pick<
     TfSessionStore,
     "issueProviderOAuthState" | "consumeProviderOAuthState"
   >;
-  readonly tokenStore: SpotifyTokenStore;
 }
 
-const defaultSpotifyTokenStore: SpotifyTokenStore = {
-  async get(accountId) {
-    const rows = await db
-      .select()
-      .from(spotifyTokensTable)
-      .where(eq(spotifyTokensTable.sessionId, accountId));
-    const row = rows[0];
-    return row === undefined
-      ? null
-      : {
-          accessToken: row.accessToken,
-          refreshToken: row.refreshToken,
-          expiresAt: row.expiresAt,
-          spotifyUserId: row.spotifyUserId,
-          displayName: row.displayName,
-        };
-  },
-  async upsert(accountId, tokens) {
-    await db
-      .insert(spotifyTokensTable)
-      .values({
-        sessionId: accountId,
-        ...tokens,
-      })
-      .onConflictDoUpdate({
-        target: spotifyTokensTable.sessionId,
-        set: {
-          ...tokens,
-          updatedAt: new Date(),
-        },
-      });
-  },
-  async update(accountId, tokens) {
-    const rows = await db
-      .update(spotifyTokensTable)
-      .set({
-        ...tokens,
-        updatedAt: new Date(),
-      })
-      .where(eq(spotifyTokensTable.sessionId, accountId))
-      .returning();
-    const row = rows[0];
-    return row === undefined
-      ? null
-      : {
-          accessToken: row.accessToken,
-          refreshToken: row.refreshToken,
-          expiresAt: row.expiresAt,
-          spotifyUserId: row.spotifyUserId,
-          displayName: row.displayName,
-        };
-  },
-  async delete(accountId) {
-    await db
-      .delete(spotifyTokensTable)
-      .where(eq(spotifyTokensTable.sessionId, accountId));
+const unavailableGateway: TfIntegrationsGateway = {
+  async execute() {
+    throw new TfIntegrationsUnavailableError();
   },
 };
 
@@ -123,16 +42,11 @@ const unavailableProviderOAuthStateStore: SpotifyRouteDependencies["providerOAut
 
 function defaultDependencies(): SpotifyRouteDependencies {
   return {
-    clientId: process.env["SPOTIFY_CLIENT_ID"] ?? "",
-    clientSecret: process.env["SPOTIFY_CLIENT_SECRET"] ?? "",
+    gateway: unavailableGateway,
     serverUrl: process.env["SERVER_URL"],
     publicApiDomain: process.env["PUBLIC_API_DOMAIN"],
     webUrl: process.env["WEB_URL"] ?? "",
-    now: Date.now,
-    fetch,
-    log: logger,
     providerOAuthStateStore: unavailableProviderOAuthStateStore,
-    tokenStore: defaultSpotifyTokenStore,
   };
 }
 
@@ -158,155 +72,57 @@ function webRedirect(
   );
 }
 
-function safeProviderError(
-  dependencies: SpotifyRouteDependencies,
-  status: number,
-  message: string,
-): void {
-  dependencies.log.error({ status }, message);
+function isFailure(
+  value: object,
+): value is TfIntegrationsErrorResponse {
+  return "error" in value;
 }
 
-function parseTokenResponse(value: unknown): {
-  readonly accessToken: string;
-  readonly refreshToken?: string;
-  readonly expiresIn: number;
-} | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
-  }
-  const data = value as Record<string, unknown>;
-  if (
-    typeof data.access_token !== "string" ||
-    data.access_token.length < 1 ||
-    data.access_token.length > 8_192 ||
-    (data.refresh_token !== undefined &&
-      (typeof data.refresh_token !== "string" ||
-        data.refresh_token.length < 1 ||
-        data.refresh_token.length > 8_192)) ||
-    typeof data.expires_in !== "number" ||
-    !Number.isInteger(data.expires_in) ||
-    data.expires_in < 1 ||
-    data.expires_in > 86_400
-  ) {
-    return null;
-  }
+function paginationValue(
+  value: unknown,
+  fallback: number,
+  maximum: number,
+): number {
+  const parsed = Number(value ?? fallback);
+  return Number.isSafeInteger(parsed) && parsed >= 0
+    ? Math.min(parsed, maximum)
+    : fallback;
+}
+
+function pagination(query: Readonly<Record<string, unknown>>): {
+  readonly offset: number;
+  readonly limit: number;
+} {
   return {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token,
-    expiresIn: data.expires_in,
+    offset: paginationValue(query["offset"], 0, 1_000_000),
+    limit: Math.max(
+      1,
+      paginationValue(query["limit"], MAX_PAGE_SIZE, MAX_PAGE_SIZE),
+    ),
   };
 }
 
-async function refreshIfExpired(
-  dependencies: SpotifyRouteDependencies,
-  accountId: string,
-): Promise<SpotifyTokenRecord | null> {
-  const row = await dependencies.tokenStore.get(accountId);
-  if (row === null) return null;
-  if (row.expiresAt.getTime() > dependencies.now() + 60_000) return row;
-
-  try {
-    const body = new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: row.refreshToken,
-      client_id: dependencies.clientId,
-      client_secret: dependencies.clientSecret,
-    });
-    const response = await dependencies.fetch(
-      "https://accounts.spotify.com/api/token",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body,
-      },
-    );
-    if (!response.ok) {
-      safeProviderError(
-        dependencies,
-        response.status,
-        "Spotify token refresh failed",
-      );
-      return null;
-    }
-    const tokens = parseTokenResponse(await response.json());
-    if (tokens === null) {
-      safeProviderError(
-        dependencies,
-        response.status,
-        "Spotify token refresh failed",
-      );
-      return null;
-    }
-    return await dependencies.tokenStore.update(accountId, {
-      ...row,
-      accessToken: tokens.accessToken,
-      refreshToken: tokens.refreshToken ?? row.refreshToken,
-      expiresAt: new Date(dependencies.now() + tokens.expiresIn * 1_000),
-    });
-  } catch {
-    dependencies.log.error(
-      { errorType: "ProviderUnavailable" },
-      "Spotify token refresh failed",
-    );
-    return null;
-  }
-}
-
-interface SpotifyTrack {
-  id: string;
-  name: string;
-  artists: { name: string }[];
-  album: {
-    name: string;
-    images: { url: string; width?: number; height?: number }[];
-  };
-  duration_ms: number;
-  external_urls: { spotify: string };
-}
-
-async function spotifyGet<T>(
-  dependencies: SpotifyRouteDependencies,
-  token: string,
-  path: string,
-  parameters?: Record<string, string>,
-): Promise<T | null> {
-  const url = new URL(`https://api.spotify.com/v1${path}`);
-  if (parameters) {
-    for (const [key, value] of Object.entries(parameters)) {
-      url.searchParams.set(key, value);
-    }
-  }
-  try {
-    const response = await dependencies.fetch(url, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!response.ok) {
-      safeProviderError(dependencies, response.status, "Spotify API error");
-      return null;
-    }
-    return (await response.json()) as T;
-  } catch {
-    dependencies.log.error(
-      { errorType: "ProviderUnavailable", path },
-      "Spotify API error",
-    );
-    return null;
-  }
-}
-
-function mapTrack(track: SpotifyTrack) {
-  const image = [...track.album.images].sort(
-    (left, right) => (right.width ?? 0) - (left.width ?? 0),
-  )[0];
+function mapTrack(track: NormalizedTrack) {
   return {
     id: track.id,
-    title: track.name,
-    artist: track.artists.map((artist) => artist.name).join(", "),
-    album: track.album.name,
-    durationMs: track.duration_ms,
-    thumbnailUrl: image?.url ?? null,
-    spotifyUrl: track.external_urls.spotify,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    durationMs: track.duration * 1_000,
+    thumbnailUrl: track.thumbnailUrl,
+    spotifyUrl: track.providerUrl,
   };
+}
+
+function sendLibraryFailure(
+  response: Response,
+  failure: TfIntegrationsErrorResponse,
+): void {
+  if (failure.error.code === "not_connected") {
+    response.status(401).json({ error: "not_connected" });
+    return;
+  }
+  response.status(502).json({ error: "spotify_error" });
 }
 
 export function createSpotifyRouter(
@@ -319,35 +135,33 @@ export function createSpotifyRouter(
   const router = Router();
 
   router.get("/spotify/login", async (request, response) => {
-    if (!dependencies.clientId) {
-      response.status(500).json({
-        error: "spotify_not_configured",
-        message: "SPOTIFY_CLIENT_ID is not set",
-      });
-      return;
-    }
     try {
+      const accountId = request.tfPrincipal!.accountId;
       const state =
         await dependencies.providerOAuthStateStore.issueProviderOAuthState(
           "spotify",
-          request.tfPrincipal!.accountId,
+          accountId,
         );
-      const parameters = new URLSearchParams({
-        response_type: "code",
-        client_id: dependencies.clientId,
-        scope: SCOPES,
-        redirect_uri: redirectUri(dependencies, request.hostname),
-        state,
+      const result = await dependencies.gateway.execute({
+        accountId,
+        operation: "spotify.oauth.authorize",
+        input: {
+          state,
+          callbackUri: redirectUri(dependencies, request.hostname),
+        },
       });
-      response.redirect(
-        `https://accounts.spotify.com/authorize?${parameters.toString()}`,
-      );
+      if (isFailure(result)) {
+        response.status(503).json({ error: "spotify_unavailable" });
+        return;
+      }
+      response.redirect(result.result.authorizationUrl);
     } catch {
       response.status(503).json({ error: "spotify_unavailable" });
     }
   });
 
   router.get("/spotify/callback", async (request, response) => {
+    const accountId = request.tfPrincipal!.accountId;
     const suppliedState =
       typeof request.query["state"] === "string" ? request.query["state"] : "";
     let stateConsumed: boolean;
@@ -355,7 +169,7 @@ export function createSpotifyRouter(
       stateConsumed =
         await dependencies.providerOAuthStateStore.consumeProviderOAuthState(
           "spotify",
-          request.tfPrincipal!.accountId,
+          accountId,
           suppliedState,
         );
     } catch {
@@ -384,260 +198,195 @@ export function createSpotifyRouter(
     }
 
     try {
-      const body = new URLSearchParams({
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: redirectUri(dependencies, request.hostname),
-        client_id: dependencies.clientId,
-        client_secret: dependencies.clientSecret,
-      });
-      const tokenResponse = await dependencies.fetch(
-        "https://accounts.spotify.com/api/token",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body,
+      const result = await dependencies.gateway.execute({
+        accountId,
+        operation: "spotify.oauth.complete",
+        input: {
+          code,
+          callbackUri: redirectUri(dependencies, request.hostname),
         },
-      );
-      if (!tokenResponse.ok) {
-        safeProviderError(
-          dependencies,
-          tokenResponse.status,
-          "Spotify token exchange failed",
-        );
+      });
+      if (isFailure(result)) {
         webRedirect(dependencies, response, {
-          spotify_error: "token_exchange_failed",
+          spotify_error:
+            result.error.code === "storage_unavailable"
+              ? "internal"
+              : "token_exchange_failed",
         });
         return;
       }
-      const tokens = parseTokenResponse(await tokenResponse.json());
-      if (tokens === null || tokens.refreshToken === undefined) {
-        safeProviderError(
-          dependencies,
-          tokenResponse.status,
-          "Spotify token exchange failed",
-        );
-        webRedirect(dependencies, response, {
-          spotify_error: "token_exchange_failed",
-        });
-        return;
-      }
-
-      const meResponse = await dependencies.fetch(
-        "https://api.spotify.com/v1/me",
-        {
-          headers: { Authorization: `Bearer ${tokens.accessToken}` },
-        },
-      );
-      const meValue = meResponse.ok ? await meResponse.json() : null;
-      const me =
-        typeof meValue === "object" &&
-        meValue !== null &&
-        !Array.isArray(meValue)
-          ? (meValue as Record<string, unknown>)
-          : null;
-      await dependencies.tokenStore.upsert(request.tfPrincipal!.accountId, {
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
-        expiresAt: new Date(dependencies.now() + tokens.expiresIn * 1_000),
-        spotifyUserId: typeof me?.id === "string" ? me.id : null,
-        displayName:
-          typeof me?.display_name === "string" ? me.display_name : null,
-      });
       webRedirect(dependencies, response, { spotify_connected: "1" });
     } catch {
-      dependencies.log.error(
-        { errorType: "ProviderUnavailable" },
-        "Spotify callback error",
-      );
       webRedirect(dependencies, response, { spotify_error: "internal" });
     }
   });
 
   router.get("/spotify/status", async (request, response) => {
-    const tokens = await refreshIfExpired(
-      dependencies,
-      request.tfPrincipal!.accountId,
-    );
-    if (tokens === null) {
+    try {
+      const result = await dependencies.gateway.execute({
+        accountId: request.tfPrincipal!.accountId,
+        operation: "spotify.status",
+        input: {},
+      });
+      if (isFailure(result) || !result.result.account.connected) {
+        response.json({ connected: false });
+        return;
+      }
+      response.json({
+        connected: true,
+        displayName: result.result.account.account.displayName,
+        spotifyUserId: result.result.account.account.id,
+      });
+    } catch {
       response.json({ connected: false });
-      return;
     }
-    response.json({
-      connected: true,
-      displayName: tokens.displayName,
-      spotifyUserId: tokens.spotifyUserId,
-    });
   });
 
   router.post("/spotify/logout", async (request, response) => {
-    await dependencies.tokenStore.delete(request.tfPrincipal!.accountId);
-    response.json({ ok: true });
+    try {
+      const result = await dependencies.gateway.execute({
+        accountId: request.tfPrincipal!.accountId,
+        operation: "spotify.disconnect",
+        input: {},
+      });
+      if (isFailure(result)) {
+        response.status(503).json({ error: "spotify_unavailable" });
+        return;
+      }
+      response.json({ ok: true });
+    } catch {
+      response.status(503).json({ error: "spotify_unavailable" });
+    }
   });
 
   router.get("/spotify/liked", async (request, response) => {
-    const tokens = await refreshIfExpired(
-      dependencies,
-      request.tfPrincipal!.accountId,
-    );
-    if (tokens === null) {
-      response.status(401).json({ error: "not_connected" });
-      return;
-    }
-    const offset = Number(request.query["offset"] ?? 0);
-    const limit = Math.min(Number(request.query["limit"] ?? 50), 50);
-    const data = await spotifyGet<{
-      items: { track: SpotifyTrack }[];
-      total: number;
-    }>(dependencies, tokens.accessToken, "/me/tracks", {
-      limit: String(limit),
-      offset: String(offset),
-    });
-    if (data === null) {
+    const page = pagination(request.query);
+    try {
+      const result = await dependencies.gateway.execute({
+        accountId: request.tfPrincipal!.accountId,
+        operation: "spotify.liked.list",
+        input: page,
+      });
+      if (isFailure(result)) {
+        sendLibraryFailure(response, result);
+        return;
+      }
+      response.json({
+        tracks: result.result.tracks.map(mapTrack),
+        total: result.result.total,
+        offset: page.offset,
+        limit: page.limit,
+        hasMore:
+          page.offset + result.result.tracks.length < result.result.total,
+      });
+    } catch {
       response.status(502).json({ error: "spotify_error" });
-      return;
     }
-    const tracks = data.items.map((item) => mapTrack(item.track));
-    response.json({
-      tracks,
-      total: data.total,
-      offset,
-      limit,
-      hasMore: offset + tracks.length < data.total,
-    });
   });
 
   router.get("/spotify/liked-all", async (request, response) => {
-    const tokens = await refreshIfExpired(
-      dependencies,
-      request.tfPrincipal!.accountId,
-    );
-    if (tokens === null) {
-      response.status(401).json({ error: "not_connected" });
-      return;
-    }
     const allTracks: ReturnType<typeof mapTrack>[] = [];
-    const pageSize = 50;
     let offset = 0;
     let total = Number.POSITIVE_INFINITY;
     while (offset < total) {
-      const data = await spotifyGet<{
-        items: { track: SpotifyTrack }[];
-        total: number;
-      }>(dependencies, tokens.accessToken, "/me/tracks", {
-        limit: String(pageSize),
-        offset: String(offset),
-      });
-      if (data === null) break;
-      total = data.total;
-      allTracks.push(...data.items.map((item) => mapTrack(item.track)));
-      offset += pageSize;
-      if (data.items.length < pageSize) break;
+      try {
+        const result = await dependencies.gateway.execute({
+          accountId: request.tfPrincipal!.accountId,
+          operation: "spotify.liked.list",
+          input: { offset, limit: MAX_PAGE_SIZE },
+        });
+        if (isFailure(result)) {
+          if (
+            result.error.code === "not_connected" &&
+            allTracks.length === 0
+          ) {
+            response.status(401).json({ error: "not_connected" });
+            return;
+          }
+          break;
+        }
+        total = result.result.total;
+        allTracks.push(...result.result.tracks.map(mapTrack));
+        offset += MAX_PAGE_SIZE;
+        if (result.result.tracks.length < MAX_PAGE_SIZE) break;
+      } catch {
+        break;
+      }
     }
     response.json({ tracks: allTracks, total: allTracks.length });
   });
 
   router.get("/spotify/playlists", async (request, response) => {
-    const tokens = await refreshIfExpired(
-      dependencies,
-      request.tfPrincipal!.accountId,
-    );
-    if (tokens === null) {
-      response.status(401).json({ error: "not_connected" });
-      return;
-    }
-    const data = await spotifyGet<{
-      items: {
-        id: string;
-        name: string;
-        description: string;
-        tracks: { total: number };
-        images: { url: string }[];
-        owner: { display_name: string };
-      }[];
-      total: number;
-    }>(dependencies, tokens.accessToken, "/me/playlists", { limit: "50" });
-    if (data === null) {
+    try {
+      const result = await dependencies.gateway.execute({
+        accountId: request.tfPrincipal!.accountId,
+        operation: "spotify.playlists.list",
+        input: {},
+      });
+      if (isFailure(result)) {
+        sendLibraryFailure(response, result);
+        return;
+      }
+      response.json(result.result);
+    } catch {
       response.status(502).json({ error: "spotify_error" });
-      return;
     }
-    response.json({
-      playlists: data.items.map((playlist) => ({
-        id: playlist.id,
-        name: playlist.name,
-        description: playlist.description,
-        trackCount: playlist.tracks.total,
-        thumbnailUrl: playlist.images[0]?.url ?? null,
-        owner: playlist.owner.display_name,
-      })),
-      total: data.total,
-    });
   });
 
   router.get(
     "/spotify/playlists/:playlistId/tracks",
     async (request, response) => {
-      const tokens = await refreshIfExpired(
-        dependencies,
-        request.tfPrincipal!.accountId,
-      );
-      if (tokens === null) {
-        response.status(401).json({ error: "not_connected" });
-        return;
-      }
-      const { playlistId } = request.params;
-      const offset = Number(request.query["offset"] ?? 0);
-      const limit = Math.min(Number(request.query["limit"] ?? 50), 50);
-      const data = await spotifyGet<{
-        items: { track: SpotifyTrack | null }[];
-        total: number;
-      }>(dependencies, tokens.accessToken, `/playlists/${playlistId}/tracks`, {
-        limit: String(limit),
-        offset: String(offset),
-        fields:
-          "items(track(id,name,artists,album,duration_ms,external_urls)),total",
-      });
-      if (data === null) {
+      const page = pagination(request.query);
+      try {
+        const result = await dependencies.gateway.execute({
+          accountId: request.tfPrincipal!.accountId,
+          operation: "spotify.playlist-tracks.list",
+          input: {
+            playlistId: request.params.playlistId!,
+            ...page,
+          },
+        });
+        if (isFailure(result)) {
+          sendLibraryFailure(response, result);
+          return;
+        }
+        response.json({
+          tracks: result.result.tracks.map(mapTrack),
+          total: result.result.total,
+          offset: page.offset,
+          limit: page.limit,
+        });
+      } catch {
         response.status(502).json({ error: "spotify_error" });
-        return;
       }
-      response.json({
-        tracks: data.items
-          .filter(
-            (item): item is { track: SpotifyTrack } => item.track !== null,
-          )
-          .map((item) => mapTrack(item.track)),
-        total: data.total,
-        offset,
-        limit,
-      });
     },
   );
 
   router.get("/spotify/top-tracks", async (request, response) => {
-    const tokens = await refreshIfExpired(
-      dependencies,
-      request.tfPrincipal!.accountId,
-    );
-    if (tokens === null) {
-      response.status(401).json({ error: "not_connected" });
-      return;
-    }
+    const suppliedRange = request.query["time_range"];
     const timeRange =
-      typeof request.query["time_range"] === "string"
-        ? request.query["time_range"]
+      suppliedRange === "short_term" ||
+      suppliedRange === "long_term" ||
+      suppliedRange === "medium_term"
+        ? suppliedRange
         : "medium_term";
-    const data = await spotifyGet<{ items: SpotifyTrack[] }>(
-      dependencies,
-      tokens.accessToken,
-      "/me/top/tracks",
-      { limit: "50", time_range: timeRange },
-    );
-    if (data === null) {
+    try {
+      const result = await dependencies.gateway.execute({
+        accountId: request.tfPrincipal!.accountId,
+        operation: "spotify.top-tracks.list",
+        input: { timeRange },
+      });
+      if (isFailure(result)) {
+        sendLibraryFailure(response, result);
+        return;
+      }
+      response.json({
+        tracks: result.result.tracks.map(mapTrack),
+        timeRange,
+      });
+    } catch {
       response.status(502).json({ error: "spotify_error" });
-      return;
     }
-    response.json({ tracks: data.items.map(mapTrack), timeRange });
   });
 
   return router;

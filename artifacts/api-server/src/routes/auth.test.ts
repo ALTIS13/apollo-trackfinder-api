@@ -6,7 +6,7 @@ import { Writable } from "node:stream";
 
 import cookieParser from "cookie-parser";
 import express from "express";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { createTfLogger } from "../lib/logger.js";
 import { PlatformAuthUnavailableError } from "../lib/platform-auth-client.js";
@@ -24,6 +24,13 @@ const WEB_ORIGIN = "https://tf.apollot.ru";
 const PLATFORM_ORIGIN = "https://api.apollot.ru";
 const CALLBACK_URL = "https://api.tf.apollot.ru/api/auth/callback";
 const servers: Server[] = [];
+let productionAppModule: typeof import("../app.js");
+
+beforeAll(async () => {
+  process.env["DATABASE_URL"] ??=
+    "postgres://unused:unused@127.0.0.1:1/unused";
+  productionAppModule = await import("../app.js");
+});
 
 function opaque(): string {
   return randomBytes(32).toString("base64url");
@@ -1007,11 +1014,8 @@ describe("TF auth logger hygiene", () => {
   });
 
   it("mounts injected auth routes and omits auth query values from request logs", async () => {
-    process.env["DATABASE_URL"] ??=
-      "postgres://unused:unused@127.0.0.1:1/unused";
-    const appModule = await import("../app.js");
-    expect(appModule.createApiApp).toBeTypeOf("function");
-    expect(appModule).not.toHaveProperty("default");
+    expect(productionAppModule.createApiApp).toBeTypeOf("function");
+    expect(productionAppModule).not.toHaveProperty("default");
     let output = "";
     const destination = new Writable({
       write(chunk, _encoding, callback) {
@@ -1020,7 +1024,7 @@ describe("TF auth logger hygiene", () => {
       },
     });
     const dependencies = createDependencies({ tfSession: null });
-    const app = appModule.createApiApp({
+    const app = productionAppModule.createApiApp({
       auth: dependencies,
       requestLogger: createTfLogger(destination),
     });

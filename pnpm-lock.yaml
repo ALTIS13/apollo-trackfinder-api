@@ -164,6 +164,9 @@ importers:
       '@workspace/platform-contract':
         specifier: workspace:*
         version: link:../../lib/platform-contract
+      '@workspace/tf-integrations-contract':
+        specifier: workspace:*
+        version: link:../../lib/tf-integrations-contract
       '@workspace/tf-search-contract':
         specifier: workspace:*
         version: link:../../lib/tf-search-contract
