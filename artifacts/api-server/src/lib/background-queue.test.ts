@@ -14,11 +14,18 @@ const validJob = {
   createdAt: "2026-07-26T00:00:00.000Z",
 } as const;
 
+function intentFor(data: typeof validJob): string {
+  return `pending:${data.accountId}`;
+}
+
 class FakeRedis {
   lock: string | undefined;
   lockExpiresAt: number | undefined;
   readonly calls: unknown[][] = [];
   readonly events = new Map<string, () => void>();
+  readonly ledgers = new Map<string, Map<string, string>>();
+  readonly queuesByWaitKey = new Map<string, FakeQueue>();
+  reserveResult: unknown | undefined;
   closed = false;
 
   on = vi.fn((event: string, listener: () => void) =>
@@ -49,13 +56,61 @@ class FakeRedis {
     }
     return "OK";
   }
+
+  bind(queue: FakeQueue): void {
+    this.queuesByWaitKey.set(queue.toKey("wait"), queue);
+  }
+
+  ledgerFor(queue: FakeQueue): Map<string, string> {
+    const key = queue.toKey("admission-intents");
+    let ledger = this.ledgers.get(key);
+    if (ledger === undefined) {
+      ledger = new Map<string, string>();
+      this.ledgers.set(key, ledger);
+    }
+    return ledger;
+  }
+
   async eval(
-    _script: string,
-    _keys: number,
-    _key: string,
-    token: string,
+    script: string,
+    keyCount: number,
+    ...arguments_: string[]
   ): Promise<number> {
-    if (this.lock !== token) return 0;
+    this.calls.push([script, keyCount, ...arguments_]);
+    const keys = arguments_.slice(0, keyCount);
+    const args = arguments_.slice(keyCount);
+    if (script.includes("HSET")) {
+      if (this.reserveResult !== undefined) return this.reserveResult as number;
+      const queue = this.queuesByWaitKey.get(keys[0]!);
+      if (queue === undefined) throw new Error("unknown queue");
+      const ledger = this.ledgerFor(queue);
+      for (const [jobId, intent] of ledger) {
+        if (intent.startsWith("confirmed:") || queue.jobs.has(jobId)) {
+          ledger.delete(jobId);
+        }
+      }
+      const total =
+        queue.counts.waiting +
+        queue.counts.active +
+        queue.counts.delayed +
+        queue.counts.prioritized +
+        queue.counts["waiting-children"] +
+        queue.counts.paused +
+        ledger.size;
+      if (total >= Number(args[2])) return 0;
+      ledger.set(args[0]!, args[1]!);
+      return total + 1;
+    }
+    if (script.includes("HGET")) {
+      const ledger = this.ledgers.get(keys[0]!);
+      if (ledger === undefined) return 1;
+      const stored = ledger.get(args[0]!);
+      if (stored === undefined) return 1;
+      if (stored !== args[1]) return 0;
+      ledger.delete(args[0]!);
+      return 1;
+    }
+    if (this.lock !== args[0]) return 0;
     this.lock = undefined;
     this.lockExpiresAt = undefined;
     return 1;
@@ -82,8 +137,12 @@ class FakeQueue {
   ambiguousJobData: unknown | undefined;
   addId: string | undefined;
   onAdd: (() => void) | undefined;
+  onAddStarted: (() => void) | undefined;
+  addGate: Promise<void> | undefined;
+  getJobError: Error | undefined;
   closed = false;
   ready: (() => Promise<void>) | undefined;
+  keyPrefix = "tenant:{apollo-downloads}:";
 
   on = vi.fn((event: string, listener: () => void) =>
     this.events.set(event, listener),
@@ -109,12 +168,17 @@ class FakeQueue {
       ]),
     );
   }
+  toKey(type: string): string {
+    return `${this.keyPrefix}${type}`;
+  }
   async add(
     _name: string,
     data: unknown,
     options: { jobId: string },
   ): Promise<{ id: string }> {
     this.added.push({ data, options });
+    this.onAddStarted?.();
+    await this.addGate;
     const job = {
       id: options.jobId,
       data,
@@ -127,6 +191,7 @@ class FakeQueue {
         ...job,
         data: this.ambiguousJobData ?? data,
       });
+      this.counts.waiting += 1;
     }
     if (this.addError !== undefined) throw this.addError;
     this.jobs.set(options.jobId, job);
@@ -135,6 +200,7 @@ class FakeQueue {
     return { id: this.addId ?? options.jobId };
   }
   async getJob(id: string): Promise<unknown> {
+    if (this.getJobError !== undefined) throw this.getJobError;
     return this.jobs.get(id);
   }
   async getWaiting(): Promise<never[]> {
@@ -174,6 +240,7 @@ function createAdapter(
     options.createQueue ??
     vi.fn().mockReturnValueOnce(producer).mockReturnValueOnce(telemetry);
   const createRedis = vi.fn().mockReturnValue(redis);
+  redis.bind(producer);
   return {
     adapter: queueModule.createDownloadQueueAdapter({
       environment: options.environment ?? {
@@ -263,6 +330,36 @@ describe("download queue producer boundary", () => {
     expect(producer.added[0]!.data).not.toHaveProperty("sessionId");
   });
 
+  it("keeps a stalled pending intent through an expired old mutex lease", async () => {
+    const redis = new FakeRedis();
+    const first = new FakeQueue();
+    const second = new FakeQueue();
+    first.counts.waiting = 199;
+    second.counts = first.counts;
+    second.jobs = first.jobs;
+    let startAdd!: () => void;
+    const addStarted = new Promise<void>((resolve) => {
+      startAdd = resolve;
+    });
+    let resumeAdd!: () => void;
+    first.addGate = new Promise<void>((resolve) => {
+      resumeAdd = resolve;
+    });
+    first.onAddStarted = startAdd;
+    const a = createAdapter({ producer: first, redis }).adapter;
+    const b = createAdapter({ producer: second, redis }).adapter;
+    await Promise.all([a.init(), b.init()]);
+    const firstAdmission = a.enqueue(validJob);
+    await addStarted;
+    redis.lockExpiresAt = Date.now() - 1;
+    await expect(b.enqueue(validJob)).rejects.toBeInstanceOf(
+      queueModule.DownloadQueueCapacityError,
+    );
+    resumeAdd();
+    await expect(firstAdmission).resolves.toMatchObject({ position: 200 });
+    expect(first.counts.waiting).toBe(200);
+  });
+
   it("serializes two producer adapters observed at 199 capacity", async () => {
     const redis = new FakeRedis();
     const first = new FakeQueue();
@@ -302,40 +399,80 @@ describe("download queue producer boundary", () => {
     await expect(adapter.enqueue(validJob)).rejects.toMatchObject({
       code: "download_queue_full",
     });
-    expect(redis.calls[0]).toEqual(
-      expect.arrayContaining(["NX", "PX", expect.any(Number)]),
-    );
-    expect(queueModule.DOWNLOAD_ADMISSION_LOCK_POLICY.leaseMs).toBeGreaterThan(
-      queueModule.DOWNLOAD_ADMISSION_LOCK_POLICY
-        .maxCriticalSectionCommandWindowMs,
+    expect(redis.calls).toContainEqual(
+      expect.arrayContaining([
+        producer.toKey("wait"),
+        producer.toKey("active"),
+        producer.toKey("delayed"),
+        producer.toKey("prioritized"),
+        producer.toKey("waiting-children"),
+        producer.toKey("paused"),
+        producer.toKey("admission-intents"),
+      ]),
     );
     expect(producer.added).toHaveLength(0);
   });
 
-  it("reconciles an ambiguous add only for the exact accepted job", async () => {
-    const { adapter, producer } = createAdapter();
+  it("reconciles an accepted ambiguous add and removes its intent", async () => {
+    const { adapter, producer, redis } = createAdapter();
     producer.ambiguousAccepted = true;
     producer.addError = new Error("timeout");
     await adapter.init();
     await expect(adapter.enqueue(validJob)).resolves.toMatchObject({
       jobId: expect.stringMatching(/^[0-9a-f-]{36}$/),
     });
+    expect(redis.ledgerFor(producer)).toEqual(new Map());
   });
 
-  it("fails closed when ambiguous add is absent or the mutex belongs to another producer", async () => {
+  it("releases a confirmed absent intent so the final slot can be retried", async () => {
     const absent = createAdapter();
+    absent.producer.counts.waiting = 199;
     absent.producer.addError = new Error("timeout");
     await absent.adapter.init();
     await expect(absent.adapter.enqueue(validJob)).rejects.toBeInstanceOf(
       queueModule.DownloadQueueUnavailableError,
     );
-    const locked = createAdapter();
-    locked.redis.lock = "other-token";
-    await locked.adapter.init();
-    await expect(locked.adapter.enqueue(validJob)).rejects.toBeInstanceOf(
+    expect(absent.redis.ledgerFor(absent.producer)).toEqual(new Map());
+    absent.producer.addError = undefined;
+    await expect(absent.adapter.enqueue(validJob)).resolves.toMatchObject({
+      position: 200,
+    });
+  });
+
+  it("retains an unresolved intent and blocks the final slot", async () => {
+    const redis = new FakeRedis();
+    const first = new FakeQueue();
+    const second = new FakeQueue();
+    first.counts.waiting = 199;
+    second.counts = first.counts;
+    second.jobs = first.jobs;
+    first.addError = new Error("timeout");
+    first.getJobError = new Error("redis down");
+    const a = createAdapter({ producer: first, redis }).adapter;
+    const b = createAdapter({ producer: second, redis }).adapter;
+    await Promise.all([a.init(), b.init()]);
+    await expect(a.enqueue(validJob)).rejects.toBeInstanceOf(
       queueModule.DownloadQueueUnavailableError,
     );
-    expect(locked.redis.lock).toBe("other-token");
+    expect(redis.ledgerFor(first)).toHaveLength(1);
+    await expect(b.enqueue(validJob)).rejects.toBeInstanceOf(
+      queueModule.DownloadQueueCapacityError,
+    );
+  });
+
+  it("prunes an existing job's redundant intent before counting capacity", async () => {
+    const { adapter, producer, redis } = createAdapter();
+    producer.counts.waiting = 199;
+    producer.jobs.set("existing", {
+      id: "existing",
+      data: validJob,
+    });
+    redis.ledgerFor(producer).set("existing", intentFor(validJob));
+    await adapter.init();
+    await expect(adapter.enqueue(validJob)).resolves.toMatchObject({
+      position: 200,
+    });
+    expect(redis.ledgerFor(producer)).toEqual(new Map());
   });
 
   it("fails closed when ambiguous add belongs to another owner or payload", async () => {
@@ -354,71 +491,23 @@ describe("download queue producer boundary", () => {
     }
   });
 
-  it("requires Queue.add to return the preassigned job id", async () => {
-    const { adapter, producer } = createAdapter();
+  it("reconciles a wrong Queue.add return id through the preassigned id", async () => {
+    const { adapter, producer, redis } = createAdapter();
     producer.addId = "different-job-id";
+    await adapter.init();
+    await expect(adapter.enqueue(validJob)).resolves.toMatchObject({
+      jobId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    });
+    expect(redis.ledgerFor(producer)).toEqual(new Map());
+  });
+
+  it("fails closed on a malformed ledger admission result", async () => {
+    const { adapter, redis } = createAdapter();
+    redis.reserveResult = "not-a-number";
     await adapter.init();
     await expect(adapter.enqueue(validJob)).rejects.toBeInstanceOf(
       queueModule.DownloadQueueUnavailableError,
     );
-  });
-
-  it("does not release a lock after ownership changes", async () => {
-    const { adapter, producer, redis } = createAdapter();
-    producer.onAdd = () => {
-      redis.lock = "new-owner";
-      redis.lockExpiresAt = Date.now() + 20_000;
-    };
-    await adapter.init();
-    await adapter.enqueue(validJob);
-    expect(redis.lock).toBe("new-owner");
-  });
-
-  it("admits after a crashed producer's bounded lease has expired", async () => {
-    const { adapter, redis } = createAdapter();
-    redis.lock = "crashed-owner";
-    redis.lockExpiresAt = Date.now() - 1;
-    await adapter.init();
-    await expect(adapter.enqueue(validJob)).resolves.toMatchObject({
-      position: 1,
-    });
-    expect(queueModule.DOWNLOAD_ADMISSION_LOCK_POLICY.retryWindowMs).toBe(250);
-  });
-
-  it("fails closed on malformed atomic capacity counts", async () => {
-    const malformedCounts = [
-      {
-        wait: -1,
-        active: 0,
-        delayed: 0,
-        prioritized: 0,
-        "waiting-children": 0,
-        paused: 0,
-      },
-      {
-        wait: 0,
-        active: 0,
-        delayed: 1.5,
-        prioritized: 0,
-        "waiting-children": 0,
-        paused: 0,
-      },
-      {
-        wait: 0,
-        active: 0,
-        delayed: 0,
-        prioritized: 0,
-        "waiting-children": 0,
-      },
-    ];
-    for (const counts of malformedCounts) {
-      const { adapter, producer } = createAdapter();
-      producer.getJobCounts = async () => counts as Record<string, number>;
-      await adapter.init();
-      await expect(adapter.enqueue(validJob)).rejects.toBeInstanceOf(
-        queueModule.DownloadQueueUnavailableError,
-      );
-    }
   });
 
   it("cleans partial sync initialization failures and shares concurrent init with error listeners", async () => {
@@ -478,12 +567,19 @@ describe("download queue producer boundary", () => {
     });
   });
 
-  it("contains no reservation lifecycle, worker, or downloader code", async () => {
+  it("contains no expiring admission lock, worker, or downloader code", async () => {
     const source = await readFile(
       new URL("./background-queue.ts", import.meta.url),
       "utf8",
     );
-    expect(source).not.toContain("RESERVATION");
+    const enqueueSource = source.slice(
+      source.indexOf("async enqueue"),
+      source.indexOf("async telemetry"),
+    );
+    expect(enqueueSource).not.toContain("ADMISSION_LOCK");
+    expect(enqueueSource).not.toContain("PX");
+    expect(enqueueSource).not.toContain("Date.now");
+    expect(enqueueSource).not.toContain("getJobCounts");
     expect(source).not.toMatch(/new\s+Worker/);
     expect(source).not.toContain("spawnAudioDownload");
   });

@@ -3,6 +3,34 @@ import { z } from "zod";
 export const DOWNLOAD_QUEUE_NAME = "apollo-tf-downloads-v1";
 export const DOWNLOAD_MAX_FILE_BYTES = 1_073_741_824;
 
+export type DownloadAdmissionIntentState = "pending" | "confirmed";
+
+export function getDownloadQueueAdmissionLedgerKey(
+  toKey: (suffix: string) => string,
+): string {
+  return toKey("admission-intents");
+}
+
+export function encodeDownloadAdmissionIntent(
+  state: DownloadAdmissionIntentState,
+  accountId: string,
+): string {
+  return `${state}:${canonicalUuidSchema.parse(accountId)}`;
+}
+
+export function parseDownloadAdmissionIntent(
+  value: string,
+): { state: DownloadAdmissionIntentState; accountId: string } | undefined {
+  const match = /^(pending|confirmed):(.+)$/.exec(value);
+  if (!match) return undefined;
+  const accountId = canonicalUuidSchema.safeParse(match[2]);
+  if (!accountId.success) return undefined;
+  return {
+    state: match[1] as DownloadAdmissionIntentState,
+    accountId: accountId.data,
+  };
+}
+
 const MAX_SOURCE_URL_LENGTH = 4_096;
 const MAX_TRACK_ID_LENGTH = 4_096;
 const MAX_ARTIST_LENGTH = 300;

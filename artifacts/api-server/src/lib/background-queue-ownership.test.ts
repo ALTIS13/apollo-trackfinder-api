@@ -46,6 +46,7 @@ function createAdapter(
     getWaitingCount: async () => 0,
     getActiveCount: async () => 0,
     getJobCounts: async () => ({}),
+    toKey: (type: string) => `tenant:{apollo-downloads}:${type}`,
     getWaiting: async () => collections.waiting ?? [...jobs.values()],
     getDelayed: async () => collections.delayed ?? [],
     getActive: async () => collections.active ?? [],
@@ -55,11 +56,21 @@ function createAdapter(
     close: async () => {},
   };
   const telemetry = { ...producer, on: vi.fn() };
+  const ledger = new Map<string, string>();
   const redis = {
     on: vi.fn(),
     connect: async () => {},
     ping: async () => "PONG",
-    eval: async () => 1,
+    eval: vi.fn(
+      async (_script: string, keyCount: number, ...args: string[]) => {
+        const values = args.slice(keyCount);
+        const stored = ledger.get(values[0]!);
+        if (stored === undefined) return 1;
+        if (stored !== values[1]) return 0;
+        ledger.delete(values[0]!);
+        return 1;
+      },
+    ),
     set: vi.fn(async () => "OK"),
     del: vi.fn(async () => 1),
     quit: async () => {},
@@ -79,6 +90,7 @@ function createAdapter(
     }),
     producer,
     redis,
+    ledger,
   };
 }
 
@@ -138,6 +150,30 @@ describe("download queue ownership, states, and cancellation", () => {
       status: "canceled",
     });
     expect(delayed.remove).toHaveBeenCalledOnce();
+  });
+
+  it("owner-releases a matching pending intent after delayed removal", async () => {
+    const delayed = job("delayed", JOB_DATA, ["delayed"]);
+    const { adapter, ledger } = createAdapter(new Map([[delayed.id, delayed]]));
+    ledger.set(delayed.id, `pending:${ACCOUNT_ID}`);
+    await adapter.init();
+    await expect(adapter.cancel("delayed", ACCOUNT_ID)).resolves.toEqual({
+      status: "canceled",
+    });
+    expect(ledger).toEqual(new Map());
+  });
+
+  it("cannot release another account's pending intent", async () => {
+    const delayed = job("delayed", JOB_DATA, ["delayed"]);
+    const { adapter, ledger } = createAdapter(new Map([[delayed.id, delayed]]));
+    ledger.set(delayed.id, `pending:${FOREIGN_ACCOUNT_ID}`);
+    await adapter.init();
+    await expect(adapter.cancel("delayed", ACCOUNT_ID)).rejects.toBeInstanceOf(
+      queueModule.DownloadQueueUnavailableError,
+    );
+    expect(ledger).toEqual(
+      new Map([[delayed.id, `pending:${FOREIGN_ACCOUNT_ID}`]]),
+    );
   });
 
   it("rereads a remove race and cancels active work with the exact TTL", async () => {

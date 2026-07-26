@@ -3,6 +3,9 @@ import {
   DOWNLOAD_MAX_FILE_BYTES,
   DOWNLOAD_QUEUE_NAME,
   downloadFileCommandSchema,
+  encodeDownloadAdmissionIntent,
+  getDownloadQueueAdmissionLedgerKey,
+  parseDownloadAdmissionIntent,
   downloadJobDataSchema,
   downloadJobResultSchema,
   downloadJobStatusSchema,
@@ -50,6 +53,24 @@ describe("tf download contract", () => {
   it("exports the versioned queue constants", () => {
     expect(DOWNLOAD_QUEUE_NAME).toBe("apollo-tf-downloads-v1");
     expect(DOWNLOAD_MAX_FILE_BYTES).toBe(1_073_741_824);
+  });
+
+  it("encodes owner-bound admission intents through the queue's own prefix", () => {
+    expect(
+      getDownloadQueueAdmissionLedgerKey(
+        (suffix) => `tenant:{apollo}:${suffix}`,
+      ),
+    ).toBe("tenant:{apollo}:admission-intents");
+    expect(encodeDownloadAdmissionIntent("pending", ACCOUNT_ID)).toBe(
+      `pending:${ACCOUNT_ID}`,
+    );
+    expect(parseDownloadAdmissionIntent(`confirmed:${ACCOUNT_ID}`)).toEqual({
+      state: "confirmed",
+      accountId: ACCOUNT_ID,
+    });
+    expect(parseDownloadAdmissionIntent(`pending:${ACCOUNT_ID}:extra`)).toBe(
+      undefined,
+    );
   });
 
   it("accepts every download quality", () => {
