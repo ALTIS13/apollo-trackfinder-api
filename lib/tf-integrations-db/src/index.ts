@@ -15,6 +15,7 @@ export {
   type ProviderAccountRecord,
   type ProviderAccountRepository,
   type ProviderAccountWrite,
+  type TfIntegrationsCommandContext,
 } from "./repository.js";
 
 export type IntegrationsPoolProfile = "runtime" | "migration";

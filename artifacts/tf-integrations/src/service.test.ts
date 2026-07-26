@@ -9,6 +9,7 @@ import type {
   Provider,
   ProviderAccountRecord,
   ProviderAccountRepository,
+  TfIntegrationsCommandContext,
 } from "@workspace/tf-integrations-db";
 import { describe, expect, it } from "vitest";
 
@@ -68,6 +69,7 @@ function vault(activeKeyId = "active-key"): ProviderTokenVault {
 class MemoryRepository implements ProviderAccountRepository {
   readonly records = new Map<string, ProviderAccountRecord>();
   readonly events: string[] = [];
+  readonly mutationContexts: TfIntegrationsCommandContext[] = [];
   deleteRecords = true;
   generation = 1;
 
@@ -85,8 +87,10 @@ class MemoryRepository implements ProviderAccountRepository {
 
   async upsert(
     record: Omit<ProviderAccountRecord, "generation">,
+    context: TfIntegrationsCommandContext,
   ): Promise<void> {
     this.events.push(`upsert:${record.accountId}:${record.provider}`);
+    this.mutationContexts.push(context);
     const generation = `${String(this.generation).padStart(8, "0")}-0000-4000-8000-000000000001`;
     this.generation += 1;
     this.records.set(this.key(record.accountId, record.provider), {
@@ -100,19 +104,26 @@ class MemoryRepository implements ProviderAccountRepository {
     provider: Provider,
     generation: string,
     tokenEnvelope: ProviderAccountRecord["tokenEnvelope"],
+    context: TfIntegrationsCommandContext,
   ): Promise<boolean> {
     const key = this.key(account, provider);
     const current = this.records.get(key);
     const matched = current?.generation === generation;
     this.events.push(`cas:${account}:${provider}:${String(matched)}`);
+    this.mutationContexts.push(context);
     if (matched) {
       this.records.set(key, { ...current, tokenEnvelope });
     }
     return matched;
   }
 
-  async delete(account: string, provider: Provider): Promise<boolean> {
+  async delete(
+    account: string,
+    provider: Provider,
+    context: TfIntegrationsCommandContext,
+  ): Promise<boolean> {
     this.events.push(`delete:${account}:${provider}`);
+    this.mutationContexts.push(context);
     if (!this.deleteRecords) {
       return this.records.has(this.key(account, provider));
     }
@@ -122,6 +133,13 @@ class MemoryRepository implements ProviderAccountRepository {
   async isMigrationCurrent(): Promise<boolean> {
     return true;
   }
+}
+
+function executionContext(
+  controller = new AbortController(),
+  deadlineAt = Date.now() + 5_000,
+): TfIntegrationsCommandContext {
+  return { signal: controller.signal, deadlineAt };
 }
 
 function spotifyAdapter(
@@ -344,13 +362,13 @@ describe("TfIntegrationsService", () => {
     const stored = repository.records.get(`${accountId}:spotify`)!;
     expect(JSON.stringify(stored.tokenEnvelope)).not.toContain(accessToken);
     expect(JSON.stringify(stored.tokenEnvelope)).not.toContain(refreshToken);
-    expect(tokenVault.decrypt("spotify", accountId, stored.tokenEnvelope)).toEqual(
-      {
-        accessToken,
-        refreshToken,
-        expiresAt: "2026-07-25T13:00:00.000Z",
-      },
-    );
+    expect(
+      tokenVault.decrypt("spotify", accountId, stored.tokenEnvelope),
+    ).toEqual({
+      accessToken,
+      refreshToken,
+      expiresAt: "2026-07-25T13:00:00.000Z",
+    });
     expect(JSON.stringify(result)).not.toContain(accessToken);
     expect(JSON.stringify(result)).not.toContain(refreshToken);
   });
@@ -467,9 +485,7 @@ describe("TfIntegrationsService", () => {
     });
     expect(repository.records.has(`${accountId}:spotify`)).toBe(false);
     expect(likedCalls).toEqual([]);
-    expect(repository.events).toContain(
-      `cas:${accountId}:spotify:false`,
-    );
+    expect(repository.events).toContain(`cas:${accountId}:spotify:false`);
   });
 
   it("never overwrites a reconnected row when an older refresh completes", async () => {
@@ -524,9 +540,7 @@ describe("TfIntegrationsService", () => {
       operation: "spotify.liked.list",
       error: { code: "not_connected" },
     });
-    expect(repository.records.get(`${accountId}:spotify`)).toEqual(
-      replacement,
-    );
+    expect(repository.records.get(`${accountId}:spotify`)).toEqual(replacement);
     expect(replacement.generation).not.toBe(initialGeneration);
     expect(replacementSecret).toMatchObject({
       accessToken: "spotify-access",
@@ -567,13 +581,212 @@ describe("TfIntegrationsService", () => {
     await expect(
       target.execute(
         command("spotify.liked.list", { offset: 0, limit: 1 }),
-        { signal: controller.signal },
+        executionContext(controller),
       ),
     ).resolves.toMatchObject({
       operation: "spotify.liked.list",
       result: { total: 0 },
     });
     expect(received).toEqual([controller.signal, controller.signal]);
+  });
+
+  it("does not upsert credentials after either provider boundary aborts", async () => {
+    const spotifyController = new AbortController();
+    const spotifyRepository = new MemoryRepository();
+    const spotifyTarget = service(
+      spotifyRepository,
+      vault(),
+      spotifyAdapter({
+        async exchangeCode() {
+          spotifyController.abort();
+          return {
+            secret: {
+              accessToken: "cancelled-access",
+              refreshToken: "cancelled-refresh",
+              expiresAt: "2026-07-25T13:00:00.000Z",
+            },
+            account: {
+              id: "cancelled-spotify-user",
+              displayName: "Cancelled Spotify User",
+            },
+          };
+        },
+      }),
+    );
+
+    await expect(
+      spotifyTarget.execute(
+        command("spotify.oauth.complete", {
+          code: "cancelled-code",
+          callbackUri: "https://tf.apollot.ru/api/spotify/callback",
+        }),
+        executionContext(spotifyController),
+      ),
+    ).resolves.toMatchObject({
+      operation: "spotify.oauth.complete",
+      error: { code: "provider_unavailable" },
+    });
+    expect(spotifyRepository.records.size).toBe(0);
+    expect(spotifyRepository.events).toEqual([]);
+
+    const yandexController = new AbortController();
+    const yandexRepository = new MemoryRepository();
+    const yandexTarget = service(
+      yandexRepository,
+      vault(),
+      spotifyAdapter(),
+      yandexAdapter({
+        async validateToken() {
+          yandexController.abort();
+          return {
+            id: "cancelled-yandex-user",
+            login: "cancelled-login",
+            displayName: "Cancelled Yandex User",
+          };
+        },
+      }),
+    );
+
+    await expect(
+      yandexTarget.execute(
+        command("yandex.token.upsert", { token: "cancelled-token" }),
+        executionContext(yandexController),
+      ),
+    ).resolves.toMatchObject({
+      operation: "yandex.token.upsert",
+      error: { code: "provider_unavailable" },
+    });
+    expect(yandexRepository.records.size).toBe(0);
+    expect(yandexRepository.events).toEqual([]);
+  });
+
+  it("keeps disconnect records when cancellation or the absolute deadline arrives first", async () => {
+    const tokenVault = vault();
+    const spotifyRepository = new MemoryRepository();
+    spotifyRepository.records.set(
+      `${accountId}:spotify`,
+      storedRecord(tokenVault, "spotify"),
+    );
+    const cancelled = new AbortController();
+    cancelled.abort();
+
+    await expect(
+      service(spotifyRepository, tokenVault).execute(
+        command("spotify.disconnect", {}),
+        executionContext(cancelled),
+      ),
+    ).resolves.toMatchObject({
+      operation: "spotify.disconnect",
+      error: { code: "provider_unavailable" },
+    });
+    expect(spotifyRepository.records.has(`${accountId}:spotify`)).toBe(true);
+    expect(spotifyRepository.events).toEqual([]);
+
+    const yandexRepository = new MemoryRepository();
+    yandexRepository.records.set(
+      `${accountId}:yandex`,
+      storedRecord(tokenVault, "yandex"),
+    );
+    await expect(
+      service(yandexRepository, tokenVault).execute(
+        command("yandex.disconnect", {}),
+        executionContext(new AbortController(), Date.now() - 1),
+      ),
+    ).resolves.toMatchObject({
+      operation: "yandex.disconnect",
+      error: { code: "provider_unavailable" },
+    });
+    expect(yandexRepository.records.has(`${accountId}:yandex`)).toBe(true);
+    expect(yandexRepository.events).toEqual([]);
+  });
+
+  it("does not persist an in-flight refresh after its provider boundary aborts", async () => {
+    const tokenVault = vault();
+    const repository = new MemoryRepository();
+    const original = storedRecord(tokenVault, "spotify");
+    repository.records.set(`${accountId}:spotify`, original);
+    const controller = new AbortController();
+    const target = service(
+      repository,
+      tokenVault,
+      spotifyAdapter({
+        async refresh() {
+          controller.abort();
+          return {
+            refreshed: true,
+            secret: {
+              accessToken: "cancelled-refreshed-access",
+              refreshToken: "cancelled-refreshed-refresh",
+              expiresAt: "2026-07-25T14:00:00.000Z",
+            },
+          };
+        },
+      }),
+    );
+
+    await expect(
+      target.execute(
+        command("spotify.liked.list", { offset: 0, limit: 1 }),
+        executionContext(controller),
+      ),
+    ).resolves.toMatchObject({
+      operation: "spotify.liked.list",
+      error: { code: "provider_unavailable" },
+    });
+    expect(repository.records.get(`${accountId}:spotify`)).toEqual(original);
+    expect(repository.events).toEqual([`get:${accountId}:spotify`]);
+  });
+
+  it("passes the exact command context through every repository mutation path", async () => {
+    const context = executionContext();
+    const tokenVault = vault();
+
+    const upsertRepository = new MemoryRepository();
+    await service(upsertRepository, tokenVault).execute(
+      command("spotify.oauth.complete", {
+        code: "provider-code",
+        callbackUri: "https://tf.apollot.ru/api/spotify/callback",
+      }),
+      context,
+    );
+
+    const deleteRepository = new MemoryRepository();
+    deleteRepository.records.set(
+      `${accountId}:spotify`,
+      storedRecord(tokenVault, "spotify"),
+    );
+    await service(deleteRepository, tokenVault).execute(
+      command("spotify.disconnect", {}),
+      context,
+    );
+
+    const refreshRepository = new MemoryRepository();
+    refreshRepository.records.set(
+      `${accountId}:spotify`,
+      storedRecord(tokenVault, "spotify"),
+    );
+    await service(
+      refreshRepository,
+      tokenVault,
+      spotifyAdapter({
+        async refresh() {
+          return {
+            refreshed: true,
+            secret: {
+              accessToken: "refreshed-access",
+              refreshToken: "refreshed-refresh",
+              expiresAt: "2026-07-25T14:00:00.000Z",
+            },
+          };
+        },
+      }),
+    ).execute(command("spotify.liked.list", { offset: 0, limit: 1 }), context);
+
+    expect([
+      ...upsertRepository.mutationContexts,
+      ...deleteRepository.mutationContexts,
+      ...refreshRepository.mutationContexts,
+    ]).toEqual([context, context, context]);
   });
 
   it("bounds provider I/O concurrency and queues only a finite command backlog", async () => {
@@ -619,7 +832,7 @@ describe("TfIntegrationsService", () => {
     const commands = Array.from({ length: 3 }, () =>
       target.execute(
         command("spotify.liked.list", { offset: 0, limit: 1 }),
-        { signal: new AbortController().signal },
+        executionContext(),
       ),
     );
     await started;
@@ -720,9 +933,9 @@ describe("TfIntegrationsService", () => {
     const stored = repository.records.get(`${accountId}:yandex`)!;
     expect(JSON.stringify(stored.tokenEnvelope)).not.toContain(oauthToken);
     expect(stored.providerLogin).toBe("yandex-user");
-    expect(tokenVault.decrypt("yandex", accountId, stored.tokenEnvelope)).toEqual(
-      { oauthToken },
-    );
+    expect(
+      tokenVault.decrypt("yandex", accountId, stored.tokenEnvelope),
+    ).toEqual({ oauthToken });
     expect(JSON.stringify(result)).not.toContain(oauthToken);
 
     await expect(

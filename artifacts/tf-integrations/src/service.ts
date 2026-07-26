@@ -9,6 +9,7 @@ import type {
   ProviderAccountRecord,
   ProviderAccountRepository,
   ProviderAccountWrite,
+  TfIntegrationsCommandContext,
 } from "@workspace/tf-integrations-db";
 
 import {
@@ -110,14 +111,20 @@ export interface TfIntegrationsServiceOptions {
   readonly providerQueueLimit?: number;
 }
 
-export interface TfIntegrationsExecutionContext {
-  readonly signal: AbortSignal;
-}
+export type TfIntegrationsExecutionContext = TfIntegrationsCommandContext;
 
 const DEFAULT_PROVIDER_CONCURRENCY = 8;
 const DEFAULT_PROVIDER_QUEUE_LIMIT = 24;
 const MAX_PROVIDER_CONCURRENCY = 32;
+const DEFAULT_COMMAND_TIMEOUT_MS = 8_000;
 const inertSignal = new AbortController().signal;
+
+function defaultExecutionContext(): TfIntegrationsExecutionContext {
+  return {
+    signal: inertSignal,
+    deadlineAt: Date.now() + DEFAULT_COMMAND_TIMEOUT_MS,
+  };
+}
 
 interface ProviderWaiter {
   readonly signal: AbortSignal;
@@ -203,10 +210,7 @@ class ProviderIoLimiter {
   }
 
   #startNext(): void {
-    while (
-      this.#active < this.#concurrency &&
-      this.#queue.length > 0
-    ) {
+    while (this.#active < this.#concurrency && this.#queue.length > 0) {
       const waiter = this.#queue.shift()!;
       waiter.signal.removeEventListener("abort", waiter.onAbort);
       if (waiter.signal.aborted) {
@@ -226,6 +230,16 @@ class ServiceError extends Error {
     super("TF integrations command failed");
     this.name = "ServiceError";
     this.code = code;
+  }
+}
+
+function requireActive(context: TfIntegrationsExecutionContext): void {
+  if (
+    context.signal.aborted ||
+    !Number.isSafeInteger(context.deadlineAt) ||
+    Date.now() >= context.deadlineAt
+  ) {
+    throw new ServiceError("provider_unavailable");
   }
 }
 
@@ -267,52 +281,61 @@ export class TfIntegrationsService {
 
   async execute(
     command: TfIntegrationsCommand,
-    context: TfIntegrationsExecutionContext = { signal: inertSignal },
+    context: TfIntegrationsExecutionContext = defaultExecutionContext(),
   ): Promise<TfIntegrationsSuccessResponse | TfIntegrationsErrorResponse> {
     try {
+      requireActive(context);
       switch (command.operation) {
-        case "spotify.oauth.authorize":
+        case "spotify.oauth.authorize": {
+          const authorizationUrl = this.#spotify.authorizationUrl(
+            command.input,
+          );
+          requireActive(context);
           return this.#success(command, {
-            authorizationUrl: this.#spotify.authorizationUrl(command.input),
+            authorizationUrl,
           });
+        }
 
         case "spotify.oauth.complete": {
-          const exchange = await this.#provider(context.signal, () =>
+          const exchange = await this.#provider(context, () =>
             this.#spotify.exchangeCode({
               ...command.input,
               signal: context.signal,
             }),
           );
-          const response = this.#success(command, {
-            account: this.#connectedSpotifyAccount(exchange.account),
-          });
           const tokenEnvelope = this.#encryptSpotify(
             command.accountId,
             exchange.secret,
+            context,
           );
-          await this.#upsert({
-            accountId: command.accountId,
-            provider: "spotify",
-            tokenEnvelope,
-            providerUserId: exchange.account.id,
-            displayName: exchange.account.displayName,
+          await this.#upsert(
+            {
+              accountId: command.accountId,
+              provider: "spotify",
+              tokenEnvelope,
+              providerUserId: exchange.account.id,
+              displayName: exchange.account.displayName,
+            },
+            context,
+          );
+          return this.#success(command, {
+            account: this.#connectedSpotifyAccount(exchange.account),
           });
-          return response;
         }
 
         case "spotify.status":
-          return await this.#status(command, "spotify");
+          return await this.#status(command, "spotify", context);
 
         case "spotify.disconnect":
-          await this.#delete(command.accountId, "spotify");
+          await this.#delete(command.accountId, "spotify", context);
           return this.#success(command, { ok: true });
 
         case "spotify.liked.list": {
           const secret = await this.#refreshedSpotifySecret(
             command.accountId,
-            context.signal,
+            context,
           );
-          const result = await this.#provider(context.signal, () =>
+          const result = await this.#provider(context, () =>
             this.#spotify.likedTracks({
               accessToken: secret.accessToken,
               ...command.input,
@@ -325,9 +348,9 @@ export class TfIntegrationsService {
         case "spotify.playlists.list": {
           const secret = await this.#refreshedSpotifySecret(
             command.accountId,
-            context.signal,
+            context,
           );
-          const result = await this.#provider(context.signal, () =>
+          const result = await this.#provider(context, () =>
             this.#spotify.playlists({
               accessToken: secret.accessToken,
               signal: context.signal,
@@ -339,9 +362,9 @@ export class TfIntegrationsService {
         case "spotify.playlist-tracks.list": {
           const secret = await this.#refreshedSpotifySecret(
             command.accountId,
-            context.signal,
+            context,
           );
-          const result = await this.#provider(context.signal, () =>
+          const result = await this.#provider(context, () =>
             this.#spotify.playlistTracks({
               accessToken: secret.accessToken,
               ...command.input,
@@ -354,9 +377,9 @@ export class TfIntegrationsService {
         case "spotify.top-tracks.list": {
           const secret = await this.#refreshedSpotifySecret(
             command.accountId,
-            context.signal,
+            context,
           );
-          const result = await this.#provider(context.signal, () =>
+          const result = await this.#provider(context, () =>
             this.#spotify.topTracks({
               accessToken: secret.accessToken,
               ...command.input,
@@ -367,41 +390,48 @@ export class TfIntegrationsService {
         }
 
         case "yandex.token.upsert": {
-          const account = await this.#provider(context.signal, () =>
+          const account = await this.#provider(context, () =>
             this.#yandex.validateToken({
               oauthToken: command.input.token,
               signal: context.signal,
             }),
           );
-          const response = this.#success(command, {
+          const tokenEnvelope = this.#encryptYandex(
+            command.accountId,
+            {
+              oauthToken: command.input.token,
+            },
+            context,
+          );
+          await this.#upsert(
+            {
+              accountId: command.accountId,
+              provider: "yandex",
+              tokenEnvelope,
+              providerUserId: account.id,
+              displayName: account.displayName,
+              providerLogin: account.login,
+            },
+            context,
+          );
+          return this.#success(command, {
             account: this.#connectedYandexAccount(account),
           });
-          const tokenEnvelope = this.#encryptYandex(command.accountId, {
-            oauthToken: command.input.token,
-          });
-          await this.#upsert({
-            accountId: command.accountId,
-            provider: "yandex",
-            tokenEnvelope,
-            providerUserId: account.id,
-            displayName: account.displayName,
-            providerLogin: account.login,
-          });
-          return response;
         }
 
         case "yandex.status":
-          return await this.#status(command, "yandex");
+          return await this.#status(command, "yandex", context);
 
         case "yandex.disconnect":
-          await this.#delete(command.accountId, "yandex");
+          await this.#delete(command.accountId, "yandex", context);
           return this.#success(command, { ok: true });
 
         case "yandex.liked.list": {
           const { record, secret } = await this.#yandexAccount(
             command.accountId,
+            context,
           );
-          const result = await this.#provider(context.signal, () =>
+          const result = await this.#provider(context, () =>
             this.#yandex.likedTracks({
               oauthToken: secret.oauthToken,
               userId: record.providerUserId,
@@ -415,8 +445,9 @@ export class TfIntegrationsService {
         case "yandex.playlists.list": {
           const { record, secret } = await this.#yandexAccount(
             command.accountId,
+            context,
           );
-          const result = await this.#provider(context.signal, () =>
+          const result = await this.#provider(context, () =>
             this.#yandex.playlists({
               oauthToken: secret.oauthToken,
               userId: record.providerUserId,
@@ -427,8 +458,11 @@ export class TfIntegrationsService {
         }
 
         case "yandex.playlist-tracks.list": {
-          const { secret } = await this.#yandexAccount(command.accountId);
-          const result = await this.#provider(context.signal, () =>
+          const { secret } = await this.#yandexAccount(
+            command.accountId,
+            context,
+          );
+          const result = await this.#provider(context, () =>
             this.#yandex.playlistTracks({
               oauthToken: secret.oauthToken,
               ...command.input,
@@ -445,9 +479,7 @@ export class TfIntegrationsService {
       }
     } catch (error) {
       const code =
-        error instanceof ServiceError
-          ? error.code
-          : providerErrorCode(error);
+        error instanceof ServiceError ? error.code : providerErrorCode(error);
       this.#log(command.operation, code);
       return {
         schemaVersion: 1,
@@ -503,8 +535,9 @@ export class TfIntegrationsService {
   async #status(
     command: TfIntegrationsCommand,
     provider: Provider,
+    context: TfIntegrationsExecutionContext,
   ): Promise<TfIntegrationsSuccessResponse> {
-    const record = await this.#get(command.accountId, provider);
+    const record = await this.#get(command.accountId, provider, context);
     if (
       record !== null &&
       provider === "yandex" &&
@@ -531,12 +564,12 @@ export class TfIntegrationsService {
 
   async #refreshedSpotifySecret(
     accountId: string,
-    signal: AbortSignal,
+    context: TfIntegrationsExecutionContext,
   ): Promise<SpotifySecret> {
-    const record = await this.#requiredRecord(accountId, "spotify");
-    const secret = this.#decryptSpotify(accountId, record);
-    const refresh = await this.#provider(signal, () =>
-      this.#spotify.refresh(secret, { signal }),
+    const record = await this.#requiredRecord(accountId, "spotify", context);
+    const secret = this.#decryptSpotify(accountId, record, context);
+    const refresh = await this.#provider(context, () =>
+      this.#spotify.refresh(secret, { signal: context.signal }),
     );
     if (
       !isObject(refresh) ||
@@ -546,15 +579,21 @@ export class TfIntegrationsService {
       throw new ServiceError("invalid_provider_response");
     }
     if (!refresh.refreshed) {
+      requireActive(context);
       return secret;
     }
     const refreshedSecret = refresh.secret as SpotifySecret;
-    const tokenEnvelope = this.#encryptSpotify(accountId, refreshedSecret);
+    const tokenEnvelope = this.#encryptSpotify(
+      accountId,
+      refreshedSecret,
+      context,
+    );
     const updated = await this.#updateTokenEnvelopeIfGeneration(
       accountId,
       "spotify",
       record.generation,
       tokenEnvelope,
+      context,
     );
     if (!updated) {
       throw new ServiceError("not_connected");
@@ -562,22 +601,26 @@ export class TfIntegrationsService {
     return refreshedSecret;
   }
 
-  async #yandexAccount(accountId: string): Promise<{
+  async #yandexAccount(
+    accountId: string,
+    context: TfIntegrationsExecutionContext,
+  ): Promise<{
     readonly record: ProviderAccountRecord;
     readonly secret: YandexSecret;
   }> {
-    const record = await this.#requiredRecord(accountId, "yandex");
+    const record = await this.#requiredRecord(accountId, "yandex", context);
     return {
       record,
-      secret: this.#decryptYandex(accountId, record),
+      secret: this.#decryptYandex(accountId, record, context),
     };
   }
 
   async #requiredRecord(
     accountId: string,
     provider: Provider,
+    context: TfIntegrationsExecutionContext,
   ): Promise<ProviderAccountRecord> {
-    const record = await this.#get(accountId, provider);
+    const record = await this.#get(accountId, provider, context);
     if (record === null) {
       throw new ServiceError("not_connected");
     }
@@ -587,20 +630,30 @@ export class TfIntegrationsService {
   async #get(
     accountId: string,
     provider: Provider,
+    context: TfIntegrationsExecutionContext,
   ): Promise<ProviderAccountRecord | null> {
+    requireActive(context);
+    let record: ProviderAccountRecord | null;
     try {
-      return await this.#repository.get(accountId, provider);
+      record = await this.#repository.get(accountId, provider);
     } catch {
       throw new ServiceError("storage_unavailable");
     }
+    requireActive(context);
+    return record;
   }
 
-  async #upsert(record: ProviderAccountWrite): Promise<void> {
+  async #upsert(
+    record: ProviderAccountWrite,
+    context: TfIntegrationsExecutionContext,
+  ): Promise<void> {
+    requireActive(context);
     try {
-      await this.#repository.upsert(record);
+      await this.#repository.upsert(record, context);
     } catch {
       throw new ServiceError("storage_unavailable");
     }
+    requireActive(context);
   }
 
   async #updateTokenEnvelopeIfGeneration(
@@ -608,49 +661,80 @@ export class TfIntegrationsService {
     provider: Provider,
     generation: string,
     tokenEnvelope: ProviderAccountRecord["tokenEnvelope"],
+    context: TfIntegrationsExecutionContext,
   ): Promise<boolean> {
+    requireActive(context);
+    let updated: boolean;
     try {
-      return await this.#repository.updateTokenEnvelopeIfGeneration(
+      updated = await this.#repository.updateTokenEnvelopeIfGeneration(
         accountId,
         provider,
         generation,
         tokenEnvelope,
+        context,
       );
     } catch {
       throw new ServiceError("storage_unavailable");
     }
+    requireActive(context);
+    return updated;
   }
 
-  async #delete(accountId: string, provider: Provider): Promise<void> {
+  async #delete(
+    accountId: string,
+    provider: Provider,
+    context: TfIntegrationsExecutionContext,
+  ): Promise<void> {
+    requireActive(context);
     try {
-      await this.#repository.delete(accountId, provider);
+      await this.#repository.delete(accountId, provider, context);
     } catch {
       throw new ServiceError("storage_unavailable");
     }
+    requireActive(context);
   }
 
-  #encryptSpotify(accountId: string, secret: SpotifySecret) {
+  #encryptSpotify(
+    accountId: string,
+    secret: SpotifySecret,
+    context: TfIntegrationsExecutionContext,
+  ) {
+    requireActive(context);
+    let tokenEnvelope: ProviderAccountRecord["tokenEnvelope"];
     try {
-      return this.#tokenVault.encrypt("spotify", accountId, secret);
+      tokenEnvelope = this.#tokenVault.encrypt("spotify", accountId, secret);
     } catch {
       throw new ServiceError("invalid_provider_response");
     }
+    requireActive(context);
+    return tokenEnvelope;
   }
 
-  #encryptYandex(accountId: string, secret: YandexSecret) {
+  #encryptYandex(
+    accountId: string,
+    secret: YandexSecret,
+    context: TfIntegrationsExecutionContext,
+  ) {
+    requireActive(context);
+    let tokenEnvelope: ProviderAccountRecord["tokenEnvelope"];
     try {
-      return this.#tokenVault.encrypt("yandex", accountId, secret);
+      tokenEnvelope = this.#tokenVault.encrypt("yandex", accountId, secret);
     } catch {
       throw new ServiceError("invalid_provider_response");
     }
+    requireActive(context);
+    return tokenEnvelope;
   }
 
   #decryptSpotify(
     accountId: string,
     record: ProviderAccountRecord,
+    context: TfIntegrationsExecutionContext,
   ): SpotifySecret {
+    requireActive(context);
+    let secret: SpotifySecret;
     try {
-      return this.#tokenVault.decrypt(
+      secret = this.#tokenVault.decrypt(
         "spotify",
         accountId,
         record.tokenEnvelope,
@@ -658,14 +742,19 @@ export class TfIntegrationsService {
     } catch {
       throw new ServiceError("storage_unavailable");
     }
+    requireActive(context);
+    return secret;
   }
 
   #decryptYandex(
     accountId: string,
     record: ProviderAccountRecord,
+    context: TfIntegrationsExecutionContext,
   ): YandexSecret {
+    requireActive(context);
+    let secret: YandexSecret;
     try {
-      return this.#tokenVault.decrypt(
+      secret = this.#tokenVault.decrypt(
         "yandex",
         accountId,
         record.tokenEnvelope,
@@ -673,17 +762,23 @@ export class TfIntegrationsService {
     } catch {
       throw new ServiceError("storage_unavailable");
     }
+    requireActive(context);
+    return secret;
   }
 
   async #provider<T>(
-    signal: AbortSignal,
+    context: TfIntegrationsExecutionContext,
     operation: () => T | Promise<T>,
   ): Promise<T> {
+    requireActive(context);
+    let result: T;
     try {
-      return await this.#providerLimiter.run(signal, operation);
+      result = await this.#providerLimiter.run(context.signal, operation);
     } catch (error) {
       throw new ServiceError(providerErrorCode(error));
     }
+    requireActive(context);
+    return result;
   }
 
   #log(

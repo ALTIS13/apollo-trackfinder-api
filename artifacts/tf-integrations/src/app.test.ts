@@ -8,6 +8,7 @@ import type {
   TfIntegrationsErrorResponse,
   TfIntegrationsSuccessResponse,
 } from "@workspace/tf-integrations-contract";
+import type { TfIntegrationsCommandContext } from "@workspace/tf-integrations-db";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -39,7 +40,7 @@ const response: TfIntegrationsSuccessResponse = {
 interface TestService {
   execute(
     input: TfIntegrationsCommand,
-    context: { readonly signal: AbortSignal },
+    context: TfIntegrationsCommandContext,
   ): Promise<TfIntegrationsSuccessResponse | TfIntegrationsErrorResponse>;
 }
 
@@ -361,11 +362,7 @@ describe("TF integrations private HTTP runtime", () => {
     const malformedBody = Buffer.from('{"schemaVersion":1}', "utf8");
     const malformed = await request(instance, "/v1/commands", {
       method: "POST",
-      headers: signedHeaders(
-        "/v1/commands",
-        malformedBody,
-        reusedNonce,
-      ),
+      headers: signedHeaders("/v1/commands", malformedBody, reusedNonce),
       body: malformedBody,
     });
     expect(malformed.status).toBe(400);
@@ -459,8 +456,36 @@ describe("TF integrations private HTTP runtime", () => {
     expect(execute).toHaveBeenCalledTimes(256);
   });
 
-  it("propagates a fixed sub-10-second command deadline and runtime shutdown abort", async () => {
-    const timeoutSignals: AbortSignal[] = [];
+  it("propagates one absolute command deadline with the abort signal", async () => {
+    let observed: TfIntegrationsCommandContext | undefined;
+    const result = await request(
+      app({
+        commandTimeoutMs: 250,
+        execute: async (_input, context) => {
+          observed = context;
+          return response;
+        },
+      }),
+      "/v1/commands",
+      {
+        method: "POST",
+        headers: signedHeaders(
+          "/v1/commands",
+          Buffer.from(JSON.stringify(command), "utf8"),
+          50,
+        ),
+        body: JSON.stringify(command),
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(observed?.signal).toBeInstanceOf(AbortSignal);
+    expect(observed?.deadlineAt).toEqual(expect.any(Number));
+    expect(observed!.deadlineAt! - Date.now()).toBeGreaterThan(0);
+    expect(observed!.deadlineAt! - Date.now()).toBeLessThanOrEqual(250);
+  });
+
+  it("never reports service success after command timeout or runtime shutdown abort", async () => {
     const timeoutResult = await request(
       app({
         commandTimeoutMs: 25,
@@ -474,19 +499,12 @@ describe("TF integrations private HTTP runtime", () => {
               error: { code: "provider_unavailable" },
             };
           }
-          timeoutSignals.push(context.signal);
           await new Promise<void>((resolve) => {
             context.signal.addEventListener("abort", () => resolve(), {
               once: true,
             });
           });
-          return {
-            schemaVersion: 1,
-            requestId,
-            accountId,
-            operation: "spotify.status",
-            error: { code: "provider_unavailable" },
-          };
+          return response;
         },
       }),
       "/v1/commands",
@@ -500,9 +518,10 @@ describe("TF integrations private HTTP runtime", () => {
         body: JSON.stringify(command),
       },
     );
-    expect(timeoutResult.status).toBe(200);
-    expect(timeoutSignals).toHaveLength(1);
-    expect(timeoutSignals[0]?.aborted).toBe(true);
+    expect(timeoutResult.status).toBe(503);
+    await expect(timeoutResult.json()).resolves.toEqual({
+      error: "integrations_unavailable",
+    });
 
     const shutdown = new AbortController();
     let started: (() => void) | undefined;
@@ -528,13 +547,7 @@ describe("TF integrations private HTTP runtime", () => {
               once: true,
             });
           });
-          return {
-            schemaVersion: 1,
-            requestId,
-            accountId,
-            operation: "spotify.status",
-            error: { code: "provider_unavailable" },
-          };
+          return response;
         },
       }),
       "/v1/commands",
@@ -550,7 +563,11 @@ describe("TF integrations private HTTP runtime", () => {
     );
     await executionStarted;
     shutdown.abort();
-    await expect(shutdownPending).resolves.toHaveProperty("status", 200);
+    const shutdownResult = await shutdownPending;
+    expect(shutdownResult.status).toBe(503);
+    await expect(shutdownResult.json()).resolves.toEqual({
+      error: "integrations_unavailable",
+    });
   });
 
   it("aborts command work when the HTTP client disconnects", async () => {

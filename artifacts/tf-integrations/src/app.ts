@@ -15,6 +15,7 @@ import {
   type TfIntegrationsErrorResponse,
   type TfIntegrationsSuccessResponse,
 } from "@workspace/tf-integrations-contract";
+import type { TfIntegrationsCommandContext } from "@workspace/tf-integrations-db";
 
 import type {
   InternalRequestAuthenticator,
@@ -30,7 +31,7 @@ const MAX_CONCURRENT_COMMANDS = 32;
 export interface TfIntegrationsCommandService {
   execute(
     command: TfIntegrationsCommand,
-    context: { readonly signal: AbortSignal },
+    context: TfIntegrationsCommandContext,
   ): Promise<TfIntegrationsSuccessResponse | TfIntegrationsErrorResponse>;
 }
 
@@ -198,19 +199,28 @@ function boundedInteger(
   maximum: number,
   label: string,
 ): number {
-  if (
-    !Number.isSafeInteger(value) ||
-    value < minimum ||
-    value > maximum
-  ) {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
     throw new Error(`invalid ${label}`);
   }
   return value;
 }
 
-interface CommandAbortScope {
-  readonly signal: AbortSignal;
+interface CommandAbortScope extends TfIntegrationsCommandContext {
   dispose(): void;
+}
+
+function commandContextExpired(context: TfIntegrationsCommandContext): boolean {
+  return (
+    context.signal.aborted ||
+    !Number.isSafeInteger(context.deadlineAt) ||
+    Date.now() >= context.deadlineAt
+  );
+}
+
+function respondIntegrationsUnavailable(res: Response): void {
+  if (!res.headersSent && !res.destroyed) {
+    res.status(503).json({ error: "integrations_unavailable" });
+  }
 }
 
 function createCommandAbortScope(
@@ -220,11 +230,12 @@ function createCommandAbortScope(
   shutdownSignal?: AbortSignal,
 ): CommandAbortScope {
   const controller = new AbortController();
+  const deadlineAt = Date.now() + timeoutMs;
   const abort = (): void => controller.abort();
   const abortOnClose = (): void => {
     if (!res.writableEnded) abort();
   };
-  const timeout = setTimeout(abort, timeoutMs);
+  const timeout = setTimeout(abort, Math.max(0, deadlineAt - Date.now()));
 
   req.once("aborted", abort);
   res.once("close", abortOnClose);
@@ -233,6 +244,7 @@ function createCommandAbortScope(
 
   return {
     signal: controller.signal,
+    deadlineAt,
     dispose(): void {
       clearTimeout(timeout);
       req.off("aborted", abort);
@@ -310,9 +322,9 @@ export function createTfIntegrationsApp(
       try {
         if (
           !(await isReady(options.readiness)) ||
-          scope.signal.aborted
+          commandContextExpired(scope)
         ) {
-          res.status(503).json({ error: "integrations_unavailable" });
+          respondIntegrationsUnavailable(res);
           return;
         }
         const claim = options.auth.claim(command.data.accountId, proof);
@@ -324,9 +336,11 @@ export function createTfIntegrationsApp(
           }
           return;
         }
-        const rawResponse = await options.service.execute(command.data, {
-          signal: scope.signal,
-        });
+        const rawResponse = await options.service.execute(command.data, scope);
+        if (commandContextExpired(scope)) {
+          respondIntegrationsUnavailable(res);
+          return;
+        }
         const success =
           tfIntegrationsSuccessResponseSchema.safeParse(rawResponse);
         const failure =
@@ -345,6 +359,10 @@ export function createTfIntegrationsApp(
         }
         res.status(200).json(parsed);
       } catch {
+        if (commandContextExpired(scope)) {
+          respondIntegrationsUnavailable(res);
+          return;
+        }
         if (!res.headersSent && !res.destroyed) {
           res.status(500).json({ error: "internal_error" });
         }

@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
-import type { Pool, QueryResult, QueryResultRow } from "pg";
+import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -8,6 +8,7 @@ import {
   PostgresProviderAccountRepository,
   type EncryptedTokenEnvelopeV1,
   type ProviderAccountRecord,
+  type TfIntegrationsCommandContext,
 } from "./index.js";
 
 type RecordedQuery = {
@@ -17,19 +18,98 @@ type RecordedQuery = {
 
 class RepositoryPoolDouble {
   readonly queries: RecordedQuery[] = [];
+  readonly client: RepositoryClientDouble;
+  connectCalls = 0;
   rows: QueryResultRow[] = [];
   rowCount = 0;
   failure?: unknown;
+  failurePattern = /\b(insert|update|delete)\b/i;
+  #blockedPattern?: RegExp;
+  #blockedResolve?: (result: QueryResult) => void;
+  #blockedReject?: (error: Error) => void;
+  #blockedStarted?: () => void;
+
+  constructor() {
+    this.client = new RepositoryClientDouble(this);
+  }
 
   async query(text: string, values?: readonly unknown[]): Promise<QueryResult> {
+    return this.execute(text, values);
+  }
+
+  async connect(): Promise<PoolClient> {
+    this.connectCalls += 1;
+    return this.client as unknown as PoolClient;
+  }
+
+  async execute(
+    text: string,
+    values?: readonly unknown[],
+  ): Promise<QueryResult> {
     this.queries.push({ text, values });
-    if (this.failure !== undefined) {
+    if (this.failure !== undefined && this.failurePattern.test(text)) {
       throw this.failure;
+    }
+    if (this.#blockedPattern?.test(text)) {
+      this.#blockedPattern = undefined;
+      this.#blockedStarted?.();
+      return await new Promise<QueryResult>((resolve, reject) => {
+        this.#blockedResolve = resolve;
+        this.#blockedReject = reject;
+      });
     }
     return {
       rows: this.rows,
       rowCount: this.rowCount,
     } as QueryResult;
+  }
+
+  blockNextMutation(pattern: RegExp): Promise<void> {
+    this.#blockedPattern = pattern;
+    return new Promise<void>((resolve) => {
+      this.#blockedStarted = resolve;
+    });
+  }
+
+  completeBlockedMutation(): void {
+    this.#blockedResolve?.({
+      rows: this.rows,
+      rowCount: this.rowCount,
+    } as QueryResult);
+    this.#clearBlockedMutation();
+  }
+
+  destroyBlockedMutation(): void {
+    this.#blockedReject?.(new Error("test connection destroyed"));
+    this.#clearBlockedMutation();
+  }
+
+  #clearBlockedMutation(): void {
+    this.#blockedResolve = undefined;
+    this.#blockedReject = undefined;
+    this.#blockedStarted = undefined;
+  }
+}
+
+class RepositoryClientDouble {
+  readonly releases: Array<Error | boolean | undefined> = [];
+  destroyed = false;
+  readonly #pool: RepositoryPoolDouble;
+
+  constructor(pool: RepositoryPoolDouble) {
+    this.#pool = pool;
+  }
+
+  async query(text: string, values?: readonly unknown[]): Promise<QueryResult> {
+    return this.#pool.execute(text, values);
+  }
+
+  release(error?: Error | boolean): void {
+    this.releases.push(error);
+    if (error === true || error instanceof Error) {
+      this.destroyed = true;
+      this.#pool.destroyBlockedMutation();
+    }
   }
 }
 
@@ -72,17 +152,37 @@ function repository(
   );
 }
 
+function commandContext(
+  controller = new AbortController(),
+): TfIntegrationsCommandContext {
+  return {
+    signal: controller.signal,
+    deadlineAt: Date.now() + 5_000,
+  };
+}
+
+function findQuery(pool: RepositoryPoolDouble, pattern: RegExp): RecordedQuery {
+  const query = pool.queries.find(({ text }) => pattern.test(text));
+  if (query === undefined) {
+    throw new Error(`Missing expected query: ${pattern.source}`);
+  }
+  return query;
+}
+
 describe("PostgresProviderAccountRepository", () => {
   it("uses parameterized SQL and creates a fresh unguessable generation for every replacement", async () => {
     const pool = new RepositoryPoolDouble();
     const stored = record();
     const target = repository(pool, [firstGeneration, secondGeneration]);
 
-    await target.upsert(stored);
-    await target.upsert(stored);
+    await target.upsert(stored, commandContext());
+    await target.upsert(stored, commandContext());
 
-    expect(pool.queries).toHaveLength(2);
-    const query = pool.queries[0]!;
+    const writes = pool.queries.filter(({ text }) =>
+      /insert into apollo_tf_integrations\.provider_accounts/i.test(text),
+    );
+    expect(writes).toHaveLength(2);
+    const query = writes[0]!;
     expect(query.text).toMatch(
       /insert into apollo_tf_integrations\.provider_accounts/i,
     );
@@ -101,8 +201,39 @@ describe("PostgresProviderAccountRepository", () => {
       stored.displayName,
       null,
     ]);
-    expect(pool.queries[1]?.values?.[2]).toBe(secondGeneration);
-    expect(pool.queries[1]?.values?.[2]).not.toBe(firstGeneration);
+    expect(writes[1]?.values?.[2]).toBe(secondGeneration);
+    expect(writes[1]?.values?.[2]).not.toBe(firstGeneration);
+  });
+
+  it("runs a successful mutation in one deadline-bounded checked-out transaction", async () => {
+    const pool = new RepositoryPoolDouble();
+    const target = repository(pool);
+
+    await target.upsert(record(), commandContext());
+
+    expect(pool.connectCalls).toBe(1);
+    expect(pool.queries.map(({ text }) => text.trim())).toEqual([
+      "BEGIN",
+      expect.stringMatching(/^SET LOCAL statement_timeout = \d+$/i),
+      expect.stringMatching(/^SET LOCAL lock_timeout = \d+$/i),
+      expect.stringMatching(
+        /^insert into apollo_tf_integrations\.provider_accounts/i,
+      ),
+      "COMMIT",
+    ]);
+    expect(pool.client.releases).toEqual([undefined]);
+    expect(pool.client.destroyed).toBe(false);
+
+    const statementTimeout = Number(
+      findQuery(pool, /^SET LOCAL statement_timeout/i).text.match(/\d+/)?.[0],
+    );
+    const lockTimeout = Number(
+      findQuery(pool, /^SET LOCAL lock_timeout/i).text.match(/\d+/)?.[0],
+    );
+    expect(statementTimeout).toBeGreaterThan(0);
+    expect(statementTimeout).toBeLessThanOrEqual(5_000);
+    expect(lockTimeout).toBeGreaterThan(0);
+    expect(lockTimeout).toBeLessThanOrEqual(3_000);
   });
 
   it("maps one canonical account-provider row and updates metadata atomically", async () => {
@@ -133,13 +264,15 @@ describe("PostgresProviderAccountRepository", () => {
     ]);
 
     pool.queries.length = 0;
-    await repository(pool).upsert(stored);
-    expect(pool.queries[0]?.text).toMatch(
+    await repository(pool).upsert(stored, commandContext());
+    const write = findQuery(
+      pool,
+      /insert into apollo_tf_integrations\.provider_accounts/i,
+    );
+    expect(write.text).toMatch(
       /on conflict \(account_id, provider\) do update[\s\S]*generation = excluded\.generation[\s\S]*token_envelope = excluded\.token_envelope[\s\S]*provider_user_id = excluded\.provider_user_id[\s\S]*display_name = excluded\.display_name[\s\S]*provider_login = excluded\.provider_login[\s\S]*updated_at = now\(\)/i,
     );
-    expect(pool.queries[0]?.text.match(/\b(insert|update)\b/gi)).toHaveLength(
-      2,
-    );
+    expect(write.text.match(/\b(insert|update)\b/gi)).toHaveLength(2);
   });
 
   it("keeps legacy Yandex metadata without login explicit and rejects cross-provider login", async () => {
@@ -161,13 +294,16 @@ describe("PostgresProviderAccountRepository", () => {
       repository(pool).get(legacy.accountId, "yandex"),
     ).resolves.toEqual({ ...legacy, generation: firstGeneration });
     await expect(
-      repository(pool).upsert(legacy),
+      repository(pool).upsert(legacy, commandContext()),
     ).rejects.toMatchObject({ code: "constraint_violation" });
     await expect(
-      repository(pool).upsert({
-        ...record(),
-        providerLogin: "spotify-login",
-      } as ProviderAccountRecord),
+      repository(pool).upsert(
+        {
+          ...record(),
+          providerLogin: "spotify-login",
+        } as ProviderAccountRecord,
+        commandContext(),
+      ),
     ).rejects.toMatchObject({ code: "constraint_violation" });
   });
 
@@ -175,18 +311,18 @@ describe("PostgresProviderAccountRepository", () => {
     const pool = new RepositoryPoolDouble();
     pool.rowCount = 1;
 
-    await expect(repository(pool).delete(accountId, "spotify")).resolves.toBe(
-      true,
-    );
+    await expect(
+      repository(pool).delete(accountId, "spotify", commandContext()),
+    ).resolves.toBe(true);
 
-    expect(pool.queries).toEqual([
-      {
-        text: expect.stringMatching(
-          /delete from apollo_tf_integrations\.provider_accounts\s+where account_id = \$1 and provider = \$2/i,
-        ),
-        values: [accountId, "spotify"],
-      },
-    ]);
+    expect(
+      findQuery(pool, /delete from apollo_tf_integrations\.provider_accounts/i),
+    ).toEqual({
+      text: expect.stringMatching(
+        /delete from apollo_tf_integrations\.provider_accounts\s+where account_id = \$1 and provider = \$2/i,
+      ),
+      values: [accountId, "spotify"],
+    });
   });
 
   it("refreshes only the exact loaded generation and can never insert a missing row", async () => {
@@ -200,23 +336,21 @@ describe("PostgresProviderAccountRepository", () => {
         "spotify",
         firstGeneration,
         envelope(),
+        commandContext(),
       ),
     ).resolves.toBe(false);
 
-    expect(pool.queries).toEqual([
-      {
-        text: expect.stringMatching(
-          /update apollo_tf_integrations\.provider_accounts[\s\S]*set token_envelope = \$4::jsonb[\s\S]*where account_id = \$1[\s\S]*and provider = \$2[\s\S]*and generation = \$3::uuid/i,
-        ),
-        values: [
-          accountId,
-          "spotify",
-          firstGeneration,
-          expect.any(String),
-        ],
-      },
-    ]);
-    expect(pool.queries[0]?.text).not.toMatch(/\binsert\b/i);
+    const update = findQuery(
+      pool,
+      /update apollo_tf_integrations\.provider_accounts/i,
+    );
+    expect(update).toEqual({
+      text: expect.stringMatching(
+        /update apollo_tf_integrations\.provider_accounts[\s\S]*set token_envelope = \$4::jsonb[\s\S]*where account_id = \$1[\s\S]*and provider = \$2[\s\S]*and generation = \$3::uuid/i,
+      ),
+      values: [accountId, "spotify", firstGeneration, expect.any(String)],
+    });
+    expect(update.text).not.toMatch(/\binsert\b/i);
 
     pool.rowCount = 1;
     await expect(
@@ -225,6 +359,7 @@ describe("PostgresProviderAccountRepository", () => {
         "spotify",
         firstGeneration,
         envelope(),
+        commandContext(),
       ),
     ).resolves.toBe(true);
   });
@@ -266,6 +401,7 @@ describe("PostgresProviderAccountRepository", () => {
     try {
       await repository(pool).upsert(
         record({ providerUserId: parameterCanary }),
+        commandContext(),
       );
     } catch (error) {
       errorText = String(error);
@@ -278,5 +414,32 @@ describe("PostgresProviderAccountRepository", () => {
     expect(errorText).not.toContain(connectionCanary);
     expect(errorText).not.toContain(parameterCanary);
     expect(errorText).not.toMatch(/insert|sqlstate/i);
+    expect(pool.queries.map(({ text }) => text.trim())).toContain("ROLLBACK");
+    expect(pool.queries.map(({ text }) => text.trim())).not.toContain("COMMIT");
+    expect(pool.client.releases).toEqual([undefined]);
+  });
+
+  it("destroys an in-flight mutation connection on abort so it cannot commit later", async () => {
+    const pool = new RepositoryPoolDouble();
+    const controller = new AbortController();
+    const started = pool.blockNextMutation(
+      /insert into apollo_tf_integrations\.provider_accounts/i,
+    );
+    const pending = repository(pool).upsert(
+      record(),
+      commandContext(controller),
+    );
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: "storage_unavailable",
+    });
+
+    await started;
+    controller.abort();
+    pool.completeBlockedMutation();
+
+    await rejected;
+    expect(pool.client.destroyed).toBe(true);
+    expect(pool.client.releases).toEqual([true]);
+    expect(pool.queries.map(({ text }) => text.trim())).not.toContain("COMMIT");
   });
 });

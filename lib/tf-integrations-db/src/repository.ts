@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { Pool, QueryResultRow } from "pg";
+import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { INTEGRATIONS_MIGRATION_MANIFEST } from "./migrations.js";
 
@@ -10,8 +10,15 @@ const GENERATION_UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const KEY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+const MAX_LOCK_TIMEOUT_MS = 3_000;
+const MAX_POSTGRES_TIMEOUT_MS = 2_147_483_647;
 
 export type Provider = "spotify" | "yandex";
+
+export interface TfIntegrationsCommandContext {
+  readonly signal: AbortSignal;
+  readonly deadlineAt: number;
+}
 
 export interface EncryptedTokenEnvelopeV1 {
   readonly version: 1;
@@ -31,24 +38,29 @@ export interface ProviderAccountRecord {
   readonly providerLogin?: string;
 }
 
-export type ProviderAccountWrite = Omit<
-  ProviderAccountRecord,
-  "generation"
->;
+export type ProviderAccountWrite = Omit<ProviderAccountRecord, "generation">;
 
 export interface ProviderAccountRepository {
   get(
     accountId: string,
     provider: Provider,
   ): Promise<ProviderAccountRecord | null>;
-  upsert(record: ProviderAccountWrite): Promise<void>;
+  upsert(
+    record: ProviderAccountWrite,
+    context: TfIntegrationsCommandContext,
+  ): Promise<void>;
   updateTokenEnvelopeIfGeneration(
     accountId: string,
     provider: Provider,
     generation: string,
     tokenEnvelope: EncryptedTokenEnvelopeV1,
+    context: TfIntegrationsCommandContext,
   ): Promise<boolean>;
-  delete(accountId: string, provider: Provider): Promise<boolean>;
+  delete(
+    accountId: string,
+    provider: Provider,
+    context: TfIntegrationsCommandContext,
+  ): Promise<boolean>;
   isMigrationCurrent(): Promise<boolean>;
 }
 
@@ -86,6 +98,16 @@ function mapStorageError(error: unknown): IntegrationsStorageError {
     return storageError("constraint_violation");
   }
   return storageError("storage_unavailable");
+}
+
+function remainingCommandMilliseconds(
+  context: TfIntegrationsCommandContext,
+): number {
+  if (!Number.isSafeInteger(context.deadlineAt)) return 0;
+  return Math.min(
+    MAX_POSTGRES_TIMEOUT_MS,
+    Math.max(0, context.deadlineAt - Date.now()),
+  );
 }
 
 function isPlainObject(
@@ -169,10 +191,7 @@ function validateAccountId(value: unknown): string {
 }
 
 function validateGeneration(value: unknown): string {
-  if (
-    typeof value !== "string" ||
-    !GENERATION_UUID_PATTERN.test(value)
-  ) {
+  if (typeof value !== "string" || !GENERATION_UUID_PATTERN.test(value)) {
     throw storageError("constraint_violation");
   }
   return value;
@@ -293,11 +312,107 @@ export class PostgresProviderAccountRepository implements ProviderAccountReposit
     }
   }
 
-  async upsert(record: ProviderAccountWrite): Promise<void> {
+  async #mutate<T>(
+    context: TfIntegrationsCommandContext,
+    operation: (client: PoolClient) => Promise<T>,
+  ): Promise<T> {
+    let client: PoolClient | undefined;
+    let released = false;
+    let cancelled = false;
+    let transactionStarted = false;
+    let cleanupFailed = false;
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    let failed = false;
+    let failure: unknown;
+    let result: T | undefined;
+    let hasResult = false;
+
+    const destroyClient = (): void => {
+      cancelled = true;
+      if (client === undefined || released) return;
+      const target = client;
+      released = true;
+      try {
+        target.release(true);
+      } catch {
+        cleanupFailed = true;
+      }
+    };
+    const requireActive = (): number => {
+      const remaining = remainingCommandMilliseconds(context);
+      if (cancelled || context.signal.aborted || remaining === 0) {
+        destroyClient();
+        throw storageError("storage_unavailable");
+      }
+      return remaining;
+    };
+    const onAbort = (): void => destroyClient();
+
+    context.signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      const initialRemaining = requireActive();
+      deadlineTimer = setTimeout(destroyClient, initialRemaining);
+
+      client = await this.#pool.connect();
+      requireActive();
+      await client.query("BEGIN");
+      transactionStarted = true;
+
+      const statementTimeoutMs = requireActive();
+      await client.query(`SET LOCAL statement_timeout = ${statementTimeoutMs}`);
+      const lockTimeoutMs = Math.min(MAX_LOCK_TIMEOUT_MS, requireActive());
+      await client.query(`SET LOCAL lock_timeout = ${lockTimeoutMs}`);
+
+      requireActive();
+      result = await operation(client);
+      requireActive();
+      await client.query("COMMIT");
+      transactionStarted = false;
+      requireActive();
+      hasResult = true;
+    } catch (error) {
+      failed = true;
+      failure = error;
+      if (client !== undefined && transactionStarted && !released) {
+        try {
+          await client.query("ROLLBACK");
+          transactionStarted = false;
+        } catch {
+          destroyClient();
+        }
+      }
+    } finally {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      context.signal.removeEventListener("abort", onAbort);
+      if (client !== undefined && !released) {
+        const target = client;
+        released = true;
+        try {
+          target.release();
+        } catch (error) {
+          cleanupFailed = true;
+          if (!failed) {
+            failed = true;
+            failure = error;
+          }
+        }
+      }
+    }
+
+    if (failed || cleanupFailed || !hasResult) {
+      throw mapStorageError(failure);
+    }
+    return result as T;
+  }
+
+  async upsert(
+    record: ProviderAccountWrite,
+    context: TfIntegrationsCommandContext,
+  ): Promise<void> {
     const validated = validateRecord(record);
     const generation = validateGeneration(this.#createGeneration());
-    try {
-      await this.#pool.query(
+    await this.#mutate(context, async (client) => {
+      await client.query(
         `
           insert into apollo_tf_integrations.provider_accounts
             (account_id, provider, generation, token_envelope,
@@ -321,9 +436,7 @@ export class PostgresProviderAccountRepository implements ProviderAccountReposit
           validated.providerLogin ?? null,
         ],
       );
-    } catch (error) {
-      throw mapStorageError(error);
-    }
+    });
   }
 
   async updateTokenEnvelopeIfGeneration(
@@ -331,13 +444,14 @@ export class PostgresProviderAccountRepository implements ProviderAccountReposit
     provider: Provider,
     generation: string,
     tokenEnvelope: EncryptedTokenEnvelopeV1,
+    context: TfIntegrationsCommandContext,
   ): Promise<boolean> {
     const validatedAccountId = validateAccountId(accountId);
     const validatedProvider = validateProvider(provider);
     const validatedGeneration = validateGeneration(generation);
     const validatedEnvelope = validateEnvelope(tokenEnvelope);
-    try {
-      const result = await this.#pool.query(
+    return this.#mutate(context, async (client) => {
+      const result = await client.query(
         `
           update apollo_tf_integrations.provider_accounts
           set token_envelope = $4::jsonb,
@@ -354,16 +468,18 @@ export class PostgresProviderAccountRepository implements ProviderAccountReposit
         ],
       );
       return result.rowCount === 1;
-    } catch (error) {
-      throw mapStorageError(error);
-    }
+    });
   }
 
-  async delete(accountId: string, provider: Provider): Promise<boolean> {
+  async delete(
+    accountId: string,
+    provider: Provider,
+    context: TfIntegrationsCommandContext,
+  ): Promise<boolean> {
     const validatedAccountId = validateAccountId(accountId);
     const validatedProvider = validateProvider(provider);
-    try {
-      const result = await this.#pool.query(
+    return this.#mutate(context, async (client) => {
+      const result = await client.query(
         `
           delete from apollo_tf_integrations.provider_accounts
           where account_id = $1 and provider = $2
@@ -371,9 +487,7 @@ export class PostgresProviderAccountRepository implements ProviderAccountReposit
         [validatedAccountId, validatedProvider],
       );
       return result.rowCount === 1;
-    } catch (error) {
-      throw mapStorageError(error);
-    }
+    });
   }
 
   async isMigrationCurrent(): Promise<boolean> {
