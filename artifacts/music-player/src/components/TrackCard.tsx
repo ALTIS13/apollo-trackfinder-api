@@ -1,17 +1,20 @@
-import { useState } from "react";
-import { Play, Pause, Download, Music, Loader2, ListPlus } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  Play,
+  Pause,
+  Download,
+  Music,
+  Loader2,
+  ListPlus,
+  X,
+} from "lucide-react";
 import { formatDuration } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { usePlayer } from "@/hooks/use-player";
-import { getGetTrackDownloadQueryOptions } from "@workspace/api-client-react";
 import type { TrackResult } from "@workspace/api-client-react";
-import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { motion } from "framer-motion";
-import {
-  reportTfAuthError,
-  tfRequestInit,
-} from "@/lib/tf-session-client";
+import { useTrackDownload } from "@/hooks/use-track-download";
 
 interface TrackCardProps {
   track: TrackResult;
@@ -19,11 +22,18 @@ interface TrackCardProps {
 }
 
 export function TrackCard({ track, index }: TrackCardProps) {
-  const { currentTrack, isPlaying, playTrack, togglePlayPause, isLoading, addToQueue } = usePlayer();
-  const [isDownloading, setIsDownloading] = useState(false);
+  const {
+    currentTrack,
+    isPlaying,
+    playTrack,
+    togglePlayPause,
+    isLoading,
+    addToQueue,
+  } = usePlayer();
   const [queueAdded, setQueueAdded] = useState(false);
-  const queryClient = useQueryClient();
   const { toast } = useToast();
+  const { state: downloadState, progress, start, cancel } = useTrackDownload();
+  const previousDownloadStateRef = useRef(downloadState);
 
   const isCurrentTrack = currentTrack?.id === track.id;
   const isThisLoading = isCurrentTrack && isLoading;
@@ -45,35 +55,41 @@ export function TrackCard({ track, index }: TrackCardProps) {
     toast({ title: "Добавлено в очередь", description: track.title });
   };
 
-  const handleDownload = async () => {
-    try {
-      setIsDownloading(true);
-      const res = await queryClient.fetchQuery(getGetTrackDownloadQueryOptions(track.id, {
-        request: tfRequestInit({ method: "GET" }),
-      }));
-      if (!res.downloadUrl) throw new Error("No download URL returned");
-      const a = document.createElement("a");
-      a.href = res.downloadUrl;
-      a.download = res.filename || `${track.artist} - ${track.title}.mp3`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      toast({ title: "Загрузка начата", description: `Скачиваем ${track.title}...` });
-    } catch (err) {
-      reportTfAuthError(err);
-      console.error("Download failed:", err);
-      toast({ title: "Ошибка загрузки", description: "Не удалось получить ссылку для скачивания.", variant: "destructive" });
-    } finally {
-      setIsDownloading(false);
+  useEffect(() => {
+    if (previousDownloadStateRef.current === downloadState) return;
+    previousDownloadStateRef.current = downloadState;
+    if (downloadState === "completed") {
+      toast({
+        title: "Загрузка начата",
+        description: `Скачиваем ${track.title}...`,
+      });
+    } else if (downloadState === "failed") {
+      toast({
+        title: "Ошибка загрузки",
+        description: "Не удалось начать загрузку.",
+        variant: "destructive",
+      });
+    } else if (downloadState === "canceled") {
+      toast({ title: "Загрузка отменена", description: track.title });
     }
-  };
+  }, [downloadState, toast, track.title]);
+
+  const isDownloadPending =
+    downloadState === "waiting" || downloadState === "active";
+  const downloadStatus =
+    downloadState === "active"
+      ? `Загрузка ${progress}%`
+      : "Подготовка загрузки";
 
   type TypeVariant = "original" | "remix" | "live" | "cover" | "outline";
   type SourceVariant = "youtube" | "soundcloud" | "default";
 
   const getVariant = (type: string): TypeVariant => {
     const map: Record<string, TypeVariant> = {
-      original: "original", remix: "remix", live: "live", cover: "cover",
+      original: "original",
+      remix: "remix",
+      live: "live",
+      cover: "cover",
     };
     return map[type] ?? "outline";
   };
@@ -138,14 +154,22 @@ export function TrackCard({ track, index }: TrackCardProps) {
             <p className="text-muted-foreground flex items-center gap-2 mt-1">
               <span className="truncate">{track.artist}</span>
               <span className="w-1 h-1 rounded-full bg-muted-foreground/30 inline-block" />
-              <span className="font-mono text-sm tracking-wide">{formatDuration(track.duration)}</span>
+              <span className="font-mono text-sm tracking-wide">
+                {formatDuration(track.duration)}
+              </span>
             </p>
           </div>
           <div className="flex flex-col items-end gap-2 flex-shrink-0">
-            <Badge variant={getVariant(track.type)} className="capitalize px-3 py-1">
+            <Badge
+              variant={getVariant(track.type)}
+              className="capitalize px-3 py-1"
+            >
               {track.type}
             </Badge>
-            <Badge variant={getSourceVariant(track.source)} className="uppercase text-[10px] tracking-wider px-2">
+            <Badge
+              variant={getSourceVariant(track.source)}
+              className="uppercase text-[10px] tracking-wider px-2"
+            >
               {track.source}
             </Badge>
           </div>
@@ -164,23 +188,75 @@ export function TrackCard({ track, index }: TrackCardProps) {
           title="Добавить в очередь"
         >
           <ListPlus className="w-4 h-4" />
-          <span className="sm:hidden">{queueAdded ? "✓ В очереди" : "В очередь"}</span>
+          <span className="sm:hidden">
+            {queueAdded ? "✓ В очереди" : "В очередь"}
+          </span>
           <span className="hidden sm:inline">{queueAdded ? "✓" : "+"}</span>
         </button>
 
-        <button
-          onClick={handleDownload}
-          disabled={isDownloading}
-          className="flex items-center gap-2 px-4 py-2 sm:p-3 rounded-xl bg-secondary/50 text-foreground hover:bg-secondary hover:text-primary hover:shadow-lg transition-all disabled:opacity-50 group/dl border border-white/5 w-full sm:w-auto justify-center"
-          title="Скачать"
+        <div
+          data-testid="track-download-action"
+          className="relative h-12 w-full min-w-0 sm:w-28"
         >
-          {isDownloading ? (
-            <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+          {isDownloadPending ? (
+            <div className="flex h-12 w-full items-center justify-between rounded-xl border border-white/5 bg-secondary/50 px-3 text-xs text-muted-foreground">
+              <span aria-label="Загрузка" title="Загрузка">
+                <Loader2 className="h-5 w-5 flex-shrink-0 animate-spin" />
+              </span>
+              <span
+                className="min-w-0 flex-1 truncate px-2 text-center"
+                role="status"
+              >
+                {downloadStatus}
+              </span>
+              <button
+                aria-label="Отменить загрузку"
+                className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background/50 hover:text-primary"
+                onClick={() => void cancel()}
+                title="Отменить загрузку"
+                type="button"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
           ) : (
-            <Download className="w-5 h-5 group-hover/dl:-translate-y-0.5 transition-transform" />
+            <button
+              aria-label="Скачать"
+              className="group/dl flex h-12 w-full items-center justify-center gap-2 rounded-xl border border-white/5 bg-secondary/50 px-4 text-foreground transition-all hover:bg-secondary hover:text-primary hover:shadow-lg disabled:opacity-50"
+              disabled={downloadState === "completed"}
+              onClick={() => void start(track)}
+              title="Скачать"
+              type="button"
+            >
+              <Download className="h-5 w-5 flex-shrink-0 transition-transform group-hover/dl:-translate-y-0.5" />
+              <span className="font-medium sm:hidden">Скачать</span>
+            </button>
           )}
-          <span className="sm:hidden font-medium">Скачать</span>
-        </button>
+          {downloadState === "failed" ? (
+            <span
+              className="absolute inset-x-1 bottom-1 truncate text-center text-[10px] text-destructive"
+              role="status"
+            >
+              Не удалось начать загрузку.
+            </span>
+          ) : null}
+          {downloadState === "canceled" ? (
+            <span
+              className="absolute inset-x-1 bottom-1 truncate text-center text-[10px] text-muted-foreground"
+              role="status"
+            >
+              Загрузка отменена
+            </span>
+          ) : null}
+          {downloadState === "completed" ? (
+            <span
+              className="absolute inset-x-1 bottom-1 truncate text-center text-[10px] text-muted-foreground"
+              role="status"
+            >
+              Файл открывается
+            </span>
+          ) : null}
+        </div>
       </div>
     </motion.div>
   );

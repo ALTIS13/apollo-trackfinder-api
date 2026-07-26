@@ -1,6 +1,13 @@
 import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TrackCard } from "@/components/TrackCard";
 import { PlayerProvider, usePlayer } from "@/hooks/use-player";
@@ -17,7 +24,7 @@ const runtime = vi.hoisted(() => ({
   logoutSession: vi.fn(),
   tfFetch: vi.fn(),
   streamQuery: vi.fn(),
-  downloadQuery: vi.fn(),
+  queueDownload: vi.fn(),
   toast: vi.fn(),
   lifecycleOptions: [] as Array<{
     onTerminalError: (error: unknown) => void;
@@ -27,7 +34,8 @@ const runtime = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/tf-session-client", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/tf-session-client")>();
+  const actual =
+    await importOriginal<typeof import("@/lib/tf-session-client")>();
   return {
     ...actual,
     fetchTfSession: runtime.fetchSession,
@@ -38,17 +46,15 @@ vi.mock("@/lib/tf-session-client", async (importOriginal) => {
 });
 
 vi.mock("@workspace/api-client-react", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@workspace/api-client-react")>();
+  const actual =
+    await importOriginal<typeof import("@workspace/api-client-react")>();
   return {
     ...actual,
     getGetTrackStreamQueryOptions: (trackId: string) => ({
       queryKey: ["test-stream", trackId],
       queryFn: runtime.streamQuery,
     }),
-    getGetTrackDownloadQueryOptions: (trackId: string) => ({
-      queryKey: ["test-download", trackId],
-      queryFn: runtime.downloadQuery,
-    }),
+    queueTrackDownloads: runtime.queueDownload,
   };
 });
 
@@ -103,12 +109,18 @@ class FakeAudio {
   readonly play = vi.fn().mockResolvedValue(undefined);
 }
 
-function PlayerActions({ includeDownload = false }: { includeDownload?: boolean }) {
+function PlayerActions({
+  includeDownload = false,
+}: {
+  includeDownload?: boolean;
+}) {
   const { playTrack } = usePlayer();
 
   return (
     <div data-testid="protected-runtime">
-      <button onClick={() => void playTrack(track)}>Play generated stream</button>
+      <button onClick={() => void playTrack(track)}>
+        Play generated stream
+      </button>
       {includeDownload ? <TrackCard track={track} index={0} /> : null}
     </div>
   );
@@ -144,7 +156,7 @@ beforeEach(() => {
   runtime.logoutSession.mockReset().mockResolvedValue(undefined);
   runtime.tfFetch.mockReset().mockResolvedValue(undefined);
   runtime.streamQuery.mockReset();
-  runtime.downloadQuery.mockReset();
+  runtime.queueDownload.mockReset();
   runtime.toast.mockReset();
   runtime.lifecycleOptions.length = 0;
   runtime.lifecycleStarts = 0;
@@ -163,17 +175,25 @@ afterEach(() => {
 describe("protected generated API auth failures", () => {
   it("invalidates and unmounts after generated stream unauthorized while preserving playback feedback", async () => {
     runtime.fetchSession.mockResolvedValueOnce(session);
-    runtime.streamQuery.mockRejectedValueOnce(generatedError(401, "unauthorized"));
+    runtime.streamQuery.mockRejectedValueOnce(
+      generatedError(401, "unauthorized"),
+    );
     renderProtectedRuntime();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Play generated stream" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Play generated stream" }),
+    );
 
-    expect(await screen.findByRole("heading", { name: "Требуется вход" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Требуется вход" }),
+    ).toBeInTheDocument();
     expect(screen.queryByTestId("protected-runtime")).not.toBeInTheDocument();
-    expect(runtime.toast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Ошибка воспроизведения",
-      variant: "destructive",
-    }));
+    expect(runtime.toast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Ошибка воспроизведения",
+        variant: "destructive",
+      }),
+    );
   });
 
   it.each([
@@ -187,32 +207,39 @@ describe("protected generated API auth failures", () => {
       new TfApiError(503, "policy_unavailable", "unavailable"),
       "Сервис временно недоступен",
     ],
-  ])("revalidates generated stream policy failures before protected content can remain mounted", async (
-    error,
-    refreshResult,
-    heading,
-  ) => {
-    runtime.fetchSession.mockResolvedValueOnce(session);
-    if (refreshResult instanceof Error) {
-      runtime.fetchSession.mockRejectedValueOnce(refreshResult);
-    } else {
-      runtime.fetchSession.mockResolvedValueOnce(refreshResult);
-    }
-    runtime.streamQuery.mockRejectedValueOnce(error);
-    renderProtectedRuntime();
+  ])(
+    "revalidates generated stream policy failures before protected content can remain mounted",
+    async (error, refreshResult, heading) => {
+      runtime.fetchSession.mockResolvedValueOnce(session);
+      if (refreshResult instanceof Error) {
+        runtime.fetchSession.mockRejectedValueOnce(refreshResult);
+      } else {
+        runtime.fetchSession.mockResolvedValueOnce(refreshResult);
+      }
+      runtime.streamQuery.mockRejectedValueOnce(error);
+      renderProtectedRuntime();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Play generated stream" }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Play generated stream" }),
+      );
 
-    await waitFor(() => {
-      expect(screen.queryByTestId("protected-runtime")).not.toBeInTheDocument();
-    });
-    expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
-    expect(runtime.fetchSession).toHaveBeenCalledTimes(2);
-    expect(runtime.toast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Ошибка воспроизведения",
-      variant: "destructive",
-    }));
-  });
+      await waitFor(() => {
+        expect(
+          screen.queryByTestId("protected-runtime"),
+        ).not.toBeInTheDocument();
+      });
+      expect(
+        await screen.findByRole("heading", { name: heading }),
+      ).toBeInTheDocument();
+      expect(runtime.fetchSession).toHaveBeenCalledTimes(2);
+      expect(runtime.toast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Ошибка воспроизведения",
+          variant: "destructive",
+        }),
+      );
+    },
+  );
 
   it.each([
     [generatedError(401, "unauthorized"), null, "Требуется вход"],
@@ -221,27 +248,24 @@ describe("protected generated API auth failures", () => {
       { ...session, entitlements: ["tf.downloads"] },
       "Модуль недоступен",
     ],
-  ])("forwards generated download auth failures and preserves download feedback", async (
-    error,
-    refreshSession,
-    heading,
-  ) => {
-    runtime.fetchSession.mockResolvedValueOnce(session);
-    if (refreshSession !== null) {
-      runtime.fetchSession.mockResolvedValueOnce(refreshSession);
-    }
-    runtime.downloadQuery.mockRejectedValueOnce(error);
-    renderProtectedRuntime(<PlayerActions includeDownload />);
+  ])(
+    "forwards generated queue auth failures",
+    async (error, refreshSession, heading) => {
+      runtime.fetchSession.mockResolvedValueOnce(session);
+      if (refreshSession !== null) {
+        runtime.fetchSession.mockResolvedValueOnce(refreshSession);
+      }
+      runtime.queueDownload.mockRejectedValueOnce(error);
+      renderProtectedRuntime(<PlayerActions includeDownload />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Скачать" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Скачать" }));
 
-    expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
-    expect(screen.queryByTestId("protected-runtime")).not.toBeInTheDocument();
-    expect(runtime.toast).toHaveBeenCalledWith(expect.objectContaining({
-      title: "Ошибка загрузки",
-      variant: "destructive",
-    }));
-  });
+      expect(
+        await screen.findByRole("heading", { name: heading }),
+      ).toBeInTheDocument();
+      expect(screen.queryByTestId("protected-runtime")).not.toBeInTheDocument();
+    },
+  );
 });
 
 describe("pre-open WebSocket auth integration", () => {
@@ -268,36 +292,37 @@ describe("pre-open WebSocket auth integration", () => {
   });
 
   it.each([
-    [
-      { ...session, entitlements: ["tf.downloads"] },
-      "Модуль недоступен",
-    ],
+    [{ ...session, entitlements: ["tf.downloads"] }, "Модуль недоступен"],
     [
       new TfApiError(503, "policy_unavailable", "unavailable"),
       "Сервис временно недоступен",
     ],
-  ])("keeps the player unmounted when websocket_unavailable refresh remains denied", async (
-    refreshResult,
-    heading,
-  ) => {
-    runtime.fetchSession.mockResolvedValueOnce(session);
-    if (refreshResult instanceof Error) {
-      runtime.fetchSession.mockRejectedValueOnce(refreshResult);
-    } else {
-      runtime.fetchSession.mockResolvedValueOnce(refreshResult);
-    }
-    renderProtectedRuntime();
+  ])(
+    "keeps the player unmounted when websocket_unavailable refresh remains denied",
+    async (refreshResult, heading) => {
+      runtime.fetchSession.mockResolvedValueOnce(session);
+      if (refreshResult instanceof Error) {
+        runtime.fetchSession.mockRejectedValueOnce(refreshResult);
+      } else {
+        runtime.fetchSession.mockResolvedValueOnce(refreshResult);
+      }
+      renderProtectedRuntime();
 
-    expect(await screen.findByTestId("protected-runtime")).toBeInTheDocument();
-    act(() => {
-      runtime.lifecycleOptions[0].onTerminalError(
-        new TfApiError(503, "websocket_unavailable", "unavailable"),
-      );
-    });
+      expect(
+        await screen.findByTestId("protected-runtime"),
+      ).toBeInTheDocument();
+      act(() => {
+        runtime.lifecycleOptions[0].onTerminalError(
+          new TfApiError(503, "websocket_unavailable", "unavailable"),
+        );
+      });
 
-    expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
-    expect(screen.queryByTestId("protected-runtime")).not.toBeInTheDocument();
-    expect(runtime.lifecycleStarts).toBe(1);
-    expect(runtime.lifecycleStops).toBe(1);
-  });
+      expect(
+        await screen.findByRole("heading", { name: heading }),
+      ).toBeInTheDocument();
+      expect(screen.queryByTestId("protected-runtime")).not.toBeInTheDocument();
+      expect(runtime.lifecycleStarts).toBe(1);
+      expect(runtime.lifecycleStops).toBe(1);
+    },
+  );
 });
