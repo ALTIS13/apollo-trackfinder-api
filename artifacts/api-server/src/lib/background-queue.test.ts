@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const ACCOUNT_ID = "10000000-0000-4000-8000-000000000001";
 const validJob = {
@@ -14,157 +14,146 @@ const validJob = {
   createdAt: "2026-07-26T00:00:00.000Z",
 } as const;
 
-interface FakeJob {
-  id: string;
-  data: unknown;
-  progress: number;
-  returnvalue?: unknown;
-  failedReason?: string;
-  getState(): Promise<string>;
-  remove(): Promise<void>;
-}
-
 class FakeQueue {
-  readonly added: Array<{ name: string; data: unknown }> = [];
-  readonly jobs = new Map<string, FakeJob>();
-  waiting = 0;
-  active = 0;
-  fail?: Error;
+  readonly added: Array<{ name: string; data: unknown; options: unknown }> = [];
+  readonly events = new Map<string, () => void>();
   closed = false;
-
+  fail?: Error;
+  constructor(
+    readonly waiting = 0,
+    readonly active = 0,
+  ) {}
+  on = vi.fn((event: string, listener: () => void) =>
+    this.events.set(event, listener),
+  );
   async waitUntilReady(): Promise<void> {
     if (this.fail) throw this.fail;
   }
-
   async getWaitingCount(): Promise<number> {
-    if (this.fail) throw this.fail;
     return this.waiting;
   }
-
   async getActiveCount(): Promise<number> {
-    if (this.fail) throw this.fail;
     return this.active;
   }
-
-  async add(name: string, data: unknown): Promise<{ id: string }> {
+  async add(
+    name: string,
+    data: unknown,
+    options: unknown,
+  ): Promise<{ id: string }> {
     if (this.fail) throw this.fail;
-    this.added.push({ name, data });
-    return { id: `job-${this.added.length}` };
+    this.added.push({ name, data, options });
+    return { id: (options as { jobId: string }).jobId };
   }
-
-  async getJob(id: string): Promise<FakeJob | undefined> {
-    if (this.fail) throw this.fail;
-    return this.jobs.get(id);
+  async getJob(): Promise<undefined> {
+    return undefined;
   }
-
-  async getWaiting(): Promise<FakeJob[]> {
-    return [...this.jobs.values()].filter(
-      async (job) => (await job.getState()) === "waiting",
-    );
+  async getWaiting(): Promise<never[]> {
+    return [];
   }
-
-  async getActive(): Promise<FakeJob[]> {
-    return [...this.jobs.values()];
+  async getDelayed(): Promise<never[]> {
+    return [];
   }
-
-  async getCompleted(): Promise<FakeJob[]> {
-    return [...this.jobs.values()];
+  async getActive(): Promise<never[]> {
+    return [];
   }
-
-  async getFailed(): Promise<FakeJob[]> {
-    return [...this.jobs.values()];
+  async getCompleted(): Promise<never[]> {
+    return [];
   }
-
+  async getFailed(): Promise<never[]> {
+    return [];
+  }
   async close(): Promise<void> {
     this.closed = true;
   }
 }
 
 class FakeRedis {
+  readonly events = new Map<string, () => void>();
+  readonly reservations = new Set<string>();
   readonly writes: unknown[][] = [];
   closed = false;
-  fail?: Error;
-
-  async connect(): Promise<void> {
-    if (this.fail) throw this.fail;
-  }
-
+  on = vi.fn((event: string, listener: () => void) =>
+    this.events.set(event, listener),
+  );
+  async connect(): Promise<void> {}
   async ping(): Promise<string> {
-    if (this.fail) throw this.fail;
     return "PONG";
   }
-
+  async eval(
+    _script: string,
+    _keys: number,
+    _key: string,
+    _now: string,
+    _expiry: string,
+    capacity: string,
+    jobId: string,
+  ): Promise<number> {
+    if (this.reservations.size >= Number(capacity)) return 0;
+    this.reservations.add(jobId);
+    return 1;
+  }
+  async zrem(_key: string, jobId: string): Promise<number> {
+    return this.reservations.delete(jobId) ? 1 : 0;
+  }
   async set(...args: unknown[]): Promise<string> {
-    if (this.fail) throw this.fail;
     this.writes.push(args);
     return "OK";
   }
-
+  async del(): Promise<number> {
+    return 1;
+  }
   async quit(): Promise<void> {
     this.closed = true;
   }
 }
 
-function fakeJob(
-  id: string,
-  data: unknown,
-  state: string,
-  options: { progress?: number; failedReason?: string } = {},
-): FakeJob {
-  return {
-    id,
-    data,
-    progress: options.progress ?? 0,
-    failedReason: options.failedReason,
-    getState: async () => state,
-    remove: async () => {},
-  };
-}
-
 const queueModule = await import("./background-queue.js");
 const adapterModule = queueModule as typeof queueModule & {
-  createDownloadQueueAdapter: (options: unknown) => {
+  createDownloadQueueAdapter(options: unknown): {
     init(): Promise<void>;
     shutdown(): Promise<void>;
-    enqueue(data: typeof validJob): Promise<{ jobId: string; position: number }>;
-    status(jobId: string, accountId: string): Promise<{ status: string; progress: number }>;
-    list(accountId: string): Promise<readonly { jobId: string; status: string }[]>;
-    cancel(jobId: string, accountId: string): Promise<{ status: string }>;
-    telemetry(): Promise<unknown>;
+    enqueue(
+      data: typeof validJob,
+    ): Promise<{ jobId: string; position: number }>;
     runtimeState(): unknown;
   };
 };
 
 function createAdapter(
-  producer = new FakeQueue(),
-  telemetry = new FakeQueue(),
-  cancellation = new FakeRedis(),
-  environment: Record<string, string | undefined> = {
-    TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/run/secrets/download-queue-url",
-    TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
-  },
-  readQueueUrl = async () => Buffer.from("redis://tf-download-redis:6379/0"),
+  options: {
+    producer?: FakeQueue;
+    telemetry?: FakeQueue;
+    redis?: FakeRedis;
+    url?: string;
+    environment?: Record<string, string | undefined>;
+    createQueue?: ReturnType<typeof vi.fn>;
+  } = {},
 ) {
+  const producer = options.producer ?? new FakeQueue();
+  const telemetry = options.telemetry ?? new FakeQueue();
+  const redis = options.redis ?? new FakeRedis();
+  const createQueue =
+    options.createQueue ??
+    vi.fn().mockReturnValueOnce(producer).mockReturnValueOnce(telemetry);
+  const createRedis = vi.fn().mockReturnValue(redis);
   return {
     adapter: adapterModule.createDownloadQueueAdapter({
-      environment,
-      readFile: readQueueUrl,
-      createQueue: vi
-        .fn()
-        .mockReturnValueOnce(producer)
-        .mockReturnValueOnce(telemetry),
-      createRedis: vi.fn().mockReturnValue(cancellation),
+      environment: options.environment ?? {
+        TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url",
+        TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+      },
+      readFile: async () =>
+        Buffer.from(options.url ?? "redis://tf-download-redis:6379/0"),
+      createQueue,
+      createRedis,
     }),
     producer,
     telemetry,
-    cancellation,
+    redis,
+    createQueue,
+    createRedis,
   };
 }
-
-afterEach(async () => {
-  await queueModule.shutdownBackgroundQueues();
-  vi.restoreAllMocks();
-});
 
 describe("download queue producer boundary", () => {
   it("is unavailable without initialization and never embeds a worker", async () => {
@@ -177,122 +166,118 @@ describe("download queue producer boundary", () => {
     );
   });
 
-  it("requires a readable bounded file-backed Redis URL", async () => {
-    for (const [environment, readQueueUrl] of [
-      [{}, async () => Buffer.from("redis://tf-download-redis:6379/0")],
-      [
-        { TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url" },
-        async () => Buffer.alloc(0),
-      ],
-      [
-        { TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url" },
-        async () => Buffer.alloc(2_049, 120),
-      ],
-      [
-        { TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url" },
-        async () => {
-          throw new Error("permission denied");
-        },
-      ],
-    ] as const) {
-      const { adapter } = createAdapter(undefined, undefined, undefined, environment, readQueueUrl);
-      await expect(adapter.init()).rejects.toThrow("invalid runtime configuration");
+  it("uses an atomic Redis reservation so concurrent callers at 199 admit only one", async () => {
+    const redis = new FakeRedis();
+    for (let index = 0; index < 199; index += 1)
+      redis.reservations.add(`existing-${index}`);
+    const { adapter, producer } = createAdapter({ redis });
+    await adapter.init();
+    const results = await Promise.allSettled([
+      adapter.enqueue(validJob),
+      adapter.enqueue(validJob),
+    ]);
+    expect(
+      results.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === "rejected"),
+    ).toHaveLength(1);
+    expect(producer.added).toHaveLength(1);
+    expect(producer.added[0]!.options).toEqual(
+      expect.objectContaining({
+        jobId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      }),
+    );
+  });
+
+  it("passes strict data and full retention options to Queue.add", async () => {
+    const { adapter, producer } = createAdapter();
+    await adapter.init();
+    await adapter.enqueue(validJob);
+    expect(producer.added[0]).toEqual({
+      name: "download",
+      data: validJob,
+      options: { jobId: expect.stringMatching(/^[0-9a-f-]{36}$/) },
+    });
+    expect(producer.added[0]!.data).not.toHaveProperty("sessionId");
+    expect(producer.added).toHaveLength(1);
+  });
+
+  it("uses exact default job options and decoded credentials with a numeric Redis database", async () => {
+    const { adapter, createQueue, createRedis } = createAdapter({
+      url: "rediss://user%20name:p%40ss@queue.example.test:6380/3",
+      environment: { TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url" },
+    });
+    await adapter.init();
+    expect(createQueue.mock.calls[0]![1]).toMatchObject({
+      defaultJobOptions: {
+        attempts: 2,
+        backoff: { type: "fixed", delay: 5_000 },
+        removeOnComplete: { age: 86_400, count: 200 },
+        removeOnFail: { age: 86_400, count: 200 },
+      },
+      connection: { username: "user name", password: "p@ss", db: 3 },
+    });
+    expect(createRedis.mock.calls[0]![0]).toMatchObject({
+      username: "user name",
+      password: "p@ss",
+      db: 3,
+    });
+  });
+
+  it("rejects noncanonical or out-of-range Redis database paths", async () => {
+    for (const url of [
+      "rediss://queue.example.test/03",
+      "rediss://queue.example.test/16",
+      "rediss://queue.example.test/3/extra",
+      "redis://tf-download-redis:6379/1",
+    ]) {
+      await expect(createAdapter({ url }).adapter.init()).rejects.toThrow(
+        "invalid runtime configuration",
+      );
     }
   });
 
-  it("allows plaintext Redis only for the exact same-node endpoint with an explicit flag", async () => {
-    const localWithoutFlag = createAdapter(
-      undefined,
-      undefined,
-      undefined,
-      { TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url" },
-    ).adapter;
-    await expect(localWithoutFlag.init()).rejects.toThrow("invalid runtime configuration");
-
-    const localWithQuery = createAdapter(
-      undefined,
-      undefined,
-      undefined,
-      {
-        TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url",
-        TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
-      },
-      async () => Buffer.from("redis://tf-download-redis:6379/0?unsafe=true"),
-    ).adapter;
-    await expect(localWithQuery.init()).rejects.toThrow("invalid runtime configuration");
-
-    const crossNodePlaintext = createAdapter(
-      undefined,
-      undefined,
-      undefined,
-      {
-        TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url",
-        TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
-      },
-      async () => Buffer.from("redis://queue.example.test:6379/0"),
-    ).adapter;
-    await expect(crossNodePlaintext.init()).rejects.toThrow("invalid runtime configuration");
-
-    const secureCrossNode = createAdapter(
-      undefined,
-      undefined,
-      undefined,
-      { TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url" },
-      async () => Buffer.from("rediss://queue.example.test:6380/0"),
-    ).adapter;
-    await expect(secureCrossNode.init()).resolves.toBeUndefined();
+  it("cleans partial synchronous initialization failures and sanitizes the error", async () => {
+    const producer = new FakeQueue();
+    const createQueue = vi
+      .fn()
+      .mockReturnValueOnce(producer)
+      .mockImplementationOnce(() => {
+        throw new Error("redis://secret");
+      });
+    const { adapter } = createAdapter({ producer, createQueue });
+    await expect(adapter.init()).rejects.toBeInstanceOf(
+      queueModule.DownloadQueueUnavailableError,
+    );
+    expect(producer.closed).toBe(true);
   });
 
-  it("enforces capacity before adding strict Task 1 data", async () => {
-    const { adapter, producer } = createAdapter();
-    producer.waiting = 199;
-    producer.active = 1;
-    await adapter.init();
-
-    await expect(adapter.enqueue(validJob)).rejects.toThrow("download_queue_full");
-    expect(producer.added).toEqual([]);
-  });
-
-  it("adds only strict account-owned contract data with bounded job options", async () => {
-    const { adapter, producer } = createAdapter();
-    await adapter.init();
-
-    await expect(adapter.enqueue(validJob)).resolves.toEqual({
-      jobId: "job-1",
-      position: 1,
+  it("shares concurrent initialization and registers non-throwing client error listeners", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
     });
-    expect(producer.added).toEqual([{ name: "download", data: validJob }]);
-    expect(producer.added[0]!.data).not.toHaveProperty("sessionId");
-  });
-
-  it("keeps telemetry unknown without changing the available producer backend", async () => {
-    const { adapter, telemetry } = createAdapter();
-    await adapter.init();
-    telemetry.fail = new Error("raw redis failure");
-
-    await expect(adapter.telemetry()).resolves.toEqual({
-      status: "unknown",
-      redisStatus: "unknown",
+    const producer = new FakeQueue();
+    producer.waitUntilReady = async () => gate;
+    const { adapter, telemetry, redis, createQueue } = createAdapter({
+      producer,
     });
-    expect(adapter.runtimeState()).toEqual({
-      backend: "redis",
-      workerEmbedded: false,
-    });
-  });
-
-  it("maps raw queue failures to a sanitized unavailable error", async () => {
-    const { adapter, producer } = createAdapter();
-    await adapter.init();
-    producer.fail = new Error("redis://secret.example:6379 refused");
-
-    await expect(adapter.enqueue(validJob)).rejects.toMatchObject({
-      code: "download_queue_unavailable",
-      message: "Download queue is unavailable",
-    });
+    const first = adapter.init();
+    const second = adapter.init();
+    release();
+    await Promise.all([first, second]);
+    expect(createQueue).toHaveBeenCalledTimes(2);
+    expect(producer.on).toHaveBeenCalledWith("error", expect.any(Function));
+    expect(telemetry.on).toHaveBeenCalledWith("error", expect.any(Function));
+    expect(redis.on).toHaveBeenCalledWith("error", expect.any(Function));
   });
 
   it("does not import an API worker or downloader implementation", async () => {
-    const source = await readFile(new URL("./background-queue.ts", import.meta.url), "utf8");
+    const source = await readFile(
+      new URL("./background-queue.ts", import.meta.url),
+      "utf8",
+    );
     expect(source).not.toMatch(/new\s+Worker/);
     expect(source).not.toContain("spawnAudioDownload");
     expect(source).not.toContain("inMemory");

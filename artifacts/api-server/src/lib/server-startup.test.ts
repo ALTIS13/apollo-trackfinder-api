@@ -21,6 +21,32 @@ afterEach(async () => {
 });
 
 describe("API listener startup", () => {
+  it("closes queue and Redis resources when post-listen initialization rejects", async () => {
+    const app = express();
+    const closeQueues = vi.fn(async () => {});
+    const closeRedis = vi.fn(async () => {});
+    let attempted: Server | undefined;
+
+    await expect(
+      startApiListener({
+        listen: () => {
+          attempted = app.listen(0, "127.0.0.1");
+          servers.push(attempted);
+          return attempted;
+        },
+        initialize: async () => {
+          throw new Error("queue initialization failed");
+        },
+        closeQueues,
+        closeRedis,
+      }),
+    ).rejects.toThrow("TF API startup failed");
+
+    expect(closeQueues).toHaveBeenCalledOnce();
+    expect(closeRedis).toHaveBeenCalledOnce();
+    expect(attempted?.listening).toBe(false);
+  });
+
   it("fails generically and closes startup resources when the port is occupied", async () => {
     const occupied = createServer();
     servers.push(occupied);

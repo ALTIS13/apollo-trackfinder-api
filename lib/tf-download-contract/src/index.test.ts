@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   DOWNLOAD_MAX_FILE_BYTES,
   DOWNLOAD_QUEUE_NAME,
+  DOWNLOAD_QUEUE_RESERVATION_KEY,
+  DOWNLOAD_QUEUE_RESERVATION_TTL_MS,
   downloadFileCommandSchema,
   downloadJobDataSchema,
   downloadJobResultSchema,
@@ -52,12 +54,27 @@ describe("tf download contract", () => {
     expect(DOWNLOAD_MAX_FILE_BYTES).toBe(1_073_741_824);
   });
 
+  it("exports shared bounded queue reservation coordination constants", () => {
+    expect(DOWNLOAD_QUEUE_RESERVATION_KEY).toBe(
+      "apollo-tf-downloads-v1:reservations",
+    );
+    expect(DOWNLOAD_QUEUE_RESERVATION_TTL_MS).toBe(86_400_000);
+  });
+
   it("accepts every download quality", () => {
-    expect(downloadQualitySchema.options).toEqual(["128", "192", "256", "320", "flac"]);
+    expect(downloadQualitySchema.options).toEqual([
+      "128",
+      "192",
+      "256",
+      "320",
+      "flac",
+    ]);
   });
 
   it("parses only strict bounded download job data", () => {
-    expect(downloadJobDataSchema.parse(downloadJobData)).toEqual(downloadJobData);
+    expect(downloadJobDataSchema.parse(downloadJobData)).toEqual(
+      downloadJobData,
+    );
     expect(() =>
       downloadJobDataSchema.parse({
         schemaVersion: 1,
@@ -71,31 +88,72 @@ describe("tf download contract", () => {
         unexpected: true,
       }),
     ).toThrow();
-    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, accountId: ACCOUNT_ID.toUpperCase() }).success).toBe(false);
-    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, trackId: "" }).success).toBe(false);
-    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, trackId: "x".repeat(4_097) }).success).toBe(false);
-    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, artist: " ".repeat(301) }).success).toBe(false);
-    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, title: " ".repeat(501) }).success).toBe(false);
-    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, sourceUrl: `https://youtube.com/${"x".repeat(4_080)}` }).success).toBe(false);
-    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, createdAt: "not-a-date" }).success).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        accountId: ACCOUNT_ID.toUpperCase(),
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({ ...downloadJobData, trackId: "" })
+        .success,
+    ).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        trackId: "x".repeat(4_097),
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        artist: " ".repeat(301),
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        title: " ".repeat(501),
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        sourceUrl: `https://youtube.com/${"x".repeat(4_080)}`,
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        createdAt: "not-a-date",
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects raw download job strings that exceed bounds before trimming", () => {
     expect(
-      downloadJobDataSchema.safeParse({ ...downloadJobData, trackId: `${"x".repeat(4_096)} ` })
-        .success,
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        trackId: `${"x".repeat(4_096)} `,
+      }).success,
     ).toBe(false);
     expect(
-      downloadJobDataSchema.safeParse({ ...downloadJobData, artist: `${"x".repeat(300)} ` })
-        .success,
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        artist: `${"x".repeat(300)} `,
+      }).success,
     ).toBe(false);
     expect(
-      downloadJobDataSchema.safeParse({ ...downloadJobData, title: `${"x".repeat(500)} ` })
-        .success,
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        title: `${"x".repeat(500)} `,
+      }).success,
     ).toBe(false);
     expect(
-      downloadJobDataSchema.safeParse({ ...downloadJobData, sourceUrl: ` ${MAX_SOURCE_URL}` })
-        .success,
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        sourceUrl: ` ${MAX_SOURCE_URL}`,
+      }).success,
     ).toBe(false);
   });
 
@@ -109,25 +167,83 @@ describe("tf download contract", () => {
         sourceUrl: MAX_SOURCE_URL,
       }).success,
     ).toBe(true);
-    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, trackId: "x".repeat(4_097) }).success).toBe(false);
-    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, artist: "x".repeat(301) }).success).toBe(false);
-    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, title: "x".repeat(501) }).success).toBe(false);
-    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, sourceUrl: `${MAX_SOURCE_URL}x` }).success).toBe(false);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, filename: "x".repeat(255) }).success).toBe(true);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, filename: "x".repeat(256) }).success).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        trackId: "x".repeat(4_097),
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        artist: "x".repeat(301),
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        title: "x".repeat(501),
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        sourceUrl: `${MAX_SOURCE_URL}x`,
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        filename: "x".repeat(255),
+      }).success,
+    ).toBe(true);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        filename: "x".repeat(256),
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects timestamps that are not real ISO instants", () => {
-    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, createdAt: "2026-07-26T00:00:00+99:99" }).success).toBe(false);
-    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, createdAt: "2026-02-30T00:00:00Z" }).success).toBe(false);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, completedAt: "2026-07-26T00:00:00-99:99" }).success).toBe(false);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, completedAt: "2026-02-30T00:00:00Z" }).success).toBe(false);
-    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, createdAt: "2026-07-26T00:00:00+23:59" }).success).toBe(true);
+    expect(
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        createdAt: "2026-07-26T00:00:00+99:99",
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        createdAt: "2026-02-30T00:00:00Z",
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        completedAt: "2026-07-26T00:00:00-99:99",
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        completedAt: "2026-02-30T00:00:00Z",
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        createdAt: "2026-07-26T00:00:00+23:59",
+      }).success,
+    ).toBe(true);
   });
 
   it("rejects every forbidden source URL through job data parsing", () => {
     for (const sourceUrl of FORBIDDEN_SOURCE_URLS) {
-      expect(downloadJobDataSchema.safeParse({ ...downloadJobData, sourceUrl }).success).toBe(false);
+      expect(
+        downloadJobDataSchema.safeParse({ ...downloadJobData, sourceUrl })
+          .success,
+      ).toBe(false);
     }
   });
 
@@ -144,35 +260,109 @@ describe("tf download contract", () => {
       "https://dzcdn.net/images/cover.jpg",
       "https://e-cdns-proxy-3.dzcdn.net/images/cover.jpg",
     ]) {
-      expect(parseAllowedDownloadSourceUrl(value)?.href).toBe(new URL(value).href);
+      expect(parseAllowedDownloadSourceUrl(value)?.href).toBe(
+        new URL(value).href,
+      );
     }
 
     for (const value of FORBIDDEN_SOURCE_URLS) {
       expect(parseAllowedDownloadSourceUrl(value)).toBeNull();
     }
 
-    expect(parseAllowedDownloadSourceUrl("https://youtube.com:443/watch?v=example")?.port).toBe("");
+    expect(
+      parseAllowedDownloadSourceUrl("https://youtube.com:443/watch?v=example")
+        ?.port,
+    ).toBe("");
   });
 
   it("parses only strict bounded completed job results", () => {
-    expect(downloadJobResultSchema.parse(downloadJobResult)).toEqual(downloadJobResult);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, extra: true }).success).toBe(false);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, storageKey: `${JOB_ID}.wav` }).success).toBe(false);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, fileSize: DOWNLOAD_MAX_FILE_BYTES + 1 }).success).toBe(false);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, fileSize: 1.5 }).success).toBe(false);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, mimeType: "audio/wav" }).success).toBe(false);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, storageKey: `${JOB_ID}.flac` }).success).toBe(false);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, storageKey: `${JOB_ID}.flac`, mimeType: "audio/flac" }).success).toBe(true);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, filename: "bad/name.mp3" }).success).toBe(false);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, filename: "bad\\name.mp3" }).success).toBe(false);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, filename: "bad\r\nname.mp3" }).success).toBe(false);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, filename: "bad\0name.mp3" }).success).toBe(false);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, filename: `x${"x".repeat(255)}` }).success).toBe(false);
-    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, completedAt: "2026-07-26" }).success).toBe(false);
+    expect(downloadJobResultSchema.parse(downloadJobResult)).toEqual(
+      downloadJobResult,
+    );
+    expect(
+      downloadJobResultSchema.safeParse({ ...downloadJobResult, extra: true })
+        .success,
+    ).toBe(false);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        storageKey: `${JOB_ID}.wav`,
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        fileSize: DOWNLOAD_MAX_FILE_BYTES + 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobResultSchema.safeParse({ ...downloadJobResult, fileSize: 1.5 })
+        .success,
+    ).toBe(false);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        mimeType: "audio/wav",
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        storageKey: `${JOB_ID}.flac`,
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        storageKey: `${JOB_ID}.flac`,
+        mimeType: "audio/flac",
+      }).success,
+    ).toBe(true);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        filename: "bad/name.mp3",
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        filename: "bad\\name.mp3",
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        filename: "bad\r\nname.mp3",
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        filename: "bad\0name.mp3",
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        filename: `x${"x".repeat(255)}`,
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadJobResultSchema.safeParse({
+        ...downloadJobResult,
+        completedAt: "2026-07-26",
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts only known job statuses", () => {
-    expect(downloadJobStatusSchema.options).toEqual(["queued", "active", "completed", "failed"]);
+    expect(downloadJobStatusSchema.options).toEqual([
+      "queued",
+      "active",
+      "completed",
+      "failed",
+    ]);
     expect(downloadJobStatusSchema.safeParse("delayed").success).toBe(false);
   });
 
@@ -186,16 +376,48 @@ describe("tf download contract", () => {
     } as const;
 
     expect(downloadFileCommandSchema.parse(command)).toEqual(command);
-    expect(downloadFileCommandSchema.parse({ ...command, range: { start: 0 } })).toEqual({
+    expect(
+      downloadFileCommandSchema.parse({ ...command, range: { start: 0 } }),
+    ).toEqual({
       ...command,
       range: { start: 0 },
     });
-    expect(downloadFileCommandSchema.safeParse({ ...command, requestId: "not-a-uuid" }).success).toBe(false);
-    expect(downloadFileCommandSchema.safeParse({ ...command, jobId: JOB_ID.toUpperCase() }).success).toBe(false);
-    expect(downloadFileCommandSchema.safeParse({ ...command, range: { start: -1 } }).success).toBe(false);
-    expect(downloadFileCommandSchema.safeParse({ ...command, range: { start: 0, end: DOWNLOAD_MAX_FILE_BYTES } }).success).toBe(false);
-    expect(downloadFileCommandSchema.safeParse({ ...command, range: { start: 2, end: 1 } }).success).toBe(false);
-    expect(downloadFileCommandSchema.safeParse({ ...command, range: { start: 0, extra: true } }).success).toBe(false);
-    expect(downloadFileCommandSchema.safeParse({ ...command, extra: true }).success).toBe(false);
+    expect(
+      downloadFileCommandSchema.safeParse({
+        ...command,
+        requestId: "not-a-uuid",
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadFileCommandSchema.safeParse({
+        ...command,
+        jobId: JOB_ID.toUpperCase(),
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadFileCommandSchema.safeParse({ ...command, range: { start: -1 } })
+        .success,
+    ).toBe(false);
+    expect(
+      downloadFileCommandSchema.safeParse({
+        ...command,
+        range: { start: 0, end: DOWNLOAD_MAX_FILE_BYTES },
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadFileCommandSchema.safeParse({
+        ...command,
+        range: { start: 2, end: 1 },
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadFileCommandSchema.safeParse({
+        ...command,
+        range: { start: 0, extra: true },
+      }).success,
+    ).toBe(false);
+    expect(
+      downloadFileCommandSchema.safeParse({ ...command, extra: true }).success,
+    ).toBe(false);
   });
 });

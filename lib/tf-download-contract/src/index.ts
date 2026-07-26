@@ -2,6 +2,8 @@ import { z } from "zod";
 
 export const DOWNLOAD_QUEUE_NAME = "apollo-tf-downloads-v1";
 export const DOWNLOAD_MAX_FILE_BYTES = 1_073_741_824;
+export const DOWNLOAD_QUEUE_RESERVATION_KEY = `${DOWNLOAD_QUEUE_NAME}:reservations`;
+export const DOWNLOAD_QUEUE_RESERVATION_TTL_MS = 86_400_000;
 
 const MAX_SOURCE_URL_LENGTH = 4_096;
 const MAX_TRACK_ID_LENGTH = 4_096;
@@ -22,14 +24,26 @@ const canonicalUuidSchema = z
   .uuid()
   .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 const isRealIsoInstant = (value: string): boolean => {
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/.exec(
-    value,
-  );
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/.exec(
+      value,
+    );
   if (!match) {
     return false;
   }
 
-  const [, yearText, monthText, dayText, hourText, minuteText, secondText, offset, offsetHourText, offsetMinuteText] = match;
+  const [
+    ,
+    yearText,
+    monthText,
+    dayText,
+    hourText,
+    minuteText,
+    secondText,
+    offset,
+    offsetHourText,
+    offsetMinuteText,
+  ] = match;
   const year = Number(yearText);
   const month = Number(monthText);
   const day = Number(dayText);
@@ -41,7 +55,8 @@ const isRealIsoInstant = (value: string): boolean => {
     hour > 23 ||
     minute > 59 ||
     second > 59 ||
-    (offset !== "Z" && (Number(offsetHourText) > 23 || Number(offsetMinuteText) > 59))
+    (offset !== "Z" &&
+      (Number(offsetHourText) > 23 || Number(offsetMinuteText) > 59))
   ) {
     return false;
   }
@@ -65,7 +80,13 @@ const timestampSchema = z
 const boundedTrimmedStringSchema = (max: number) =>
   z.string().min(1).max(max).trim().min(1);
 
-export const downloadQualitySchema = z.enum(["128", "192", "256", "320", "flac"]);
+export const downloadQualitySchema = z.enum([
+  "128",
+  "192",
+  "256",
+  "320",
+  "flac",
+]);
 export type DownloadQuality = z.infer<typeof downloadQualitySchema>;
 
 export interface DownloadJobData {
@@ -98,7 +119,8 @@ export interface DownloadFileCommand {
 
 const isAllowedSourceHost = (hostname: string): boolean =>
   allowedSourceHosts.some(
-    (allowedHost) => hostname === allowedHost || hostname.endsWith(`.${allowedHost}`),
+    (allowedHost) =>
+      hostname === allowedHost || hostname.endsWith(`.${allowedHost}`),
   );
 
 export const parseAllowedDownloadSourceUrl = (value: string): URL | null => {
@@ -121,10 +143,11 @@ export const parseAllowedDownloadSourceUrl = (value: string): URL | null => {
   }
 };
 
-const sourceUrlSchema = boundedTrimmedStringSchema(MAX_SOURCE_URL_LENGTH)
-  .refine((value) => parseAllowedDownloadSourceUrl(value) !== null, {
-    message: "Expected an allowed HTTPS download source URL",
-  });
+const sourceUrlSchema = boundedTrimmedStringSchema(
+  MAX_SOURCE_URL_LENGTH,
+).refine((value) => parseAllowedDownloadSourceUrl(value) !== null, {
+  message: "Expected an allowed HTTPS download source URL",
+});
 
 const downloadJobDataObjectSchema = z
   .object({
@@ -141,7 +164,9 @@ const downloadJobDataObjectSchema = z
 
 const storageKeySchema = z
   .string()
-  .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(mp3|flac)$/);
+  .regex(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(mp3|flac)$/,
+  );
 
 const filenameSchema = z
   .string()
@@ -166,12 +191,22 @@ const downloadJobResultObjectSchema = z
     "Storage key extension must match MIME type",
   );
 
-export const downloadJobStatusSchema = z.enum(["queued", "active", "completed", "failed"]);
+export const downloadJobStatusSchema = z.enum([
+  "queued",
+  "active",
+  "completed",
+  "failed",
+]);
 export type DownloadJobStatus = z.infer<typeof downloadJobStatusSchema>;
 
 const byteRangeSchema = z
   .object({
-    start: z.number().finite().int().min(0).max(DOWNLOAD_MAX_FILE_BYTES - 1),
+    start: z
+      .number()
+      .finite()
+      .int()
+      .min(0)
+      .max(DOWNLOAD_MAX_FILE_BYTES - 1),
     end: z
       .number()
       .finite()
@@ -195,7 +230,8 @@ const downloadFileCommandObjectSchema = z
   })
   .strict();
 
-export const downloadJobDataSchema: z.ZodType<DownloadJobData> = downloadJobDataObjectSchema;
+export const downloadJobDataSchema: z.ZodType<DownloadJobData> =
+  downloadJobDataObjectSchema;
 export const downloadJobResultSchema: z.ZodType<DownloadJobResult> =
   downloadJobResultObjectSchema;
 export const downloadFileCommandSchema: z.ZodType<DownloadFileCommand> =

@@ -1,7 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import {
   DOWNLOAD_QUEUE_NAME,
+  DOWNLOAD_QUEUE_RESERVATION_KEY,
+  DOWNLOAD_QUEUE_RESERVATION_TTL_MS,
   downloadJobDataSchema,
   downloadJobResultSchema,
   type DownloadJobData,
@@ -12,41 +15,33 @@ import Redis, { type RedisOptions } from "ioredis";
 
 const QUEUE_CAPACITY = 200;
 const CANCELLATION_TTL_MS = 1_800_000;
-const LOCAL_QUEUE_HOST = "tf-download-redis";
-const LOCAL_QUEUE_PORT = "6379";
-const LOCAL_QUEUE_DATABASE = "/0";
+const RESERVE_SCRIPT =
+  "redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1]); if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then return 0 end; redis.call('ZADD', KEYS[1], ARGV[2], ARGV[4]); return 1";
 
 export { type DownloadJobData, type DownloadJobResult };
-
 export class DownloadQueueUnavailableError extends Error {
   readonly code = "download_queue_unavailable";
-
   constructor() {
     super("Download queue is unavailable");
     this.name = "DownloadQueueUnavailableError";
   }
 }
-
 export class DownloadQueueCapacityError extends Error {
   readonly code = "download_queue_full";
-
   constructor() {
     super("download_queue_full");
     this.name = "DownloadQueueCapacityError";
   }
 }
-
 export interface DownloadQueueTelemetry {
   depth?: number;
   status: "healthy" | "unknown";
   redisStatus: "healthy" | "unknown";
 }
-
 export interface EnqueueResult {
   readonly jobId: string;
   readonly position: number;
 }
-
 export interface JobStatus {
   readonly status:
     | "waiting"
@@ -59,183 +54,189 @@ export interface JobStatus {
   readonly position?: number;
   readonly fileSize?: number;
 }
-
 export interface DownloadQueueCountReader {
   getWaitingCount(): Promise<number>;
   getActiveCount(): Promise<number>;
 }
 
-interface DownloadQueueJob {
+interface Job {
   readonly id?: string;
   readonly data: unknown;
   readonly progress: unknown;
   readonly returnvalue: unknown;
-  readonly failedReason: string | undefined;
+  readonly failedReason?: string;
   getState(): Promise<string>;
   remove(): Promise<void>;
 }
-
-interface DownloadQueue {
+interface QueueClient {
+  on?(event: "error", listener: () => void): unknown;
   waitUntilReady?(): Promise<unknown>;
-  close(): Promise<void>;
+  close(): Promise<unknown>;
   getWaitingCount(): Promise<number>;
   getActiveCount(): Promise<number>;
-  add(name: string, data: DownloadJobData): Promise<{ id?: string }>;
-  getJob(id: string): Promise<DownloadQueueJob | undefined>;
-  getWaiting(start?: number, end?: number): Promise<DownloadQueueJob[]>;
-  getActive(start?: number, end?: number): Promise<DownloadQueueJob[]>;
-  getCompleted(start?: number, end?: number): Promise<DownloadQueueJob[]>;
-  getFailed(start?: number, end?: number): Promise<DownloadQueueJob[]>;
+  add(
+    name: string,
+    data: DownloadJobData,
+    options: { jobId: string },
+  ): Promise<{ id?: string }>;
+  getJob(id: string): Promise<Job | undefined>;
+  getWaiting(start?: number, end?: number): Promise<Job[]>;
+  getDelayed(start?: number, end?: number): Promise<Job[]>;
+  getActive(start?: number, end?: number): Promise<Job[]>;
+  getCompleted(start?: number, end?: number): Promise<Job[]>;
+  getFailed(start?: number, end?: number): Promise<Job[]>;
 }
-
-interface DownloadCancellationClient {
-  connect?(): Promise<void>;
+interface RedisClient {
+  on?(event: "error", listener: () => void): unknown;
+  connect?(): Promise<unknown>;
   ping?(): Promise<unknown>;
+  eval(script: string, keys: number, ...args: string[]): Promise<unknown>;
+  zrem(key: string, member: string): Promise<unknown>;
   set(key: string, value: string, mode: "PX", ttl: number): Promise<unknown>;
+  del(key: string): Promise<unknown>;
   quit(): Promise<unknown>;
 }
-
-interface DownloadQueueClients {
-  readonly producer: DownloadQueue;
-  readonly telemetry: DownloadQueue;
-  readonly cancellation: DownloadCancellationClient;
+interface Clients {
+  producer: QueueClient;
+  telemetry: QueueClient;
+  cancellation: RedisClient;
 }
-
-interface DownloadQueueAdapterOptions {
-  readonly environment?: NodeJS.ProcessEnv;
-  readonly readFile?: (path: string) => Promise<Buffer>;
-  readonly createQueue?: (
+interface AdapterOptions {
+  environment?: NodeJS.ProcessEnv;
+  readFile?: (path: string) => Promise<Buffer>;
+  createQueue?: (
     name: string,
     options: ConstructorParameters<typeof Queue>[1],
-  ) => DownloadQueue;
-  readonly createRedis?: (options: RedisOptions) => DownloadCancellationClient;
-}
-
-interface QueueConfiguration {
-  readonly producerConnection: RedisOptions;
-  readonly telemetryConnection: RedisOptions;
-  readonly cancellationConnection: RedisOptions;
+  ) => QueueClient;
+  createRedis?: (options: RedisOptions) => RedisClient;
 }
 
 function unavailable(): DownloadQueueUnavailableError {
   return new DownloadQueueUnavailableError();
 }
-
-function invalidRuntimeConfiguration(): Error {
-  return new Error("invalid runtime configuration");
+class RuntimeConfigurationError extends Error {
+  constructor() {
+    super("invalid runtime configuration");
+  }
+}
+function invalid(): RuntimeConfigurationError {
+  return new RuntimeConfigurationError();
+}
+function closeAll(
+  clients: Partial<Clients>,
+): Promise<PromiseSettledResult<unknown>[]> {
+  return Promise.allSettled([
+    clients.producer?.close(),
+    clients.telemetry?.close(),
+    clients.cancellation?.quit(),
+  ]);
+}
+function attachErrorListener(client: {
+  on?(event: "error", listener: () => void): unknown;
+}): void {
+  client.on?.("error", () => {});
 }
 
 function parseQueueUrl(value: string): RedisOptions {
-  let parsed: URL;
+  let url: URL;
   try {
-    parsed = new URL(value);
+    url = new URL(value);
   } catch {
-    throw invalidRuntimeConfiguration();
+    throw invalid();
   }
-
-  const isLocalPlaintext =
-    parsed.protocol === "redis:" &&
-    parsed.hostname === LOCAL_QUEUE_HOST &&
-    parsed.port === LOCAL_QUEUE_PORT &&
-    parsed.pathname === LOCAL_QUEUE_DATABASE &&
-    parsed.search === "" &&
-    parsed.hash === "";
-  if (parsed.protocol !== "rediss:" && !isLocalPlaintext) {
-    throw invalidRuntimeConfiguration();
+  const local =
+    url.protocol === "redis:" &&
+    url.hostname === "tf-download-redis" &&
+    url.port === "6379" &&
+    url.pathname === "/0" &&
+    url.search === "" &&
+    url.hash === "";
+  if (url.protocol !== "rediss:" && !local) throw invalid();
+  if (url.search || url.hash || !/^\/(?:0|[1-9]|1[0-5])$/.test(url.pathname))
+    throw invalid();
+  const port = Number(url.port || "6379");
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw invalid();
+  let username: string | undefined;
+  let password: string | undefined;
+  try {
+    username = url.username ? decodeURIComponent(url.username) : undefined;
+    password = url.password ? decodeURIComponent(url.password) : undefined;
+  } catch {
+    throw invalid();
   }
-
-  const port = Number(parsed.port || "6379");
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw invalidRuntimeConfiguration();
-  }
-
   return {
-    host: parsed.hostname,
+    host: url.hostname,
     port,
-    username: parsed.username || undefined,
-    password: parsed.password || undefined,
-    ...(parsed.protocol === "rediss:" ? { tls: {} } : {}),
+    db: Number(url.pathname.slice(1)),
+    username,
+    password,
+    ...(url.protocol === "rediss:" ? { tls: {} } : {}),
   };
 }
-
-async function readQueueConfiguration(
-  environment: NodeJS.ProcessEnv,
-  readQueueUrl: (path: string) => Promise<Buffer>,
-): Promise<QueueConfiguration> {
-  const filePath = environment["TF_DOWNLOAD_QUEUE_REDIS_URL_FILE"];
-  if (filePath === undefined || filePath.length === 0) {
-    throw invalidRuntimeConfiguration();
-  }
-
-  let contents: Buffer;
+async function configuration(
+  env: NodeJS.ProcessEnv,
+  read: (path: string) => Promise<Buffer>,
+): Promise<{
+  producer: RedisOptions;
+  telemetry: RedisOptions;
+  cancellation: RedisOptions;
+}> {
+  const path = env.TF_DOWNLOAD_QUEUE_REDIS_URL_FILE;
+  if (!path) throw invalid();
+  let bytes: Buffer;
   try {
-    contents = await readQueueUrl(filePath);
+    bytes = await read(path);
   } catch {
-    throw invalidRuntimeConfiguration();
+    throw invalid();
   }
-  if (contents.length < 1 || contents.length > 2_048) {
-    throw invalidRuntimeConfiguration();
-  }
-
-  const rawUrl = contents.toString("utf8").trim();
-  if (rawUrl.length === 0) {
-    throw invalidRuntimeConfiguration();
-  }
-  const connection = parseQueueUrl(rawUrl);
-  const isLocalPlaintext =
-    rawUrl.startsWith("redis:") &&
-    connection.host === LOCAL_QUEUE_HOST &&
-    connection.port === Number(LOCAL_QUEUE_PORT);
+  if (bytes.length < 1 || bytes.length > 2048) throw invalid();
+  const raw = bytes.toString("utf8").trim();
+  const parsed = parseQueueUrl(raw);
   if (
-    isLocalPlaintext &&
-    environment["TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS"] !== "true"
-  ) {
-    throw invalidRuntimeConfiguration();
-  }
-
+    raw.startsWith("redis:") &&
+    env.TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS !== "true"
+  )
+    throw invalid();
   const common: RedisOptions = {
-    ...connection,
-    connectTimeout: 3_000,
+    ...parsed,
+    connectTimeout: 3000,
+    commandTimeout: 1000,
     enableOfflineQueue: false,
     lazyConnect: true,
     maxRetriesPerRequest: 1,
     retryStrategy: () => null,
   };
   return {
-    producerConnection: { ...common, commandTimeout: 5_000 },
-    telemetryConnection: { ...common, commandTimeout: 1_000 },
-    cancellationConnection: { ...common, commandTimeout: 1_000 },
+    producer: { ...common, commandTimeout: 5000 },
+    telemetry: common,
+    cancellation: common,
   };
 }
-
-function isOwnedJob(data: unknown, accountId: string): data is DownloadJobData {
+function owned(data: unknown, accountId: string): data is DownloadJobData {
   const parsed = downloadJobDataSchema.safeParse(data);
   return parsed.success && parsed.data.accountId === accountId;
 }
-
-function mapJobState(state: string, failedReason: string | undefined): JobStatus["status"] {
-  if (state === "failed" && failedReason === "download_canceled") {
+function mapState(state: string, failedReason?: string): JobStatus["status"] {
+  if (state === "failed" && failedReason === "download_canceled")
     return "canceled";
-  }
   if (
-    state === "waiting" ||
-    state === "active" ||
-    state === "completed" ||
-    state === "failed"
-  ) {
-    return state;
-  }
+    [
+      "waiting",
+      "delayed",
+      "paused",
+      "prioritized",
+      "waiting-children",
+    ].includes(state)
+  )
+    return "waiting";
+  if (["active", "completed", "failed"].includes(state))
+    return state as JobStatus["status"];
   return "unknown";
 }
-
-function toJobStatus(
-  job: DownloadQueueJob,
-  state: string,
-  position?: number,
-): JobStatus {
+function statusOf(job: Job, raw: string, position?: number): JobStatus {
   const result = downloadJobResultSchema.safeParse(job.returnvalue);
   return {
-    status: mapJobState(state, job.failedReason),
+    status: mapState(raw, job.failedReason),
     progress: typeof job.progress === "number" ? job.progress : 0,
     ...(position === undefined ? {} : { position }),
     ...(result.success ? { fileSize: result.data.fileSize } : {}),
@@ -260,179 +261,246 @@ export async function collectDownloadQueueTelemetry(
   }
 }
 
-export function createDownloadQueueAdapter(options: DownloadQueueAdapterOptions = {}) {
-  const environment = options.environment ?? process.env;
-  const readQueueUrl = options.readFile ?? readFile;
-  const createQueue =
+export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
+  const env = options.environment ?? process.env;
+  const read = options.readFile ?? readFile;
+  const makeQueue =
     options.createQueue ??
     ((name, queueOptions) =>
       new Queue<DownloadJobData, DownloadJobResult>(name, queueOptions));
-  const createRedis = options.createRedis ?? ((redisOptions) => new Redis(redisOptions));
-  let clients: DownloadQueueClients | undefined;
-
-  const requireClients = (): DownloadQueueClients => {
-    if (clients === undefined) throw unavailable();
+  const makeRedis =
+    options.createRedis ??
+    ((redisOptions) => new Redis(redisOptions) as unknown as RedisClient);
+  let clients: Clients | undefined;
+  let initializing: Promise<void> | undefined;
+  let stopping: Promise<void> | undefined;
+  const requireClients = (): Clients => {
+    if (!clients) throw unavailable();
     return clients;
   };
-
+  const release = async (client: RedisClient, jobId: string): Promise<void> => {
+    await client.zrem(DOWNLOAD_QUEUE_RESERVATION_KEY, jobId);
+  };
+  const cancelState = async (
+    current: Clients,
+    job: Job,
+    jobId: string,
+    raw: string,
+  ): Promise<{ status: JobStatus["status"] }> => {
+    const state = mapState(raw, job.failedReason);
+    if (state === "waiting") {
+      try {
+        await job.remove();
+        await release(current.cancellation, jobId);
+        return { status: "canceled" };
+      } catch {
+        const reread = await job.getState();
+        if (mapState(reread, job.failedReason) === "waiting")
+          throw unavailable();
+        return cancelState(current, job, jobId, reread);
+      }
+    }
+    if (state === "active") {
+      await current.cancellation.set(
+        `${DOWNLOAD_QUEUE_NAME}:cancel:${jobId}`,
+        "1",
+        "PX",
+        CANCELLATION_TTL_MS,
+      );
+      const after = mapState(await job.getState(), job.failedReason);
+      if (after !== "active") {
+        await current.cancellation.del(
+          `${DOWNLOAD_QUEUE_NAME}:cancel:${jobId}`,
+        );
+        return { status: after };
+      }
+      return { status: "canceled" };
+    }
+    return { status: state };
+  };
   return {
     async init(): Promise<void> {
-      if (clients !== undefined) return;
-      const configuration = await readQueueConfiguration(environment, readQueueUrl);
-      const producer = createQueue(DOWNLOAD_QUEUE_NAME, {
-        connection: configuration.producerConnection,
-        defaultJobOptions: {
-          attempts: 2,
-          backoff: { type: "fixed", delay: 5_000 },
-          removeOnComplete: { age: 86_400, count: 200 },
-          removeOnFail: { age: 86_400, count: 200 },
-        },
-      });
-      const telemetry = createQueue(DOWNLOAD_QUEUE_NAME, {
-        connection: configuration.telemetryConnection,
-      });
-      const cancellation = createRedis(configuration.cancellationConnection);
-      const candidate = { producer, telemetry, cancellation };
+      if (clients) return;
+      if (stopping) await stopping;
+      if (clients) return;
+      if (initializing) return initializing;
+      initializing = (async () => {
+        const partial: Partial<Clients> = {};
+        try {
+          const config = await configuration(env, read);
+          partial.producer = makeQueue(DOWNLOAD_QUEUE_NAME, {
+            connection: config.producer,
+            defaultJobOptions: {
+              attempts: 2,
+              backoff: { type: "fixed", delay: 5000 },
+              removeOnComplete: { age: 86400, count: 200 },
+              removeOnFail: { age: 86400, count: 200 },
+            },
+          });
+          attachErrorListener(partial.producer);
+          partial.telemetry = makeQueue(DOWNLOAD_QUEUE_NAME, {
+            connection: config.telemetry,
+          });
+          attachErrorListener(partial.telemetry);
+          const cancellation = makeRedis(config.cancellation);
+          partial.cancellation = cancellation;
+          attachErrorListener(cancellation);
+          await Promise.all([
+            partial.producer.waitUntilReady?.(),
+            partial.telemetry.waitUntilReady?.(),
+            cancellation.connect?.(),
+          ]);
+          await cancellation.ping?.();
+          clients = partial as Clients;
+        } catch (error) {
+          await closeAll(partial);
+          if (error instanceof RuntimeConfigurationError) throw error;
+          throw unavailable();
+        }
+      })();
       try {
-        await Promise.all([
-          producer.waitUntilReady?.(),
-          telemetry.waitUntilReady?.(),
-          cancellation.connect?.(),
-        ]);
-        await cancellation.ping?.();
-        clients = candidate;
-      } catch {
-        await Promise.allSettled([
-          producer.close(),
-          telemetry.close(),
-          cancellation.quit(),
-        ]);
-        throw unavailable();
+        await initializing;
+      } finally {
+        initializing = undefined;
       }
     },
-
     async shutdown(): Promise<void> {
-      const currentClients = clients;
-      clients = undefined;
-      if (currentClients === undefined) return;
-      await Promise.allSettled([
-        currentClients.producer.close(),
-        currentClients.telemetry.close(),
-        currentClients.cancellation.quit(),
-      ]);
+      if (stopping) return stopping;
+      stopping = (async () => {
+        await initializing?.catch(() => {});
+        const current = clients;
+        clients = undefined;
+        if (current) await closeAll(current);
+      })();
+      try {
+        await stopping;
+      } finally {
+        stopping = undefined;
+      }
     },
-
     async enqueue(data: DownloadJobData): Promise<EnqueueResult> {
       const parsed = downloadJobDataSchema.safeParse(data);
       if (!parsed.success) throw new Error("invalid download job");
       try {
-        const producer = requireClients().producer;
-        const [waiting, active] = await Promise.all([
-          producer.getWaitingCount(),
-          producer.getActiveCount(),
-        ]);
-        if (waiting + active >= QUEUE_CAPACITY) {
-          throw new DownloadQueueCapacityError();
+        const current = requireClients();
+        const jobId = randomUUID();
+        const now = Date.now();
+        const admitted = Number(
+          await current.cancellation.eval(
+            RESERVE_SCRIPT,
+            1,
+            DOWNLOAD_QUEUE_RESERVATION_KEY,
+            String(now),
+            String(now + DOWNLOAD_QUEUE_RESERVATION_TTL_MS),
+            String(QUEUE_CAPACITY),
+            jobId,
+          ),
+        );
+        if (admitted !== 1) throw new DownloadQueueCapacityError();
+        try {
+          const job = await current.producer.add("download", parsed.data, {
+            jobId,
+          });
+          if (!job.id) throw unavailable();
+          return { jobId, position: 0 };
+        } catch (error) {
+          await release(current.cancellation, jobId).catch(() => {});
+          throw error;
         }
-        const job = await producer.add("download", parsed.data);
-        if (job.id === undefined) throw unavailable();
-        return { jobId: job.id, position: waiting + 1 };
       } catch (error) {
-        if (error instanceof DownloadQueueCapacityError) throw error;
-        if (error instanceof DownloadQueueUnavailableError) throw error;
+        if (
+          error instanceof DownloadQueueCapacityError ||
+          error instanceof DownloadQueueUnavailableError
+        )
+          throw error;
         throw unavailable();
       }
     },
-
     async telemetry(): Promise<DownloadQueueTelemetry> {
-      if (clients === undefined) {
-        return { status: "unknown", redisStatus: "unknown" };
-      }
-      return collectDownloadQueueTelemetry(clients.telemetry);
+      return clients
+        ? collectDownloadQueueTelemetry(clients.telemetry)
+        : { status: "unknown", redisStatus: "unknown" };
     },
-
-    runtimeState(): { backend: "redis" | "unavailable"; workerEmbedded: false } {
+    runtimeState(): {
+      backend: "redis" | "unavailable";
+      workerEmbedded: false;
+    } {
       return {
-        backend: clients === undefined ? "unavailable" : "redis",
+        backend: clients ? "redis" : "unavailable",
         workerEmbedded: false,
       };
     },
-
     async status(jobId: string, accountId: string): Promise<JobStatus> {
       try {
         const producer = requireClients().producer;
         const job = await producer.getJob(jobId);
-        if (job === undefined || !isOwnedJob(job.data, accountId)) {
+        if (!job || !owned(job.data, accountId))
           return { status: "unknown", progress: 0 };
-        }
-        const state = await job.getState();
-        if (state !== "waiting") return toJobStatus(job, state);
-        const waiting = await producer.getWaiting(0, QUEUE_CAPACITY - 1);
-        const position = waiting.findIndex((candidate) => candidate.id === job.id);
-        return toJobStatus(job, state, position < 0 ? undefined : position + 1);
+        const raw = await job.getState();
+        if (mapState(raw, job.failedReason) !== "waiting")
+          return statusOf(job, raw);
+        const waiting = [
+          ...(await producer.getWaiting(0, 199)),
+          ...(await producer.getDelayed(0, 199)),
+        ];
+        const index = waiting.findIndex((candidate) => candidate.id === jobId);
+        return statusOf(job, raw, index < 0 ? undefined : index + 1);
       } catch (error) {
         if (error instanceof DownloadQueueUnavailableError) throw error;
         throw unavailable();
       }
     },
-
-    async list(accountId: string): Promise<readonly (JobStatus & { jobId: string })[]> {
+    async list(
+      accountId: string,
+    ): Promise<readonly (JobStatus & { jobId: string })[]> {
       try {
         const producer = requireClients().producer;
-        const [waiting, active, completed, failed] = await Promise.all([
-          producer.getWaiting(0, QUEUE_CAPACITY - 1),
-          producer.getActive(0, QUEUE_CAPACITY - 1),
-          producer.getCompleted(0, QUEUE_CAPACITY - 1),
-          producer.getFailed(0, QUEUE_CAPACITY - 1),
+        const collections = await Promise.all([
+          producer.getWaiting(0, 199),
+          producer.getDelayed(0, 199),
+          producer.getActive(0, 199),
+          producer.getCompleted(0, 199),
+          producer.getFailed(0, 199),
         ]);
-        const results: Array<JobStatus & { jobId: string }> = [];
+        const labels = [
+          "waiting",
+          "delayed",
+          "active",
+          "completed",
+          "failed",
+        ] as const;
         const seen = new Set<string>();
-        for (const [jobs, state] of [
-          [waiting, "waiting"],
-          [active, "active"],
-          [completed, "completed"],
-          [failed, "failed"],
-        ] as const) {
-          for (const [index, job] of jobs.entries()) {
-            if (job.id === undefined || seen.has(job.id) || !isOwnedJob(job.data, accountId)) {
-              continue;
+        const result: Array<JobStatus & { jobId: string }> = [];
+        collections.forEach((jobs, collection) =>
+          jobs.forEach((job, index) => {
+            if (job.id && !seen.has(job.id) && owned(job.data, accountId)) {
+              seen.add(job.id);
+              result.push({
+                jobId: job.id,
+                ...statusOf(
+                  job,
+                  labels[collection]!,
+                  collection < 2 ? index + 1 : undefined,
+                ),
+              });
             }
-            seen.add(job.id);
-            results.push({
-              jobId: job.id,
-              ...toJobStatus(job, state, state === "waiting" ? index + 1 : undefined),
-            });
-          }
-        }
-        return results;
+          }),
+        );
+        return result;
       } catch (error) {
         if (error instanceof DownloadQueueUnavailableError) throw error;
         throw unavailable();
       }
     },
-
-    async cancel(jobId: string, accountId: string): Promise<{ status: JobStatus["status"] }> {
+    async cancel(
+      jobId: string,
+      accountId: string,
+    ): Promise<{ status: JobStatus["status"] }> {
       try {
-        const currentClients = requireClients();
-        const job = await currentClients.producer.getJob(jobId);
-        if (job === undefined || !isOwnedJob(job.data, accountId)) {
-          return { status: "unknown" };
-        }
-        const state = mapJobState(await job.getState(), job.failedReason);
-        if (state === "waiting") {
-          await job.remove();
-          return { status: "canceled" };
-        }
-        if (state === "active") {
-          await currentClients.cancellation.set(
-            `${DOWNLOAD_QUEUE_NAME}:cancel:${jobId}`,
-            "1",
-            "PX",
-            CANCELLATION_TTL_MS,
-          );
-          return { status: "canceled" };
-        }
-        return { status: state };
+        const current = requireClients();
+        const job = await current.producer.getJob(jobId);
+        if (!job || !owned(job.data, accountId)) return { status: "unknown" };
+        return cancelState(current, job, jobId, await job.getState());
       } catch (error) {
         if (error instanceof DownloadQueueUnavailableError) throw error;
         throw unavailable();
@@ -442,51 +510,43 @@ export function createDownloadQueueAdapter(options: DownloadQueueAdapterOptions 
 }
 
 let runtime = createDownloadQueueAdapter();
-
 export async function initBackgroundQueues(): Promise<void> {
   await runtime.init();
 }
-
 export async function shutdownBackgroundQueues(): Promise<void> {
   await runtime.shutdown();
 }
-
-export async function enqueueDownload(data: DownloadJobData): Promise<EnqueueResult> {
+export async function enqueueDownload(
+  data: DownloadJobData,
+): Promise<EnqueueResult> {
   return runtime.enqueue(data);
 }
-
 export async function getDownloadQueueTelemetry(): Promise<DownloadQueueTelemetry> {
   return runtime.telemetry();
 }
-
 export function getDownloadQueueRuntimeState(): {
   backend: "redis" | "unavailable";
   workerEmbedded: false;
 } {
   return runtime.runtimeState();
 }
-
 export const queueRuntimeState = getDownloadQueueRuntimeState;
-
 export async function getDownloadQueueDepth(): Promise<number> {
   const telemetry = await getDownloadQueueTelemetry();
   if (telemetry.depth === undefined) throw unavailable();
   return telemetry.depth;
 }
-
 export async function getDownloadJobStatus(
   jobId: string,
   accountId: string,
 ): Promise<JobStatus> {
   return runtime.status(jobId, accountId);
 }
-
 export async function listSessionDownloadJobs(
   accountId: string,
 ): Promise<readonly (JobStatus & { jobId: string })[]> {
   return runtime.list(accountId);
 }
-
 export async function cancelDownloadJob(
   jobId: string,
   accountId: string,
