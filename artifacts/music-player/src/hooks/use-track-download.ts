@@ -37,6 +37,7 @@ interface PendingQueueGeneration {
   readonly abort: AbortController;
   canceled: boolean;
   compensationStarted: boolean;
+  cancelGeneration: number | null;
 }
 
 const INITIAL_SNAPSHOT: DownloadSnapshot = { state: "idle", progress: 0 };
@@ -50,6 +51,14 @@ function fileNavigationUrl(jobId: string): string {
   return apiUrl(getGetDownloadJobFileUrl(jobId).replace(/^\/api(?=\/)/, ""));
 }
 
+function shouldReportCancellationError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("status" in error)) {
+    return false;
+  }
+  const status = error.status;
+  return status === 401 || status === 403 || status === 409;
+}
+
 export function useTrackDownload(): TrackDownloadController {
   const [snapshot, setSnapshot] = useState<DownloadSnapshot>(INITIAL_SNAPSHOT);
   const mountedRef = useRef(true);
@@ -58,6 +67,7 @@ export function useTrackDownload(): TrackDownloadController {
   const jobIdRef = useRef<string | null>(null);
   const pendingQueuesRef = useRef(new Map<number, PendingQueueGeneration>());
   const cancelAbortControllersRef = useRef(new Set<AbortController>());
+  const knownCancelPromiseRef = useRef<Promise<void> | null>(null);
   const pollAbortRef = useRef<AbortController | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollInFlightRef = useRef(false);
@@ -90,30 +100,18 @@ export function useTrackDownload(): TrackDownloadController {
     pollInFlightRef.current = false;
   }, []);
 
-  const cancelJob = useCallback(
-    async (jobId: string, reportGeneration: number | null): Promise<void> => {
-      const abort = new AbortController();
-      cancelAbortControllersRef.current.add(abort);
-      try {
-        await cancelDownloadJob(
-          jobId,
-          tfRequestInit({ method: "DELETE", signal: abort.signal }),
-        );
-      } catch (error) {
-        if (
-          !abort.signal.aborted &&
-          reportGeneration !== null &&
-          mountedRef.current &&
-          reportGeneration === generationRef.current
-        ) {
-          reportTfAuthError(error);
-        }
-      } finally {
-        cancelAbortControllersRef.current.delete(abort);
-      }
-    },
-    [],
-  );
+  const cancelJob = useCallback(async (jobId: string): Promise<void> => {
+    const abort = new AbortController();
+    cancelAbortControllersRef.current.add(abort);
+    try {
+      await cancelDownloadJob(
+        jobId,
+        tfRequestInit({ method: "DELETE", signal: abort.signal }),
+      );
+    } finally {
+      cancelAbortControllersRef.current.delete(abort);
+    }
+  }, []);
 
   const start = useCallback(
     async (
@@ -121,6 +119,7 @@ export function useTrackDownload(): TrackDownloadController {
       quality: DownloadQuality = DownloadQuality.NUMBER_320,
     ) => {
       if (
+        pendingQueuesRef.current.size > 0 ||
         snapshotRef.current.state === "waiting" ||
         snapshotRef.current.state === "active"
       ) {
@@ -133,6 +132,7 @@ export function useTrackDownload(): TrackDownloadController {
         abort: new AbortController(),
         canceled: false,
         compensationStarted: false,
+        cancelGeneration: null,
       };
       pendingQueuesRef.current.set(generation, pendingQueue);
       jobIdRef.current = null;
@@ -228,7 +228,23 @@ export function useTrackDownload(): TrackDownloadController {
             !pendingQueue.compensationStarted
           ) {
             pendingQueue.compensationStarted = true;
-            await cancelJob(jobId, null);
+            try {
+              await cancelJob(jobId);
+            } catch (error) {
+              const cancelGeneration = pendingQueue.cancelGeneration;
+              if (
+                cancelGeneration !== null &&
+                isCurrent(cancelGeneration) &&
+                !pendingQueue.abort.signal.aborted
+              ) {
+                jobIdRef.current = jobId;
+                navigationGenerationRef.current = null;
+                commit(cancelGeneration, { state: "waiting", progress: 0 });
+                if (shouldReportCancellationError(error)) {
+                  reportTfAuthError(error);
+                }
+              }
+            }
           }
           return;
         }
@@ -256,24 +272,68 @@ export function useTrackDownload(): TrackDownloadController {
   );
 
   const cancel = useCallback(async () => {
-    const pendingQueue = pendingQueuesRef.current.get(generationRef.current);
-    if (pendingQueue) pendingQueue.canceled = true;
-    const jobId = jobIdRef.current;
-    const generation = ++generationRef.current;
-    stopPolling();
-    jobIdRef.current = null;
-    navigationGenerationRef.current = null;
-    if (mountedRef.current) {
-      snapshotRef.current = {
-        state: "canceled",
-        progress: snapshotRef.current.progress,
-      };
-      setSnapshot(snapshotRef.current);
+    if (knownCancelPromiseRef.current !== null) {
+      await knownCancelPromiseRef.current;
+      return;
     }
 
+    const pendingQueue = pendingQueuesRef.current.values().next().value as
+      | PendingQueueGeneration
+      | undefined;
+    if (pendingQueue) {
+      if (pendingQueue.canceled) return;
+      pendingQueue.canceled = true;
+      const generation = ++generationRef.current;
+      pendingQueue.cancelGeneration = generation;
+      stopPolling();
+      navigationGenerationRef.current = null;
+      if (mountedRef.current) {
+        snapshotRef.current = {
+          state: "canceled",
+          progress: snapshotRef.current.progress,
+        };
+        setSnapshot(snapshotRef.current);
+      }
+      return;
+    }
+
+    const jobId = jobIdRef.current;
     if (jobId === null) return;
-    await cancelJob(jobId, generation);
-  }, [cancelJob, stopPolling]);
+    const previousSnapshot = snapshotRef.current;
+    const generation = ++generationRef.current;
+    stopPolling();
+    navigationGenerationRef.current = null;
+
+    const knownCancelPromise = (async () => {
+      try {
+        await cancelJob(jobId);
+      } catch (error) {
+        if (isCurrent(generation, jobId)) {
+          commit(generation, previousSnapshot);
+          if (shouldReportCancellationError(error)) {
+            reportTfAuthError(error);
+          }
+        }
+        return;
+      }
+
+      if (isCurrent(generation, jobId)) {
+        jobIdRef.current = null;
+        commit(generation, {
+          state: "canceled",
+          progress: previousSnapshot.progress,
+        });
+      }
+    })();
+    knownCancelPromiseRef.current = knownCancelPromise;
+    try {
+      await knownCancelPromise;
+    } finally {
+      if (knownCancelPromiseRef.current === knownCancelPromise) {
+        knownCancelPromiseRef.current = null;
+      }
+    }
+  }, [cancelJob, commit, isCurrent, stopPolling]);
 
   useEffect(
     () => () => {

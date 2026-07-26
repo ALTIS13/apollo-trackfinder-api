@@ -256,6 +256,63 @@ describe("useTrackDownload", () => {
     expect(window.location.assign).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [401, true],
+    [403, true],
+    [409, true],
+    [503, false],
+  ])(
+    "restores an active known job after DELETE %s and retries the same job",
+    async (status, shouldReportAuth) => {
+      const error = { status, data: { error: "bounded_error" } };
+      vi.mocked(queueTrackDownloads).mockResolvedValue({
+        results: [{ trackId: track.id, jobId: "job-1", position: 1 }],
+      });
+      vi.mocked(getDownloadJobStatus).mockResolvedValue(active);
+      vi.mocked(cancelDownloadJob)
+        .mockRejectedValueOnce(error)
+        .mockResolvedValueOnce({ jobId: "job-1", status: "canceled" });
+      const { result } = renderHook(() => useTrackDownload());
+
+      await act(async () => {
+        await result.current.start(track);
+      });
+      await flushMicrotasks();
+      expect(result.current.state).toBe("active");
+      expect(result.current.progress).toBe(64);
+
+      await act(async () => {
+        await result.current.cancel();
+      });
+
+      expect(result.current.state).toBe("active");
+      expect(result.current.progress).toBe(64);
+      if (shouldReportAuth) {
+        expect(reportTfAuthError).toHaveBeenCalledWith(error);
+      } else {
+        expect(reportTfAuthError).not.toHaveBeenCalled();
+      }
+
+      await act(async () => {
+        await result.current.cancel();
+      });
+
+      expect(cancelDownloadJob).toHaveBeenCalledTimes(2);
+      expect(cancelDownloadJob).toHaveBeenNthCalledWith(
+        1,
+        "job-1",
+        expect.any(Object),
+      );
+      expect(cancelDownloadJob).toHaveBeenNthCalledWith(
+        2,
+        "job-1",
+        expect.any(Object),
+      );
+      expect(result.current.state).toBe("canceled");
+      expect(window.location.assign).not.toHaveBeenCalled();
+    },
+  );
+
   it("compensates a canceled pending queue acknowledgement exactly once", async () => {
     const queued = deferred<{
       results: Array<{ trackId: string; jobId: string; position: number }>;
@@ -297,7 +354,69 @@ describe("useTrackDownload", () => {
     expect(result.current.state).toBe("canceled");
   });
 
-  it("lets a restarted generation proceed while compensating only the old late acknowledgement", async () => {
+  it.each([
+    [401, true],
+    [503, false],
+  ])(
+    "restores a late-ack job after compensating DELETE %s and retries the same job",
+    async (status, shouldReportAuth) => {
+      const queued = deferred<{
+        results: Array<{ trackId: string; jobId: string; position: number }>;
+      }>();
+      const error = { status, data: { error: "bounded_error" } };
+      vi.mocked(queueTrackDownloads).mockReturnValue(queued.promise);
+      vi.mocked(cancelDownloadJob)
+        .mockRejectedValueOnce(error)
+        .mockResolvedValueOnce({ jobId: "job-late", status: "canceled" });
+      const { result } = renderHook(() => useTrackDownload());
+
+      let startPromise!: Promise<void>;
+      await act(async () => {
+        startPromise = result.current.start(track);
+        await Promise.resolve();
+        await result.current.cancel();
+      });
+      expect(result.current.state).toBe("canceled");
+
+      await act(async () => {
+        queued.resolve({
+          results: [{ trackId: track.id, jobId: "job-late", position: 1 }],
+        });
+        await startPromise;
+      });
+
+      expect(result.current.state).toBe("waiting");
+      expect(result.current.progress).toBe(0);
+      if (shouldReportAuth) {
+        expect(reportTfAuthError).toHaveBeenCalledWith(error);
+      } else {
+        expect(reportTfAuthError).not.toHaveBeenCalled();
+      }
+      expect(getDownloadJobStatus).not.toHaveBeenCalled();
+      expect(window.location.assign).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await result.current.cancel();
+      });
+
+      expect(cancelDownloadJob).toHaveBeenCalledTimes(2);
+      expect(cancelDownloadJob).toHaveBeenNthCalledWith(
+        1,
+        "job-late",
+        expect.any(Object),
+      );
+      expect(cancelDownloadJob).toHaveBeenNthCalledWith(
+        2,
+        "job-late",
+        expect.any(Object),
+      );
+      expect(result.current.state).toBe("canceled");
+      expect(getDownloadJobStatus).not.toHaveBeenCalled();
+      expect(window.location.assign).not.toHaveBeenCalled();
+    },
+  );
+
+  it("suppresses restart until the canceled queue acknowledgement settles", async () => {
     const oldQueue = deferred<{
       results: Array<{ trackId: string; jobId: string; position: number }>;
     }>();
@@ -322,18 +441,12 @@ describe("useTrackDownload", () => {
       await Promise.resolve();
       await result.current.cancel();
       await result.current.start(track);
+      await result.current.start(track);
     });
-    await flushMicrotasks();
 
-    expect(getDownloadJobStatus).toHaveBeenCalledTimes(1);
-    expect(getDownloadJobStatus).toHaveBeenCalledWith(
-      "job-current",
-      expect.any(Object),
-    );
-    expect(result.current.state).toBe("completed");
-    expect(window.location.assign).toHaveBeenCalledWith(
-      "/api/tracks/download/file/job-current",
-    );
+    expect(queueTrackDownloads).toHaveBeenCalledTimes(1);
+    expect(getDownloadJobStatus).not.toHaveBeenCalled();
+    expect(result.current.state).toBe("canceled");
 
     await act(async () => {
       oldQueue.resolve({
@@ -347,12 +460,26 @@ describe("useTrackDownload", () => {
       "job-old",
       expect.any(Object),
     );
+    expect(queueTrackDownloads).toHaveBeenCalledTimes(1);
+    expect(getDownloadJobStatus).not.toHaveBeenCalled();
+    expect(window.location.assign).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await result.current.start(track);
+    });
+    await flushMicrotasks();
+
+    expect(queueTrackDownloads).toHaveBeenCalledTimes(2);
     expect(getDownloadJobStatus).toHaveBeenCalledTimes(1);
+    expect(getDownloadJobStatus).toHaveBeenCalledWith(
+      "job-current",
+      expect.any(Object),
+    );
     expect(window.location.assign).toHaveBeenCalledTimes(1);
     expect(result.current.state).toBe("completed");
   });
 
-  it("does not duplicate compensation after repeated pre-ack cancel calls", async () => {
+  it("keeps repeated pre-ack starts and cancels bounded to one queue request", async () => {
     const queued = deferred<{
       results: Array<{ trackId: string; jobId: string; position: number }>;
     }>();
@@ -368,8 +495,12 @@ describe("useTrackDownload", () => {
       startPromise = result.current.start(track);
       await Promise.resolve();
       await result.current.cancel();
+      void result.current.start(track);
       await result.current.cancel();
+      void result.current.start(track);
+      await Promise.resolve();
     });
+    expect(queueTrackDownloads).toHaveBeenCalledTimes(1);
     await act(async () => {
       queued.resolve({
         results: [{ trackId: track.id, jobId: "job-late", position: 1 }],
@@ -378,6 +509,7 @@ describe("useTrackDownload", () => {
     });
 
     expect(cancelDownloadJob).toHaveBeenCalledTimes(1);
+    expect(queueTrackDownloads).toHaveBeenCalledTimes(1);
     expect(getDownloadJobStatus).not.toHaveBeenCalled();
     expect(result.current.state).toBe("canceled");
   });

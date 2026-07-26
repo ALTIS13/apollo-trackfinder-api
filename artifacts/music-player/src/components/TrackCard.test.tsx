@@ -147,6 +147,29 @@ describe("TrackCard download action", () => {
     expectReservedTerminalRow("Загрузка отменена");
   });
 
+  it("keeps the cancel control available when known-job DELETE fails", async () => {
+    vi.mocked(queueTrackDownloads).mockResolvedValue({
+      results: [{ trackId: track.id, jobId: "job-1", position: 1 }],
+    });
+    vi.mocked(cancelDownloadJob).mockRejectedValue({
+      status: 503,
+      data: { error: "download_queue_unavailable" },
+    });
+    render(<TrackCard track={track} index={0} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Скачать" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Отменить загрузку" }),
+    );
+
+    await waitFor(() => expect(cancelDownloadJob).toHaveBeenCalledTimes(1));
+    expect(
+      screen.getByRole("button", { name: "Отменить загрузку" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Загрузка отменена")).not.toBeInTheDocument();
+    expect(screen.getByTestId("track-download-action")).toHaveClass("h-12");
+  });
+
   it("renders completed feedback in the reserved non-overlapping row", async () => {
     vi.mocked(queueTrackDownloads).mockResolvedValue({
       results: [{ trackId: track.id, jobId: "job-1", position: 1 }],
