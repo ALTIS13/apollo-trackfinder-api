@@ -41,7 +41,9 @@ local entries = rcall("HGETALL", ledger)
 for index = 1, #entries, 2 do
   local jobId = entries[index]
   local intent = entries[index + 1]
-  if string.sub(intent, 1, 10) == "confirmed:" or rcall("EXISTS", ARGV[4] .. jobId) == 1 then
+  if string.sub(intent, 1, 10) == "confirmed:" or
+    rcall("EXISTS", ARGV[4] .. jobId) == 1 or
+    rcall("EXISTS", ARGV[5] .. jobId) == 1 then
     rcall("HDEL", ledger, jobId)
   end
 end
@@ -59,30 +61,94 @@ return redis.call("HDEL", KEYS[1], ARGV[1])
 const PERSIST_WAITING_CANCELLATION_SCRIPT = `
 -- persist-waiting-cancellation
 local stored = redis.call("GET", KEYS[1])
+local intent = redis.call("HGET", KEYS[4], ARGV[4])
+if intent and intent ~= ARGV[5] then return 0 end
 if stored and stored ~= ARGV[1] and stored ~= ARGV[2] then return 0 end
 if stored == ARGV[2] then
   redis.call("PEXPIRE", KEYS[1], ARGV[3])
   return 1
 end
+local cursor = redis.call("GET", KEYS[2])
+if cursor then
+  redis.call("PEXPIRE", KEYS[2], ARGV[3])
+else
+  local latest = redis.call("XREVRANGE", KEYS[3], "+", "-", "COUNT", 1)
+  cursor = "0-0"
+  if #latest > 0 then cursor = latest[1][1] end
+  redis.call("SET", KEYS[2], cursor, "PX", ARGV[3])
+end
 redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[3])
 return 1
 `;
-const FINALIZE_WAITING_CANCELLATION_SCRIPT = `
--- finalize-waiting-cancellation
+const RECONCILE_WAITING_CANCELLATION_SCRIPT = `
+-- finalize-waiting-cancellation-receipt
+local function releaseIntent()
+  local intent = redis.call("HGET", KEYS[1], ARGV[1])
+  if intent and intent ~= ARGV[2] then return false end
+  if intent then redis.call("HDEL", KEYS[1], ARGV[1]) end
+  return true
+end
+local tombstone = redis.call("GET", KEYS[2])
+if tombstone ~= ARGV[3] and tombstone ~= ARGV[4] then return 0 end
+if tombstone == ARGV[4] then
+  if not releaseIntent() then return -1 end
+  redis.call("PEXPIRE", KEYS[2], ARGV[5])
+  redis.call("DEL", KEYS[3])
+  return 1
+end
+local cursor = redis.call("GET", KEYS[3])
+if cursor then
+  local entries = redis.call(
+    "XREVRANGE",
+    KEYS[4],
+    "+",
+    "(" .. cursor,
+    "COUNT",
+    10000
+  )
+  for index = 1, #entries do
+    local fields = entries[index][2]
+    local event = nil
+    local eventJobId = nil
+    local previous = nil
+    for field = 1, #fields, 2 do
+      if fields[field] == "event" then event = fields[field + 1] end
+      if fields[field] == "jobId" then eventJobId = fields[field + 1] end
+      if fields[field] == "prev" then previous = fields[field + 1] end
+    end
+    if event == "removed" and eventJobId == ARGV[1] then
+      if previous == "wait" or previous == "paused" or
+        previous == "delayed" or previous == "prioritized" or
+        previous == "waiting-children" then
+        if not releaseIntent() then return -1 end
+        redis.call("SET", KEYS[2], ARGV[4], "PX", ARGV[5])
+        redis.call("DEL", KEYS[3])
+        return 1
+      end
+      if previous == "completed" then
+        if not releaseIntent() then return -1 end
+        return 2
+      end
+      if previous == "failed" then
+        if not releaseIntent() then return -1 end
+        return 3
+      end
+    end
+  end
+end
+if redis.call("EXISTS", KEYS[5]) == 0 and not releaseIntent() then return -1 end
+return 0
+`;
+const COMMIT_PENDING_CANCELLATION_SCRIPT = `
+-- commit-pending-cancellation
 local tombstone = redis.call("GET", KEYS[2])
 if tombstone ~= ARGV[3] and tombstone ~= ARGV[4] then return 0 end
 local intent = redis.call("HGET", KEYS[1], ARGV[1])
 if intent and intent ~= ARGV[2] then return 0 end
 redis.call("SET", KEYS[2], ARGV[4], "PX", ARGV[5])
+redis.call("DEL", KEYS[3])
 if intent then redis.call("HDEL", KEYS[1], ARGV[1]) end
 return 1
-`;
-const CLEAR_PENDING_CANCELLATION_SCRIPT = `
--- clear-pending-cancellation
-local stored = redis.call("GET", KEYS[1])
-if not stored or stored == ARGV[2] then return 1 end
-if stored ~= ARGV[1] then return 0 end
-return redis.call("DEL", KEYS[1])
 `;
 
 export { type DownloadJobData, type DownloadJobResult };
@@ -160,7 +226,6 @@ interface RedisClient {
   ping?(): Promise<unknown>;
   eval(script: string, keys: number, ...args: string[]): Promise<unknown>;
   set(...args: Array<string | number>): Promise<unknown>;
-  get(key: string): Promise<string | null>;
   del(key: string): Promise<unknown>;
   quit(): Promise<unknown>;
 }
@@ -383,6 +448,7 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
         encodeDownloadAdmissionIntent("pending", accountId),
         String(QUEUE_CAPACITY),
         producer.toKey(""),
+        producer.toKey("canceled:"),
       ),
     );
     if (
@@ -402,27 +468,35 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
     const recorded = Number(
       await cancellation.eval(
         PERSIST_WAITING_CANCELLATION_SCRIPT,
-        1,
+        4,
         producer.toKey(`canceled:${jobId}`),
+        producer.toKey(`canceled-cursor:${jobId}`),
+        producer.toKey("events"),
+        getDownloadQueueAdmissionLedgerKey((suffix) => producer.toKey(suffix)),
         encodeDownloadAdmissionIntent("pending", accountId),
         `canceled:${accountId}`,
         String(JOB_RETENTION_MS),
+        jobId,
+        encodeDownloadAdmissionIntent("pending", accountId),
       ),
     );
     if (recorded !== 1) throw unavailable();
   };
-  const finalizeWaitingCancellation = async (
+  const reconcileWaitingCancellation = async (
     producer: QueueClient,
     cancellation: RedisClient,
     jobId: string,
     accountId: string,
-  ): Promise<void> => {
-    const finalized = Number(
+  ): Promise<"canceled" | "completed" | "failed" | "unknown"> => {
+    const reconciled = Number(
       await cancellation.eval(
-        FINALIZE_WAITING_CANCELLATION_SCRIPT,
-        2,
+        RECONCILE_WAITING_CANCELLATION_SCRIPT,
+        5,
         getDownloadQueueAdmissionLedgerKey((suffix) => producer.toKey(suffix)),
         producer.toKey(`canceled:${jobId}`),
+        producer.toKey(`canceled-cursor:${jobId}`),
+        producer.toKey("events"),
+        producer.toKey(jobId),
         jobId,
         encodeDownloadAdmissionIntent("pending", accountId),
         encodeDownloadAdmissionIntent("pending", accountId),
@@ -430,24 +504,34 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
         String(JOB_RETENTION_MS),
       ),
     );
-    if (finalized !== 1) throw unavailable();
+    if (reconciled === -1) throw unavailable();
+    if (reconciled === 1) return "canceled";
+    if (reconciled === 2) return "completed";
+    if (reconciled === 3) return "failed";
+    if (reconciled === 0) return "unknown";
+    throw unavailable();
   };
-  const clearPendingCancellation = async (
+  const commitPendingCancellation = async (
     producer: QueueClient,
     cancellation: RedisClient,
     jobId: string,
     accountId: string,
   ): Promise<void> => {
-    const cleared = Number(
+    const committed = Number(
       await cancellation.eval(
-        CLEAR_PENDING_CANCELLATION_SCRIPT,
-        1,
+        COMMIT_PENDING_CANCELLATION_SCRIPT,
+        3,
+        getDownloadQueueAdmissionLedgerKey((suffix) => producer.toKey(suffix)),
         producer.toKey(`canceled:${jobId}`),
+        producer.toKey(`canceled-cursor:${jobId}`),
+        jobId,
+        encodeDownloadAdmissionIntent("pending", accountId),
         encodeDownloadAdmissionIntent("pending", accountId),
         `canceled:${accountId}`,
+        String(JOB_RETENTION_MS),
       ),
     );
-    if (cleared !== 1) throw unavailable();
+    if (committed !== 1) throw unavailable();
   };
   const cancelActive = async (
     current: Clients,
@@ -485,19 +569,18 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
       try {
         await job.remove();
       } catch {
+        const reconciled = await reconcileWaitingCancellation(
+          current.producer,
+          current.cancellation,
+          jobId,
+          data.accountId,
+        );
+        if (reconciled !== "unknown") return { status: reconciled };
         const reread = await job.getState();
         const rereadState = mapState(reread, job.failedReason);
-        if (rereadState === "waiting") {
-          await clearPendingCancellation(
-            current.producer,
-            current.cancellation,
-            jobId,
-            data.accountId,
-          );
-          throw unavailable();
-        }
-        if (rereadState === "unknown" || rereadState === "canceled") {
-          await finalizeWaitingCancellation(
+        if (rereadState === "waiting") throw unavailable();
+        if (rereadState === "canceled") {
+          await commitPendingCancellation(
             current.producer,
             current.cancellation,
             jobId,
@@ -508,14 +591,7 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
         if (rereadState === "active") {
           const result = await cancelActive(current, job, jobId);
           if (result.status === "canceled") {
-            await finalizeWaitingCancellation(
-              current.producer,
-              current.cancellation,
-              jobId,
-              data.accountId,
-            );
-          } else {
-            await clearPendingCancellation(
+            await commitPendingCancellation(
               current.producer,
               current.cancellation,
               jobId,
@@ -524,21 +600,30 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
           }
           return result;
         }
-        await clearPendingCancellation(
-          current.producer,
-          current.cancellation,
-          jobId,
-          data.accountId,
-        );
         return { status: rereadState };
       }
-      await finalizeWaitingCancellation(
+      const reconciled = await reconcileWaitingCancellation(
         current.producer,
         current.cancellation,
         jobId,
         data.accountId,
       );
-      return { status: "canceled" };
+      if (reconciled !== "unknown") return { status: reconciled };
+      const rereadState = mapState(await job.getState(), job.failedReason);
+      if (rereadState === "active") {
+        const result = await cancelActive(current, job, jobId);
+        if (result.status === "canceled") {
+          await commitPendingCancellation(
+            current.producer,
+            current.cancellation,
+            jobId,
+            data.accountId,
+          );
+        }
+        return result;
+      }
+      if (rereadState === "waiting") throw unavailable();
+      return { status: rereadState };
     }
     if (state === "active") return cancelActive(current, job, jobId);
     return { status: state };
@@ -755,22 +840,14 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
         const current = requireClients();
         const job = await current.producer.getJob(jobId);
         if (!job) {
-          const tombstone = await current.cancellation.get(
-            current.producer.toKey(`canceled:${jobId}`),
-          );
-          if (
-            tombstone !== encodeDownloadAdmissionIntent("pending", accountId) &&
-            tombstone !== `canceled:${accountId}`
-          ) {
-            return { status: "unknown" };
-          }
-          await finalizeWaitingCancellation(
-            current.producer,
-            current.cancellation,
-            jobId,
-            accountId,
-          );
-          return { status: "canceled" };
+          return {
+            status: await reconcileWaitingCancellation(
+              current.producer,
+              current.cancellation,
+              jobId,
+              accountId,
+            ),
+          };
         }
         if (!owned(job.data, accountId)) return { status: "unknown" };
         return await cancelState(

@@ -25,12 +25,19 @@ function job(
   states: string[],
   failedReason?: string,
 ) {
+  let lastState = states[0] ?? "completed";
   return {
     id,
     data,
     progress: 42,
     failedReason,
-    getState: vi.fn(async () => states.shift() ?? "completed"),
+    get lastState() {
+      return lastState;
+    },
+    getState: vi.fn(async () => {
+      lastState = states.shift() ?? "completed";
+      return lastState;
+    }),
     remove: vi.fn(async () => {}),
   };
 }
@@ -41,10 +48,27 @@ function createAdapter(
     Record<"waiting" | "delayed" | "active" | "completed" | "failed", unknown[]>
   > = {},
 ) {
+  const removals = new Map<string, string>();
   const producer = {
     on: vi.fn(),
     waitUntilReady: async () => {},
-    getJob: async (id: string) => jobs.get(id),
+    getJob: async (id: string) => {
+      const current = jobs.get(id);
+      if (!current) return undefined;
+      return {
+        ...current,
+        remove: async () => {
+          const previous = current.lastState;
+          await current.remove();
+          if (!removals.has(current.id)) {
+            removals.set(
+              current.id,
+              previous === "waiting" ? "wait" : previous,
+            );
+          }
+        },
+      };
+    },
     getWaitingCount: async () => 0,
     getActiveCount: async () => 0,
     getJobCounts: async () => ({}),
@@ -69,34 +93,63 @@ function createAdapter(
         const keys = args.slice(0, keyCount);
         const commandArgs = args.slice(keyCount);
         if (_script.includes("persist-waiting-cancellation")) {
-          const [pending, final] = commandArgs;
+          const [pending, final, , jobId, expectedIntent] = commandArgs;
+          const intent = ledger.get(jobId!);
+          if (intent !== undefined && intent !== expectedIntent) return 0;
           const stored = values.get(keys[0]!);
           if (stored !== undefined && stored !== pending && stored !== final) {
             return 0;
           }
           if (stored !== final) values.set(keys[0]!, pending!);
+          if (!values.has(keys[1]!)) values.set(keys[1]!, "0-0");
           return 1;
         }
         if (_script.includes("finalize-waiting-cancellation")) {
           const [jobId, expectedIntent, pending, final] = commandArgs;
           const tombstone = values.get(keys[1]!);
           const intent = ledger.get(jobId!);
+          if (tombstone !== pending && tombstone !== final) return 0;
+          if (intent !== undefined && intent !== expectedIntent) return -1;
+          if (tombstone === final) {
+            if (intent !== undefined) ledger.delete(jobId!);
+            values.delete(keys[2]!);
+            return 1;
+          }
+          const previous = removals.get(jobId!);
           if (
-            (tombstone !== pending && tombstone !== final) ||
+            [
+              "wait",
+              "paused",
+              "delayed",
+              "prioritized",
+              "waiting-children",
+            ].includes(previous ?? "")
+          ) {
+            values.set(keys[1]!, final!);
+            values.delete(keys[2]!);
+            if (intent !== undefined) ledger.delete(jobId!);
+            return 1;
+          }
+          if (previous === "completed" || previous === "failed") {
+            if (intent !== undefined) ledger.delete(jobId!);
+            return previous === "completed" ? 2 : 3;
+          }
+          if (!jobs.has(jobId!) && intent !== undefined) ledger.delete(jobId!);
+          return 0;
+        }
+        if (_script.includes("commit-pending-cancellation")) {
+          const [jobId, expectedIntent, pending, final] = commandArgs;
+          const stored = values.get(keys[1]!);
+          const intent = ledger.get(jobId!);
+          if (
+            (stored !== pending && stored !== final) ||
             (intent !== undefined && intent !== expectedIntent)
           ) {
             return 0;
           }
           values.set(keys[1]!, final!);
+          values.delete(keys[2]!);
           if (intent !== undefined) ledger.delete(jobId!);
-          return 1;
-        }
-        if (_script.includes("clear-pending-cancellation")) {
-          const [pending, final] = commandArgs;
-          const stored = values.get(keys[0]!);
-          if (stored === undefined || stored === final) return 1;
-          if (stored !== pending) return 0;
-          values.delete(keys[0]!);
           return 1;
         }
         const stored = ledger.get(commandArgs[0]!);
@@ -136,6 +189,7 @@ function createAdapter(
     redis,
     ledger,
     values,
+    removals,
   };
 }
 
@@ -341,7 +395,7 @@ describe("download queue ownership, states, and cancellation", () => {
   });
 
   it.each(["pending", "canceled"] as const)(
-    "reruns finalization for an owned %s tombstone on a missing job",
+    "reconciles an owned %s tombstone on a missing job",
     async (phase) => {
       const jobId = `${phase}-missing`;
       const { adapter, producer, ledger, values } = createAdapter(new Map());
@@ -355,11 +409,13 @@ describe("download queue ownership, states, and cancellation", () => {
       await adapter.init();
 
       await expect(adapter.cancel(jobId, ACCOUNT_ID)).resolves.toEqual({
-        status: "canceled",
+        status: phase === "pending" ? "unknown" : "canceled",
       });
       expect(ledger).toEqual(new Map());
       expect(values.get(producer.toKey(`canceled:${jobId}`))).toBe(
-        finalCancellation(ACCOUNT_ID),
+        phase === "pending"
+          ? pendingCancellation(ACCOUNT_ID)
+          : finalCancellation(ACCOUNT_ID),
       );
     },
   );
@@ -407,7 +463,7 @@ describe("download queue ownership, states, and cancellation", () => {
     );
   });
 
-  it("clears only its pending tombstone when removal remains waiting", async () => {
+  it("retains pending evidence when removal remains waiting", async () => {
     const waiting = job("waiting-retry", JOB_DATA, ["waiting", "waiting"]);
     waiting.remove.mockRejectedValueOnce(new Error("remove failed"));
     const { adapter, producer, ledger, values } = createAdapter(
@@ -419,13 +475,15 @@ describe("download queue ownership, states, and cancellation", () => {
     await expect(adapter.cancel(waiting.id, ACCOUNT_ID)).rejects.toBeInstanceOf(
       queueModule.DownloadQueueUnavailableError,
     );
-    expect(values.has(producer.toKey(`canceled:${waiting.id}`))).toBe(false);
+    expect(values.get(producer.toKey(`canceled:${waiting.id}`))).toBe(
+      pendingCancellation(ACCOUNT_ID),
+    );
     expect(ledger).toEqual(
       new Map([[waiting.id, pendingCancellation(ACCOUNT_ID)]]),
     );
   });
 
-  it("preserves a concurrently finalized tombstone while clearing pending state", async () => {
+  it("converges on a concurrently finalized tombstone", async () => {
     const waiting = job("concurrent-final", JOB_DATA, ["waiting", "waiting"]);
     const { adapter, producer, values } = createAdapter(
       new Map([[waiting.id, waiting]]),
@@ -437,14 +495,111 @@ describe("download queue ownership, states, and cancellation", () => {
     });
     await adapter.init();
 
-    await expect(adapter.cancel(waiting.id, ACCOUNT_ID)).rejects.toBeInstanceOf(
-      queueModule.DownloadQueueUnavailableError,
-    );
+    await expect(adapter.cancel(waiting.id, ACCOUNT_ID)).resolves.toEqual({
+      status: "canceled",
+    });
     expect(values.get(tombstoneKey)).toBe(finalCancellation(ACCOUNT_ID));
   });
 
+  it("does not let a failed same-owner request erase evidence after another request removes the job", async () => {
+    const waiting = job("interleaved-waiting", JOB_DATA, ["waiting"]);
+    const jobs = new Map([[waiting.id, waiting]]);
+    let state = "waiting";
+    let stateReads = 0;
+    let removeCalls = 0;
+    let releaseFirstRemoval!: () => void;
+    let finishFirstRemoval!: () => void;
+    let releaseWaitingReread!: () => void;
+    let waitingRereadObserved!: () => void;
+    let firstRemovalCommitted!: () => void;
+    const firstRemovalGate = new Promise<void>((resolve) => {
+      releaseFirstRemoval = resolve;
+    });
+    const firstRemovalFinalizationGate = new Promise<void>((resolve) => {
+      finishFirstRemoval = resolve;
+    });
+    const waitingRereadGate = new Promise<void>((resolve) => {
+      releaseWaitingReread = resolve;
+    });
+    const waitingRereadObservation = new Promise<void>((resolve) => {
+      waitingRereadObserved = resolve;
+    });
+    const firstRemovalCommit = new Promise<void>((resolve) => {
+      firstRemovalCommitted = resolve;
+    });
+    waiting.getState.mockImplementation(async () => {
+      stateReads += 1;
+      if (stateReads === 3) {
+        const observed = state;
+        waitingRereadObserved();
+        await waitingRereadGate;
+        return observed;
+      }
+      return state;
+    });
+    waiting.remove.mockImplementation(async () => {
+      removeCalls += 1;
+      if (removeCalls === 1) {
+        await firstRemovalGate;
+        state = "unknown";
+        jobs.delete(waiting.id);
+        firstRemovalCommitted();
+        await firstRemovalFinalizationGate;
+        return;
+      }
+      throw new Error("ambiguous remove failure");
+    });
+    const { adapter, producer, ledger, values } = createAdapter(jobs);
+    ledger.set(waiting.id, pendingCancellation(ACCOUNT_ID));
+    await adapter.init();
+
+    const first = adapter.cancel(waiting.id, ACCOUNT_ID);
+    await vi.waitFor(() => expect(waiting.remove).toHaveBeenCalledTimes(1));
+    const second = adapter.cancel(waiting.id, ACCOUNT_ID);
+    await waitingRereadObservation;
+    releaseFirstRemoval();
+    await firstRemovalCommit;
+    releaseWaitingReread();
+
+    await expect(second).rejects.toBeInstanceOf(
+      queueModule.DownloadQueueUnavailableError,
+    );
+    finishFirstRemoval();
+    await expect(first).resolves.toEqual({ status: "canceled" });
+    expect(ledger).toEqual(new Map());
+    expect(values.get(producer.toKey(`canceled:${waiting.id}`))).toBe(
+      finalCancellation(ACCOUNT_ID),
+    );
+  });
+
+  it("does not reclassify natural disappearance after an uncommitted remove with pending evidence", async () => {
+    const waiting = job("naturally-removed", JOB_DATA, ["waiting", "waiting"]);
+    const jobs = new Map([[waiting.id, waiting]]);
+    waiting.remove.mockRejectedValueOnce(new Error("remove did not commit"));
+    const { adapter, producer, ledger, values } = createAdapter(jobs);
+    ledger.set(waiting.id, pendingCancellation(ACCOUNT_ID));
+    await adapter.init();
+
+    await expect(adapter.cancel(waiting.id, ACCOUNT_ID)).rejects.toBeInstanceOf(
+      queueModule.DownloadQueueUnavailableError,
+    );
+    expect(values.get(producer.toKey(`canceled:${waiting.id}`))).toBe(
+      pendingCancellation(ACCOUNT_ID),
+    );
+
+    jobs.delete(waiting.id);
+
+    await expect(adapter.cancel(waiting.id, ACCOUNT_ID)).resolves.toEqual({
+      status: "unknown",
+    });
+    expect(ledger).toEqual(new Map());
+    expect(values.get(producer.toKey(`canceled:${waiting.id}`))).toBe(
+      pendingCancellation(ACCOUNT_ID),
+    );
+  });
+
   it.each(["completed", "failed"] as const)(
-    "clears pending cancellation when waiting removal races %s",
+    "retains pending evidence when waiting removal races %s",
     async (terminalState) => {
       const raced = job(`raced-${terminalState}`, JOB_DATA, [
         "waiting",
@@ -460,7 +615,9 @@ describe("download queue ownership, states, and cancellation", () => {
       await expect(adapter.cancel(raced.id, ACCOUNT_ID)).resolves.toEqual({
         status: terminalState,
       });
-      expect(values.has(producer.toKey(`canceled:${raced.id}`))).toBe(false);
+      expect(values.get(producer.toKey(`canceled:${raced.id}`))).toBe(
+        pendingCancellation(ACCOUNT_ID),
+      );
       expect(ledger).toEqual(
         new Map([[raced.id, pendingCancellation(ACCOUNT_ID)]]),
       );
@@ -490,7 +647,7 @@ describe("download queue ownership, states, and cancellation", () => {
   });
 
   it.each(["completed", "failed"] as const)(
-    "does not finalize when active cancellation races %s",
+    "retains pending evidence when active cancellation races %s",
     async (terminalState) => {
       const raced = job(`active-${terminalState}`, JOB_DATA, [
         "waiting",
@@ -507,20 +664,45 @@ describe("download queue ownership, states, and cancellation", () => {
       await expect(adapter.cancel(raced.id, ACCOUNT_ID)).resolves.toEqual({
         status: terminalState,
       });
-      expect(values.has(producer.toKey(`canceled:${raced.id}`))).toBe(false);
+      expect(values.get(producer.toKey(`canceled:${raced.id}`))).toBe(
+        pendingCancellation(ACCOUNT_ID),
+      );
       expect(ledger).toEqual(
         new Map([[raced.id, pendingCancellation(ACCOUNT_ID)]]),
       );
     },
   );
 
-  it("finalizes an ambiguous remove-to-unknown race", async () => {
+  it("does not finalize an ambiguous remove-to-unknown race without a receipt", async () => {
     const raced = job("raced-unknown", JOB_DATA, ["waiting", "unknown"]);
     raced.remove.mockRejectedValueOnce(new Error("already removed"));
     const { adapter, producer, ledger, values } = createAdapter(
       new Map([[raced.id, raced]]),
     );
     ledger.set(raced.id, pendingCancellation(ACCOUNT_ID));
+    await adapter.init();
+
+    await expect(adapter.cancel(raced.id, ACCOUNT_ID)).resolves.toEqual({
+      status: "unknown",
+    });
+    expect(ledger).toEqual(
+      new Map([[raced.id, pendingCancellation(ACCOUNT_ID)]]),
+    );
+    expect(values.get(producer.toKey(`canceled:${raced.id}`))).toBe(
+      pendingCancellation(ACCOUNT_ID),
+    );
+  });
+
+  it("finalizes an ambiguous queued removal only when BullMQ recorded its receipt", async () => {
+    const raced = job("removed-with-lost-reply", JOB_DATA, ["waiting"]);
+    const jobs = new Map([[raced.id, raced]]);
+    const { adapter, producer, ledger, values, removals } = createAdapter(jobs);
+    ledger.set(raced.id, pendingCancellation(ACCOUNT_ID));
+    raced.remove.mockImplementationOnce(async () => {
+      jobs.delete(raced.id);
+      removals.set(raced.id, "wait");
+      throw new Error("remove reply lost");
+    });
     await adapter.init();
 
     await expect(adapter.cancel(raced.id, ACCOUNT_ID)).resolves.toEqual({
@@ -532,8 +714,32 @@ describe("download queue ownership, states, and cancellation", () => {
     );
   });
 
+  it.each(["completed", "failed"] as const)(
+    "does not reclassify a %s job removed after a waiting-state race",
+    async (terminalState) => {
+      const raced = job(`removed-${terminalState}`, JOB_DATA, ["waiting"]);
+      const jobs = new Map([[raced.id, raced]]);
+      const { adapter, producer, ledger, values, removals } =
+        createAdapter(jobs);
+      ledger.set(raced.id, pendingCancellation(ACCOUNT_ID));
+      raced.remove.mockImplementationOnce(async () => {
+        jobs.delete(raced.id);
+        removals.set(raced.id, terminalState);
+      });
+      await adapter.init();
+
+      await expect(adapter.cancel(raced.id, ACCOUNT_ID)).resolves.toEqual({
+        status: terminalState,
+      });
+      expect(ledger).toEqual(new Map());
+      expect(values.get(producer.toKey(`canceled:${raced.id}`))).toBe(
+        pendingCancellation(ACCOUNT_ID),
+      );
+    },
+  );
+
   it("makes concurrent same-owner waiting cancellations both idempotent", async () => {
-    const waiting = job("waiting-job", JOB_DATA, []);
+    const waiting = job("waiting-job", JOB_DATA, ["waiting"]);
     const jobs = new Map([[waiting.id, waiting]]);
     let state = "waiting";
     let removeCalls = 0;
@@ -584,7 +790,7 @@ describe("download queue ownership, states, and cancellation", () => {
     waiting.remove.mockImplementation(async () => {
       jobs.delete(waiting.id);
     });
-    const { adapter, producer, redis, values } = createAdapter(jobs);
+    const { adapter, producer, values } = createAdapter(jobs);
     await adapter.init();
 
     await expect(adapter.cancel(waiting.id, ACCOUNT_ID)).resolves.toEqual({
@@ -598,7 +804,6 @@ describe("download queue ownership, states, and cancellation", () => {
     ).resolves.toEqual({ status: "unknown" });
     const tombstoneKey = producer.toKey(`canceled:${waiting.id}`);
     expect(values.get(tombstoneKey)).toBe(finalCancellation(ACCOUNT_ID));
-    expect(redis.get).toHaveBeenCalledWith(tombstoneKey);
   });
 
   it("cannot release another account's pending intent", async () => {
