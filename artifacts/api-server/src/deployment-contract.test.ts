@@ -274,10 +274,7 @@ function assertIdentity(
   expected: FileIdentity,
   label: string,
 ): void {
-  if (
-    actual.device !== expected.device ||
-    actual.inode !== expected.inode
-  ) {
+  if (actual.device !== expected.device || actual.inode !== expected.inode) {
     throw new Error(`${label} identity was replaced`);
   }
 }
@@ -533,9 +530,7 @@ async function runTemporaryInterlock(
   await options.interlock?.({ name, path, phase });
 }
 
-async function verifyOwnedHierarchy(
-  record: TemporaryOwnershipRecord,
-): Promise<{
+async function verifyOwnedHierarchy(record: TemporaryOwnershipRecord): Promise<{
   readonly owner: VerifiedDirectory;
   readonly run: VerifiedDirectory;
   readonly temporary: VerifiedDirectory;
@@ -816,12 +811,7 @@ async function createOwnedFixtureFile(
   }
 
   const written = await verifyOwnedHierarchy(record);
-  await verifiedPhysicalFile(
-    path,
-    written.run,
-    written.workspace,
-    file!,
-  );
+  await verifiedPhysicalFile(path, written.run, written.workspace, file!);
   return file!;
 }
 
@@ -1237,11 +1227,7 @@ async function removeSyntheticFixtureTree(directory: string): Promise<void> {
   }
   await rmdir(lexicalRoot);
   try {
-    await verifiedPhysicalDirectory(
-      parent.lexicalCandidate,
-      workspace,
-      parent,
-    );
+    await verifiedPhysicalDirectory(parent.lexicalCandidate, workspace, parent);
     await rmdir(parent.lexicalCandidate);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -1263,9 +1249,7 @@ describe("TF deployment identity contract", () => {
   });
 
   it("creates a per-run ownership marker before fixture data", async () => {
-    const directory = await createTemporaryDirectory(
-      "apollo-tf-api-marker-",
-    );
+    const directory = await createTemporaryDirectory("apollo-tf-api-marker-");
 
     expect(await readdir(directory)).toEqual([
       ".api-deployment-contract-owner",
@@ -1692,6 +1676,8 @@ describe("TF deployment identity contract", () => {
       "api",
       "db",
       "redis",
+      "tf-download-redis",
+      "tf-download-worker",
       "tf-integrations",
       "tf-integrations-migrate",
       "tf-integrations-postgres",
@@ -1701,6 +1687,8 @@ describe("TF deployment identity contract", () => {
     expect(Object.keys(template.volumes ?? {}).sort()).toEqual([
       "pgdata",
       "redis_data",
+      "tf-download-redis-data",
+      "tf-download-worker-data",
       "tf-integrations-postgres-data",
     ]);
     expect(service(template, "db").environment).toMatchObject({
@@ -1750,6 +1738,8 @@ describe("TF deployment identity contract", () => {
       "api",
       "db",
       "redis",
+      "tf-download-redis",
+      "tf-download-worker",
       "tf-integrations",
       "tf-integrations-migrate",
       "tf-integrations-postgres",
@@ -1758,6 +1748,8 @@ describe("TF deployment identity contract", () => {
     expect(Object.keys(template.volumes ?? {}).sort()).toEqual([
       "postgres_data",
       "redis_data",
+      "tf-download-redis-data",
+      "tf-download-worker-data",
       "tf-integrations-postgres-data",
     ]);
     expect(service(template, "db").environment).toMatchObject({
@@ -1865,11 +1857,7 @@ describe("TF deployment identity contract", () => {
     const result = await runApiStartup({ heartbeatKeys: heartbeatMap });
 
     expect(JSON.parse(result.stdout)).toEqual({
-      heartbeatModules: [
-        "core-api",
-        "search-media",
-        "account-integrations",
-      ],
+      heartbeatModules: ["core-api", "search-media", "account-integrations"],
       databaseHost: "db",
       databaseUser: "trackfinder",
     });
