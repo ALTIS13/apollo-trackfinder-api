@@ -120,6 +120,29 @@ describe("useTrackDownload", () => {
     expect(result.current.state).toBe("waiting");
   });
 
+  it("renders a bounded failed state for a per-track queue rejection", async () => {
+    vi.mocked(queueTrackDownloads).mockResolvedValue({
+      results: [
+        {
+          trackId: track.id,
+          error: "download_queue_unavailable",
+        },
+      ],
+    });
+    const { result } = renderHook(() => useTrackDownload());
+
+    await act(async () => {
+      await result.current.start(track);
+    });
+
+    expect(result.current.state).toBe("failed");
+    expect(result.current.progress).toBe(0);
+    expect(reportTfAuthError).not.toHaveBeenCalled();
+    expect(getDownloadJobStatus).not.toHaveBeenCalled();
+    expect(cancelDownloadJob).not.toHaveBeenCalled();
+    expect(window.location.assign).not.toHaveBeenCalled();
+  });
+
   it("keeps one poll in flight and uses bounded backoff only for waiting and active jobs", async () => {
     const firstPoll = deferred<DownloadJobStatus>();
     vi.mocked(queueTrackDownloads).mockResolvedValue({
@@ -233,6 +256,132 @@ describe("useTrackDownload", () => {
     expect(window.location.assign).not.toHaveBeenCalled();
   });
 
+  it("compensates a canceled pending queue acknowledgement exactly once", async () => {
+    const queued = deferred<{
+      results: Array<{ trackId: string; jobId: string; position: number }>;
+    }>();
+    vi.mocked(queueTrackDownloads).mockReturnValue(queued.promise);
+    vi.mocked(cancelDownloadJob).mockResolvedValue({
+      jobId: "job-late",
+      status: "canceled",
+    });
+    const { result } = renderHook(() => useTrackDownload());
+
+    let startPromise!: Promise<void>;
+    await act(async () => {
+      startPromise = result.current.start(track);
+      await Promise.resolve();
+    });
+    const queueRequest = vi.mocked(queueTrackDownloads).mock.calls[0][1];
+
+    await act(async () => {
+      await result.current.cancel();
+    });
+    expect(result.current.state).toBe("canceled");
+    expect((queueRequest?.signal as AbortSignal).aborted).toBe(false);
+
+    await act(async () => {
+      queued.resolve({
+        results: [{ trackId: track.id, jobId: "job-late", position: 1 }],
+      });
+      await startPromise;
+    });
+
+    expect(cancelDownloadJob).toHaveBeenCalledTimes(1);
+    expect(cancelDownloadJob).toHaveBeenCalledWith(
+      "job-late",
+      expect.objectContaining({ credentials: "include", method: "DELETE" }),
+    );
+    expect(getDownloadJobStatus).not.toHaveBeenCalled();
+    expect(window.location.assign).not.toHaveBeenCalled();
+    expect(result.current.state).toBe("canceled");
+  });
+
+  it("lets a restarted generation proceed while compensating only the old late acknowledgement", async () => {
+    const oldQueue = deferred<{
+      results: Array<{ trackId: string; jobId: string; position: number }>;
+    }>();
+    vi.mocked(queueTrackDownloads)
+      .mockReturnValueOnce(oldQueue.promise)
+      .mockResolvedValueOnce({
+        results: [{ trackId: track.id, jobId: "job-current", position: 1 }],
+      });
+    vi.mocked(getDownloadJobStatus).mockResolvedValue({
+      status: "completed",
+      progress: 100,
+    });
+    vi.mocked(cancelDownloadJob).mockResolvedValue({
+      jobId: "job-old",
+      status: "canceled",
+    });
+    const { result } = renderHook(() => useTrackDownload());
+
+    let oldStart!: Promise<void>;
+    await act(async () => {
+      oldStart = result.current.start(track);
+      await Promise.resolve();
+      await result.current.cancel();
+      await result.current.start(track);
+    });
+    await flushMicrotasks();
+
+    expect(getDownloadJobStatus).toHaveBeenCalledTimes(1);
+    expect(getDownloadJobStatus).toHaveBeenCalledWith(
+      "job-current",
+      expect.any(Object),
+    );
+    expect(result.current.state).toBe("completed");
+    expect(window.location.assign).toHaveBeenCalledWith(
+      "/api/tracks/download/file/job-current",
+    );
+
+    await act(async () => {
+      oldQueue.resolve({
+        results: [{ trackId: track.id, jobId: "job-old", position: 1 }],
+      });
+      await oldStart;
+    });
+
+    expect(cancelDownloadJob).toHaveBeenCalledTimes(1);
+    expect(cancelDownloadJob).toHaveBeenCalledWith(
+      "job-old",
+      expect.any(Object),
+    );
+    expect(getDownloadJobStatus).toHaveBeenCalledTimes(1);
+    expect(window.location.assign).toHaveBeenCalledTimes(1);
+    expect(result.current.state).toBe("completed");
+  });
+
+  it("does not duplicate compensation after repeated pre-ack cancel calls", async () => {
+    const queued = deferred<{
+      results: Array<{ trackId: string; jobId: string; position: number }>;
+    }>();
+    vi.mocked(queueTrackDownloads).mockReturnValue(queued.promise);
+    vi.mocked(cancelDownloadJob).mockResolvedValue({
+      jobId: "job-late",
+      status: "canceled",
+    });
+    const { result } = renderHook(() => useTrackDownload());
+
+    let startPromise!: Promise<void>;
+    await act(async () => {
+      startPromise = result.current.start(track);
+      await Promise.resolve();
+      await result.current.cancel();
+      await result.current.cancel();
+    });
+    await act(async () => {
+      queued.resolve({
+        results: [{ trackId: track.id, jobId: "job-late", position: 1 }],
+      });
+      await startPromise;
+    });
+
+    expect(cancelDownloadJob).toHaveBeenCalledTimes(1);
+    expect(getDownloadJobStatus).not.toHaveBeenCalled();
+    expect(result.current.state).toBe("canceled");
+  });
+
   it.each([401, 403, 409])(
     "forwards queue error %s through reportTfAuthError",
     async (status) => {
@@ -272,45 +421,30 @@ describe("useTrackDownload", () => {
     expect(window.location.assign).not.toHaveBeenCalled();
   });
 
-  it("ignores a stale queue generation after rapid start, cancel, and restart", async () => {
-    const firstQueue = deferred<{
+  it("aborts a pending queue request on unmount without compensating a mocked late acknowledgement", async () => {
+    const queued = deferred<{
       results: Array<{ trackId: string; jobId: string; position: number }>;
     }>();
-    vi.mocked(queueTrackDownloads)
-      .mockReturnValueOnce(firstQueue.promise)
-      .mockResolvedValueOnce({
-        results: [{ trackId: track.id, jobId: "job-2", position: 1 }],
-      });
-    vi.mocked(getDownloadJobStatus).mockResolvedValue({
-      status: "waiting",
-      progress: 3,
-      position: 1,
-    });
-    const { result } = renderHook(() => useTrackDownload());
+    vi.mocked(queueTrackDownloads).mockReturnValue(queued.promise);
+    const { result, unmount } = renderHook(() => useTrackDownload());
 
-    let firstStart!: Promise<void>;
+    let startPromise!: Promise<void>;
     await act(async () => {
-      firstStart = result.current.start(track);
+      startPromise = result.current.start(track);
       await Promise.resolve();
-      await result.current.cancel();
-      await result.current.start(track);
     });
-    await act(async () => {
-      firstQueue.resolve({
-        results: [{ trackId: track.id, jobId: "job-1", position: 1 }],
-      });
-      await firstStart;
-    });
+    const queueRequest = vi.mocked(queueTrackDownloads).mock.calls[0][1];
+    unmount();
 
-    expect(getDownloadJobStatus).toHaveBeenCalledWith(
-      "job-2",
-      expect.any(Object),
-    );
-    expect(getDownloadJobStatus).not.toHaveBeenCalledWith(
-      "job-1",
-      expect.any(Object),
-    );
-    expect(result.current.state).toBe("waiting");
-    expect(result.current.progress).toBe(3);
+    expect((queueRequest?.signal as AbortSignal).aborted).toBe(true);
+    await act(async () => {
+      queued.resolve({
+        results: [{ trackId: track.id, jobId: "job-late", position: 1 }],
+      });
+      await startPromise;
+    });
+    expect(cancelDownloadJob).not.toHaveBeenCalled();
+    expect(getDownloadJobStatus).not.toHaveBeenCalled();
+    expect(window.location.assign).not.toHaveBeenCalled();
   });
 });

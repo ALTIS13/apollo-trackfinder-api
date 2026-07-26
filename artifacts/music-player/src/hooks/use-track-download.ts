@@ -33,6 +33,12 @@ interface DownloadSnapshot {
   progress: number;
 }
 
+interface PendingQueueGeneration {
+  readonly abort: AbortController;
+  canceled: boolean;
+  compensationStarted: boolean;
+}
+
 const INITIAL_SNAPSHOT: DownloadSnapshot = { state: "idle", progress: 0 };
 const POLL_DELAYS_MS = [500, 1_000, 2_000, 4_000, 5_000] as const;
 
@@ -50,7 +56,8 @@ export function useTrackDownload(): TrackDownloadController {
   const snapshotRef = useRef(snapshot);
   const generationRef = useRef(0);
   const jobIdRef = useRef<string | null>(null);
-  const queueAbortRef = useRef<AbortController | null>(null);
+  const pendingQueuesRef = useRef(new Map<number, PendingQueueGeneration>());
+  const cancelAbortControllersRef = useRef(new Set<AbortController>());
   const pollAbortRef = useRef<AbortController | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollInFlightRef = useRef(false);
@@ -83,6 +90,31 @@ export function useTrackDownload(): TrackDownloadController {
     pollInFlightRef.current = false;
   }, []);
 
+  const cancelJob = useCallback(
+    async (jobId: string, reportGeneration: number | null): Promise<void> => {
+      const abort = new AbortController();
+      cancelAbortControllersRef.current.add(abort);
+      try {
+        await cancelDownloadJob(
+          jobId,
+          tfRequestInit({ method: "DELETE", signal: abort.signal }),
+        );
+      } catch (error) {
+        if (
+          !abort.signal.aborted &&
+          reportGeneration !== null &&
+          mountedRef.current &&
+          reportGeneration === generationRef.current
+        ) {
+          reportTfAuthError(error);
+        }
+      } finally {
+        cancelAbortControllersRef.current.delete(abort);
+      }
+    },
+    [],
+  );
+
   const start = useCallback(
     async (
       track: TrackResult,
@@ -97,9 +129,12 @@ export function useTrackDownload(): TrackDownloadController {
 
       const generation = ++generationRef.current;
       stopPolling();
-      queueAbortRef.current?.abort();
-      const queueAbort = new AbortController();
-      queueAbortRef.current = queueAbort;
+      const pendingQueue: PendingQueueGeneration = {
+        abort: new AbortController(),
+        canceled: false,
+        compensationStarted: false,
+      };
+      pendingQueuesRef.current.set(generation, pendingQueue);
       jobIdRef.current = null;
       navigationGenerationRef.current = null;
       commit(generation, { state: "waiting", progress: 0 });
@@ -170,33 +205,62 @@ export function useTrackDownload(): TrackDownloadController {
               },
             ],
           },
-          tfRequestInit({ method: "POST", signal: queueAbort.signal }),
+          tfRequestInit({ method: "POST", signal: pendingQueue.abort.signal }),
         );
-        if (!isCurrent(generation) || queueAbort.signal.aborted) return;
+        const queueResult = response.results[0];
+        if (queueResult && "error" in queueResult) {
+          if (
+            !pendingQueue.canceled &&
+            isCurrent(generation) &&
+            !pendingQueue.abort.signal.aborted
+          ) {
+            commit(generation, { state: "failed", progress: 0 });
+          }
+          return;
+        }
+        const jobId = queueResult?.jobId;
 
-        const jobId = response.results[0]?.jobId;
+        if (pendingQueue.canceled) {
+          if (
+            jobId &&
+            mountedRef.current &&
+            !pendingQueue.abort.signal.aborted &&
+            !pendingQueue.compensationStarted
+          ) {
+            pendingQueue.compensationStarted = true;
+            await cancelJob(jobId, null);
+          }
+          return;
+        }
+        if (!isCurrent(generation) || pendingQueue.abort.signal.aborted) return;
         if (!jobId) throw new Error("download queue returned no job");
         jobIdRef.current = jobId;
         void poll(jobId, 0);
       } catch (error) {
-        if (!isCurrent(generation) || queueAbort.signal.aborted) return;
+        if (
+          pendingQueue.canceled ||
+          !isCurrent(generation) ||
+          pendingQueue.abort.signal.aborted
+        ) {
+          return;
+        }
         reportTfAuthError(error);
         commit(generation, { state: "failed", progress: 0 });
       } finally {
-        if (queueAbortRef.current === queueAbort) {
-          queueAbortRef.current = null;
+        if (pendingQueuesRef.current.get(generation) === pendingQueue) {
+          pendingQueuesRef.current.delete(generation);
         }
       }
     },
-    [commit, isCurrent, stopPolling],
+    [cancelJob, commit, isCurrent, stopPolling],
   );
 
   const cancel = useCallback(async () => {
+    const pendingQueue = pendingQueuesRef.current.get(generationRef.current);
+    if (pendingQueue) pendingQueue.canceled = true;
     const jobId = jobIdRef.current;
     const generation = ++generationRef.current;
     stopPolling();
-    queueAbortRef.current?.abort();
-    queueAbortRef.current = null;
     jobIdRef.current = null;
     navigationGenerationRef.current = null;
     if (mountedRef.current) {
@@ -208,22 +272,20 @@ export function useTrackDownload(): TrackDownloadController {
     }
 
     if (jobId === null) return;
-    try {
-      await cancelDownloadJob(jobId, tfRequestInit({ method: "DELETE" }));
-    } catch (error) {
-      if (mountedRef.current && generation === generationRef.current) {
-        reportTfAuthError(error);
-      }
-    }
-  }, [stopPolling]);
+    await cancelJob(jobId, generation);
+  }, [cancelJob, stopPolling]);
 
   useEffect(
     () => () => {
       mountedRef.current = false;
       generationRef.current += 1;
       stopPolling();
-      queueAbortRef.current?.abort();
-      queueAbortRef.current = null;
+      for (const pendingQueue of pendingQueuesRef.current.values()) {
+        pendingQueue.abort.abort();
+      }
+      pendingQueuesRef.current.clear();
+      for (const abort of cancelAbortControllersRef.current) abort.abort();
+      cancelAbortControllersRef.current.clear();
     },
     [stopPolling],
   );

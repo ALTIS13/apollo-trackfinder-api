@@ -4,9 +4,14 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import type { TrackResult } from "@workspace/api-client-react";
-import { queueTrackDownloads } from "@workspace/api-client-react";
+import {
+  cancelDownloadJob,
+  getDownloadJobStatus,
+  queueTrackDownloads,
+} from "@workspace/api-client-react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TrackCard } from "./TrackCard";
 
@@ -63,12 +68,34 @@ const track: TrackResult = {
 
 beforeEach(() => {
   vi.mocked(queueTrackDownloads).mockReset();
+  vi.mocked(getDownloadJobStatus)
+    .mockReset()
+    .mockImplementation(() => new Promise(() => {}));
+  vi.mocked(cancelDownloadJob).mockReset().mockResolvedValue({
+    jobId: "job-1",
+    status: "canceled",
+  });
+  vi.stubGlobal("location", { assign: vi.fn() });
 });
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
+
+function expectReservedTerminalRow(label: string) {
+  const action = screen.getByTestId("track-download-action");
+  const status = within(action).getByRole("status");
+  const control = within(action).getByRole("button", { name: "Скачать" });
+
+  expect(action).toHaveClass("h-12");
+  expect(control).toHaveClass("h-8");
+  expect(status).toHaveClass("h-4");
+  expect(status).toHaveTextContent(label);
+  expect(status.previousElementSibling).toBe(control);
+  expect(action.querySelector('[class~="absolute"]')).toBeNull();
+}
 
 describe("TrackCard download action", () => {
   it("queues one track from its download action without resizing the action area", async () => {
@@ -100,9 +127,40 @@ describe("TrackCard download action", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Скачать" }));
 
-    expect(
-      await screen.findByText("Не удалось начать загрузку."),
-    ).toHaveAttribute("role", "status");
+    await screen.findByText("Не удалось начать загрузку.");
+    expectReservedTerminalRow("Не удалось начать загрузку.");
     expect(screen.getByRole("button", { name: "Скачать" })).not.toBeDisabled();
+  });
+
+  it("renders canceled feedback in the reserved non-overlapping row", async () => {
+    vi.mocked(queueTrackDownloads).mockImplementation(
+      () => new Promise(() => {}),
+    );
+    render(<TrackCard track={track} index={0} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Скачать" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Отменить загрузку" }),
+    );
+
+    await screen.findByText("Загрузка отменена");
+    expectReservedTerminalRow("Загрузка отменена");
+  });
+
+  it("renders completed feedback in the reserved non-overlapping row", async () => {
+    vi.mocked(queueTrackDownloads).mockResolvedValue({
+      results: [{ trackId: track.id, jobId: "job-1", position: 1 }],
+    });
+    vi.mocked(getDownloadJobStatus).mockResolvedValue({
+      status: "completed",
+      progress: 100,
+    });
+    render(<TrackCard track={track} index={0} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Скачать" }));
+
+    await screen.findByText("Файл открывается");
+    expectReservedTerminalRow("Файл открывается");
+    expect(screen.getByRole("button", { name: "Скачать" })).toBeDisabled();
   });
 });

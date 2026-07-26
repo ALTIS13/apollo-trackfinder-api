@@ -80,6 +80,14 @@ export function TrackCard({ track, index }: TrackCardProps) {
     downloadState === "active"
       ? `Загрузка ${progress}%`
       : "Подготовка загрузки";
+  const terminalDownloadStatus =
+    downloadState === "failed"
+      ? "Не удалось начать загрузку."
+      : downloadState === "canceled"
+        ? "Загрузка отменена"
+        : downloadState === "completed"
+          ? "Файл открывается"
+          : null;
 
   type TypeVariant = "original" | "remix" | "live" | "cover" | "outline";
   type SourceVariant = "youtube" | "soundcloud" | "default";
@@ -196,7 +204,7 @@ export function TrackCard({ track, index }: TrackCardProps) {
 
         <div
           data-testid="track-download-action"
-          className="relative h-12 w-full min-w-0 sm:w-28"
+          className="h-12 w-full min-w-0 sm:w-28"
         >
           {isDownloadPending ? (
             <div className="flex h-12 w-full items-center justify-between rounded-xl border border-white/5 bg-secondary/50 px-3 text-xs text-muted-foreground">
@@ -220,42 +228,27 @@ export function TrackCard({ track, index }: TrackCardProps) {
               </button>
             </div>
           ) : (
-            <button
-              aria-label="Скачать"
-              className="group/dl flex h-12 w-full items-center justify-center gap-2 rounded-xl border border-white/5 bg-secondary/50 px-4 text-foreground transition-all hover:bg-secondary hover:text-primary hover:shadow-lg disabled:opacity-50"
-              disabled={downloadState === "completed"}
-              onClick={() => void start(track)}
-              title="Скачать"
-              type="button"
-            >
-              <Download className="h-5 w-5 flex-shrink-0 transition-transform group-hover/dl:-translate-y-0.5" />
-              <span className="font-medium sm:hidden">Скачать</span>
-            </button>
+            <div className="flex h-12 w-full flex-col">
+              <button
+                aria-label="Скачать"
+                className="group/dl flex h-8 w-full items-center justify-center gap-2 rounded-xl border border-white/5 bg-secondary/50 px-4 text-foreground transition-all hover:bg-secondary hover:text-primary hover:shadow-lg disabled:opacity-50"
+                disabled={downloadState === "completed"}
+                onClick={() => void start(track)}
+                title="Скачать"
+                type="button"
+              >
+                <Download className="h-5 w-5 flex-shrink-0 transition-transform group-hover/dl:-translate-y-0.5" />
+                <span className="font-medium sm:hidden">Скачать</span>
+              </button>
+              <span
+                aria-hidden={terminalDownloadStatus === null}
+                className={`h-4 w-full truncate text-center text-[10px] leading-4 ${downloadState === "failed" ? "text-destructive" : "text-muted-foreground"}`}
+                role={terminalDownloadStatus === null ? undefined : "status"}
+              >
+                {terminalDownloadStatus}
+              </span>
+            </div>
           )}
-          {downloadState === "failed" ? (
-            <span
-              className="absolute inset-x-1 bottom-1 truncate text-center text-[10px] text-destructive"
-              role="status"
-            >
-              Не удалось начать загрузку.
-            </span>
-          ) : null}
-          {downloadState === "canceled" ? (
-            <span
-              className="absolute inset-x-1 bottom-1 truncate text-center text-[10px] text-muted-foreground"
-              role="status"
-            >
-              Загрузка отменена
-            </span>
-          ) : null}
-          {downloadState === "completed" ? (
-            <span
-              className="absolute inset-x-1 bottom-1 truncate text-center text-[10px] text-muted-foreground"
-              role="status"
-            >
-              Файл открывается
-            </span>
-          ) : null}
         </div>
       </div>
     </motion.div>
