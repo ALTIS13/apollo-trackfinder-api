@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DOWNLOAD_MAX_FILE_BYTES,
+  DOWNLOAD_QUEUE_PREFIX,
   DOWNLOAD_QUEUE_NAME,
   downloadFileCommandSchema,
   encodeDownloadAdmissionIntent,
@@ -53,6 +54,8 @@ describe("tf download contract", () => {
   it("exports the versioned queue constants", () => {
     expect(DOWNLOAD_QUEUE_NAME).toBe("apollo-tf-downloads-v1");
     expect(DOWNLOAD_MAX_FILE_BYTES).toBe(1_073_741_824);
+    expect(DOWNLOAD_QUEUE_PREFIX).toBe("{apollo-tf-downloads}");
+    expect(DOWNLOAD_QUEUE_PREFIX).toMatch(/^\{[^{}]+\}$/);
   });
 
   it("encodes owner-bound admission intents through the queue's own prefix", () => {

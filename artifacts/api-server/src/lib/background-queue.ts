@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 
 import {
   DOWNLOAD_QUEUE_NAME,
+  DOWNLOAD_QUEUE_PREFIX,
   downloadJobDataSchema,
   downloadJobResultSchema,
   encodeDownloadAdmissionIntent,
@@ -414,6 +415,7 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
         try {
           const config = await configuration(env, read);
           partial.producer = makeQueue(DOWNLOAD_QUEUE_NAME, {
+            prefix: DOWNLOAD_QUEUE_PREFIX,
             connection: config.producer,
             defaultJobOptions: {
               attempts: 2,
@@ -424,6 +426,7 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
           });
           attachErrorListener(partial.producer);
           partial.telemetry = makeQueue(DOWNLOAD_QUEUE_NAME, {
+            prefix: DOWNLOAD_QUEUE_PREFIX,
             connection: config.telemetry,
           });
           attachErrorListener(partial.telemetry);

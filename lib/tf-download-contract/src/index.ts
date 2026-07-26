@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const DOWNLOAD_QUEUE_NAME = "apollo-tf-downloads-v1";
+export const DOWNLOAD_QUEUE_PREFIX = "{apollo-tf-downloads}";
 export const DOWNLOAD_MAX_FILE_BYTES = 1_073_741_824;
 
 export type DownloadAdmissionIntentState = "pending" | "confirmed";

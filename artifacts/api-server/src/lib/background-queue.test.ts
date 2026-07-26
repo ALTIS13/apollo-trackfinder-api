@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 
+import { DOWNLOAD_QUEUE_PREFIX } from "@workspace/tf-download-contract";
 import { describe, expect, it, vi } from "vitest";
 
 const ACCOUNT_ID = "10000000-0000-4000-8000-000000000001";
@@ -142,7 +143,7 @@ class FakeQueue {
   getJobError: Error | undefined;
   closed = false;
   ready: (() => Promise<void>) | undefined;
-  keyPrefix = "tenant:{apollo-downloads}:";
+  keyPrefix = "tenant:apollo-downloads:";
 
   on = vi.fn((event: string, listener: () => void) =>
     this.events.set(event, listener),
@@ -238,7 +239,21 @@ function createAdapter(
   const redis = options.redis ?? new FakeRedis();
   const createQueue =
     options.createQueue ??
-    vi.fn().mockReturnValueOnce(producer).mockReturnValueOnce(telemetry);
+    vi
+      .fn()
+      .mockImplementationOnce(
+        (name: string, queueOptions: { prefix?: string }) => {
+          producer.keyPrefix = `${queueOptions.prefix ?? "tenant"}:${name}:`;
+          redis.bind(producer);
+          return producer;
+        },
+      )
+      .mockImplementationOnce(
+        (name: string, queueOptions: { prefix?: string }) => {
+          telemetry.keyPrefix = `${queueOptions.prefix ?? "tenant"}:${name}:`;
+          return telemetry;
+        },
+      );
   const createRedis = vi.fn().mockReturnValue(redis);
   redis.bind(producer);
   return {
@@ -328,6 +343,36 @@ describe("download queue producer boundary", () => {
     });
     expect(producer.added[0]!.data).toEqual(validJob);
     expect(producer.added[0]!.data).not.toHaveProperty("sessionId");
+  });
+
+  it("uses the shared hash-tagged prefix for every Queue client and admission key", async () => {
+    const { adapter, createQueue, producer, redis } = createAdapter();
+    expect(new FakeQueue().toKey("wait")).not.toContain(DOWNLOAD_QUEUE_PREFIX);
+    await adapter.init();
+    expect(createQueue.mock.calls[0]![1]).toMatchObject({
+      prefix: DOWNLOAD_QUEUE_PREFIX,
+    });
+    expect(createQueue.mock.calls[1]![1]).toMatchObject({
+      prefix: DOWNLOAD_QUEUE_PREFIX,
+    });
+    await adapter.enqueue(validJob);
+    const admissionCall = redis.calls.find(
+      (call) => typeof call[0] === "string" && call[0].includes("HSET"),
+    );
+    expect(admissionCall).toBeDefined();
+    const keys = [...admissionCall!.slice(2, 9), admissionCall!.at(-1)].map(
+      String,
+    );
+    expect(keys).toHaveLength(8);
+    expect(
+      keys.every((key) => key.startsWith(`${DOWNLOAD_QUEUE_PREFIX}:`)),
+    ).toBe(true);
+    expect(new Set(keys.map((key) => key.match(/\{[^{}]+\}/)?.[0]))).toEqual(
+      new Set([DOWNLOAD_QUEUE_PREFIX]),
+    );
+    expect(producer.toKey("wait")).toBe(
+      `${DOWNLOAD_QUEUE_PREFIX}:apollo-tf-downloads-v1:wait`,
+    );
   });
 
   it("keeps a stalled pending intent through an expired old mutex lease", async () => {
