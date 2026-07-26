@@ -1,114 +1,131 @@
-import { EventEmitter } from "node:events";
-import { access, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import { PassThrough } from "node:stream";
+import { describe, expect, it, vi } from "vitest";
 
-import { afterAll, describe, expect, it, vi } from "vitest";
-
-vi.mock("./ytdlp.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./ytdlp.js")>();
-  return {
-    ...original,
-    spawnAudioDownload: vi.fn(() => {
-      const process = new EventEmitter() as EventEmitter & {
-        stdout: PassThrough;
-        stderr: PassThrough;
-      };
-      process.stdout = new PassThrough();
-      process.stderr = new PassThrough();
-      setImmediate(() => {
-        process.stdout.end(Buffer.alloc(2_048, 1));
-        setTimeout(() => process.emit("close", 0), 20);
-      });
-      return process;
-    }),
-  };
-});
-
-process.env["DATABASE_URL"] ??= "postgres://unused:unused@127.0.0.1:1/unused";
-const downloadDirectory = await mkdtemp(
-  path.join(tmpdir(), "apollo-tf-owner-test-"),
-);
-process.env["DOWNLOAD_DIR"] = downloadDirectory;
-
-const queue = await import("./background-queue.js");
 const ACCOUNT_ID = "10000000-0000-4000-8000-000000000001";
+const FOREIGN_ACCOUNT_ID = "20000000-0000-4000-8000-000000000002";
+const JOB_DATA = {
+  schemaVersion: 1,
+  accountId: ACCOUNT_ID,
+  trackId: "yt_example",
+  artist: "Artist",
+  title: "Title",
+  quality: "320",
+  sourceUrl: "https://www.youtube.com/watch?v=example",
+  createdAt: "2026-07-26T00:00:00.000Z",
+} as const;
 
-async function waitForFile(filePath: string): Promise<void> {
-  const deadline = Date.now() + 2_000;
-  for (;;) {
-    try {
-      await access(filePath);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      return;
-    } catch {
-      if (Date.now() >= deadline) throw new Error("download did not complete");
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-  }
+const queueModule = await import("./background-queue.js");
+const adapterModule = queueModule as typeof queueModule & {
+  createDownloadQueueAdapter: (options: unknown) => {
+    init(): Promise<void>;
+    status(jobId: string, accountId: string): Promise<{ status: string; progress: number }>;
+    list(accountId: string): Promise<readonly { jobId: string; status: string }[]>;
+    cancel(jobId: string, accountId: string): Promise<{ status: string }>;
+  };
+};
+
+function job(
+  id: string,
+  data: unknown,
+  state: string,
+  failedReason?: string,
+) {
+  return {
+    id,
+    data,
+    progress: 42,
+    failedReason,
+    getState: vi.fn(async () => state),
+    remove: vi.fn(async () => {}),
+  };
 }
 
-async function enqueueWithOwner(
-  trackId: string,
-  owner: unknown,
-): Promise<{ readonly jobId: string; readonly filePath: string }> {
-  const filePath = path.join(downloadDirectory, `${trackId}.mp3`);
-  const result = await queue.enqueueDownload({
-    trackId,
-    artist: "Artist",
-    title: "Title",
-    quality: "128",
-    sourceUrl: "https://www.youtube.com/watch?v=owner-test",
-    sessionId: owner,
-  } as Parameters<typeof queue.enqueueDownload>[0]);
-  await waitForFile(filePath);
-  return { jobId: result.jobId, filePath };
+function createAdapter(jobs: Map<string, ReturnType<typeof job>>) {
+  const producer = {
+    waitUntilReady: async () => {},
+    getJob: async (id: string) => jobs.get(id),
+    getWaitingCount: async () => 0,
+    getActiveCount: async () => 0,
+    getWaiting: async () => [...jobs.values()],
+    getActive: async () => [...jobs.values()],
+    getCompleted: async () => [...jobs.values()],
+    getFailed: async () => [...jobs.values()],
+    add: async () => ({ id: "new-job" }),
+    close: async () => {},
+  };
+  const telemetry = { ...producer };
+  const cancellation = {
+    connect: async () => {},
+    ping: async () => "PONG",
+    set: vi.fn(async () => "OK"),
+    quit: async () => {},
+  };
+  return {
+    adapter: adapterModule.createDownloadQueueAdapter({
+      environment: {
+        TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url",
+        TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+      },
+      readFile: async () => Buffer.from("redis://tf-download-redis:6379/0"),
+      createQueue: vi.fn().mockReturnValueOnce(producer).mockReturnValueOnce(telemetry),
+      createRedis: vi.fn().mockReturnValue(cancellation),
+    }),
+    cancellation,
+  };
 }
 
-afterAll(async () => {
-  await queue.shutdownBackgroundQueues();
-  await rm(downloadDirectory, { recursive: true, force: true });
-  delete process.env["DOWNLOAD_DIR"];
-});
+describe("download queue ownership and cancellation", () => {
+  it("hides foreign and malformed owners from status and list results", async () => {
+    const owned = job("owned", JOB_DATA, "waiting");
+    const foreign = job("foreign", { ...JOB_DATA, accountId: FOREIGN_ACCOUNT_ID }, "active");
+    const malformed = job("malformed", { ...JOB_DATA, accountId: "legacy-owner" }, "completed");
+    const { adapter } = createAdapter(new Map([[owned.id, owned], [foreign.id, foreign], [malformed.id, malformed]]));
+    await adapter.init();
 
-describe("download queue helper ownership", () => {
-  it("denies status, file, and list access for missing or malformed legacy owners", async () => {
-    const emptyOwner = await enqueueWithOwner("ownerless-empty", "");
-    const missingOwner = await enqueueWithOwner("ownerless-missing", undefined);
-    const malformedOwner = await enqueueWithOwner(
-      "ownerless-malformed",
-      "legacy-owner",
-    );
-
-    for (const job of [emptyOwner, missingOwner, malformedOwner]) {
-      await expect(
-        queue.getDownloadJobStatus(job.jobId, ACCOUNT_ID),
-      ).resolves.toEqual({ status: "unknown", progress: 0 });
-      await expect(
-        queue.getDownloadFilePath(job.jobId, ACCOUNT_ID),
-      ).resolves.toBeNull();
-    }
-    await expect(queue.listSessionDownloadJobs("")).resolves.toEqual([]);
-    await expect(
-      queue.listSessionDownloadJobs("legacy-owner"),
-    ).resolves.toEqual([]);
+    await expect(adapter.status("foreign", ACCOUNT_ID)).resolves.toEqual({ status: "unknown", progress: 0 });
+    await expect(adapter.status("malformed", ACCOUNT_ID)).resolves.toEqual({ status: "unknown", progress: 0 });
+    await expect(adapter.list(ACCOUNT_ID)).resolves.toEqual([
+      expect.objectContaining({ jobId: "owned", status: "waiting" }),
+    ]);
   });
 
-  it("still allows an exact nonempty owner match", async () => {
-    const owned = await enqueueWithOwner("account-owned", ACCOUNT_ID);
+  it("removes a waiting owned job and reports cancellation", async () => {
+    const waiting = job("waiting", JOB_DATA, "waiting");
+    const { adapter, cancellation } = createAdapter(new Map([[waiting.id, waiting]]));
+    await adapter.init();
 
-    await expect(
-      queue.getDownloadJobStatus(owned.jobId, ACCOUNT_ID),
-    ).resolves.toMatchObject({ status: "completed", progress: 100 });
-    await expect(
-      queue.getDownloadFilePath(owned.jobId, ACCOUNT_ID),
-    ).resolves.toBe(owned.filePath);
-    await expect(queue.listSessionDownloadJobs(ACCOUNT_ID)).resolves.toEqual([
-      expect.objectContaining({
-        jobId: owned.jobId,
-        status: "completed",
-      }),
-    ]);
+    await expect(adapter.cancel("waiting", ACCOUNT_ID)).resolves.toEqual({ status: "canceled" });
+    expect(waiting.remove).toHaveBeenCalledOnce();
+    expect(cancellation.set).not.toHaveBeenCalled();
+  });
+
+  it("marks active owned work with a bounded cancellation key", async () => {
+    const active = job("active", JOB_DATA, "active");
+    const { adapter, cancellation } = createAdapter(new Map([[active.id, active]]));
+    await adapter.init();
+
+    await expect(adapter.cancel("active", ACCOUNT_ID)).resolves.toEqual({ status: "canceled" });
+    expect(cancellation.set).toHaveBeenCalledWith(
+      "apollo-tf-downloads-v1:cancel:active",
+      "1",
+      "PX",
+      expect.any(Number),
+    );
+    expect(cancellation.set).toHaveBeenCalledWith(
+      "apollo-tf-downloads-v1:cancel:active",
+      "1",
+      "PX",
+      expect.any(Number),
+    );
+  });
+
+  it("is idempotent for completed and canceled jobs", async () => {
+    const completed = job("completed", JOB_DATA, "completed");
+    const canceled = job("canceled", JOB_DATA, "failed", "download_canceled");
+    const { adapter, cancellation } = createAdapter(new Map([[completed.id, completed], [canceled.id, canceled]]));
+    await adapter.init();
+
+    await expect(adapter.cancel("completed", ACCOUNT_ID)).resolves.toEqual({ status: "completed" });
+    await expect(adapter.cancel("canceled", ACCOUNT_ID)).resolves.toEqual({ status: "canceled" });
+    expect(cancellation.set).not.toHaveBeenCalled();
   });
 });

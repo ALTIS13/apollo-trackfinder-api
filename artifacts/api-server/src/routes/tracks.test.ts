@@ -150,7 +150,6 @@ function routeDependencies(
       id: "job-1",
       state: "waiting",
     }),
-    getDownloadFilePath: vi.fn().mockResolvedValue(null),
   };
   return Object.assign(
     dependencies,
@@ -667,20 +666,20 @@ describe("track account ownership", () => {
     expect(jobs.status).toBe(200);
     expect(status.status).toBe(200);
     expect(file.status).toBe(404);
-    expect(dependencies.enqueueDownload).toHaveBeenCalledWith({
-      trackId,
-      artist: "Artist",
-      title: "Title",
-      quality: "192",
-      sourceUrl,
-      sessionId: ACCOUNT_ID,
-    });
+    expect(dependencies.enqueueDownload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schemaVersion: 1,
+        accountId: ACCOUNT_ID,
+        trackId,
+        artist: "Artist",
+        title: "Title",
+        quality: "192",
+        sourceUrl,
+        createdAt: expect.any(String),
+      }),
+    );
     expect(dependencies.listDownloadJobs).toHaveBeenCalledWith(ACCOUNT_ID);
     expect(dependencies.getDownloadJobStatus).toHaveBeenCalledWith(
-      "job-1",
-      ACCOUNT_ID,
-    );
-    expect(dependencies.getDownloadFilePath).toHaveBeenCalledWith(
       "job-1",
       ACCOUNT_ID,
     );
@@ -688,7 +687,6 @@ describe("track account ownership", () => {
       dependencies.enqueueDownload,
       dependencies.listDownloadJobs,
       dependencies.getDownloadJobStatus,
-      dependencies.getDownloadFilePath,
     ]) {
       expect(JSON.stringify(spy.mock.calls)).not.toContain(OTHER_ACCOUNT_ID);
     }

@@ -11,6 +11,10 @@ globalThis.require = createRequire(import.meta.url);
 const artifactDir = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(artifactDir, "../..");
 const databaseIndex = path.resolve(repositoryRoot, "lib/db/src/index.ts");
+const downloadContractIndex = path.resolve(
+  repositoryRoot,
+  "lib/tf-download-contract/src/index.ts",
+);
 const apiDatabaseSchema = [
   "trackCache.ts",
   "playHistory.ts",
@@ -28,6 +32,10 @@ const apiDatabaseSchemaPlugin = {
     build.onResolve(
       { filter: /^@workspace\/db\/schema$/ },
       () => virtualSchema,
+    );
+    build.onResolve(
+      { filter: /^@workspace\/tf-download-contract$/ },
+      () => ({ path: downloadContractIndex }),
     );
     build.onResolve({ filter: /^\.\/schema$/ }, (args) =>
       path.resolve(args.importer) === databaseIndex ? virtualSchema : undefined,

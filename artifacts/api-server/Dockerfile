@@ -12,7 +12,7 @@ RUN node -e " \
   const fs = require('fs'); \
   const y = fs.readFileSync('pnpm-workspace.yaml', 'utf8'); \
   const replaced = y.replace(/^packages:[\s\S]*?(?=\n[a-zA-Z])/m, \
-    'packages:\n  - artifacts/api-server\n  - lib/admin-dashboard-contract\n  - lib/db\n  - lib/api-zod\n  - lib/module-runtime-contract\n  - lib/platform-contract\n  - lib/tf-integrations-contract\n  - lib/tf-search-contract\n\n'); \
+    'packages:\n  - artifacts/api-server\n  - lib/admin-dashboard-contract\n  - lib/db\n  - lib/api-zod\n  - lib/module-runtime-contract\n  - lib/platform-contract\n  - lib/tf-download-contract\n  - lib/tf-integrations-contract\n  - lib/tf-search-contract\n\n'); \
   fs.writeFileSync('pnpm-workspace.yaml', replaced);"
 
 COPY lib/db/package.json ./lib/db/
@@ -20,6 +20,7 @@ COPY lib/api-zod/package.json ./lib/api-zod/
 COPY lib/admin-dashboard-contract/package.json ./lib/admin-dashboard-contract/
 COPY lib/module-runtime-contract/package.json ./lib/module-runtime-contract/
 COPY lib/platform-contract/package.json ./lib/platform-contract/
+COPY lib/tf-download-contract/package.json ./lib/tf-download-contract/
 COPY lib/tf-integrations-contract/package.json ./lib/tf-integrations-contract/
 COPY lib/tf-search-contract/package.json ./lib/tf-search-contract/
 COPY artifacts/api-server/package.json ./artifacts/api-server/
@@ -29,6 +30,7 @@ COPY lib/api-zod ./lib/api-zod
 COPY lib/admin-dashboard-contract ./lib/admin-dashboard-contract
 COPY lib/module-runtime-contract ./lib/module-runtime-contract
 COPY lib/platform-contract ./lib/platform-contract
+COPY lib/tf-download-contract ./lib/tf-download-contract
 COPY lib/tf-integrations-contract ./lib/tf-integrations-contract
 COPY lib/tf-search-contract ./lib/tf-search-contract
 COPY artifacts/api-server ./artifacts/api-server

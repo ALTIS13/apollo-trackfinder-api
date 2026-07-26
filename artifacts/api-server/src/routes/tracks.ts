@@ -9,17 +9,12 @@ import { getCachedStreamUrl, setCachedStreamUrl } from "../lib/stream-cache.js";
 import {
   enqueueDownload,
   getDownloadJobStatus,
-  getDownloadFilePath,
   listSessionDownloadJobs,
-  DOWNLOAD_DIR,
-  VALID_QUALITIES,
   type DownloadJobData,
 } from "../lib/background-queue.js";
 import { db } from "@workspace/db";
 import { playHistoryTable } from "@workspace/db/schema";
 import { eq, sql } from "drizzle-orm";
-import * as fsSync from "node:fs";
-import * as path from "node:path";
 import {
   TfSearchUnavailableError,
   type TfSearchGateway,
@@ -55,10 +50,16 @@ export interface TrackRouteDependencies {
   readonly enqueueDownload: typeof enqueueDownload;
   readonly listDownloadJobs: typeof listSessionDownloadJobs;
   readonly getDownloadJobStatus: typeof getDownloadJobStatus;
-  readonly getDownloadFilePath: typeof getDownloadFilePath;
 }
 
 const ALL_SEARCH_SOURCES: readonly TfSearchSource[] = ["yt", "sc", "bc", "dz"];
+const VALID_QUALITIES: readonly AudioQuality[] = [
+  "128",
+  "192",
+  "256",
+  "320",
+  "flac",
+];
 
 function unavailableGateway(): TfSearchGateway {
   const unavailable = async (): Promise<never> => {
@@ -215,7 +216,6 @@ const defaultTrackRouteDependencies: TrackRouteDependencies = {
   enqueueDownload,
   listDownloadJobs: listSessionDownloadJobs,
   getDownloadJobStatus,
-  getDownloadFilePath,
 };
 
 export function createTracksRouter(
@@ -978,7 +978,9 @@ export function createTracksRouter(
           title,
           quality,
           sourceUrl,
-          sessionId: req.tfPrincipal!.accountId,
+          schemaVersion: 1,
+          accountId: req.tfPrincipal!.accountId,
+          createdAt: new Date().toISOString(),
         });
         results.push({ trackId, jobId, position });
       } catch (err) {
@@ -1007,27 +1009,7 @@ export function createTracksRouter(
   });
 
   router.get("/tracks/download/file/:jobId", async (req, res) => {
-    const { jobId } = req.params as { jobId: string };
-    const filePath = await routeDependencies.getDownloadFilePath(
-      jobId,
-      req.tfPrincipal!.accountId,
-    );
-    if (!filePath) {
-      res.status(404).json({ error: "File not ready or access denied" });
-      return;
-    }
-    if (!fsSync.existsSync(filePath)) {
-      res.status(404).json({ error: "File not found on disk" });
-      return;
-    }
-    const ext = path.extname(filePath).slice(1) || "mp3";
-    const mime = ext === "flac" ? "audio/flac" : "audio/mpeg";
-    const filename = path.basename(filePath);
-    const stats = fsSync.statSync(filePath);
-    res.setHeader("Content-Type", mime);
-    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-    res.setHeader("Content-Length", stats.size);
-    fsSync.createReadStream(filePath).pipe(res);
+    res.status(404).json({ error: "File not ready or access denied" });
   });
 
   return router;
