@@ -4,9 +4,11 @@ Last updated: 2026-07-26.
 
 ## TF integrations admission/deadline hardening candidate
 
-Status: `REVIEWED_CANDIDATE`. The local candidate through
-`2799b58b5a993ae3bcdc6cac766a501980313da6` has focused task review, but this
-record does not claim final whole-wave validation, push, or merge.
+Status: `READY_TO_MERGE`. The immutable reviewed implementation tip is
+`be3abd1ca17153187b0c978f114cbf14d22f6c9c`; the later evidence commit is
+documentation-only and does not claim that the runtime matrix was rerun on
+itself. Independent task reviews and the final whole-wave review found no
+remaining Critical or Important breakage.
 
 - Replay state retains up to `256` live nonces per canonical account across at
   most `256` account partitions. There is no shared global nonce pool and no
@@ -18,9 +20,33 @@ record does not claim final whole-wave validation, push, or merge.
   through `COMMIT`; PG16 or a missing capability fails readiness
   closed. The HTTP path performs a final deadline check after serializing the
   validated response and before sending it.
+- Exact package validation passed contract `10/10`; integrations DB
+  `25 passed / 5 PostgreSQL-gated`, followed by the gated PostgreSQL 17 suite
+  `5/5`; integrations `105 passed / 10 real-Docker-gated`, followed by the
+  complete smoke file `17/17` with all ten gates enabled; API
+  `384 passed / 2 skipped`; tf-search `140 passed / 1 skipped`; and
+  music-player `85/85`. This is `764` unique passes, `3` documented external
+  skips, and `0` failures across `65` files. An earlier parallel Windows worker
+  exit had no assertion failure; every affected package then passed in an
+  isolated single-worker rerun.
+- Workspace typecheck, both exact Compose renders, `git diff --check`, and all
+  three production builds passed. Fresh primary outputs are integrations
+  `index.mjs` 111,790 bytes and `migrate.mjs` 9,101 bytes; API `index.mjs`
+  4,278,639 bytes; music-player JS 517,554 bytes and CSS 121,197 bytes. The
+  existing music-player sourcemap and greater-than-500-kB chunk advisories
+  remain nonblocking.
+- Public read-only DNS checks through `1.1.1.1` and `8.8.8.8` passed `16/16`
+  for the eight owner-created records. The Docker smoke and the independent
+  audit left zero project containers, networks, volumes, or temporary
+  validation resources.
+- Owner-requested Docker image cleanup removed all six unused local images and
+  reclaimed 937.3 MB. Two detached, exactly named Task 6 residues from
+  2026-07-25 were also removed after proving that no container used them.
+  Unrelated anonymous volumes and build cache were not mass-pruned.
 - The next server/web feature is `tf-download-worker`. Coolify/HomeNode rollout
-  remains gated on the later whole-wave validation, read-only preflight, and
-  explicit owner approval.
+  remains gated on a read-only preflight and explicit owner approval. No
+  HomeNode, Coolify, Caddy, UFW, DNS, or other remote infrastructure mutation
+  was performed in this wave.
 
 ## TF integrations Task 7 historical release validation
 
