@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { open } from "node:fs/promises";
+import { TextDecoder } from "node:util";
 
 import {
   DOWNLOAD_QUEUE_NAME,
@@ -199,7 +200,10 @@ async function readBoundedRegularFile(
   }
 }
 
-function parseQueueUrl(value: string): RedisOptions {
+function parseQueueUrl(value: string): {
+  protocol: "redis:" | "rediss:";
+  options: RedisOptions;
+} {
   let url: URL;
   try {
     url = new URL(value);
@@ -216,14 +220,17 @@ function parseQueueUrl(value: string): RedisOptions {
   try {
     username = url.username ? decodeURIComponent(url.username) : undefined;
     password = url.password ? decodeURIComponent(url.password) : undefined;
-    for (const credential of [username, password]) {
-      if (
-        credential !== undefined &&
-        (Buffer.byteLength(credential, "utf8") > 512 ||
-          /[\u0000-\u001f\u007f]/.test(credential))
-      ) {
-        throw invalid();
-      }
+    const passwordBytes =
+      password === undefined ? 0 : Buffer.byteLength(password, "utf8");
+    if (
+      (username !== undefined &&
+        (Buffer.byteLength(username, "utf8") > 512 ||
+          /[\u0000-\u001f\u007f]/.test(username))) ||
+      passwordBytes < 32 ||
+      passwordBytes > 512 ||
+      (password !== undefined && /[\u0000-\u001f\u007f]/.test(password))
+    ) {
+      throw invalid();
     }
   } catch {
     throw invalid();
@@ -232,17 +239,18 @@ function parseQueueUrl(value: string): RedisOptions {
     url.protocol === "redis:" &&
     url.hostname === "tf-download-redis" &&
     url.port === "6379" &&
-    url.pathname === "/0" &&
-    password !== undefined &&
-    password.length > 0;
+    url.pathname === "/0";
   if (url.protocol !== "rediss:" && !local) throw invalid();
   return {
-    host: url.hostname,
-    port,
-    db: Number(url.pathname.slice(1)),
-    username,
-    password,
-    ...(url.protocol === "rediss:" ? { tls: {} } : {}),
+    protocol: url.protocol === "redis:" ? "redis:" : "rediss:",
+    options: {
+      host: url.hostname,
+      port,
+      db: Number(url.pathname.slice(1)),
+      username,
+      password,
+      ...(url.protocol === "rediss:" ? { tls: {} } : {}),
+    },
   };
 }
 async function configuration(
@@ -262,15 +270,20 @@ async function configuration(
     throw invalid();
   }
   if (bytes.length < 1 || bytes.length > MAX_QUEUE_FILE_BYTES) throw invalid();
-  const raw = bytes.toString("utf8").trim();
+  let raw: string;
+  try {
+    raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes).trim();
+  } catch {
+    throw invalid();
+  }
   const parsed = parseQueueUrl(raw);
   if (
-    raw.startsWith("redis:") &&
+    parsed.protocol === "redis:" &&
     env.TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS !== "true"
   )
     throw invalid();
   const common: RedisOptions = {
-    ...parsed,
+    ...parsed.options,
     connectTimeout: 3000,
     commandTimeout: 1000,
     enableOfflineQueue: false,

@@ -6,6 +6,9 @@ import { DOWNLOAD_QUEUE_PREFIX } from "@workspace/tf-download-contract";
 import { describe, expect, it, vi } from "vitest";
 
 const ACCOUNT_ID = "10000000-0000-4000-8000-000000000001";
+const QUEUE_PASSWORD = `p@ss${"q".repeat(28)}`;
+const ENCODED_QUEUE_PASSWORD = encodeURIComponent(QUEUE_PASSWORD);
+const LOCAL_QUEUE_URL = `redis://default:${ENCODED_QUEUE_PASSWORD}@tf-download-redis:6379/0`;
 const validJob = {
   schemaVersion: 1,
   accountId: ACCOUNT_ID,
@@ -266,11 +269,7 @@ function createAdapter(
       },
       readFile:
         options.readFile ??
-        (async () =>
-          Buffer.from(
-            options.queueUrl ??
-              "redis://default:p%40ss@tf-download-redis:6379/0",
-          )),
+        (async () => Buffer.from(options.queueUrl ?? LOCAL_QUEUE_URL)),
       createQueue: createQueue as never,
       createRedis,
     }),
@@ -307,9 +306,26 @@ describe("download queue producer boundary", () => {
     }
   });
 
+  it("rejects malformed UTF-8 before parsing the queue URL", async () => {
+    const malformed = Buffer.concat([
+      Buffer.from(`rediss://worker:${"p".repeat(30)}`, "utf8"),
+      Buffer.from([0xc3, 0x28]),
+      Buffer.from("@queue.example.test:6380/3", "utf8"),
+    ]);
+
+    await expect(
+      createAdapter({
+        readFile: async () => malformed,
+        environment: {
+          TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url",
+        },
+      }).adapter.init(),
+    ).rejects.toThrow("invalid runtime configuration");
+  });
+
   it("passes the queue file bound to injectable readers", async () => {
     const readQueueFile = vi.fn(async (_path: string, _maximumBytes: number) =>
-      Buffer.from("redis://default:p%40ss@tf-download-redis:6379/0"),
+      Buffer.from(LOCAL_QUEUE_URL),
     );
     const { adapter } = createAdapter({ readFile: readQueueFile });
 
@@ -352,16 +368,20 @@ describe("download queue producer boundary", () => {
 
   it("preserves strict Redis URL, database, and encoded credential handling", async () => {
     const { adapter, createQueue, createRedis } = createAdapter({
-      queueUrl: "rediss://user%20name:p%40ss@queue.example.test:6380/3",
+      queueUrl: `rediss://user%20name:${ENCODED_QUEUE_PASSWORD}@queue.example.test:6380/3`,
       environment: { TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url" },
     });
     await adapter.init();
     expect(createQueue.mock.calls[0]![1]).toMatchObject({
-      connection: { username: "user name", password: "p@ss", db: 3 },
+      connection: {
+        username: "user name",
+        password: QUEUE_PASSWORD,
+        db: 3,
+      },
     });
     expect(createRedis.mock.calls[0]![0]).toMatchObject({ db: 3 });
     const authenticatedLocal = createAdapter({
-      queueUrl: "redis://user%20name:p%40ss@tf-download-redis:6379/0",
+      queueUrl: `redis://user%20name:${ENCODED_QUEUE_PASSWORD}@tf-download-redis:6379/0`,
     });
     await authenticatedLocal.adapter.init();
     expect(authenticatedLocal.createQueue.mock.calls[0]![1]).toMatchObject({
@@ -370,7 +390,7 @@ describe("download queue producer boundary", () => {
         port: 6379,
         db: 0,
         username: "user name",
-        password: "p@ss",
+        password: QUEUE_PASSWORD,
       },
     });
     for (const queueUrl of [
@@ -380,19 +400,95 @@ describe("download queue producer boundary", () => {
       "rediss://queue.example.test/3?query=value",
       "rediss://queue.example.test/3#fragment",
       "rediss:///0",
-      "redis://tf-download-redis:6379/1",
+      `redis://default:${ENCODED_QUEUE_PASSWORD}@tf-download-redis:6379/1`,
       "redis://tf-download-redis:6379/0",
       "redis://default:@tf-download-redis:6379/0",
-      "redis://default:password@tf-download-redis:6380/0",
-      "redis://default:password@api-server:6379/0",
-      "redis://default:password@10.0.0.2:6379/0",
+      `redis://default:${ENCODED_QUEUE_PASSWORD}@tf-download-redis:6380/0`,
+      `redis://default:${ENCODED_QUEUE_PASSWORD}@api-server:6379/0`,
+      `redis://default:${ENCODED_QUEUE_PASSWORD}@10.0.0.2:6379/0`,
       "redis://user%ZZ:password@tf-download-redis:6379/0",
       "redis://default:password%E0%A4%A@tf-download-redis:6379/0",
-      "redis://tf-download-redis:6379/0?query=value",
+      `redis://default:${ENCODED_QUEUE_PASSWORD}@tf-download-redis:6379/0?query=value`,
     ]) {
       await expect(createAdapter({ queueUrl }).adapter.init()).rejects.toThrow(
         "invalid runtime configuration",
       );
+    }
+  });
+
+  it("requires a 32..512 UTF-8 byte Redis password for redis and rediss", async () => {
+    for (const password of [
+      "p".repeat(32),
+      "p".repeat(512),
+      "é".repeat(16),
+      "é".repeat(256),
+    ]) {
+      const encoded = encodeURIComponent(password);
+      for (const options of [
+        {
+          queueUrl: `rediss://:${encoded}@queue.example.test:6380/3`,
+          environment: { TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url" },
+        },
+        {
+          queueUrl: `redis://default:${encoded}@tf-download-redis:6379/0`,
+          environment: {
+            TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url",
+            TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+          },
+        },
+      ]) {
+        const accepted = createAdapter(options);
+        await accepted.adapter.init();
+        expect(accepted.createQueue.mock.calls[0]![1]).toMatchObject({
+          connection: { password },
+        });
+      }
+    }
+
+    for (const password of [
+      "p",
+      "p".repeat(31),
+      "p".repeat(513),
+      `${"é".repeat(256)}p`,
+    ]) {
+      const encoded = encodeURIComponent(password);
+      for (const queueUrl of [
+        `rediss://worker:${encoded}@queue.example.test:6380/3`,
+        `redis://default:${encoded}@tf-download-redis:6379/0`,
+      ]) {
+        await expect(
+          createAdapter({ queueUrl }).adapter.init(),
+        ).rejects.toThrow("invalid runtime configuration");
+      }
+    }
+
+    for (const queueUrl of [
+      "rediss://queue.example.test:6380/3",
+      `rediss://${"u".repeat(513)}:${ENCODED_QUEUE_PASSWORD}@queue.example.test:6380/3`,
+      `rediss://user%0Aname:${ENCODED_QUEUE_PASSWORD}@queue.example.test:6380/3`,
+      `rediss://worker:password%0A${"p".repeat(23)}@queue.example.test:6380/3`,
+    ]) {
+      await expect(createAdapter({ queueUrl }).adapter.init()).rejects.toThrow(
+        "invalid runtime configuration",
+      );
+    }
+  });
+
+  it("gates mixed-case redis schemes through the normalized protocol", async () => {
+    for (const scheme of ["ReDiS", "REDIS"]) {
+      const queueUrl = `${scheme}://default:${ENCODED_QUEUE_PASSWORD}@tf-download-redis:6379/0`;
+      await expect(
+        createAdapter({
+          queueUrl,
+          environment: {
+            TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url",
+          },
+        }).adapter.init(),
+      ).rejects.toThrow("invalid runtime configuration");
+
+      await expect(
+        createAdapter({ queueUrl }).adapter.init(),
+      ).resolves.toBeUndefined();
     }
   });
 

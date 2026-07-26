@@ -8,6 +8,9 @@ import { parseTfDownloadWorkerConfig } from "./config.js";
 
 const commandSecret = "c".repeat(32);
 const heartbeatSecret = "h".repeat(32);
+const queuePassword = `p@ss${"q".repeat(28)}`;
+const encodedQueuePassword = encodeURIComponent(queuePassword);
+const secureQueueUrl = `rediss://worker:${encodedQueuePassword}@queue.apollot.ru:6380/3`;
 const storageRoot = path.resolve("C:/apollo-tf/downloads");
 
 function environment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
@@ -28,8 +31,7 @@ function files(
   overrides: Readonly<Record<string, string | Buffer>> = {},
 ): Readonly<Record<string, string | Buffer>> {
   return {
-    "/run/secrets/download-queue-url":
-      "rediss://worker:password@queue.apollot.ru:6380/3",
+    "/run/secrets/download-queue-url": secureQueueUrl,
     "/run/secrets/download-command": commandSecret,
     "/run/secrets/download-heartbeat": heartbeatSecret,
     ...overrides,
@@ -54,7 +56,7 @@ describe("TF download worker runtime configuration", () => {
       parseTfDownloadWorkerConfig(environment(), readFile),
     ).resolves.toEqual({
       port: 8080,
-      queueRedisUrl: "rediss://worker:password@queue.apollot.ru:6380/3",
+      queueRedisUrl: secureQueueUrl,
       internalAuthSecret: commandSecret,
       heartbeatSecret,
       heartbeatApiOrigin: "https://api.apollot.ru",
@@ -193,7 +195,7 @@ describe("TF download worker runtime configuration", () => {
               [filePath]:
                 filePath === "/run/secrets/download-queue-url"
                   ? Buffer.concat([
-                      Buffer.from("rediss://user:", "utf8"),
+                      Buffer.from(`rediss://user:${"p".repeat(30)}`, "utf8"),
                       Buffer.from([0xc3, 0x28]),
                       Buffer.from("@queue.apollot.ru/0", "utf8"),
                     ])
@@ -208,9 +210,82 @@ describe("TF download worker runtime configuration", () => {
     }
   });
 
+  it("requires a 32..512 UTF-8 byte Redis password for redis and rediss", async () => {
+    for (const password of [
+      "p".repeat(32),
+      "p".repeat(512),
+      "é".repeat(16),
+      "é".repeat(256),
+    ]) {
+      const encoded = encodeURIComponent(password);
+      for (const [queueUrl, insecure] of [
+        [`rediss://:${encoded}@queue.apollot.ru:6380/3`, false],
+        [`redis://default:${encoded}@tf-download-redis:6379/0`, true],
+      ] as const) {
+        await expect(
+          parseTfDownloadWorkerConfig(
+            environment(
+              insecure
+                ? { TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true" }
+                : {},
+            ),
+            reader(
+              files({
+                "/run/secrets/download-queue-url": queueUrl,
+              }),
+            ),
+          ),
+        ).resolves.toMatchObject({ queueRedisUrl: queueUrl });
+      }
+    }
+
+    for (const password of [
+      "p",
+      "p".repeat(31),
+      "p".repeat(513),
+      `${"é".repeat(256)}p`,
+    ]) {
+      const encoded = encodeURIComponent(password);
+      for (const queueUrl of [
+        `rediss://worker:${encoded}@queue.apollot.ru:6380/3`,
+        `redis://default:${encoded}@tf-download-redis:6379/0`,
+      ]) {
+        await expect(
+          parseTfDownloadWorkerConfig(
+            environment({
+              TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+            }),
+            reader(
+              files({
+                "/run/secrets/download-queue-url": queueUrl,
+              }),
+            ),
+          ),
+        ).rejects.toThrow("invalid runtime configuration");
+      }
+    }
+
+    for (const queueUrl of [
+      "rediss://queue.apollot.ru:6380/3",
+      `rediss://${"u".repeat(513)}:${encodedQueuePassword}@queue.apollot.ru:6380/3`,
+      `rediss://user%0Aname:${encodedQueuePassword}@queue.apollot.ru:6380/3`,
+      `rediss://worker:password%0A${"p".repeat(23)}@queue.apollot.ru:6380/3`,
+    ]) {
+      await expect(
+        parseTfDownloadWorkerConfig(
+          environment(),
+          reader(
+            files({
+              "/run/secrets/download-queue-url": queueUrl,
+            }),
+          ),
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+    }
+  });
+
   it("allows private same-node redis/http only with exact explicit flags", async () => {
-    const authenticatedQueueUrl =
-      "redis://default:p%40ss@tf-download-redis:6379/0";
+    const authenticatedQueueUrl = `redis://default:${encodedQueuePassword}@tf-download-redis:6379/0`;
     await expect(
       parseTfDownloadWorkerConfig(
         environment({
@@ -254,6 +329,35 @@ describe("TF download worker runtime configuration", () => {
     }
   });
 
+  it("gates mixed-case redis schemes through the normalized protocol", async () => {
+    for (const scheme of ["ReDiS", "REDIS"]) {
+      const queueUrl = `${scheme}://default:${encodedQueuePassword}@tf-download-redis:6379/0`;
+      await expect(
+        parseTfDownloadWorkerConfig(
+          environment(),
+          reader(
+            files({
+              "/run/secrets/download-queue-url": queueUrl,
+            }),
+          ),
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+
+      await expect(
+        parseTfDownloadWorkerConfig(
+          environment({
+            TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+          }),
+          reader(
+            files({
+              "/run/secrets/download-queue-url": queueUrl,
+            }),
+          ),
+        ),
+      ).resolves.toMatchObject({ queueRedisUrl: queueUrl });
+    }
+  });
+
   it("rejects unsafe origins, queue URLs, and non-normalized paths", async () => {
     for (const origin of [
       "https://api.apollot.ru/",
@@ -275,13 +379,13 @@ describe("TF download worker runtime configuration", () => {
       "rediss://queue.apollot.ru/03",
       "rediss://queue.apollot.ru/16",
       "rediss://queue.apollot.ru/0?secret=value",
-      "redis://public.apollot.ru:6379/0",
-      "redis://10.0.0.2:6379/0",
+      `redis://default:${encodedQueuePassword}@public.apollot.ru:6379/0`,
+      `redis://default:${encodedQueuePassword}@10.0.0.2:6379/0`,
       "redis://tf-download-redis:6379/0",
       "redis://default:@tf-download-redis:6379/0",
-      "redis://default:password@tf-download-redis:6379/1",
-      "redis://default:password@tf-download-redis:6380/0",
-      "redis://default:password@api-server:6379/0",
+      `redis://default:${encodedQueuePassword}@tf-download-redis:6379/1`,
+      `redis://default:${encodedQueuePassword}@tf-download-redis:6380/0`,
+      `redis://default:${encodedQueuePassword}@api-server:6379/0`,
       "redis://user%ZZ:password@tf-download-redis:6379/0",
       "redis://default:password%E0%A4%A@tf-download-redis:6379/0",
       "rediss://user%ZZ:password@queue.apollot.ru/0",
@@ -305,13 +409,12 @@ describe("TF download worker runtime configuration", () => {
         environment(),
         reader(
           files({
-            "/run/secrets/download-queue-url":
-              "rediss://user%20name:p%40ss@queue.apollot.ru:6380/3",
+            "/run/secrets/download-queue-url": `rediss://user%20name:${encodedQueuePassword}@queue.apollot.ru:6380/3`,
           }),
         ),
       ),
     ).resolves.toMatchObject({
-      queueRedisUrl: "rediss://user%20name:p%40ss@queue.apollot.ru:6380/3",
+      queueRedisUrl: `rediss://user%20name:${encodedQueuePassword}@queue.apollot.ru:6380/3`,
     });
     await expect(
       parseTfDownloadWorkerConfig(

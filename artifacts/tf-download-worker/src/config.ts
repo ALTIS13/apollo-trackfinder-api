@@ -140,17 +140,19 @@ function parseQueueRedisUrl(value: string, allowInsecure: boolean): string {
   }
   const port = Number(url.port || "6379");
   if (!Number.isInteger(port) || port < 1 || port > 65_535) return invalid();
-  let decodedPassword: string | undefined;
+  let decodedPassword: string;
   try {
-    for (const [index, credential] of [url.username, url.password].entries()) {
-      const decoded = decodeURIComponent(credential);
-      if (
-        Buffer.byteLength(decoded, "utf8") > 512 ||
-        /[\u0000-\u001f\u007f]/.test(decoded)
-      ) {
-        return invalid();
-      }
-      if (index === 1 && credential !== "") decodedPassword = decoded;
+    const decodedUsername = decodeURIComponent(url.username);
+    decodedPassword = decodeURIComponent(url.password);
+    const passwordBytes = Buffer.byteLength(decodedPassword, "utf8");
+    if (
+      Buffer.byteLength(decodedUsername, "utf8") > 512 ||
+      /[\u0000-\u001f\u007f]/.test(decodedUsername) ||
+      passwordBytes < 32 ||
+      passwordBytes > 512 ||
+      /[\u0000-\u001f\u007f]/.test(decodedPassword)
+    ) {
+      return invalid();
     }
   } catch {
     return invalid();
@@ -161,9 +163,7 @@ function parseQueueRedisUrl(value: string, allowInsecure: boolean): string {
     allowInsecure &&
     url.hostname === "tf-download-redis" &&
     url.port === "6379" &&
-    url.pathname === "/0" &&
-    decodedPassword !== undefined &&
-    decodedPassword.length > 0;
+    url.pathname === "/0";
   return sameNode ? value : invalid();
 }
 

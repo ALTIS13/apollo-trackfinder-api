@@ -82,7 +82,11 @@ function createAdapter(
         TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
       },
       readFile: async () =>
-        Buffer.from("redis://default:p%40ss@tf-download-redis:6379/0"),
+        Buffer.from(
+          `redis://default:${encodeURIComponent(
+            `p@ss${"q".repeat(28)}`,
+          )}@tf-download-redis:6379/0`,
+        ),
       createQueue: vi
         .fn()
         .mockReturnValueOnce(producer)
