@@ -4,11 +4,13 @@ Last updated: 2026-07-26.
 
 ## TF integrations admission/deadline hardening candidate
 
-Status: `READY_TO_MERGE`. The immutable reviewed implementation tip is
-`be3abd1ca17153187b0c978f114cbf14d22f6c9c`; the later evidence commit is
-documentation-only and does not claim that the runtime matrix was rerun on
-itself. Independent task reviews and the final whole-wave review found no
-remaining Critical or Important breakage.
+Status: `MERGED_VALIDATED`. The immutable reviewed implementation tip is
+`be3abd1ca17153187b0c978f114cbf14d22f6c9c`; merged-result validation passed
+at evidence tip `26d00869888c8962f3016207752a39e40e59121b`, which was pushed
+to `origin/main`. This following release-record change is documentation-only
+and does not claim that the runtime matrix was rerun on itself. Independent
+task reviews and the final whole-wave review found no remaining Critical or
+Important breakage.
 
 - Replay state retains up to `256` live nonces per canonical account across at
   most `256` account partitions. There is no shared global nonce pool and no
@@ -42,6 +44,9 @@ remaining Critical or Important breakage.
 - Owner-requested Docker image cleanup removed all six unused local images and
   reclaimed 937.3 MB. Two detached, exactly named Task 6 residues from
   2026-07-25 were also removed after proving that no container used them.
+  Merged-result API validation briefly restored `redis:7-alpine`; its
+  setup-timeout residue was removed by exact name, the rerun passed, and the
+  image was pruned again with another 57.83 MB reclaimed.
   Unrelated anonymous volumes and build cache were not mass-pruned.
 - The next server/web feature is `tf-download-worker`. Coolify/HomeNode rollout
   remains gated on a read-only preflight and explicit owner approval. No
