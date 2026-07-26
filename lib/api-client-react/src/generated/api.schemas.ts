@@ -125,6 +125,144 @@ export interface DownloadResponse {
   filename?: string | null;
 }
 
+export type DownloadQuality =
+  (typeof DownloadQuality)[keyof typeof DownloadQuality];
+
+export const DownloadQuality = {
+  NUMBER_128: "128",
+  NUMBER_192: "192",
+  NUMBER_256: "256",
+  NUMBER_320: "320",
+  flac: "flac",
+} as const;
+
+export interface DownloadQueueTrack {
+  /**
+   * @minLength 1
+   * @maxLength 4096
+   */
+  trackId: string;
+  /**
+   * @minLength 1
+   * @maxLength 300
+   */
+  artist: string;
+  /**
+   * @minLength 1
+   * @maxLength 500
+   */
+  title: string;
+  quality: DownloadQuality;
+}
+
+export interface DownloadQueueRequest {
+  /**
+   * @minItems 1
+   * @maxItems 50
+   */
+  tracks: DownloadQueueTrack[];
+}
+
+export interface DownloadQueueResult {
+  /**
+   * @minLength 1
+   * @maxLength 4096
+   */
+  trackId: string;
+  jobId: string;
+  /**
+   * @minimum 1
+   * @maximum 200
+   */
+  position: number;
+}
+
+export interface DownloadQueueResponse {
+  /**
+   * @minItems 1
+   * @maxItems 50
+   */
+  results: DownloadQueueResult[];
+}
+
+export type DownloadJobState =
+  (typeof DownloadJobState)[keyof typeof DownloadJobState];
+
+export const DownloadJobState = {
+  waiting: "waiting",
+  active: "active",
+  completed: "completed",
+  failed: "failed",
+  canceled: "canceled",
+} as const;
+
+export interface DownloadJobStatus {
+  status: DownloadJobState;
+  /**
+   * @minimum 0
+   * @maximum 100
+   */
+  progress: number;
+  /**
+   * @minimum 1
+   * @maximum 200
+   */
+  position?: number;
+  /**
+   * @minimum 1
+   * @maximum 1073741824
+   */
+  fileSize?: number;
+}
+
+export interface DownloadJob {
+  jobId: string;
+  status: DownloadJobState;
+  /**
+   * @minimum 0
+   * @maximum 100
+   */
+  progress: number;
+  /**
+   * @minimum 1
+   * @maximum 200
+   */
+  position?: number;
+  /**
+   * @minimum 1
+   * @maximum 1073741824
+   */
+  fileSize?: number;
+}
+
+export interface DownloadJobListResponse {
+  /** @maxItems 200 */
+  jobs: DownloadJob[];
+}
+
+export interface DownloadJobCancelResponse {
+  jobId: string;
+  status: DownloadJobState;
+}
+
+export type DownloadErrorResponseError =
+  (typeof DownloadErrorResponseError)[keyof typeof DownloadErrorResponseError];
+
+export const DownloadErrorResponseError = {
+  bad_request: "bad_request",
+  module_access_denied: "module_access_denied",
+  download_queue_unavailable: "download_queue_unavailable",
+  job_not_found: "job_not_found",
+  file_not_found: "file_not_found",
+  file_not_ready: "file_not_ready",
+  range_not_satisfiable: "range_not_satisfiable",
+  worker_unavailable: "worker_unavailable",
+} as const;
+
+export interface DownloadErrorResponse {
+  error: DownloadErrorResponseError;
+}
+
 export interface ErrorResponse {
   error: string;
   message: string;

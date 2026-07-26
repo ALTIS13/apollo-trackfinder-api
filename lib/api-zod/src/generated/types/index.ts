@@ -6,6 +6,18 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from "./downloadErrorResponse";
+export * from "./downloadErrorResponseError";
+export * from "./downloadJob";
+export * from "./downloadJobCancelResponse";
+export * from "./downloadJobListResponse";
+export * from "./downloadJobState";
+export * from "./downloadJobStatus";
+export * from "./downloadQuality";
+export * from "./downloadQueueRequest";
+export * from "./downloadQueueResponse";
+export * from "./downloadQueueResult";
+export * from "./downloadQueueTrack";
 export * from "./downloadResponse";
 export * from "./errorResponse";
 export * from "./healthStatus";

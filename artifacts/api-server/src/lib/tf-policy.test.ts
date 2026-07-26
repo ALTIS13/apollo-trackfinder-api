@@ -162,14 +162,14 @@ afterEach(async () => {
 });
 
 describe("TF route policy map", () => {
-  it("contains the exact 30 anchored capability policies", () => {
-    expect(TF_ROUTE_POLICIES).toHaveLength(30);
+  it("contains the exact 31 anchored capability policies", () => {
+    expect(TF_ROUTE_POLICIES).toHaveLength(31);
     expect(
       TF_ROUTE_POLICIES.filter((policy) => policy.live === false),
     ).toHaveLength(6);
     expect(
       TF_ROUTE_POLICIES.filter((policy) => policy.live === true),
-    ).toHaveLength(24);
+    ).toHaveLength(25);
 
     expect(
       requiredPolicyForRequest("POST", "/api/tracks/search?ignored=1"),
@@ -185,6 +185,19 @@ describe("TF route policy map", () => {
     ).toMatchObject({ capability: "tf.integrations", live: true });
     expect(requiredPolicyForRequest("POST", "/api/ws/tickets")).toMatchObject({
       capability: "tf.search",
+      live: true,
+    });
+  });
+
+  it.each([
+    ["POST", "/api/tracks/download/queue"],
+    ["GET", "/api/tracks/download/jobs"],
+    ["GET", "/api/tracks/download/status/job-id"],
+    ["GET", "/api/tracks/download/file/job-id"],
+    ["DELETE", "/api/tracks/download/jobs/job-id"],
+  ])("requires live tf.downloads for %s %s", (method, path) => {
+    expect(requiredPolicyForRequest(method, path)).toMatchObject({
+      capability: "tf.downloads",
       live: true,
     });
   });

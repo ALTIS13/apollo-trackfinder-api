@@ -58,6 +58,7 @@ function exactInventory(): TfProtectedRoute[] {
     { method: "GET", path: "/api/tracks/download/jobs" },
     { method: "GET", path: "/api/tracks/download/status/:jobId" },
     { method: "GET", path: "/api/tracks/download/file/:jobId" },
+    { method: "DELETE", path: "/api/tracks/download/jobs/:jobId" },
     { method: "GET", path: "/api/spotify/login" },
     { method: "GET", path: "/api/spotify/callback" },
     { method: "GET", path: "/api/spotify/status" },
@@ -133,7 +134,7 @@ afterEach(async () => {
 });
 
 describe("protected route policy coverage", () => {
-  it("discovers exactly 14 track, 9 Spotify, 6 Yandex, and 1 WebSocket ticket route", async () => {
+  it("discovers exactly 15 track, 9 Spotify, 6 Yandex, and 1 WebSocket ticket route", async () => {
     const trackRoutes = discoverRoutes(createTracksRouter());
     const spotifyRoutes = discoverRoutes(createSpotifyRouter());
     const yandexRoutes = discoverRoutes(createYandexRouter());
@@ -151,7 +152,7 @@ describe("protected route policy coverage", () => {
       ...websocketTicketRoutes,
     ];
 
-    expect(trackRoutes).toHaveLength(14);
+    expect(trackRoutes).toHaveLength(15);
     expect(spotifyRoutes).toHaveLength(9);
     expect(yandexRoutes).toHaveLength(6);
     expect(websocketTicketRoutes).toHaveLength(1);

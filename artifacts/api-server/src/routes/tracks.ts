@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { Router, type IRouter } from "express";
+import { z } from "zod";
 import {
   getStreamUrl,
   spawnAudioDownload,
@@ -9,10 +10,10 @@ import {
 import { SearchTracksBody } from "@workspace/api-zod";
 import { getCachedStreamUrl, setCachedStreamUrl } from "../lib/stream-cache.js";
 import {
+  cancelDownloadJob,
   enqueueDownload,
   getDownloadJobStatus,
   listSessionDownloadJobs,
-  type DownloadJobData,
 } from "../lib/background-queue.js";
 import { db } from "@workspace/db";
 import { playHistoryTable } from "@workspace/db/schema";
@@ -25,7 +26,10 @@ import type {
   TfSearchResult,
   TfSearchSource,
 } from "@workspace/tf-search-contract";
-import { DOWNLOAD_MAX_FILE_BYTES } from "@workspace/tf-download-contract";
+import {
+  DOWNLOAD_MAX_FILE_BYTES,
+  downloadQualitySchema,
+} from "@workspace/tf-download-contract";
 import {
   TfDownloadWorkerError,
   type TfDownloadWorkerGateway,
@@ -57,17 +61,30 @@ export interface TrackRouteDependencies {
   readonly enqueueDownload: typeof enqueueDownload;
   readonly listDownloadJobs: typeof listSessionDownloadJobs;
   readonly getDownloadJobStatus: typeof getDownloadJobStatus;
+  readonly cancelDownloadJob: typeof cancelDownloadJob;
   readonly downloadWorkerGateway: TfDownloadWorkerGateway;
 }
 
 const ALL_SEARCH_SOURCES: readonly TfSearchSource[] = ["yt", "sc", "bc", "dz"];
-const VALID_QUALITIES: readonly AudioQuality[] = [
-  "128",
-  "192",
-  "256",
-  "320",
-  "flac",
-];
+const downloadQueueRequestSchema = z
+  .object({
+    tracks: z
+      .array(
+        z
+          .object({
+            trackId: z.string().trim().min(1).max(4_096),
+            artist: z.string().trim().min(1).max(300),
+            title: z.string().trim().min(1).max(500),
+            quality: downloadQualitySchema,
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(50),
+  })
+  .strict();
+const CANONICAL_JOB_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function unavailableGateway(): TfSearchGateway {
   const unavailable = async (): Promise<never> => {
@@ -114,10 +131,7 @@ function hasLegacyInvalidSearchOptions(body: unknown): boolean {
   if (typeof body !== "object" || body === null) return false;
   const candidate = body as Record<string, unknown>;
   const maxResults = candidate["maxResults"];
-  if (
-    typeof maxResults === "number" &&
-    !Number.isSafeInteger(maxResults)
-  ) {
+  if (typeof maxResults === "number" && !Number.isSafeInteger(maxResults)) {
     return true;
   }
   const sources = candidate["sources"];
@@ -232,6 +246,7 @@ const defaultTrackRouteDependencies: TrackRouteDependencies = {
   enqueueDownload,
   listDownloadJobs: listSessionDownloadJobs,
   getDownloadJobStatus,
+  cancelDownloadJob,
   downloadWorkerGateway: unavailableDownloadWorkerGateway(),
 };
 
@@ -420,9 +435,7 @@ export function createTracksRouter(
               return;
             }
           } catch {
-            req.log?.warn(
-              "Deezer stream fallback unavailable; using preview",
-            );
+            req.log?.warn("Deezer stream fallback unavailable; using preview");
           }
         }
 
@@ -911,139 +924,139 @@ export function createTracksRouter(
 
   // --- Download Queue endpoints ---
 
-  /**
-   * Validate and allowlist a source URL for download queue jobs.
-   * Accepts either a trusted track ID (decoded server-side via decodeTrackUrl)
-   * or an explicit sourceUrl that must match HTTPS + allowed host allowlist.
-   */
-  function validateDownloadSourceUrl(
-    trackId: string,
-    rawSourceUrl?: string,
-  ): string | null {
-    // Primary: derive from trusted track ID
-    const decoded = decodeTrackUrl(trackId);
-    if (decoded) return decoded.url;
-
-    // Fallback: if caller provided a raw URL, apply allowlist
-    if (rawSourceUrl) {
-      try {
-        const parsed = new URL(rawSourceUrl);
-        if (parsed.protocol !== "https:") return null;
-        const host = parsed.hostname.toLowerCase();
-        const allAllowed = Object.values(ALLOWED_HOSTS).flat();
-        const ok = allAllowed.some((h) => host === h || host.endsWith(`.${h}`));
-        if (!ok) return null;
-        return rawSourceUrl;
-      } catch {
-        return null;
-      }
-    }
-
-    return null;
-  }
-
   router.post("/tracks/download/queue", async (req, res) => {
-    const body = req.body as { tracks?: unknown[] };
-    if (!Array.isArray(body.tracks) || body.tracks.length === 0) {
-      res.status(400).json({ error: "tracks array is required" });
-      return;
-    }
-    if (body.tracks.length > 50) {
-      res.status(400).json({ error: "Maximum 50 tracks per request" });
+    const parsedBody = downloadQueueRequestSchema.safeParse(req.body);
+    if (!parsedBody.success) {
+      res.status(400).json({ error: "bad_request" });
       return;
     }
 
-    const results: Array<
-      | { trackId: string; jobId: string; position: number }
-      | { trackId: string; error: string }
-    > = [];
-
-    for (const t of body.tracks as Record<string, unknown>[]) {
-      const trackId = String(t["trackId"] ?? t["id"] ?? "").trim();
-      const artist = String(t["artist"] ?? "").trim();
-      const title = String(t["title"] ?? "").trim();
-      const rawQuality = String(t["quality"] ?? "128").trim();
-      const rawSourceUrl = t["sourceUrl"] ? String(t["sourceUrl"]) : undefined;
-
-      if (!trackId) {
-        results.push({ trackId, error: "trackId is required" });
-        continue;
+    const resolved = [] as Array<{
+      readonly trackId: string;
+      readonly artist: string;
+      readonly title: string;
+      readonly quality: AudioQuality;
+      readonly sourceUrl: string;
+    }>;
+    for (const track of parsedBody.data.tracks) {
+      const decoded = decodeTrackUrl(track.trackId);
+      if (decoded === null) {
+        res.status(400).json({ error: "bad_request" });
+        return;
       }
 
-      // Strict quality allowlist — normalize with fallback to 128 kbps
-      const quality: import("../lib/ytdlp.js").AudioQuality =
-        VALID_QUALITIES.includes(
-          rawQuality as import("../lib/ytdlp.js").AudioQuality,
-        )
-          ? (rawQuality as import("../lib/ytdlp.js").AudioQuality)
-          : "128";
-
-      // Derive source URL server-side from trusted track ID (with allowlist fallback)
-      const sourceUrl = validateDownloadSourceUrl(trackId, rawSourceUrl);
-      if (!sourceUrl) {
-        results.push({
-          trackId,
-          error: "Could not resolve a trusted source URL for this track",
-        });
-        continue;
+      let sourceUrl = decoded.url;
+      if (decoded.source === "dz") {
+        if (!hasTfSearchAccess(req.tfPrincipal!.entitlements)) {
+          res.status(403).json({ error: "module_access_denied" });
+          return;
+        }
+        try {
+          const fallback = await routeDependencies.searchGateway.search({
+            artist: track.artist,
+            title: track.title,
+            mode: "manual",
+            sources: ["yt", "sc"],
+            maxResults: 6,
+          });
+          sourceUrl =
+            preferredSourceUrl(fallback.results, ["youtube", "soundcloud"]) ??
+            "";
+        } catch {
+          res.status(503).json({ error: "download_queue_unavailable" });
+          return;
+        }
+        if (sourceUrl === "") {
+          res.status(400).json({ error: "bad_request" });
+          return;
+        }
       }
-
-      try {
-        const { jobId, position } = await routeDependencies.enqueueDownload({
-          trackId,
-          artist,
-          title,
-          quality,
-          sourceUrl,
-          schemaVersion: 1,
-          accountId: req.tfPrincipal!.accountId,
-          createdAt: new Date().toISOString(),
-        });
-        results.push({ trackId, jobId, position });
-      } catch (err) {
-        results.push({ trackId, error: (err as Error).message });
-      }
+      resolved.push({ ...track, sourceUrl });
     }
 
-    res.json({ results });
+    try {
+      const results = await Promise.all(
+        resolved.map(async (track) => {
+          const { jobId, position } = await routeDependencies.enqueueDownload({
+            ...track,
+            schemaVersion: 1,
+            accountId: req.tfPrincipal!.accountId,
+            createdAt: new Date().toISOString(),
+          });
+          return { trackId: track.trackId, jobId, position };
+        }),
+      );
+      res.json({ results });
+    } catch {
+      res.status(503).json({ error: "download_queue_unavailable" });
+    }
   });
 
-  /** List session's download jobs — used for client rehydration after app restart */
   router.get("/tracks/download/jobs", async (req, res) => {
-    const jobs = await routeDependencies.listDownloadJobs(
-      req.tfPrincipal!.accountId,
-    );
-    res.json({ jobs });
+    try {
+      const jobs = await routeDependencies.listDownloadJobs(
+        req.tfPrincipal!.accountId,
+      );
+      res.json({ jobs });
+    } catch {
+      res.status(503).json({ error: "download_queue_unavailable" });
+    }
   });
 
   router.get("/tracks/download/status/:jobId", async (req, res) => {
     const { jobId } = req.params as { jobId: string };
-    const status = await routeDependencies.getDownloadJobStatus(
-      jobId,
-      req.tfPrincipal!.accountId,
-    );
-    res.json(status);
+    if (!CANONICAL_JOB_ID.test(jobId)) {
+      res.status(404).json({ error: "job_not_found" });
+      return;
+    }
+    try {
+      const status = await routeDependencies.getDownloadJobStatus(
+        jobId,
+        req.tfPrincipal!.accountId,
+      );
+      if (status.status === "unknown") {
+        res.status(404).json({ error: "job_not_found" });
+        return;
+      }
+      res.json(status);
+    } catch {
+      res.status(503).json({ error: "download_queue_unavailable" });
+    }
+  });
+
+  router.delete("/tracks/download/jobs/:jobId", async (req, res) => {
+    const { jobId } = req.params as { jobId: string };
+    if (!CANONICAL_JOB_ID.test(jobId)) {
+      res.status(404).json({ error: "job_not_found" });
+      return;
+    }
+    try {
+      const result = await routeDependencies.cancelDownloadJob(
+        jobId,
+        req.tfPrincipal!.accountId,
+      );
+      if (result.status === "unknown") {
+        res.status(404).json({ error: "job_not_found" });
+        return;
+      }
+      res.json({ jobId, status: result.status });
+    } catch {
+      res.status(503).json({ error: "download_queue_unavailable" });
+    }
   });
 
   router.get("/tracks/download/file/:jobId", async (req, res) => {
     const { jobId } = req.params as { jobId: string };
-    if (
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
-        jobId,
-      )
-    ) {
+    if (!CANONICAL_JOB_ID.test(jobId)) {
       res.status(404).json({ error: "file_not_found" });
       return;
     }
     const rangeHeader = req.get("range");
     let range: { start: number; end?: number } | undefined;
     if (rangeHeader !== undefined) {
-      const match = /^bytes=(0|[1-9]\d*)-(?:(0|[1-9]\d*))?$/.exec(
-        rangeHeader,
-      );
+      const match = /^bytes=(0|[1-9]\d*)-(?:(0|[1-9]\d*))?$/.exec(rangeHeader);
       const start = match === null ? NaN : Number(match[1]);
-      const end =
-        match?.[2] === undefined ? undefined : Number(match[2]);
+      const end = match?.[2] === undefined ? undefined : Number(match[2]);
       if (
         match === null ||
         !Number.isSafeInteger(start) ||

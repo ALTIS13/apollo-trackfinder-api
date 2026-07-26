@@ -127,7 +127,230 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /tracks/download/queue:
+    post:
+      operationId: queueTrackDownloads
+      tags: [tracks]
+      summary: Queue tracks for download
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DownloadQueueRequest"
+      responses:
+        "200":
+          description: Tracks accepted by the download queue
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadQueueResponse"
+        "400":
+          description: Invalid queue request or unresolvable trusted source
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadErrorResponse"
+        "403":
+          description: Missing download or Deezer fallback entitlement
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadErrorResponse"
+        "503":
+          description: Download queue unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadErrorResponse"
+  /tracks/download/jobs:
+    get:
+      operationId: listDownloadJobs
+      tags: [tracks]
+      summary: List current account download jobs
+      responses:
+        "200":
+          description: Current account download jobs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadJobListResponse"
+        "503":
+          description: Download queue unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadErrorResponse"
+  /tracks/download/status/{jobId}:
+    get:
+      operationId: getDownloadJobStatus
+      tags: [tracks]
+      summary: Get a download job status
+      parameters:
+        - $ref: "#/components/parameters/DownloadJobId"
+      responses:
+        "200":
+          description: Current download job status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadJobStatus"
+        "404":
+          description: Download job is unknown or belongs to another account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadErrorResponse"
+        "503":
+          description: Download queue unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadErrorResponse"
+  /tracks/download/file/{jobId}:
+    get:
+      operationId: getDownloadJobFile
+      tags: [tracks]
+      summary: Stream a completed download file
+      parameters:
+        - $ref: "#/components/parameters/DownloadJobId"
+        - name: Range
+          in: header
+          required: false
+          description: Optional single byte range.
+          schema:
+            type: string
+            pattern: ^bytes=(0|[1-9][0-9]*)-((0|[1-9][0-9]*))?$
+      responses:
+        "200":
+          description: Completed audio file
+          headers:
+            Accept-Ranges:
+              required: true
+              schema:
+                type: string
+                const: bytes
+            Content-Length:
+              required: true
+              schema:
+                type: integer
+                minimum: 1
+                maximum: 1073741824
+            Content-Disposition:
+              required: true
+              schema:
+                type: string
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: private, no-store
+          content:
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+            audio/flac:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: Requested audio byte range
+          headers:
+            Accept-Ranges:
+              required: true
+              schema:
+                type: string
+                const: bytes
+            Content-Length:
+              required: true
+              schema:
+                type: integer
+                minimum: 1
+                maximum: 1073741824
+            Content-Disposition:
+              required: true
+              schema:
+                type: string
+            Content-Range:
+              required: true
+              schema:
+                type: string
+                pattern: ^bytes (0|[1-9][0-9]*)-(0|[1-9][0-9]*)/[1-9][0-9]*$
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: private, no-store
+          content:
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+            audio/flac:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Download file is unknown or belongs to another account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadErrorResponse"
+        "409":
+          description: Download file is not completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadErrorResponse"
+        "416":
+          description: Range is invalid or not satisfiable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadErrorResponse"
+        "503":
+          description: Download worker unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadErrorResponse"
+  /tracks/download/jobs/{jobId}:
+    delete:
+      operationId: cancelDownloadJob
+      tags: [tracks]
+      summary: Cancel a queued or active download job
+      parameters:
+        - $ref: "#/components/parameters/DownloadJobId"
+      responses:
+        "200":
+          description: Download job cancellation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadJobCancelResponse"
+        "404":
+          description: Download job is unknown or belongs to another account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadErrorResponse"
+        "503":
+          description: Download queue unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadErrorResponse"
 components:
+  parameters:
+    DownloadJobId:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+        pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
   schemas:
     HealthStatus:
       type: object
@@ -294,6 +517,157 @@ components:
       required:
         - id
         - downloadUrl
+
+    DownloadQuality:
+      type: string
+      enum: ["128", "192", "256", "320", flac]
+
+    DownloadQueueTrack:
+      type: object
+      additionalProperties: false
+      properties:
+        trackId:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        artist:
+          type: string
+          minLength: 1
+          maxLength: 300
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        quality:
+          $ref: "#/components/schemas/DownloadQuality"
+      required: [trackId, artist, title, quality]
+
+    DownloadQueueRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        tracks:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/DownloadQueueTrack"
+      required: [tracks]
+
+    DownloadQueueResult:
+      type: object
+      additionalProperties: false
+      properties:
+        trackId:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        jobId:
+          type: string
+          format: uuid
+        position:
+          type: integer
+          minimum: 1
+          maximum: 200
+      required: [trackId, jobId, position]
+
+    DownloadQueueResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        results:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/DownloadQueueResult"
+      required: [results]
+
+    DownloadJobState:
+      type: string
+      enum: [waiting, active, completed, failed, canceled]
+
+    DownloadJobStatus:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          $ref: "#/components/schemas/DownloadJobState"
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        position:
+          type: integer
+          minimum: 1
+          maximum: 200
+        fileSize:
+          type: integer
+          minimum: 1
+          maximum: 1073741824
+      required: [status, progress]
+
+    DownloadJob:
+      type: object
+      additionalProperties: false
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/DownloadJobState"
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        position:
+          type: integer
+          minimum: 1
+          maximum: 200
+        fileSize:
+          type: integer
+          minimum: 1
+          maximum: 1073741824
+      required: [jobId, status, progress]
+
+    DownloadJobListResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        jobs:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/DownloadJob"
+      required: [jobs]
+
+    DownloadJobCancelResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/DownloadJobState"
+      required: [jobId, status]
+
+    DownloadErrorResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          enum:
+            - bad_request
+            - module_access_denied
+            - download_queue_unavailable
+            - job_not_found
+            - file_not_found
+            - file_not_ready
+            - range_not_satisfiable
+            - worker_unavailable
+      required: [error]
 
     ErrorResponse:
       type: object

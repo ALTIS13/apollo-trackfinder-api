@@ -128,3 +128,180 @@ export const GetTrackDownloadResponse = zod.object({
   downloadUrl: zod.string(),
   filename: zod.string().nullish(),
 });
+
+/**
+ * @summary Queue tracks for download
+ */
+export const queueTrackDownloadsBodyTracksItemTrackIdMax = 4096;
+
+export const queueTrackDownloadsBodyTracksItemArtistMax = 300;
+
+export const queueTrackDownloadsBodyTracksItemTitleMax = 500;
+
+export const queueTrackDownloadsBodyTracksMax = 50;
+
+export const QueueTrackDownloadsBody = zod.object({
+  tracks: zod
+    .array(
+      zod.object({
+        trackId: zod
+          .string()
+          .min(1)
+          .max(queueTrackDownloadsBodyTracksItemTrackIdMax),
+        artist: zod
+          .string()
+          .min(1)
+          .max(queueTrackDownloadsBodyTracksItemArtistMax),
+        title: zod
+          .string()
+          .min(1)
+          .max(queueTrackDownloadsBodyTracksItemTitleMax),
+        quality: zod.enum(["128", "192", "256", "320", "flac"]),
+      }),
+    )
+    .min(1)
+    .max(queueTrackDownloadsBodyTracksMax),
+});
+
+export const queueTrackDownloadsResponseResultsItemTrackIdMax = 4096;
+
+export const queueTrackDownloadsResponseResultsItemPositionMax = 200;
+
+export const queueTrackDownloadsResponseResultsMax = 50;
+
+export const QueueTrackDownloadsResponse = zod.object({
+  results: zod
+    .array(
+      zod.object({
+        trackId: zod
+          .string()
+          .min(1)
+          .max(queueTrackDownloadsResponseResultsItemTrackIdMax),
+        jobId: zod.string().uuid(),
+        position: zod
+          .number()
+          .min(1)
+          .max(queueTrackDownloadsResponseResultsItemPositionMax),
+      }),
+    )
+    .min(1)
+    .max(queueTrackDownloadsResponseResultsMax),
+});
+
+/**
+ * @summary List current account download jobs
+ */
+export const listDownloadJobsResponseJobsItemProgressMin = 0;
+export const listDownloadJobsResponseJobsItemProgressMax = 100;
+
+export const listDownloadJobsResponseJobsItemPositionMax = 200;
+
+export const listDownloadJobsResponseJobsItemFileSizeMax = 1073741824;
+
+export const listDownloadJobsResponseJobsMax = 200;
+
+export const ListDownloadJobsResponse = zod.object({
+  jobs: zod
+    .array(
+      zod.object({
+        jobId: zod.string().uuid(),
+        status: zod.enum([
+          "waiting",
+          "active",
+          "completed",
+          "failed",
+          "canceled",
+        ]),
+        progress: zod
+          .number()
+          .min(listDownloadJobsResponseJobsItemProgressMin)
+          .max(listDownloadJobsResponseJobsItemProgressMax),
+        position: zod
+          .number()
+          .min(1)
+          .max(listDownloadJobsResponseJobsItemPositionMax)
+          .optional(),
+        fileSize: zod
+          .number()
+          .min(1)
+          .max(listDownloadJobsResponseJobsItemFileSizeMax)
+          .optional(),
+      }),
+    )
+    .max(listDownloadJobsResponseJobsMax),
+});
+
+/**
+ * @summary Get a download job status
+ */
+export const getDownloadJobStatusPathJobIdRegExp = new RegExp(
+  "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+);
+
+export const GetDownloadJobStatusParams = zod.object({
+  jobId: zod.coerce.string().uuid().regex(getDownloadJobStatusPathJobIdRegExp),
+});
+
+export const getDownloadJobStatusResponseProgressMin = 0;
+export const getDownloadJobStatusResponseProgressMax = 100;
+
+export const getDownloadJobStatusResponsePositionMax = 200;
+
+export const getDownloadJobStatusResponseFileSizeMax = 1073741824;
+
+export const GetDownloadJobStatusResponse = zod.object({
+  status: zod.enum(["waiting", "active", "completed", "failed", "canceled"]),
+  progress: zod
+    .number()
+    .min(getDownloadJobStatusResponseProgressMin)
+    .max(getDownloadJobStatusResponseProgressMax),
+  position: zod
+    .number()
+    .min(1)
+    .max(getDownloadJobStatusResponsePositionMax)
+    .optional(),
+  fileSize: zod
+    .number()
+    .min(1)
+    .max(getDownloadJobStatusResponseFileSizeMax)
+    .optional(),
+});
+
+/**
+ * @summary Stream a completed download file
+ */
+export const getDownloadJobFilePathJobIdRegExp = new RegExp(
+  "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+);
+
+export const GetDownloadJobFileParams = zod.object({
+  jobId: zod.coerce.string().uuid().regex(getDownloadJobFilePathJobIdRegExp),
+});
+
+export const getDownloadJobFileHeaderRangeRegExp = new RegExp(
+  "^bytes=(0|[1-9][0-9]\*)-((0|[1-9][0-9]\*))?$",
+);
+
+export const GetDownloadJobFileHeader = zod.object({
+  Range: zod
+    .string()
+    .regex(getDownloadJobFileHeaderRangeRegExp)
+    .optional()
+    .describe("Optional single byte range."),
+});
+
+/**
+ * @summary Cancel a queued or active download job
+ */
+export const cancelDownloadJobPathJobIdRegExp = new RegExp(
+  "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+);
+
+export const CancelDownloadJobParams = zod.object({
+  jobId: zod.coerce.string().uuid().regex(cancelDownloadJobPathJobIdRegExp),
+});
+
+export const CancelDownloadJobResponse = zod.object({
+  jobId: zod.string().uuid(),
+  status: zod.enum(["waiting", "active", "completed", "failed", "canceled"]),
+});
