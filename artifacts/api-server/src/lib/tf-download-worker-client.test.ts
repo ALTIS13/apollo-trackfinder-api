@@ -173,6 +173,26 @@ describe("parseTfDownloadWorkerClientConfig", () => {
       ),
     ).rejects.toThrow("invalid runtime configuration");
   });
+
+  it.each(["", SECRET])(
+    "rejects any inline secret presence when a valid file secret is configured",
+    async (inlineSecret) => {
+      const readSecret = vi.fn().mockResolvedValue(SECRET);
+
+      await expect(
+        parseTfDownloadWorkerClientConfig(
+          {
+            TF_DOWNLOAD_WORKER_ORIGIN: "https://downloads.apollot.ru",
+            TF_DOWNLOAD_WORKER_INTERNAL_AUTH_SECRET: inlineSecret,
+            TF_DOWNLOAD_WORKER_INTERNAL_AUTH_SECRET_FILE:
+              "/run/secrets/tf-download-worker",
+          },
+          readSecret,
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+      expect(readSecret).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("HttpTfDownloadWorkerClient", () => {

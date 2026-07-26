@@ -69,19 +69,20 @@ function invalidConfiguration(): never {
 }
 
 export function assertDistinctTfCommandSecrets(
-  integrationsConfig: TfCommandSecretConfig,
-  searchConfig: TfCommandSecretConfig,
+  ...configs: readonly TfCommandSecretConfig[]
 ): void {
-  const integrationsSecret = Buffer.from(
-    integrationsConfig.internalAuthSecret,
-    "utf8",
+  const secrets = configs.map((config) =>
+    Buffer.from(config.internalAuthSecret, "utf8"),
   );
-  const searchSecret = Buffer.from(searchConfig.internalAuthSecret, "utf8");
-  if (
-    integrationsSecret.byteLength === searchSecret.byteLength &&
-    timingSafeEqual(integrationsSecret, searchSecret)
-  ) {
-    invalidConfiguration();
+  for (let left = 0; left < secrets.length; left += 1) {
+    for (let right = left + 1; right < secrets.length; right += 1) {
+      if (
+        secrets[left]!.byteLength === secrets[right]!.byteLength &&
+        timingSafeEqual(secrets[left]!, secrets[right]!)
+      ) {
+        invalidConfiguration();
+      }
+    }
   }
 }
 

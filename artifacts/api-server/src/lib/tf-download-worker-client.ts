@@ -158,6 +158,14 @@ export async function parseTfDownloadWorkerClientConfig(
   env: NodeJS.ProcessEnv,
   readSecret: SecretReader = (path) => readFile(path, "utf8"),
 ): Promise<TfDownloadWorkerClientConfig> {
+  if (
+    Object.prototype.hasOwnProperty.call(
+      env,
+      "TF_DOWNLOAD_WORKER_INTERNAL_AUTH_SECRET",
+    )
+  ) {
+    invalidConfiguration();
+  }
   return {
     origin: parseExactOrigin(
       requiredValue(env, "TF_DOWNLOAD_WORKER_ORIGIN"),
