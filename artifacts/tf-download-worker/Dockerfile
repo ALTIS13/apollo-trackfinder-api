@@ -1,3 +1,14 @@
+FROM redis:7-bookworm AS queue-redis
+
+COPY artifacts/tf-download-worker/container/start-queue-redis.sh /usr/local/bin/start-queue-redis.sh
+COPY artifacts/tf-download-worker/container/queue-redis-health.sh /usr/local/bin/queue-redis-health.sh
+
+RUN chmod 0555 /usr/local/bin/start-queue-redis.sh \
+  /usr/local/bin/queue-redis-health.sh
+
+USER 999:999
+ENTRYPOINT ["/usr/local/bin/start-queue-redis.sh"]
+
 FROM node:20-bookworm-slim AS builder
 
 ENV PNPM_HOME=/pnpm
@@ -74,3 +85,19 @@ EXPOSE 8080
 USER 10001:10001
 ENTRYPOINT ["/app/bin/start-worker.sh"]
 CMD ["node", "/app/dist/index.mjs"]
+
+FROM runtime AS smoke-runtime
+
+USER root
+COPY artifacts/tf-download-worker/scripts/start-smoke-worker.sh ./bin/start-smoke-worker.sh
+COPY artifacts/tf-download-worker/scripts/smoke-downloader.sh ./bin/smoke-downloader.sh
+COPY artifacts/tf-download-worker/scripts/smoke-deadline.mjs ./bin/smoke-deadline.mjs
+RUN chmod 0555 /app/bin/start-smoke-worker.sh /app/bin/smoke-downloader.sh \
+  /app/bin/smoke-deadline.mjs \
+  && chmod -R a-w /app
+
+USER 10001:10001
+ENTRYPOINT ["/app/bin/start-smoke-worker.sh", "/app/bin/start-worker.sh"]
+CMD ["node", "/app/dist/index.mjs"]
+
+FROM runtime AS final

@@ -17,6 +17,10 @@ node_modules
 .superpowers/
 **/dist
 **/node_modules
+**/coverage
+**/*.tsbuildinfo
+**/*.part
+**/smoke.compose.yml
 
 artifacts/trackfinder-mobile
 artifacts/mockup-sandbox

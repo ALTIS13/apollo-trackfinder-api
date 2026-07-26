@@ -70,6 +70,11 @@ services:
       TF_INTEGRATIONS_ALLOW_INSECURE_HTTP: "true"
       TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_integrations_internal_auth_secret
       TF_INTEGRATIONS_ORIGIN: http://tf-integrations:8080
+      TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true"
+      TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: /run/secrets/tf_download_queue_redis_url
+      TF_DOWNLOAD_WORKER_ALLOW_INSECURE_HTTP: "true"
+      TF_DOWNLOAD_WORKER_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_download_internal_auth_secret
+      TF_DOWNLOAD_WORKER_ORIGIN: http://tf-download-worker:8080
       TF_SEARCH_ALLOW_INSECURE_HTTP: "true"
       TF_SEARCH_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_search_internal_auth_secret
       TF_SEARCH_ORIGIN: http://tf-search:8080
@@ -82,16 +87,27 @@ services:
         uid: "10001"
         gid: "10001"
         mode: "0400"
+      - source: tf_download_queue_redis_url
+        target: tf_download_queue_redis_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_download_internal_auth_secret
+        target: tf_download_internal_auth_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
       - tf_module_heartbeat_keys
       - tf_search_internal_auth_secret
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
-      - /tmp/tf-downloads:rw,noexec,nosuid,size=256m
     networks:
       - tf-data
       - tf-edge
       - tf-integrations-control
       - tf-search-control
+      - tf-download-queue
+      - tf-download-control
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -105,6 +121,10 @@ services:
         condition: service_healthy
       tf-search:
         condition: service_healthy
+      tf-download-redis:
+        condition: service_healthy
+      tf-download-worker:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -112,6 +132,131 @@ services:
         - -e
         - >-
           fetch('http://127.0.0.1:8080/api/readyz').then(r=>{if(!r.ok)process.exit(1)})
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  tf-download-redis:
+    build:
+      context: ../..
+      dockerfile: artifacts/tf-download-worker/Dockerfile
+      target: queue-redis
+    image: ${TF_DOWNLOAD_REDIS_IMAGE:-apollo-tf-download-redis:local}
+    restart: unless-stopped
+    user: "999:999"
+    read_only: true
+    init: true
+    environment:
+      TF_DOWNLOAD_QUEUE_PASSWORD_FILE: /run/secrets/tf_download_queue_password
+    secrets:
+      - source: tf_download_queue_password
+        target: tf_download_queue_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+    volumes:
+      - tf-download-redis-data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-download-queue
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    stop_grace_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+          pids: 128
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/queue-redis-health.sh"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  tf-download-worker:
+    build:
+      context: ../..
+      dockerfile: artifacts/tf-download-worker/Dockerfile
+      target: runtime
+    image: ${TF_DOWNLOAD_WORKER_IMAGE:-apollo-tf-download-worker:local}
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    init: true
+    environment:
+      APOLLO_API_VERSION: "${APOLLO_API_VERSION:-unknown}"
+      APOLLO_DEPLOYED_AT: "${APOLLO_DEPLOYED_AT:-}"
+      NODE_ENV: production
+      PORT: "8080"
+      TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: /run/secrets/tf_download_queue_redis_url
+      TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true"
+      TF_DOWNLOAD_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_download_internal_auth_secret
+      TF_DOWNLOAD_HEARTBEAT_SECRET_FILE: /run/secrets/tf_download_heartbeat_secret
+      TF_DOWNLOAD_HEARTBEAT_API_ORIGIN: http://api:8080
+      TF_DOWNLOAD_HEARTBEAT_ALLOW_INSECURE_HTTP: "true"
+      TF_DOWNLOAD_STORAGE_ROOT: /var/lib/apollo-tf/downloads
+    secrets:
+      - source: tf_download_queue_redis_url
+        target: tf_download_queue_redis_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_download_internal_auth_secret
+        target: tf_download_internal_auth_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_download_heartbeat_secret
+        target: tf_download_heartbeat_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+    volumes:
+      - tf-download-worker-data:/var/lib/apollo-tf/downloads
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    networks:
+      tf-download-queue:
+        gw_priority: 0
+      tf-download-control:
+        gw_priority: 0
+      tf-download-egress:
+        gw_priority: 1
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    stop_grace_period: 45s
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+          pids: 256
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+    depends_on:
+      tf-download-redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:8080/readyz').then(r=>{if(!r.ok)process.exit(1)})
       interval: 5s
       timeout: 3s
       retries: 20
@@ -374,6 +519,14 @@ secrets:
     file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_integrations_internal_auth_secret
   tf_integrations_heartbeat_secret:
     file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_integrations_heartbeat_secret
+  tf_download_queue_password:
+    file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_download_queue_password
+  tf_download_queue_redis_url:
+    file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_download_queue_redis_url
+  tf_download_internal_auth_secret:
+    file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_download_internal_auth_secret
+  tf_download_heartbeat_secret:
+    file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_download_heartbeat_secret
   tf_module_heartbeat_keys:
     file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_module_heartbeat_keys
   tf_postgres_password:
@@ -387,6 +540,8 @@ volumes:
   postgres_data:
   redis_data:
   tf-integrations-postgres-data:
+  tf-download-redis-data:
+  tf-download-worker-data:
 
 networks:
   tf-data:
@@ -400,3 +555,8 @@ networks:
   tf-search-control:
     internal: true
   tf-search-egress: {}
+  tf-download-queue:
+    internal: true
+  tf-download-control:
+    internal: true
+  tf-download-egress: {}

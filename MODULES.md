@@ -33,10 +33,10 @@ apollo-trackfinder/
 
 ### 1.1 Точка входа
 
-| Файл | Описание |
-|------|----------|
-| `src/index.ts` | Запускает HTTP-сервер на порту из `PORT` env |
-| `src/app.ts` | Создаёт Express-приложение, подключает все роутеры под `/api`, настраивает сессии и pino-http |
+| Файл           | Описание                                                                                      |
+| -------------- | --------------------------------------------------------------------------------------------- |
+| `src/index.ts` | Запускает HTTP-сервер на порту из `PORT` env                                                  |
+| `src/app.ts`   | Создаёт Express-приложение, подключает все роутеры под `/api`, настраивает сессии и pino-http |
 
 ### 1.2 Роуты — `src/routes/`
 
@@ -44,40 +44,40 @@ apollo-trackfinder/
 
 **Архитектура:** параллельный поиск по 4 источникам → ранжирование → кэш → стриминг через yt-dlp.
 
-| Эндпоинт | Метод | Описание |
-|----------|-------|----------|
-| `/tracks/search` | POST | Поиск по `artist` + `title`. Параллельно опрашивает YouTube, SoundCloud, Bandcamp, Deezer. Результаты ранжируются и кэшируются на 1 час. Поддерживает `maxResults` (5–40). |
-| `/tracks/:id/audio-stream` | GET | Стрим аудио. Декодирует base64url-ID трека → получает оригинальный URL источника → через yt-dlp качает и проксирует поток клиенту. Fallback: Deezer → YouTube → SoundCloud. |
-| `/tracks/:id/download` | GET | Скачивание файла с нужным качеством (`128`, `192`, `256`, `320` kbps или FLAC). Аналогичный fallback. |
-| `/tracks/lyrics` | GET | Поиск текста песни по `artist` + `title` (+ `duration`). Возвращает синхронизированный LRC и/или обычный текст. |
+| Эндпоинт                   | Метод | Описание                                                                                                                                                                    |
+| -------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/tracks/search`           | POST  | Поиск по `artist` + `title`. Параллельно опрашивает YouTube, SoundCloud, Bandcamp, Deezer. Результаты ранжируются и кэшируются на 1 час. Поддерживает `maxResults` (5–40).  |
+| `/tracks/:id/audio-stream` | GET   | Стрим аудио. Декодирует base64url-ID трека → получает оригинальный URL источника → через yt-dlp качает и проксирует поток клиенту. Fallback: Deezer → YouTube → SoundCloud. |
+| `/tracks/:id/download`     | GET   | Скачивание файла с нужным качеством (`128`, `192`, `256`, `320` kbps или FLAC). Аналогичный fallback.                                                                       |
+| `/tracks/lyrics`           | GET   | Поиск текста песни по `artist` + `title` (+ `duration`). Возвращает синхронизированный LRC и/или обычный текст.                                                             |
 
 **Безопасность:** ID треков — `source_prefix` + base64url(URL). При декодировании URL проверяется против allowlist хостов (`youtube.com`, `soundcloud.com`, `bandcamp.com`, `dzcdn.net`). Только `https://`.
 
 #### `spotify.ts` — Интеграция Spotify
 
-| Эндпоинт | Метод | Описание |
-|----------|-------|----------|
-| `/spotify/status` | GET | Проверяет, авторизован ли текущий сессионный пользователь |
-| `/spotify/login` | GET | Инициирует OAuth 2.0 Authorization Code Flow. Генерирует state с зашифрованным session ID и nonce. `redirect_uri` определяется из `SERVER_URL` env или `PUBLIC_API_DOMAIN`. |
-| `/spotify/callback` | GET | Обменивает код на токены, сохраняет в БД, редиректит в приложение |
-| `/spotify/logout` | POST | Удаляет токены сессии из БД |
-| `/spotify/liked` | GET | Получает лайкнутые треки пользователя (пагинация) |
-| `/spotify/playlists` | GET | Список плейлистов пользователя |
-| `/spotify/playlist/:id/tracks` | GET | Треки конкретного плейлиста |
-| `/spotify/top` | GET | Топ-треки пользователя |
+| Эндпоинт                       | Метод | Описание                                                                                                                                                                    |
+| ------------------------------ | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/spotify/status`              | GET   | Проверяет, авторизован ли текущий сессионный пользователь                                                                                                                   |
+| `/spotify/login`               | GET   | Инициирует OAuth 2.0 Authorization Code Flow. Генерирует state с зашифрованным session ID и nonce. `redirect_uri` определяется из `SERVER_URL` env или `PUBLIC_API_DOMAIN`. |
+| `/spotify/callback`            | GET   | Обменивает код на токены, сохраняет в БД, редиректит в приложение                                                                                                           |
+| `/spotify/logout`              | POST  | Удаляет токены сессии из БД                                                                                                                                                 |
+| `/spotify/liked`               | GET   | Получает лайкнутые треки пользователя (пагинация)                                                                                                                           |
+| `/spotify/playlists`           | GET   | Список плейлистов пользователя                                                                                                                                              |
+| `/spotify/playlist/:id/tracks` | GET   | Треки конкретного плейлиста                                                                                                                                                 |
+| `/spotify/top`                 | GET   | Топ-треки пользователя                                                                                                                                                      |
 
 **Особенности:** автоматическое обновление `access_token` через `refresh_token` за 60 сек до истечения. Мобильный режим определяется по суффиксу `__m` в state — редиректит на `trackfinder://favorites`.
 
 #### `yandex.ts` — Интеграция Яндекс Музыки
 
-| Эндпоинт | Метод | Описание |
-|----------|-------|----------|
-| `/yandex/token` | POST | Сохраняет OAuth-токен (пользователь вводит вручную из браузера) |
-| `/yandex/status` | GET | Статус подключения |
-| `/yandex/disconnect` | POST | Удаляет токен из БД |
-| `/yandex/liked` | GET | Лайкнутые треки через `api.music.yandex.net` |
-| `/yandex/playlists` | GET | Плейлисты пользователя |
-| `/yandex/playlist/:uid/:kind/tracks` | GET | Треки плейлиста |
+| Эндпоинт                             | Метод | Описание                                                        |
+| ------------------------------------ | ----- | --------------------------------------------------------------- |
+| `/yandex/token`                      | POST  | Сохраняет OAuth-токен (пользователь вводит вручную из браузера) |
+| `/yandex/status`                     | GET   | Статус подключения                                              |
+| `/yandex/disconnect`                 | POST  | Удаляет токен из БД                                             |
+| `/yandex/liked`                      | GET   | Лайкнутые треки через `api.music.yandex.net`                    |
+| `/yandex/playlists`                  | GET   | Плейлисты пользователя                                          |
+| `/yandex/playlist/:uid/:kind/tracks` | GET   | Треки плейлиста                                                 |
 
 **Особенности:** использует мобильный User-Agent (`YandexMusicAndroid/24023621`), без PKCE — пользователь сам вставляет OAuth-токен.
 
@@ -91,9 +91,9 @@ apollo-trackfinder/
 от заранее настроенного модуля. Отправитель посылает его каждые 30 секунд.
 `moduleId` должен иметь отдельный ключ в API-only JSON map
 `APOLLO_MODULE_HEARTBEAT_KEYS`; production startup требует entries
-`search-media` и `account-integrations`, например
-`{"search-media":"<search-secret>","account-integrations":"<integrations-secret>"}`.
-Пустая, невалидная, search-only или отсутствующая map завершает startup общей
+`search-media`, `account-integrations` и `download-worker`, например
+`{"search-media":"<search-secret>","account-integrations":"<integrations-secret>","download-worker":"<download-secret>"}`.
+Пустая, невалидная, неполная или отсутствующая map завершает startup общей
 ошибкой `invalid runtime configuration` без вывода key names или values.
 Endpoint по-прежнему fail-closed, если ingestion создаётся отдельно без
 настроенной map.
@@ -116,12 +116,12 @@ POST
 
 Каждый адаптер нормализует ответ источника в единый тип `NormalizedTrack`.
 
-| Файл | Источник | Метод поиска |
-|------|----------|-------------|
-| `youtube.ts` | YouTube | `yt-dlp --dump-json ytsearch:N "запрос"` |
+| Файл            | Источник   | Метод поиска                             |
+| --------------- | ---------- | ---------------------------------------- |
+| `youtube.ts`    | YouTube    | `yt-dlp --dump-json ytsearch:N "запрос"` |
 | `soundcloud.ts` | SoundCloud | `yt-dlp --dump-json scsearch:N "запрос"` |
-| `bandcamp.ts` | Bandcamp | Парсинг HTML страницы поиска Bandcamp |
-| `deezer.ts` | Deezer | REST API `api.deezer.com/search` |
+| `bandcamp.ts`   | Bandcamp   | Парсинг HTML страницы поиска Bandcamp    |
+| `deezer.ts`     | Deezer     | REST API `api.deezer.com/search`         |
 
 **Поле `id` трека:** `{source}_{base64url(originalUrl)}`  
 Примеры: `yt_aHR0cHM6...`, `sc_aHR0cHM6...`, `bc_...`, `dz_...`
@@ -132,16 +132,17 @@ POST
 
 Определяет тип трека по заголовку через регулярные выражения:
 
-| Тип | Паттерны |
-|-----|----------|
-| `original` | (по умолчанию, если ничего не подошло) |
-| `remix` | remix, rmx, bootleg, flip, edit, extended, club mix, radio edit, instrumental... |
-| `live` | live, concert, tour, acoustic, unplugged, session, at ...@ |
-| `cover` | cover, tribute, originally by, sung by |
+| Тип        | Паттерны                                                                         |
+| ---------- | -------------------------------------------------------------------------------- |
+| `original` | (по умолчанию, если ничего не подошло)                                           |
+| `remix`    | remix, rmx, bootleg, flip, edit, extended, club mix, radio edit, instrumental... |
+| `live`     | live, concert, tour, acoustic, unplugged, session, at ...@                       |
+| `cover`    | cover, tribute, originally by, sung by                                           |
 
 #### `ranker.ts` — Ранжирование результатов
 
 Оценивает каждый трек числовым `score` на основе:
+
 - Jaccard-сходство токенов заголовка/исполнителя с запросом
 - Точное совпадение строк (бонус)
 - Близость длительности к эталону (если передана)
@@ -228,12 +229,14 @@ Native Android delivery остаётся отдельным будущим эт�
 Объединяет интеграции Spotify и Яндекс Музыки в одном экране.
 
 **Spotify:**
+
 - Авторизация через OAuth (открывает браузер → сервер → redirect)
 - Вкладки: Liked Songs / Плейлисты / Топ треков
 - Поиск трека по исполнителю → переход на главный экран с поисковым запросом
 - Массовый импорт через `BatchImportModal`
 
 **Яндекс Музыка:**
+
 - Авторизация через ручной ввод OAuth-токена
 - Вкладки: Лайкнутые / Плейлисты
 - Просмотр треков плейлиста, поиск, импорт
@@ -244,32 +247,33 @@ Native Android delivery остаётся отдельным будущим эт�
 
 Центральный контекст воспроизведения. Предоставляет:
 
-| Состояние | Тип | Описание |
-|-----------|-----|----------|
-| `currentTrack` | `PlayerTrack \| null` | Текущий трек |
-| `queue` | `PlayerTrack[]` | Полная очередь |
-| `queueIndex` | `number` | Позиция в очереди |
-| `shuffle` | `boolean` | Режим перемешивания |
-| `repeat` | `'none' \| 'one' \| 'all'` | Режим повтора |
-| `isPlaying` | `boolean` | Состояние воспроизведения |
-| `isLoading` | `boolean` | Загрузка аудио |
-| `position` | `number` | Позиция в секундах |
-| `duration` | `number` | Длительность в секундах |
+| Состояние      | Тип                        | Описание                  |
+| -------------- | -------------------------- | ------------------------- |
+| `currentTrack` | `PlayerTrack \| null`      | Текущий трек              |
+| `queue`        | `PlayerTrack[]`            | Полная очередь            |
+| `queueIndex`   | `number`                   | Позиция в очереди         |
+| `shuffle`      | `boolean`                  | Режим перемешивания       |
+| `repeat`       | `'none' \| 'one' \| 'all'` | Режим повтора             |
+| `isPlaying`    | `boolean`                  | Состояние воспроизведения |
+| `isLoading`    | `boolean`                  | Загрузка аудио            |
+| `position`     | `number`                   | Позиция в секундах        |
+| `duration`     | `number`                   | Длительность в секундах   |
 
-| Метод | Описание |
-|-------|----------|
-| `play(track)` | Играть одиночный трек (очередь = [track]) |
-| `playQueue(tracks, startIndex)` | Играть список, начиная с индекса |
-| `playNext()` | Следующий трек (с учётом shuffle) |
-| `playPrev()` | Предыдущий трек или перемотка в начало (если >3 сек) |
-| `pause() / resume()` | Пауза / продолжение |
-| `stop()` | Остановить и очистить очередь |
-| `seek(pos)` | Перемотка в секундах |
-| `toggleShuffle()` | Переключить перемешивание |
-| `cycleRepeat()` | Цикл: none → all → one → none |
+| Метод                           | Описание                                             |
+| ------------------------------- | ---------------------------------------------------- |
+| `play(track)`                   | Играть одиночный трек (очередь = [track])            |
+| `playQueue(tracks, startIndex)` | Играть список, начиная с индекса                     |
+| `playNext()`                    | Следующий трек (с учётом shuffle)                    |
+| `playPrev()`                    | Предыдущий трек или перемотка в начало (если >3 сек) |
+| `pause() / resume()`            | Пауза / продолжение                                  |
+| `stop()`                        | Остановить и очистить очередь                        |
+| `seek(pos)`                     | Перемотка в секундах                                 |
+| `toggleShuffle()`               | Переключить перемешивание                            |
+| `cycleRepeat()`                 | Цикл: none → all → one → none                        |
 
 **Как работает авто-переход:**  
 Статус-коллбэк `expo-av` (`didJustFinish`) считывает режимы из refs (без stale closure), затем:
+
 - `repeat: 'one'` → воспроизвести тот же трек
 - `repeat: 'all'` → следующий, при конце очереди — с начала
 - `shuffle: true` → случайный индекс ≠ текущий
@@ -284,14 +288,14 @@ URI трека: сначала проверяется `localUri` (размер >
 
 Хранит список скачанных треков в `AsyncStorage` (ключ `trackfinder_library`).
 
-| Метод | Описание |
-|-------|----------|
-| `saveToLibrary(track)` | Добавить трек в библиотеку (без скачивания файла) |
-| `download(track)` | Скачать аудио через `/download` → сохранить в файловую систему устройства (MediaLibrary) |
-| `bulkDownload(tracks)` | Массовое скачивание с прогрессом и возможностью отмены |
-| `remove(id)` | Удалить трек и файл с диска |
-| `bulkRemove(ids)` | Массовое удаление |
-| `isSaved(id)` / `isDownloaded(id)` | Проверки статуса |
+| Метод                              | Описание                                                                                 |
+| ---------------------------------- | ---------------------------------------------------------------------------------------- |
+| `saveToLibrary(track)`             | Добавить трек в библиотеку (без скачивания файла)                                        |
+| `download(track)`                  | Скачать аудио через `/download` → сохранить в файловую систему устройства (MediaLibrary) |
+| `bulkDownload(tracks)`             | Массовое скачивание с прогрессом и возможностью отмены                                   |
+| `remove(id)`                       | Удалить трек и файл с диска                                                              |
+| `bulkRemove(ids)`                  | Массовое удаление                                                                        |
+| `isSaved(id)` / `isDownloaded(id)` | Проверки статуса                                                                         |
 
 Качество скачивания берётся из `use-settings.tsx` (128 / 192 / 256 / 320 kbps / FLAC).
 
@@ -319,6 +323,7 @@ URI трека: сначала проверяется `localUri` (размер >
 #### `MiniPlayer.tsx` — Мини-плеер
 
 Всегда показывается поверх контента когда играет трек.
+
 - Обложка трека, название, исполнитель, таймер
 - Прогресс-бар (2px линия сверху)
 - Кнопки: `▶/⏸`, `⏭` (следующий), `✕` (стоп)
@@ -330,6 +335,7 @@ URI трека: сначала проверяется `localUri` (размер >
 Открывается как `Modal` с `pageSheet` анимацией.
 
 **Структура экрана (сверху вниз):**
+
 1. Drag-handle + кнопка закрытия + бейджи источника/типа
 2. Обложка альбома (280px или SCREEN_W - 80)
 3. Название и исполнитель
@@ -339,6 +345,7 @@ URI трека: сначала проверяется `localUri` (размер >
 7. Прокручиваемый текст (синхронизированный LRC или обычный)
 
 **Возможности:**
+
 - Свайп вниз (Δy > 80px, Δx < 60px) закрывает плеер
 - Текст загружается **автоматически** при открытии плеера
 - LRC-синхронизация: активная строка увеличивается и выделяется, прокрутка следует за музыкой
@@ -389,10 +396,10 @@ Action Sheet с опциями: воспроизвести, скачать, уд
 
 ### 3.1 Экраны
 
-| Файл | Описание |
-|------|----------|
-| `src/pages/Home.tsx` | Поиск треков, воспроизведение через `<audio>` HTML5 |
-| `src/pages/Favorites.tsx` | Сохранённые треки (localStorage) |
+| Файл                      | Описание                                            |
+| ------------------------- | --------------------------------------------------- |
+| `src/pages/Home.tsx`      | Поиск треков, воспроизведение через `<audio>` HTML5 |
+| `src/pages/Favorites.tsx` | Сохранённые треки (localStorage)                    |
 
 ### 3.2 Особенности
 
@@ -477,6 +484,7 @@ Drizzle Kit. Миграции запускаются **автоматическ�
 
 Авто-генерируется из `openapi.yaml` через Orval.  
 Используется сервером для валидации входящих запросов:
+
 ```typescript
 const parseResult = SearchTracksBody.safeParse(req.body);
 ```
@@ -708,9 +716,64 @@ hostname; редиректы запрещены.
 синхронизация часов. Для локального same-node этапа новый домен не нужен.
 HomeNode, Coolify, Caddy, UFW и DNS не изменялись.
 
-### Будущие контейнерные TF-модули
+### Контейнерный `tf-download-worker`
 
-- `tf-download-worker`: authenticated queue/HTTP boundary + heartbeat key, минимальный entitlement `tf.downloads`; отдельное временное/data storage, без Docker socket, SSH и control-plane доступа.
+Download stack состоит из `tf-download-redis` и ровно одной реплики
+`tf-download-worker`. API публикует пользовательский flow через
+`POST /api/tracks/download/queue`, `GET /api/tracks/download/jobs`,
+`GET /api/tracks/download/status/:jobId`,
+`GET /api/tracks/download/file/:jobId` и
+`DELETE /api/tracks/download/jobs/:jobId`. API и worker используют BullMQ
+queue `apollo-tf-downloads-v1` с hash-tag prefix `{apollo-tf-downloads}`.
+Worker отдаёт API только exact signed internal `POST /v1/files`, а heartbeat
+отправляет в
+`POST /api/internal/modules/download-worker/heartbeat`.
+
+`tf-download-queue` является internal и содержит только API, worker и queue
+Redis. `tf-download-control` является internal и содержит только API и worker.
+Только worker подключён к `tf-download-egress`, причём эта сеть имеет наивысший
+gateway priority. Worker не подключается к `tf-data`, `tf-edge`,
+integration/search networks или любому другому control/data plane. Worker и
+queue Redis не публикуют host ports.
+
+File-backed secret `tf_download_queue_password` принадлежит только queue Redis.
+Полный authenticated URL `tf_download_queue_redis_url` получают только API и
+worker. `tf_download_internal_auth_secret` разделяют только API и worker для
+HMAC command boundary. Отдельный `tf_download_heartbeat_secret` получает только
+worker; API читает соответствующий `download-worker` key из общего
+`tf_module_heartbeat_keys`. Все четыре значения различны, не задаются в
+environment и монтируются owner-only mode `0400`: Redis password с
+UID/GID `999:999`, остальные download secrets с `10001:10001`.
+
+На одной ноде API использует private origin
+`http://tf-download-worker:8080`, worker использует `http://api:8080`, а оба
+queue client используют authenticated `redis://tf-download-redis:6379/0`.
+Plain HTTP/Redis разрешены только явными same-node insecure flags. Cross-node
+размещение требует отдельно одобренных HTTPS/TLS ingress и защищённого Redis
+transport с обычной проверкой сертификата/hostname; insecure flags там
+запрещены.
+
+Worker хранит owned files только в named volume `tf-download-worker-data` по
+`/var/lib/apollo-tf/downloads`; Redis AOF хранится отдельно в
+`tf-download-redis-data`. Первый release ограничен одной worker replica,
+поскольку локальный volume не обеспечивает cross-replica routing. Runtime
+обрабатывает до двух jobs одновременно, ограничивает очередь 200 jobs, файл
+1 GiB, storage quota по умолчанию 20 GiB, TTL файла 24 часа и job deadline
+30 минут. При quota pressure удаляются старые unpinned completed files;
+oversize, deadline и невозможность освободить quota завершаются bounded failure
+codes. Waiting и active cancellation остаются worker-mediated, удаляют partial
+output, а периодический sweep удаляет stale partial/expired/over-quota owned
+files.
+
+Публичный клиент никогда не обращается к worker или Redis напрямую: policy
+`tf.downloads`, session ownership, queue status и range validation остаются в
+API. Internal file request подписан отдельным command key и fail-closed для
+replay, tamper, wrong key и foreign account. У worker нет Docker socket,
+host mounts, SSH/Caddy/Coolify/provider/TF DB/Platform DB credentials.
+HomeNode, Coolify, Caddy, UFW, DNS и remote rollout не изменялись и остаются
+закрыты до отдельного read-only preflight и явного подтверждения владельца.
+
+### Будущие контейнерные TF-модули
 
 Модули не разделяют database credentials и не получают Docker/Coolify/Caddy/SSH доступ. На одной Coolify node связь строится через private service DNS. Между разными нодами требуется отдельно одобренный TLS upstream; Docker Compose network не является межузловой сетью.
 
@@ -731,11 +794,13 @@ services:
   tf-integrations-migrate:
   tf-integrations:
   tf-search:
+  tf-download-redis:
+  tf-download-worker:
   web:
   admin:
 ```
 
-Root template сохраняет исходные deployment identities: PostgreSQL service `db`, role/database `trackfinder` и logical volume `pgdata`. Он больше не содержит hardcoded database password или wildcard API binding. TF database/client secrets приходят из `TF_SECRET_DIRECTORY`, API/web/admin ports по умолчанию привязаны к `127.0.0.1`, data plane отделён от edge network. `VITE_API_URL` передаётся как Docker build argument и компилируется в web bundle; runtime environment nginx не может изменить уже собранный URL. Compose передаёт одинаковый server-side `ADMIN_DASHBOARD_TOKEN` API и admin nginx; браузер его не получает. `APOLLO_MODULE_HEARTBEAT_KEYS_FILE` указывает API на `/run/secrets/tf_module_heartbeat_keys`; raw map не задаётся в Compose. `tf-search` подключён только к `tf-search-control` и `tf-search-egress`, а `tf-integrations` -- только к своим control/data/egress сетям. API ожидает readiness обоих модулей без обратной startup-зависимости module -> API. Пустой service token отключает backend endpoint; пустые operator credentials закрывают UI. Deployment в Coolify/HomeNode пока не выполнялся.
+Root template сохраняет исходные deployment identities: PostgreSQL service `db`, role/database `trackfinder` и logical volume `pgdata`. Он больше не содержит hardcoded database password или wildcard API binding. TF database/client secrets приходят из `TF_SECRET_DIRECTORY`, API/web/admin ports по умолчанию привязаны к `127.0.0.1`, data plane отделён от edge network. `VITE_API_URL` передаётся как Docker build argument и компилируется в web bundle; runtime environment nginx не может изменить уже собранный URL. Compose передаёт одинаковый server-side `ADMIN_DASHBOARD_TOKEN` API и admin nginx; браузер его не получает. `APOLLO_MODULE_HEARTBEAT_KEYS_FILE` указывает API на `/run/secrets/tf_module_heartbeat_keys`; raw map не задаётся в Compose. `tf-search` подключён только к `tf-search-control` и `tf-search-egress`, `tf-integrations` -- только к своим control/data/egress сетям, а download Redis/worker -- к isolated queue/control/egress contract выше. API ожидает readiness search, integrations, download queue и worker без обратной startup-зависимости worker -> API. Пустой service token отключает backend endpoint; пустые operator credentials закрывают UI. Deployment в Coolify/HomeNode пока не выполнялся.
 
 ### `artifacts/api-server/docker-compose.yml`
 
@@ -748,36 +813,44 @@ services:
   tf-integrations-migrate:
   tf-integrations:
   tf-search:
+  tf-download-redis:
+  tf-download-worker:
 ```
 
-Вложенный template сохраняет собственные исходные identities: services `db`/`redis`/`api`/`tf-search`, PostgreSQL role `apollo`, database `apollo_trackfinder` и volumes `postgres_data`/`redis_data`. Он добавляет те же три integration services и отдельный `tf-integrations-postgres-data`, что и root template. Он использует file secrets, loopback API binding и отдельные `tf-data`/`tf-edge`. Admin service входит только в корневой `docker-compose.yml`. `ADMIN_DASHBOARD_TOKEN` передаётся только API service, а heartbeat map подключается к API через `APOLLO_MODULE_HEARTBEAT_KEYS_FILE`. Вложенные `tf-search` и `tf-integrations` сохраняют те же secret и network boundaries, что корневой template.
+Вложенный template сохраняет собственные исходные identities: services `db`/`redis`/`api`/`tf-search`, PostgreSQL role `apollo`, database `apollo_trackfinder` и volumes `postgres_data`/`redis_data`. Он добавляет те же integration и download services с отдельными owned data volumes, что и root template. Он использует file secrets, loopback API binding и отдельные `tf-data`/`tf-edge`. Admin service входит только в корневой `docker-compose.yml`. `ADMIN_DASHBOARD_TOKEN` передаётся только API service, а heartbeat map подключается к API через `APOLLO_MODULE_HEARTBEAT_KEYS_FILE`. Вложенные `tf-search`, `tf-integrations` и download stack сохраняют те же secret и network boundaries, что корневой template; отличается только Docker build context.
 
 **Переменные окружения:**
 
-| Переменная | Обязательно | Описание |
-|------------|-------------|----------|
-| `SERVER_URL` | Для self-hosted Spotify | Публичный URL сервера (`https://api.yourdomain.com`). Callback для Spotify Dashboard: `${SERVER_URL}/api/spotify/callback` |
-| `DATABASE_URL_FILE` | Да | Путь к file-backed TF database URL; entrypoint читает до импорта bundle |
-| `PORT` | Авто | 8080 |
-| `APOLLO_API_UPSTREAM` | Для admin runtime | nginx upstream origin только для exact same-origin `GET /api/admin/dashboard` proxy |
-| `ADMIN_DASHBOARD_TOKEN` | До production deployment | Server-side token, который nginx пересылает как `X-Admin-Dashboard-Token`; не попадает в browser bundle |
-| `ADMIN_ACCESS_USER` | Для доступа к admin UI | Operator username для nginx Basic Auth; допустимы буквы, цифры и `_.@-` |
-| `ADMIN_ACCESS_PASSWORD` | Для доступа к admin UI | Operator password; хэшируется при старте контейнера и удаляется из окружения nginx process |
-| `APOLLO_MODULE_HEARTBEAT_KEYS_FILE` | В Compose | API-only путь к JSON map с keys `search-media` и `account-integrations`; entrypoint отклоняет unreadable, empty и oversized файл |
-| `TF_SEARCH_INTERNAL_AUTH_SECRET_FILE` | В Compose | Общий только для API и `tf-search` HMAC command key |
-| `TF_SEARCH_ORIGIN` | В Compose | Same-node `http://tf-search:8080`; HTTP разрешён только вместе с `TF_SEARCH_ALLOW_INSECURE_HTTP=true` |
-| `TF_SEARCH_HEARTBEAT_SECRET_FILE` | Для `tf-search` | Отдельный heartbeat key, который не монтируется в API |
-| `TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE` | В Compose | Distinct command key, смонтированный только в API и `tf-integrations` |
-| `TF_INTEGRATIONS_ORIGIN` | В API Compose | Same-node exact `http://tf-integrations:8080`; HTTP разрешён только с `TF_INTEGRATIONS_ALLOW_INSECURE_HTTP=true` |
-| `TF_INTEGRATIONS_DATABASE_URL_FILE` | В module/migrator | Разные file-backed URL dedicated runtime и migrator roles |
-| `TF_INTEGRATIONS_TOKEN_KEYRING_FILE` | В module | AES-256-GCM keyring; не монтируется в API |
-| `TF_INTEGRATIONS_SPOTIFY_CLIENT_ID_FILE` | В module | File-backed Spotify client ID; не монтируется в API |
-| `TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET_FILE` | В module | File-backed Spotify client secret; не монтируется в API |
-| `TF_INTEGRATIONS_SPOTIFY_CALLBACK_URI` | В module | Exact public HTTPS `/api/spotify/callback` URI |
-| `TF_INTEGRATIONS_HEARTBEAT_SECRET_FILE` | В module | Отдельный `account-integrations` heartbeat key |
-| `TF_INTEGRATIONS_HEARTBEAT_API_ORIGIN` | В module | Same-node exact `http://api:8080`; HTTP разрешён только с `TF_INTEGRATIONS_HEARTBEAT_ALLOW_INSECURE_HTTP=true` |
-| `APOLLO_API_VERSION` | Нет | Версия in-process API-модулей в admin snapshot; default `unknown` |
-| `APOLLO_DEPLOYED_AT` | Нет | ISO timestamp фактического deployment; при отсутствии UI показывает `Нет данных` |
+| Переменная                                   | Обязательно              | Описание                                                                                                                                            |
+| -------------------------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SERVER_URL`                                 | Для self-hosted Spotify  | Публичный URL сервера (`https://api.yourdomain.com`). Callback для Spotify Dashboard: `${SERVER_URL}/api/spotify/callback`                          |
+| `DATABASE_URL_FILE`                          | Да                       | Путь к file-backed TF database URL; entrypoint читает до импорта bundle                                                                             |
+| `PORT`                                       | Авто                     | 8080                                                                                                                                                |
+| `APOLLO_API_UPSTREAM`                        | Для admin runtime        | nginx upstream origin только для exact same-origin `GET /api/admin/dashboard` proxy                                                                 |
+| `ADMIN_DASHBOARD_TOKEN`                      | До production deployment | Server-side token, который nginx пересылает как `X-Admin-Dashboard-Token`; не попадает в browser bundle                                             |
+| `ADMIN_ACCESS_USER`                          | Для доступа к admin UI   | Operator username для nginx Basic Auth; допустимы буквы, цифры и `_.@-`                                                                             |
+| `ADMIN_ACCESS_PASSWORD`                      | Для доступа к admin UI   | Operator password; хэшируется при старте контейнера и удаляется из окружения nginx process                                                          |
+| `APOLLO_MODULE_HEARTBEAT_KEYS_FILE`          | В Compose                | API-only путь к JSON map с keys `search-media`, `account-integrations` и `download-worker`; entrypoint отклоняет unreadable, empty и oversized файл |
+| `TF_SEARCH_INTERNAL_AUTH_SECRET_FILE`        | В Compose                | Общий только для API и `tf-search` HMAC command key                                                                                                 |
+| `TF_SEARCH_ORIGIN`                           | В Compose                | Same-node `http://tf-search:8080`; HTTP разрешён только вместе с `TF_SEARCH_ALLOW_INSECURE_HTTP=true`                                               |
+| `TF_SEARCH_HEARTBEAT_SECRET_FILE`            | Для `tf-search`          | Отдельный heartbeat key, который не монтируется в API                                                                                               |
+| `TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE`  | В Compose                | Distinct command key, смонтированный только в API и `tf-integrations`                                                                               |
+| `TF_INTEGRATIONS_ORIGIN`                     | В API Compose            | Same-node exact `http://tf-integrations:8080`; HTTP разрешён только с `TF_INTEGRATIONS_ALLOW_INSECURE_HTTP=true`                                    |
+| `TF_INTEGRATIONS_DATABASE_URL_FILE`          | В module/migrator        | Разные file-backed URL dedicated runtime и migrator roles                                                                                           |
+| `TF_INTEGRATIONS_TOKEN_KEYRING_FILE`         | В module                 | AES-256-GCM keyring; не монтируется в API                                                                                                           |
+| `TF_INTEGRATIONS_SPOTIFY_CLIENT_ID_FILE`     | В module                 | File-backed Spotify client ID; не монтируется в API                                                                                                 |
+| `TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET_FILE` | В module                 | File-backed Spotify client secret; не монтируется в API                                                                                             |
+| `TF_INTEGRATIONS_SPOTIFY_CALLBACK_URI`       | В module                 | Exact public HTTPS `/api/spotify/callback` URI                                                                                                      |
+| `TF_INTEGRATIONS_HEARTBEAT_SECRET_FILE`      | В module                 | Отдельный `account-integrations` heartbeat key                                                                                                      |
+| `TF_INTEGRATIONS_HEARTBEAT_API_ORIGIN`       | В module                 | Same-node exact `http://api:8080`; HTTP разрешён только с `TF_INTEGRATIONS_HEARTBEAT_ALLOW_INSECURE_HTTP=true`                                      |
+| `TF_DOWNLOAD_QUEUE_REDIS_URL_FILE`           | В API/worker             | Authenticated full queue URL; secret монтируется только в API и worker                                                                              |
+| `TF_DOWNLOAD_WORKER_ORIGIN`                  | В API Compose            | Same-node exact `http://tf-download-worker:8080`; HTTP разрешён только с `TF_DOWNLOAD_WORKER_ALLOW_INSECURE_HTTP=true`                              |
+| `TF_DOWNLOAD_INTERNAL_AUTH_SECRET_FILE`      | В API/worker             | Distinct HMAC command key для exact worker `POST /v1/files`                                                                                         |
+| `TF_DOWNLOAD_HEARTBEAT_SECRET_FILE`          | В worker                 | Отдельный `download-worker` heartbeat key; не монтируется в API                                                                                     |
+| `TF_DOWNLOAD_HEARTBEAT_API_ORIGIN`           | В worker                 | Same-node exact `http://api:8080`; HTTP разрешён только с `TF_DOWNLOAD_HEARTBEAT_ALLOW_INSECURE_HTTP=true`                                          |
+| `TF_DOWNLOAD_STORAGE_ROOT`                   | В worker                 | Exact owned named-volume mount `/var/lib/apollo-tf/downloads`                                                                                       |
+| `APOLLO_API_VERSION`                         | Нет                      | Версия in-process API-модулей в admin snapshot; default `unknown`                                                                                   |
+| `APOLLO_DEPLOYED_AT`                         | Нет                      | ISO timestamp фактического deployment; при отсутствии UI показывает `Нет данных`                                                                    |
 
 ### Запуск на своём сервере
 
@@ -804,6 +877,9 @@ TFI_RUNTIME_PASSWORD="$(openssl rand -hex 32)"
 TFI_COMMAND_SECRET="$(openssl rand -hex 32)"
 TFI_HEARTBEAT_SECRET="$(openssl rand -hex 32)"
 TFI_TOKEN_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+TFD_QUEUE_PASSWORD="$(openssl rand -hex 32)"
+TFD_COMMAND_SECRET="$(openssl rand -hex 32)"
+TFD_HEARTBEAT_SECRET="$(openssl rand -hex 32)"
 printf '%s' "$TF_POSTGRES_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_postgres_password" >/dev/null
 printf 'postgres://trackfinder:%s@db:5432/trackfinder' "$TF_POSTGRES_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_database_url" >/dev/null
 printf '%s' "$TF_CLIENT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_client_secret" >/dev/null
@@ -819,11 +895,16 @@ printf '%s' "$TF_INTEGRATIONS_SPOTIFY_CLIENT_ID" | sudo tee "$TF_SECRET_DIRECTOR
 printf '%s' "$TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_integrations_spotify_client_secret" >/dev/null
 printf '%s' "$TFI_COMMAND_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_integrations_internal_auth_secret" >/dev/null
 printf '%s' "$TFI_HEARTBEAT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_integrations_heartbeat_secret" >/dev/null
-printf '{"search-media":"%s","account-integrations":"%s"}' "$TF_SEARCH_HEARTBEAT_SECRET" "$TFI_HEARTBEAT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_module_heartbeat_keys" >/dev/null
+printf '%s' "$TFD_QUEUE_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_download_queue_password" >/dev/null
+printf 'redis://default:%s@tf-download-redis:6379/0' "$TFD_QUEUE_PASSWORD" | sudo tee "$TF_SECRET_DIRECTORY/tf_download_queue_redis_url" >/dev/null
+printf '%s' "$TFD_COMMAND_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_download_internal_auth_secret" >/dev/null
+printf '%s' "$TFD_HEARTBEAT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_download_heartbeat_secret" >/dev/null
+printf '{"search-media":"%s","account-integrations":"%s","download-worker":"%s"}' "$TF_SEARCH_HEARTBEAT_SECRET" "$TFI_HEARTBEAT_SECRET" "$TFD_HEARTBEAT_SECRET" | sudo tee "$TF_SECRET_DIRECTORY/tf_module_heartbeat_keys" >/dev/null
 unset TF_POSTGRES_PASSWORD TF_CLIENT_SECRET
 unset TF_SEARCH_COMMAND_SECRET TF_SEARCH_HEARTBEAT_SECRET
 unset TFI_ADMIN_PASSWORD TFI_MIGRATOR_PASSWORD TFI_RUNTIME_PASSWORD
 unset TFI_COMMAND_SECRET TFI_HEARTBEAT_SECRET TFI_TOKEN_KEY
+unset TFD_QUEUE_PASSWORD TFD_COMMAND_SECRET TFD_HEARTBEAT_SECRET
 unset TF_INTEGRATIONS_SPOTIFY_CLIENT_ID TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET
 sudo sh -eu -c '
   directory=$1
@@ -831,6 +912,7 @@ sudo sh -eu -c '
   chmod 0400 "$directory"/tf_*
   chown 999:999 \
     "$directory"/tf_postgres_password \
+    "$directory"/tf_download_queue_password \
     "$directory"/tf_integrations_*_password
 ' secret-permissions "$TF_SECRET_DIRECTORY"
 
@@ -841,12 +923,17 @@ docker compose up -d --build
 templates.
 Без override оба Compose templates используют безопасный non-secret default
 `/var/lib/apollo-tf/secrets`; production startup требует шесть базовых TF/search
-files и десять `tf_integrations_*` files. Integration-набор включает
+files и десять `tf_integrations_*` files.
+Download stack дополнительно требует четыре `tf_download_*` files.
+Integration-набор включает
 три PostgreSQL passwords, отдельные migrator/runtime URL, token keyring, два
 Spotify credential files, command key и heartbeat key.
+Download-набор включает отдельные queue password, authenticated queue URL,
+command key и heartbeat key; heartbeat map содержит соответствующий
+`download-worker` entry.
 Для native rootful Docker каталог остаётся `root:root` mode `0700`; privileged
 shell выполняет glob expansion, `chown` и `chmod` после записи. PostgreSQL-only
-password files принадлежат `999:999`, остальные `tf_*` files --
+password files и `tf_download_queue_password` принадлежат `999:999`, остальные `tf_*` files --
 `10001:10001`; все имеют mode `0400`. Для rootless Docker numeric host owners
 должны быть преобразованы в UID/GID mapping конкретного daemon, сохраняя
 owner-only `0400`. Long-form Compose metadata не заменяет это provisioning.
@@ -878,13 +965,13 @@ updates; простая замена secret files не меняет PostgreSQL r
 
 ## 8. Среда разработки
 
-| Workflow | Команда | Порт |
-|----------|---------|------|
-| API Server | `pnpm --filter @workspace/api-server run dev` | 8080 |
-| Admin Dashboard | `pnpm --filter @workspace/admin-dashboard dev` | 5173 |
-| TrackFinder Mobile (legacy source only) | `expo start --localhost` | dynamic |
-| Music Player (web) | `vite --host 0.0.0.0` | 25424 |
-| Mockup Sandbox | `vite dev` | 8081 |
+| Workflow                                | Команда                                        | Порт    |
+| --------------------------------------- | ---------------------------------------------- | ------- |
+| API Server                              | `pnpm --filter @workspace/api-server run dev`  | 8080    |
+| Admin Dashboard                         | `pnpm --filter @workspace/admin-dashboard dev` | 5173    |
+| TrackFinder Mobile (legacy source only) | `expo start --localhost`                       | dynamic |
+| Music Player (web)                      | `vite --host 0.0.0.0`                          | 25424   |
+| Mockup Sandbox                          | `vite dev`                                     | 8081    |
 
 **Мобильная поставка:**
 Expo Go и custom static deployment больше не являются целевым способом поставки. Следующий мобильный этап должен выдавать APK, устанавливаемый и проверяемый через ADB на физических Android-устройствах. Текущий код всё ещё использует Expo SDK; решение между native prebuild/Gradle и миграцией на bare React Native фиксируется до реализации APK pipeline.

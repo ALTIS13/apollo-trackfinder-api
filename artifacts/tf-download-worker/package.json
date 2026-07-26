@@ -28,6 +28,7 @@
   "devDependencies": {
     "@types/node": "catalog:",
     "esbuild": "^0.27.3",
-    "vitest": "^4.0.18"
+    "vitest": "^4.0.18",
+    "yaml": "^2.8.2"
   }
 }
