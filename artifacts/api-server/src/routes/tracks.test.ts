@@ -1232,6 +1232,27 @@ describe("track account ownership", () => {
     });
   });
 
+  it.each(["waiting", "active"] as const)(
+    "preserves the committed %s cancellation state and exact job id",
+    async (state) => {
+      const dependencies = routeDependencies({
+        cancelDownloadJob: vi.fn().mockResolvedValue({ status: state }),
+      });
+      const baseUrl = await startTracksServer(dependencies);
+
+      const response = await fetch(
+        `${baseUrl}/tracks/download/jobs/${JOB_ID}`,
+        { method: "DELETE" },
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        jobId: JOB_ID,
+        status: state,
+      });
+    },
+  );
+
   it("sanitizes list, status, and cancel backend failures as 503", async () => {
     const canary = "private-redis-operation-canary";
     const cases = [

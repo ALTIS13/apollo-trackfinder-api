@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  DOWNLOAD_JOB_CANCELLATION_FIELD,
+  DOWNLOAD_JOB_CANCELLATION_SENTINEL,
   DOWNLOAD_MAX_FILE_BYTES,
   DOWNLOAD_QUEUE_PREFIX,
   DOWNLOAD_QUEUE_NAME,
   downloadFileCommandSchema,
   encodeDownloadAdmissionIntent,
   getDownloadQueueAdmissionLedgerKey,
+  getDownloadQueueJobHashKey,
   parseDownloadQueueRedisConnection,
   parseDownloadAdmissionIntent,
   downloadJobDataSchema,
@@ -59,6 +62,29 @@ describe("tf download contract", () => {
     expect(DOWNLOAD_MAX_FILE_BYTES).toBe(1_073_741_824);
     expect(DOWNLOAD_QUEUE_PREFIX).toBe("{apollo-tf-downloads}");
     expect(DOWNLOAD_QUEUE_PREFIX).toMatch(/^\{[^{}]+\}$/);
+  });
+
+  it("exports one exact private cancellation field and namespaced sentinel", () => {
+    expect(DOWNLOAD_JOB_CANCELLATION_FIELD).toBe(
+      "__apollo_tf_download_cancellation_v1",
+    );
+    expect(DOWNLOAD_JOB_CANCELLATION_SENTINEL).toBe(
+      "apollo:tf-downloads:cancel-requested:v1",
+    );
+  });
+
+  it("derives the canonical BullMQ job hash key in the queue hash slot", () => {
+    const toKey = (suffix: string) =>
+      `${DOWNLOAD_QUEUE_PREFIX}:${DOWNLOAD_QUEUE_NAME}:${suffix}`;
+    const jobKey = getDownloadQueueJobHashKey(toKey, JOB_ID);
+    const ledgerKey = getDownloadQueueAdmissionLedgerKey(toKey);
+
+    expect(jobKey).toBe(
+      `${DOWNLOAD_QUEUE_PREFIX}:${DOWNLOAD_QUEUE_NAME}:${JOB_ID}`,
+    );
+    expect(
+      [jobKey, ledgerKey].map((key) => key.match(/\{[^{}]+\}/)?.[0]),
+    ).toEqual([DOWNLOAD_QUEUE_PREFIX, DOWNLOAD_QUEUE_PREFIX]);
   });
 
   it("parses canonical Redis URLs into one structured queue connection", () => {

@@ -7,8 +7,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  DOWNLOAD_JOB_CANCELLATION_FIELD,
+  DOWNLOAD_JOB_CANCELLATION_SENTINEL,
   DOWNLOAD_QUEUE_NAME,
   DOWNLOAD_QUEUE_PREFIX,
+  getDownloadQueueJobHashKey,
   type DownloadQueueRedisConnection,
   type DownloadJobData,
   type DownloadJobResult,
@@ -47,7 +50,7 @@ type RuntimeHandler = (
 interface RuntimeRedis {
   connect(): Promise<unknown>;
   ping(): Promise<string>;
-  get(key: string): Promise<string | null>;
+  hget(key: string, field: string): Promise<string | null>;
   quit(): Promise<unknown>;
   disconnect(): void;
 }
@@ -56,6 +59,7 @@ interface RuntimeQueue {
   waitUntilReady(): Promise<unknown>;
   getJobCounts(...types: string[]): Promise<Record<string, number>>;
   getJob(jobId: string): Promise<unknown>;
+  toKey(suffix: string): string;
   close(): Promise<void>;
 }
 
@@ -406,6 +410,7 @@ export async function startTfDownloadWorkerRuntime(
     });
     await withTimeout(queue.waitUntilReady(), config.queueProbeTimeoutMs);
 
+    const queueClient = queue;
     const cancellationClient = cancellationRedis;
     const processor = dependencies.createProcessor({
       storage,
@@ -414,9 +419,13 @@ export async function startTfDownloadWorkerRuntime(
         async isCanceled(jobId, signal) {
           if (signal.aborted) throw signal.reason;
           return (
-            (await cancellationClient.get(
-              `${DOWNLOAD_QUEUE_NAME}:cancel:${jobId}`,
-            )) !== null
+            (await cancellationClient.hget(
+              getDownloadQueueJobHashKey(
+                (suffix) => queueClient.toKey(suffix),
+                jobId,
+              ),
+              DOWNLOAD_JOB_CANCELLATION_FIELD,
+            )) === DOWNLOAD_JOB_CANCELLATION_SENTINEL
           );
         },
       },
@@ -454,7 +463,6 @@ export async function startTfDownloadWorkerRuntime(
     });
     await withTimeout(worker.waitUntilReady(), config.queueProbeTimeoutMs);
 
-    const queueClient = queue;
     const ownedStorage = storage;
     const runtimeConfig = config;
     const readiness: RuntimeReadiness = {

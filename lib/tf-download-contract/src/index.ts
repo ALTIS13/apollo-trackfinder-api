@@ -3,6 +3,10 @@ import { z } from "zod";
 
 export const DOWNLOAD_QUEUE_NAME = "apollo-tf-downloads-v1";
 export const DOWNLOAD_QUEUE_PREFIX = "{apollo-tf-downloads}";
+export const DOWNLOAD_JOB_CANCELLATION_FIELD =
+  "__apollo_tf_download_cancellation_v1";
+export const DOWNLOAD_JOB_CANCELLATION_SENTINEL =
+  "apollo:tf-downloads:cancel-requested:v1";
 export const DOWNLOAD_MAX_FILE_BYTES = 1_073_741_824;
 
 export interface DownloadQueueRedisConnection {
@@ -110,6 +114,13 @@ export function getDownloadQueueAdmissionLedgerKey(
   toKey: (suffix: string) => string,
 ): string {
   return toKey("admission-intents");
+}
+
+export function getDownloadQueueJobHashKey(
+  toKey: (suffix: string) => string,
+  jobId: string,
+): string {
+  return toKey(jobId);
 }
 
 export function encodeDownloadAdmissionIntent(

@@ -1,3 +1,10 @@
+import {
+  DOWNLOAD_JOB_CANCELLATION_FIELD,
+  DOWNLOAD_JOB_CANCELLATION_SENTINEL,
+  DOWNLOAD_QUEUE_NAME,
+  DOWNLOAD_QUEUE_PREFIX,
+  getDownloadQueueJobHashKey,
+} from "@workspace/tf-download-contract";
 import { UnrecoverableError } from "bullmq";
 import { describe, expect, it, vi } from "vitest";
 
@@ -16,6 +23,7 @@ const queueRedisConnection = {
   username: "worker",
   password: "p".repeat(32),
 } as const;
+const JOB_ID = "10000000-0000-4000-8000-000000000001";
 
 const config: TfDownloadWorkerConfig = {
   port: 8_080,
@@ -43,10 +51,12 @@ interface HarnessOptions {
   readonly workerRunExits?: boolean;
   readonly hangStartupPing?: boolean;
   readonly queueProbeTimeoutMs?: number;
+  readonly cancellationReads?: readonly (string | null | Error)[];
 }
 
 function createHarness(options: HarnessOptions = {}) {
   const order: string[] = [];
+  let cancellationReadIndex = 0;
   const redis = Array.from({ length: 3 }, (_, index) => ({
     async connect() {
       order.push(`redis:${index}:connect`);
@@ -59,7 +69,19 @@ function createHarness(options: HarnessOptions = {}) {
       return "PONG";
     },
     async get() {
+      order.push(`redis:${index}:get`);
       return null;
+    },
+    async hget(key: string, field: string) {
+      order.push(`redis:${index}:hget:${key}:${field}`);
+      if (index !== 2 || options.cancellationReads === undefined) return null;
+      const read =
+        options.cancellationReads[
+          Math.min(cancellationReadIndex, options.cancellationReads.length - 1)
+        ] ?? null;
+      cancellationReadIndex += 1;
+      if (read instanceof Error) throw read;
+      return read;
     },
     async quit() {
       order.push(`redis:${index}:quit`);
@@ -75,6 +97,7 @@ function createHarness(options: HarnessOptions = {}) {
   let workerProcessor: ((job: unknown) => Promise<unknown>) | undefined;
   let workerOptions: unknown;
   let queueOptions: unknown;
+  let processorOptions: unknown;
   const redisConnections: unknown[] = [];
   let appOptions: unknown;
   let sweepTask: (() => void) | undefined;
@@ -118,6 +141,9 @@ function createHarness(options: HarnessOptions = {}) {
     },
     async getJob() {
       return undefined;
+    },
+    toKey(suffix: string) {
+      return `${DOWNLOAD_QUEUE_PREFIX}:${DOWNLOAD_QUEUE_NAME}:${suffix}`;
     },
     async close() {
       order.push("queue:close");
@@ -179,8 +205,9 @@ function createHarness(options: HarnessOptions = {}) {
       workerOptions = passedOptions;
       return worker;
     },
-    createProcessor() {
+    createProcessor(passedOptions: unknown) {
       order.push("processor:create");
+      processorOptions = passedOptions;
       return (options.processJob ??
         (async () => ({
           schemaVersion: 1,
@@ -260,6 +287,9 @@ function createHarness(options: HarnessOptions = {}) {
     get queueOptions() {
       return queueOptions;
     },
+    get processorOptions() {
+      return processorOptions;
+    },
     get redisConnections() {
       return redisConnections;
     },
@@ -276,6 +306,112 @@ function createHarness(options: HarnessOptions = {}) {
 }
 
 describe("TF download worker runtime", () => {
+  it("polls the canonical BullMQ job hash field and exact sentinel", async () => {
+    const harness = createHarness({
+      cancellationReads: [DOWNLOAD_JOB_CANCELLATION_SENTINEL],
+    });
+    const runtime = await startTfDownloadWorkerRuntime({
+      registerSignals: false,
+      dependencies: harness.dependencies as never,
+    });
+    const store = (
+      harness.processorOptions as {
+        cancellationStore: {
+          isCanceled(jobId: string, signal: AbortSignal): Promise<boolean>;
+        };
+      }
+    ).cancellationStore;
+
+    await expect(
+      store.isCanceled(JOB_ID, new AbortController().signal),
+    ).resolves.toBe(true);
+    expect(harness.order).toContain(
+      `redis:2:hget:${getDownloadQueueJobHashKey(
+        harness.queue.toKey,
+        JOB_ID,
+      )}:${DOWNLOAD_JOB_CANCELLATION_FIELD}`,
+    );
+    expect(harness.order).not.toContain("redis:2:get");
+    await runtime.shutdown();
+  });
+
+  it("does not cancel for any non-sentinel hash value", async () => {
+    const harness = createHarness({
+      cancellationReads: ["1"],
+    });
+    const runtime = await startTfDownloadWorkerRuntime({
+      registerSignals: false,
+      dependencies: harness.dependencies as never,
+    });
+    const store = (
+      harness.processorOptions as {
+        cancellationStore: {
+          isCanceled(jobId: string, signal: AbortSignal): Promise<boolean>;
+        };
+      }
+    ).cancellationStore;
+
+    await expect(
+      store.isCanceled(JOB_ID, new AbortController().signal),
+    ).resolves.toBe(false);
+    await runtime.shutdown();
+  });
+
+  it("propagates a transient HGET failure and succeeds on retry", async () => {
+    const harness = createHarness({
+      cancellationReads: [
+        new Error("transient cancellation read failure"),
+        DOWNLOAD_JOB_CANCELLATION_SENTINEL,
+      ],
+    });
+    const runtime = await startTfDownloadWorkerRuntime({
+      registerSignals: false,
+      dependencies: harness.dependencies as never,
+    });
+    const store = (
+      harness.processorOptions as {
+        cancellationStore: {
+          isCanceled(jobId: string, signal: AbortSignal): Promise<boolean>;
+        };
+      }
+    ).cancellationStore;
+    const signal = new AbortController().signal;
+
+    await expect(store.isCanceled(JOB_ID, signal)).rejects.toThrow(
+      "transient cancellation read failure",
+    );
+    await expect(store.isCanceled(JOB_ID, signal)).resolves.toBe(true);
+    await runtime.shutdown();
+  });
+
+  it("keeps a retained job-hash marker effective across retries", async () => {
+    const harness = createHarness({
+      cancellationReads: [DOWNLOAD_JOB_CANCELLATION_SENTINEL],
+    });
+    const runtime = await startTfDownloadWorkerRuntime({
+      registerSignals: false,
+      dependencies: harness.dependencies as never,
+    });
+    const store = (
+      harness.processorOptions as {
+        cancellationStore: {
+          isCanceled(jobId: string, signal: AbortSignal): Promise<boolean>;
+        };
+      }
+    ).cancellationStore;
+
+    await expect(
+      store.isCanceled(JOB_ID, new AbortController().signal),
+    ).resolves.toBe(true);
+    await expect(
+      store.isCanceled(JOB_ID, new AbortController().signal),
+    ).resolves.toBe(true);
+    expect(
+      harness.order.filter((entry) => entry.startsWith("redis:2:hget:")),
+    ).toHaveLength(2);
+    await runtime.shutdown();
+  });
+
   it("uses blocking-safe worker Redis and bounded command clients", () => {
     expect(createTfDownloadWorkerRedisOptions("worker")).toEqual({
       connectTimeout: 3_000,
