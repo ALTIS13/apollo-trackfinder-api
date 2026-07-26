@@ -674,6 +674,25 @@ importers:
         specifier: ^8.20.0
         version: 8.20.0
 
+  artifacts/tf-download-worker:
+    dependencies:
+      '@workspace/tf-download-contract':
+        specifier: workspace:*
+        version: link:../../lib/tf-download-contract
+      bullmq:
+        specifier: ^5.73.0
+        version: 5.73.0
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 25.3.5
+      esbuild:
+        specifier: 0.27.3
+        version: 0.27.3
+      vitest:
+        specifier: ^4.0.18
+        version: 4.1.10(@types/node@25.3.5)(jsdom@29.1.1)(vite@7.3.1(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.2))
+
   artifacts/tf-integrations:
     dependencies:
       '@workspace/module-runtime-contract':

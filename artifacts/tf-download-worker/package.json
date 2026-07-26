@@ -1,0 +1,27 @@
+{
+  "name": "@workspace/tf-download-worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./cancellation": "./src/cancellation.ts",
+    "./downloader": "./src/downloader.ts",
+    "./logger": "./src/logger.ts",
+    "./processor": "./src/processor.ts",
+    "./storage": "./src/storage.ts"
+  },
+  "scripts": {
+    "build": "node ./build.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@workspace/tf-download-contract": "workspace:*",
+    "bullmq": "^5.73.0"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "esbuild": "^0.27.3",
+    "vitest": "^4.0.18"
+  }
+}
