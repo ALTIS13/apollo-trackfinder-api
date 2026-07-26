@@ -70,7 +70,7 @@ or implement `tf-download-worker`.
 - `artifacts/tf-integrations/src/service.test.ts`
 - `lib/tf-integrations-db/src/repository.ts`
 - `lib/tf-integrations-db/src/repository.test.ts`
-- `lib/tf-integrations-db/src/repository.integration.test.ts`
+- `lib/tf-integrations-db/src/integration.test.ts`
 
 - [ ] Add failing service tests proving cancellation before each mutation keeps
   the repository untouched.
