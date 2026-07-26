@@ -30,6 +30,7 @@ class FakeRedis {
   readonly calls: unknown[][] = [];
   readonly events = new Map<string, () => void>();
   readonly ledgers = new Map<string, Map<string, string>>();
+  readonly values = new Map<string, string>();
   readonly queuesByWaitKey = new Map<string, FakeQueue>();
   reserveResult: unknown | undefined;
   closed = false;
@@ -60,7 +61,11 @@ class FakeRedis {
       const lease = args.at(-1);
       this.lockExpiresAt = Date.now() + Number(lease);
     }
+    this.values.set(String(args[0]), String(args[1]));
     return "OK";
+  }
+  async get(key: string): Promise<string | null> {
+    return this.values.get(key) ?? null;
   }
 
   bind(queue: FakeQueue): void {
@@ -107,6 +112,14 @@ class FakeRedis {
       ledger.set(args[0]!, args[1]!);
       return total + 1;
     }
+    if (script.includes('redis.call("SET"')) {
+      const ledger = this.ledgers.get(keys[0]!);
+      const stored = ledger?.get(args[0]!);
+      if (stored !== undefined && stored !== args[1]) return 0;
+      this.values.set(keys[1]!, args[2]!);
+      ledger?.delete(args[0]!);
+      return 1;
+    }
     if (script.includes("HGET")) {
       const ledger = this.ledgers.get(keys[0]!);
       if (ledger === undefined) return 1;
@@ -121,8 +134,8 @@ class FakeRedis {
     this.lockExpiresAt = undefined;
     return 1;
   }
-  async del(): Promise<number> {
-    return 1;
+  async del(key: string): Promise<number> {
+    return this.values.delete(key) ? 1 : 0;
   }
 }
 

@@ -57,22 +57,34 @@ function createAdapter(
   };
   const telemetry = { ...producer, on: vi.fn() };
   const ledger = new Map<string, string>();
+  const values = new Map<string, string>();
   const redis = {
     on: vi.fn(),
     connect: async () => {},
     ping: async () => "PONG",
     eval: vi.fn(
       async (_script: string, keyCount: number, ...args: string[]) => {
-        const values = args.slice(keyCount);
-        const stored = ledger.get(values[0]!);
+        const keys = args.slice(0, keyCount);
+        const commandArgs = args.slice(keyCount);
+        const stored = ledger.get(commandArgs[0]!);
+        if (_script.includes('redis.call("SET"')) {
+          if (stored !== undefined && stored !== commandArgs[1]) return 0;
+          values.set(keys[1]!, commandArgs[2]!);
+          if (stored !== undefined) ledger.delete(commandArgs[0]!);
+          return 1;
+        }
         if (stored === undefined) return 1;
-        if (stored !== values[1]) return 0;
-        ledger.delete(values[0]!);
+        if (stored !== commandArgs[1]) return 0;
+        ledger.delete(commandArgs[0]!);
         return 1;
       },
     ),
-    set: vi.fn(async () => "OK"),
-    del: vi.fn(async () => 1),
+    set: vi.fn(async (key: string, value: string) => {
+      values.set(key, value);
+      return "OK";
+    }),
+    get: vi.fn(async (key: string) => values.get(key) ?? null),
+    del: vi.fn(async (key: string) => (values.delete(key) ? 1 : 0)),
     quit: async () => {},
   };
   return {
@@ -96,6 +108,7 @@ function createAdapter(
     producer,
     redis,
     ledger,
+    values,
   };
 }
 
@@ -147,6 +160,32 @@ describe("download queue ownership, states, and cancellation", () => {
     ]);
   });
 
+  it("lists at most 200 unique owned jobs in deterministic collection order", async () => {
+    const owned = Array.from({ length: 205 }, (_, index) =>
+      job(`owned-${String(index).padStart(3, "0")}`, JOB_DATA, []),
+    );
+    const foreign = job(
+      "foreign-first",
+      { ...JOB_DATA, accountId: FOREIGN_ACCOUNT_ID },
+      [],
+    );
+    const { adapter } = createAdapter(new Map(), {
+      waiting: [foreign, ...owned.slice(0, 120)],
+      delayed: [owned[5]!, ...owned.slice(120)],
+      active: [],
+      completed: [],
+      failed: [],
+    });
+    await adapter.init();
+
+    const listed = await adapter.list(ACCOUNT_ID);
+
+    expect(listed).toHaveLength(200);
+    expect(
+      listed.map((current: { readonly jobId: string }) => current.jobId),
+    ).toEqual(owned.slice(0, 200).map((current) => current.id));
+  });
+
   it("removes delayed jobs without a separate capacity record", async () => {
     const delayed = job("delayed", JOB_DATA, ["delayed"]);
     const { adapter, redis } = createAdapter(new Map([[delayed.id, delayed]]));
@@ -166,6 +205,39 @@ describe("download queue ownership, states, and cancellation", () => {
       status: "canceled",
     });
     expect(ledger).toEqual(new Map());
+  });
+
+  it("keeps waiting cancellation idempotent only for the exact owner", async () => {
+    const waiting = job("waiting-job", JOB_DATA, ["waiting"]);
+    const jobs = new Map([[waiting.id, waiting]]);
+    waiting.remove.mockImplementation(async () => {
+      jobs.delete(waiting.id);
+    });
+    const { adapter, producer, redis, values } = createAdapter(jobs);
+    await adapter.init();
+
+    await expect(adapter.cancel(waiting.id, ACCOUNT_ID)).resolves.toEqual({
+      status: "canceled",
+    });
+    await expect(adapter.cancel(waiting.id, ACCOUNT_ID)).resolves.toEqual({
+      status: "canceled",
+    });
+    await expect(
+      adapter.cancel(waiting.id, FOREIGN_ACCOUNT_ID),
+    ).resolves.toEqual({ status: "unknown" });
+    const tombstoneKey = producer.toKey(`canceled:${waiting.id}`);
+    expect(values.get(tombstoneKey)).toBe(ACCOUNT_ID);
+    expect(redis.eval).toHaveBeenCalledWith(
+      expect.stringContaining("SET"),
+      2,
+      producer.toKey("admission-intents"),
+      tombstoneKey,
+      waiting.id,
+      `pending:${ACCOUNT_ID}`,
+      ACCOUNT_ID,
+      "86400000",
+    );
+    expect(redis.get).toHaveBeenCalledWith(tombstoneKey);
   });
 
   it("cannot release another account's pending intent", async () => {

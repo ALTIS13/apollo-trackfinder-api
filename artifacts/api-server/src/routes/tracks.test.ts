@@ -820,6 +820,54 @@ describe("track account ownership", () => {
     );
   });
 
+  it.each([
+    [
+      "credentials",
+      "youtube",
+      "https://user:password@www.youtube.com/watch?v=private",
+    ],
+    ["a port", "youtube", "https://www.youtube.com:8443/watch?v=private"],
+    [
+      "a fragment",
+      "youtube",
+      "https://www.youtube.com/watch?v=private#fragment",
+    ],
+    ["non-HTTPS", "youtube", "http://www.youtube.com/watch?v=private"],
+    [
+      "a mismatched provider host",
+      "youtube",
+      "https://soundcloud.com/artist/private",
+    ],
+    ["an internal host", "soundcloud", "https://127.0.0.1/private"],
+  ] as const)(
+    "rejects a Deezer fallback with %s before enqueue",
+    async (_label, source, sourceUrl) => {
+      const gateway = searchGateway();
+      gateway.search.mockResolvedValue(
+        searchResponse({
+          results: [result(0, { source, sourceUrl })],
+          sources: ["yt", "sc"],
+        }),
+      );
+      const dependencies = routeDependencies({ searchGateway: gateway });
+      const baseUrl = await startTracksServer(dependencies);
+      const trackId = trackIdFor(
+        "dz",
+        "https://cdns-preview-e.dzcdn.net/stream/c-test",
+      );
+
+      const response = await fetch(`${baseUrl}/tracks/download/queue`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tracks: [queueTrack({ trackId })] }),
+      });
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({ error: "bad_request" });
+      expect(dependencies.enqueueDownload).not.toHaveBeenCalled();
+    },
+  );
+
   it("does not ask tf-search for a Deezer fallback without tf.search access", async () => {
     const gateway = searchGateway();
     const dependencies = routeDependencies({ searchGateway: gateway });
@@ -866,6 +914,103 @@ describe("track account ownership", () => {
     expect(response.status).toBe(503);
     expect(body).toBe('{"error":"download_queue_unavailable"}');
     expect(body).not.toContain("private-queue-error-canary");
+  });
+
+  it("returns the accepted job when two tracks race for the last queue slot", async () => {
+    const accepted = queueTrack({
+      trackId: trackIdFor(
+        "yt",
+        "https://www.youtube.com/watch?v=accepted-at-200",
+      ),
+    });
+    const rejected = queueTrack({
+      trackId: trackIdFor(
+        "yt",
+        "https://www.youtube.com/watch?v=rejected-at-201",
+      ),
+    });
+    const enqueue = vi
+      .fn()
+      .mockResolvedValueOnce({ jobId: "job-at-position-200", position: 200 })
+      .mockRejectedValueOnce(new DownloadQueueCapacityError());
+    const baseUrl = await startTracksServer(
+      routeDependencies({ enqueueDownload: enqueue }),
+    );
+
+    const response = await fetch(`${baseUrl}/tracks/download/queue`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tracks: [accepted, rejected] }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      results: [
+        {
+          trackId: accepted.trackId,
+          jobId: "job-at-position-200",
+          position: 200,
+        },
+        {
+          trackId: rejected.trackId,
+          error: "download_queue_unavailable",
+        },
+      ],
+    });
+    expect(enqueue).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps mixed results in request order without leaking queue errors", async () => {
+    const canary = "private-mixed-queue-canary";
+    const failed = queueTrack({
+      trackId: trackIdFor("yt", "https://www.youtube.com/watch?v=failed-first"),
+    });
+    const accepted = queueTrack({
+      trackId: trackIdFor(
+        "yt",
+        "https://www.youtube.com/watch?v=accepted-second",
+      ),
+    });
+    let rejectFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      rejectFirst = resolve;
+    });
+    const enqueue = vi.fn(async (input: { readonly trackId: string }) => {
+      if (input.trackId === failed.trackId) {
+        await firstGate;
+        throw new Error(canary);
+      }
+      return { jobId: "job-completed-first", position: 17 };
+    });
+    const baseUrl = await startTracksServer(
+      routeDependencies({ enqueueDownload: enqueue }),
+    );
+
+    const responsePromise = fetch(`${baseUrl}/tracks/download/queue`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tracks: [failed, accepted] }),
+    });
+    await vi.waitFor(() => expect(enqueue).toHaveBeenCalledTimes(2));
+    rejectFirst();
+    const response = await responsePromise;
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse(body)).toEqual({
+      results: [
+        {
+          trackId: failed.trackId,
+          error: "download_queue_unavailable",
+        },
+        {
+          trackId: accepted.trackId,
+          jobId: "job-completed-first",
+          position: 17,
+        },
+      ],
+    });
+    expect(body).not.toContain(canary);
   });
 
   it("binds every download operation to the principal account", async () => {

@@ -163,7 +163,7 @@ export interface DownloadQueueRequest {
   tracks: DownloadQueueTrack[];
 }
 
-export interface DownloadQueueResult {
+export interface DownloadQueueSuccessResult {
   /**
    * @minLength 1
    * @maxLength 4096
@@ -176,6 +176,19 @@ export interface DownloadQueueResult {
    */
   position: number;
 }
+
+export interface DownloadQueueFailureResult {
+  /**
+   * @minLength 1
+   * @maxLength 4096
+   */
+  trackId: string;
+  error: "download_queue_unavailable";
+}
+
+export type DownloadQueueResult =
+  | DownloadQueueSuccessResult
+  | DownloadQueueFailureResult;
 
 export interface DownloadQueueResponse {
   /**

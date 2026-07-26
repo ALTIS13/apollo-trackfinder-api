@@ -5,17 +5,9 @@
  * Music Player API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { DownloadQueueFailureResult } from "./downloadQueueFailureResult";
+import type { DownloadQueueSuccessResult } from "./downloadQueueSuccessResult";
 
-export interface DownloadQueueResult {
-  /**
-   * @minLength 1
-   * @maxLength 4096
-   */
-  trackId: string;
-  jobId: string;
-  /**
-   * @minimum 1
-   * @maximum 200
-   */
-  position: number;
-}
+export type DownloadQueueResult =
+  | DownloadQueueSuccessResult
+  | DownloadQueueFailureResult;

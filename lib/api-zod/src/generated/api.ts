@@ -163,26 +163,37 @@ export const QueueTrackDownloadsBody = zod.object({
     .max(queueTrackDownloadsBodyTracksMax),
 });
 
-export const queueTrackDownloadsResponseResultsItemTrackIdMax = 4096;
+export const queueTrackDownloadsResponseResultsItemOneTrackIdMax = 4096;
 
-export const queueTrackDownloadsResponseResultsItemPositionMax = 200;
+export const queueTrackDownloadsResponseResultsItemOnePositionMax = 200;
+
+export const queueTrackDownloadsResponseResultsItemTwoTrackIdMax = 4096;
 
 export const queueTrackDownloadsResponseResultsMax = 50;
 
 export const QueueTrackDownloadsResponse = zod.object({
   results: zod
     .array(
-      zod.object({
-        trackId: zod
-          .string()
-          .min(1)
-          .max(queueTrackDownloadsResponseResultsItemTrackIdMax),
-        jobId: zod.string().uuid(),
-        position: zod
-          .number()
-          .min(1)
-          .max(queueTrackDownloadsResponseResultsItemPositionMax),
-      }),
+      zod.union([
+        zod.object({
+          trackId: zod
+            .string()
+            .min(1)
+            .max(queueTrackDownloadsResponseResultsItemOneTrackIdMax),
+          jobId: zod.string().uuid(),
+          position: zod
+            .number()
+            .min(1)
+            .max(queueTrackDownloadsResponseResultsItemOnePositionMax),
+        }),
+        zod.object({
+          trackId: zod
+            .string()
+            .min(1)
+            .max(queueTrackDownloadsResponseResultsItemTwoTrackIdMax),
+          error: zod.literal("download_queue_unavailable"),
+        }),
+      ]),
     )
     .min(1)
     .max(queueTrackDownloadsResponseResultsMax),

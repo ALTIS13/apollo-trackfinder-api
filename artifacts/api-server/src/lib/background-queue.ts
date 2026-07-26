@@ -19,6 +19,8 @@ import Redis, { type RedisOptions } from "ioredis";
 const QUEUE_CAPACITY = 200;
 const MAX_QUEUE_FILE_BYTES = 2_048;
 const CANCELLATION_TTL_MS = 1_800_000;
+const JOB_RETENTION_SECONDS = 86_400;
+const JOB_RETENTION_MS = JOB_RETENTION_SECONDS * 1_000;
 const PRODUCER_COMMAND_TIMEOUT_MS = 5_000;
 const RESERVE_ADMISSION_INTENT_SCRIPT = `
 local rcall = redis.call
@@ -53,6 +55,13 @@ local stored = redis.call("HGET", KEYS[1], ARGV[1])
 if not stored then return 1 end
 if stored ~= ARGV[2] then return 0 end
 return redis.call("HDEL", KEYS[1], ARGV[1])
+`;
+const RECORD_WAITING_CANCELLATION_SCRIPT = `
+local stored = redis.call("HGET", KEYS[1], ARGV[1])
+if stored and stored ~= ARGV[2] then return 0 end
+redis.call("SET", KEYS[2], ARGV[3], "PX", ARGV[4])
+if stored then redis.call("HDEL", KEYS[1], ARGV[1]) end
+return 1
 `;
 
 export { type DownloadJobData, type DownloadJobResult };
@@ -130,6 +139,7 @@ interface RedisClient {
   ping?(): Promise<unknown>;
   eval(script: string, keys: number, ...args: string[]): Promise<unknown>;
   set(...args: Array<string | number>): Promise<unknown>;
+  get(key: string): Promise<string | null>;
   del(key: string): Promise<unknown>;
   quit(): Promise<unknown>;
 }
@@ -362,6 +372,26 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
       throw unavailable();
     return position;
   };
+  const recordWaitingCancellation = async (
+    producer: QueueClient,
+    cancellation: RedisClient,
+    jobId: string,
+    accountId: string,
+  ): Promise<void> => {
+    const recorded = Number(
+      await cancellation.eval(
+        RECORD_WAITING_CANCELLATION_SCRIPT,
+        2,
+        getDownloadQueueAdmissionLedgerKey((suffix) => producer.toKey(suffix)),
+        producer.toKey(`canceled:${jobId}`),
+        jobId,
+        encodeDownloadAdmissionIntent("pending", accountId),
+        accountId,
+        String(JOB_RETENTION_MS),
+      ),
+    );
+    if (recorded !== 1) throw unavailable();
+  };
   const cancelState = async (
     current: Clients,
     job: Job,
@@ -379,7 +409,7 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
           throw unavailable();
         return cancelState(current, job, jobId, reread, data);
       }
-      await releaseAdmissionIntent(
+      await recordWaitingCancellation(
         current.producer,
         current.cancellation,
         jobId,
@@ -421,8 +451,8 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
             defaultJobOptions: {
               attempts: 2,
               backoff: { type: "fixed", delay: 5000 },
-              removeOnComplete: { age: 86400, count: 200 },
-              removeOnFail: { age: 86400, count: 200 },
+              removeOnComplete: { age: JOB_RETENTION_SECONDS, count: 200 },
+              removeOnFail: { age: JOB_RETENTION_SECONDS, count: 200 },
             },
           });
           attachErrorListener(partial.producer);
@@ -603,7 +633,7 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
             }
           }),
         );
-        return result;
+        return result.slice(0, QUEUE_CAPACITY);
       } catch (error) {
         if (error instanceof DownloadQueueUnavailableError) throw error;
         throw unavailable();
@@ -616,7 +646,15 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
       try {
         const current = requireClients();
         const job = await current.producer.getJob(jobId);
-        if (!job || !owned(job.data, accountId)) return { status: "unknown" };
+        if (!job) {
+          const tombstone = await current.cancellation.get(
+            current.producer.toKey(`canceled:${jobId}`),
+          );
+          return {
+            status: tombstone === accountId ? "canceled" : "unknown",
+          };
+        }
+        if (!owned(job.data, accountId)) return { status: "unknown" };
         return cancelState(current, job, jobId, await job.getState(), job.data);
       } catch (error) {
         if (error instanceof DownloadQueueUnavailableError) throw error;

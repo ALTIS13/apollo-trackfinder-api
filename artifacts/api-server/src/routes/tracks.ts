@@ -29,6 +29,7 @@ import type {
 import {
   DOWNLOAD_MAX_FILE_BYTES,
   downloadQualitySchema,
+  parseAllowedDownloadSourceUrl,
 } from "@workspace/tf-download-contract";
 import {
   TfDownloadWorkerError,
@@ -119,6 +120,31 @@ function preferredSourceUrl(
   for (const source of sources) {
     const match = results.find((result) => result.source === source);
     if (match !== undefined) return match.sourceUrl;
+  }
+  return null;
+}
+
+function trustedFallbackSourceUrl(
+  results: readonly TfSearchResult[],
+): string | null {
+  const allowedHosts = {
+    youtube: "youtube.com",
+    soundcloud: "soundcloud.com",
+  } as const;
+  for (const source of ["youtube", "soundcloud"] as const) {
+    for (const result of results) {
+      if (result.source !== source) continue;
+      const parsed = parseAllowedDownloadSourceUrl(result.sourceUrl);
+      const allowedHost = allowedHosts[source];
+      if (
+        parsed !== null &&
+        parsed.href === result.sourceUrl &&
+        (parsed.hostname === allowedHost ||
+          parsed.hostname.endsWith(`.${allowedHost}`))
+      ) {
+        return result.sourceUrl;
+      }
+    }
   }
   return null;
 }
@@ -959,9 +985,7 @@ export function createTracksRouter(
             sources: ["yt", "sc"],
             maxResults: 6,
           });
-          sourceUrl =
-            preferredSourceUrl(fallback.results, ["youtube", "soundcloud"]) ??
-            "";
+          sourceUrl = trustedFallbackSourceUrl(fallback.results) ?? "";
         } catch {
           res.status(503).json({ error: "download_queue_unavailable" });
           return;
@@ -974,22 +998,31 @@ export function createTracksRouter(
       resolved.push({ ...track, sourceUrl });
     }
 
-    try {
-      const results = await Promise.all(
-        resolved.map(async (track) => {
-          const { jobId, position } = await routeDependencies.enqueueDownload({
-            ...track,
-            schemaVersion: 1,
-            accountId: req.tfPrincipal!.accountId,
-            createdAt: new Date().toISOString(),
-          });
-          return { trackId: track.trackId, jobId, position };
-        }),
-      );
-      res.json({ results });
-    } catch {
+    const outcomes = await Promise.allSettled(
+      resolved.map(async (track) => {
+        const { jobId, position } = await routeDependencies.enqueueDownload({
+          ...track,
+          schemaVersion: 1,
+          accountId: req.tfPrincipal!.accountId,
+          createdAt: new Date().toISOString(),
+        });
+        return { trackId: track.trackId, jobId, position };
+      }),
+    );
+    if (outcomes.every((outcome) => outcome.status === "rejected")) {
       res.status(503).json({ error: "download_queue_unavailable" });
+      return;
     }
+    res.json({
+      results: outcomes.map((outcome, index) =>
+        outcome.status === "fulfilled"
+          ? outcome.value
+          : {
+              trackId: resolved[index]!.trackId,
+              error: "download_queue_unavailable",
+            },
+      ),
+    });
   });
 
   router.get("/tracks/download/jobs", async (req, res) => {
