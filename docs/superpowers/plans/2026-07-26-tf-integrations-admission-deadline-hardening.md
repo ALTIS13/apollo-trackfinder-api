@@ -29,6 +29,9 @@ or implement `tf-download-worker`.
   returned as a silently truncated successful `liked-all` response.
 - Every command has one absolute deadline propagated through service and
   repository layers.
+- The integration PostgreSQL service uses PostgreSQL 17 or newer so
+  `transaction_timeout` enforces the complete server transaction lifetime,
+  including deferred commit work; PostgreSQL 16 is rejected by readiness.
 - Provider calls, encryption/decryption, reads, and mutations check
   cancellation at the relevant boundaries.
 - A database mutation that has not committed before cancellation/deadline must
@@ -71,6 +74,10 @@ or implement `tf-download-worker`.
 - `lib/tf-integrations-db/src/repository.ts`
 - `lib/tf-integrations-db/src/repository.test.ts`
 - `lib/tf-integrations-db/src/integration.test.ts`
+- `artifacts/tf-integrations/src/deployment-contract.test.ts`
+- `artifacts/tf-integrations/Dockerfile`
+- `docker-compose.yml`
+- `artifacts/api-server/docker-compose.yml`
 
 - [ ] Add failing service tests proving cancellation before each mutation keeps
   the repository untouched.
@@ -80,6 +87,9 @@ or implement `tf-download-worker`.
   propagate it through every mutable service/repository path.
 - [ ] Execute mutations in cancellation-aware transactions with bounded
   PostgreSQL waits and no post-deadline commit.
+- [ ] Upgrade the isolated integration PostgreSQL image/role-init contract to
+  PostgreSQL 17 and fail readiness closed on servers without
+  `transaction_timeout`.
 - [ ] Preserve shutdown draining and ensure provider/database resources close
   only after active commands settle or cancel.
 - [ ] Run focused unit and disposable PostgreSQL tests, package typechecks, and
