@@ -1,14 +1,18 @@
-import { DOWNLOAD_MAX_FILE_BYTES, downloadJobResultSchema } from "@workspace/tf-download-contract";
+import {
+  DOWNLOAD_MAX_FILE_BYTES,
+  downloadJobResultSchema,
+} from "@workspace/tf-download-contract";
 import type { DownloadJobResult } from "@workspace/tf-download-contract";
 import {
+  link,
   lstat,
   mkdir,
   open,
   opendir,
   realpath,
-  rename,
-  rm,
+  unlink,
 } from "node:fs/promises";
+import type { BigIntStats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
@@ -52,6 +56,11 @@ export interface DownloadStorageOptions {
   readonly now?: () => number;
 }
 
+export interface DownloadStorageDependencies {
+  readonly afterOpen?: () => void | Promise<void>;
+  readonly beforePublish?: () => void | Promise<void>;
+}
+
 export interface DownloadCommitMetadata {
   readonly filename: string;
   readonly mimeType: "audio/mpeg" | "audio/flac";
@@ -72,6 +81,7 @@ interface OwnedEntry {
   readonly kind: "file" | "part";
   readonly size: number;
   readonly mtimeMs: number;
+  readonly identity: FileIdentity;
 }
 
 interface ScanResult {
@@ -86,11 +96,19 @@ interface OperationState {
   readonly extension: DownloadExtension;
   readonly partPath: string;
   readonly finalPath: string;
+  readonly partIdentity: FileIdentity;
   handle: FileHandle | undefined;
   bytesWritten: number;
   failure: DownloadStorageError | undefined;
-  state: "active" | "committing" | "committed" | "aborted";
+  state: "active" | "committing" | "committed" | "finalized" | "aborted";
 }
+
+interface FileIdentity {
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
+type RemovalResult = "removed" | "missing" | "mismatch";
 
 export class DownloadStorageOutput {
   private readonly storage: DownloadStorage;
@@ -101,8 +119,8 @@ export class DownloadStorageOutput {
     this.operation = operation;
   }
 
-  async write(data: Uint8Array): Promise<boolean> {
-    return this.storage.write(this.operation, data);
+  async write(data: Uint8Array, signal?: AbortSignal): Promise<boolean> {
+    return this.storage.write(this.operation, data, signal);
   }
 
   get failure(): DownloadStorageError | undefined {
@@ -116,11 +134,18 @@ export class DownloadStorageOutput {
     return this.storage.commit(this.operation, metadata, signal);
   }
 
-  async abort(): Promise<void> {
-    await this.storage.abort(this.operation);
+  async abort(signal?: AbortSignal): Promise<void> {
+    await this.storage.abort(this.operation, signal);
+  }
+
+  finalize(): void {
+    this.storage.finalize(this.operation);
   }
 }
 
+// Security model: this root is a private 0700, single-UID volume. Portable Node
+// has no dirfd-relative link/unlink API, so retained dev/ino checks are paired
+// with that ownership boundary to close path-replacement races by other users.
 export class DownloadStorage {
   readonly root: string;
   readonly maxFileBytes: number;
@@ -129,7 +154,10 @@ export class DownloadStorage {
   readonly maxSweepEntries: number;
 
   private readonly now: () => number;
+  private readonly rootIdentity: FileIdentity;
+  private readonly dependencies: DownloadStorageDependencies;
   private readonly operations = new Map<string, symbol>();
+  private readonly pinnedFinals = new Map<string, symbol>();
   private usedBytes = 0;
   private quotaBlocked = false;
   private lockTail: Promise<void> = Promise.resolve();
@@ -141,6 +169,8 @@ export class DownloadStorage {
     ttlMs: number;
     maxSweepEntries: number;
     now: () => number;
+    rootIdentity: FileIdentity;
+    dependencies: DownloadStorageDependencies;
   }) {
     this.root = options.root;
     this.maxFileBytes = options.maxFileBytes;
@@ -148,9 +178,14 @@ export class DownloadStorage {
     this.ttlMs = options.ttlMs;
     this.maxSweepEntries = options.maxSweepEntries;
     this.now = options.now;
+    this.rootIdentity = options.rootIdentity;
+    this.dependencies = options.dependencies;
   }
 
-  static async create(options: DownloadStorageOptions): Promise<DownloadStorage> {
+  static async create(
+    options: DownloadStorageOptions,
+    dependencies: DownloadStorageDependencies = {},
+  ): Promise<DownloadStorage> {
     if (!path.isAbsolute(options.root)) {
       throw unavailable(false);
     }
@@ -166,7 +201,7 @@ export class DownloadStorage {
     );
 
     await mkdir(options.root, { recursive: true, mode: 0o700 });
-    const rootStat = await lstat(options.root);
+    const rootStat = await lstat(options.root, { bigint: true });
     if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
       throw unavailable(false);
     }
@@ -178,6 +213,8 @@ export class DownloadStorage {
       ttlMs,
       maxSweepEntries,
       now: options.now ?? Date.now,
+      rootIdentity: identityOf(rootStat),
+      dependencies,
     });
     await storage.removeStartupPartials();
     await storage.refreshUsage();
@@ -198,39 +235,65 @@ export class DownloadStorage {
     throwIfAborted(signal);
 
     return this.withLock(async () => {
-      await this.assertRoot();
+      await this.assertRootIdentity(signal);
       throwIfAborted(signal);
-      await this.ensureCapacity(0);
+      await this.ensureCapacity(0, signal);
 
       const partPath = this.containedPath(`${jobId}.${extension}.part`);
       const finalPath = this.containedPath(`${jobId}.${extension}`);
       let handle: FileHandle;
+      throwIfAborted(signal);
       try {
         handle = await open(partPath, "wx", 0o600);
-      } catch {
-        throw unavailable(true);
+      } catch (error) {
+        throw unavailable(!isPathSafetyCollision(error));
       }
 
+      let partIdentity: FileIdentity | undefined;
       try {
+        await this.dependencies.afterOpen?.();
         const [pathStat, handleStat] = await Promise.all([
-          lstat(partPath),
-          handle.stat(),
+          lstat(partPath, { bigint: true }),
+          handle.stat({ bigint: true }),
         ]);
-        if (
-          pathStat.isSymbolicLink() ||
-          !pathStat.isFile() ||
-          !handleStat.isFile() ||
-          pathStat.dev !== handleStat.dev ||
-          pathStat.ino !== handleStat.ino
-        ) {
+        throwIfAborted(signal);
+        if (!sameRegularFile(pathStat, handleStat) || pathStat.size !== 0n) {
           throw unavailable(false);
         }
-        throwIfAborted(signal);
+        partIdentity = identityOf(pathStat);
+        await this.assertRootIdentity(signal);
       } catch (error) {
+        if (!partIdentity) {
+          try {
+            const [pathStat, handleStat] = await Promise.all([
+              lstat(partPath, { bigint: true }),
+              handle.stat({ bigint: true }),
+            ]);
+            if (sameRegularFile(pathStat, handleStat)) {
+              partIdentity = identityOf(pathStat);
+            }
+          } catch {
+            // Without matching identities, cleanup must leave the path alone.
+          }
+        }
         await handle.close().catch(() => undefined);
-        await removeRegularFile(partPath);
+        if (partIdentity) {
+          let size = 0;
+          try {
+            const stat = await lstat(partPath, { bigint: true });
+            if (sameIdentity(identityOf(stat), partIdentity)) {
+              size = safeInteger(stat.size);
+            }
+          } catch {
+            // The exact cleanup below safely handles a missing path.
+          }
+          await this.removeExactFile(partPath, partIdentity, size).catch(
+            () => undefined,
+          );
+        }
         throw asStorageError(error, false);
       }
+      if (!partIdentity) throw unavailable(false);
 
       const operation: OperationState = {
         token: Symbol(jobId),
@@ -238,6 +301,7 @@ export class DownloadStorage {
         extension,
         partPath,
         finalPath,
+        partIdentity,
         handle,
         bytesWritten: 0,
         failure: undefined,
@@ -245,14 +309,14 @@ export class DownloadStorage {
       };
       this.operations.set(partPath, operation.token);
       return new DownloadStorageOutput(this, operation);
-    }).catch((error: unknown) => {
+    }, signal).catch((error: unknown) => {
       throw asStorageError(error, true);
     });
   }
 
   async sweep(): Promise<DownloadStorageSweepResult> {
     return this.withLock(async () => {
-      await this.assertRoot();
+      await this.assertRootIdentity();
       const scan = await this.scanOwnedEntries();
       const removedStorageKeys: string[] = [];
       let removedPartialFiles = 0;
@@ -276,18 +340,21 @@ export class DownloadStorage {
           entry.kind === "part" && !this.operations.has(entry.fullPath),
       );
       for (const entry of parts) {
-        if (await removeRegularFile(entry.fullPath)) {
+        if ((await this.removeOwnedEntry(entry)) === "removed") {
           removedPartialFiles += 1;
         }
       }
 
       const files = scan.entries.filter((entry) => entry.kind === "file");
+      const evictableFiles = files.filter(
+        (entry) => !this.pinnedFinals.has(entry.fullPath),
+      );
       const oldestFirst = (left: OwnedEntry, right: OwnedEntry): number =>
         left.mtimeMs - right.mtimeMs || compareNames(left.name, right.name);
-      const expired = files
+      const expired = evictableFiles
         .filter((entry) => this.now() - entry.mtimeMs >= this.ttlMs)
         .sort(oldestFirst);
-      const retained = files
+      const retained = evictableFiles
         .filter((entry) => !expired.includes(entry))
         .sort(oldestFirst);
       let bytesRemaining =
@@ -300,22 +367,21 @@ export class DownloadStorage {
           .reduce((total, entry) => total + entry.size, 0);
 
       for (const entry of expired) {
-        if (await removeRegularFile(entry.fullPath)) {
+        if ((await this.removeOwnedEntry(entry)) === "removed") {
           bytesRemaining -= entry.size;
           removedStorageKeys.push(entry.name);
         }
       }
       for (const entry of retained) {
         if (bytesRemaining <= this.quotaBytes) break;
-        if (await removeRegularFile(entry.fullPath)) {
+        if ((await this.removeOwnedEntry(entry)) === "removed") {
           bytesRemaining -= entry.size;
           removedStorageKeys.push(entry.name);
         }
       }
 
       this.usedBytes = Math.max(0, bytesRemaining);
-      this.quotaBlocked =
-        scan.truncated || this.usedBytes > this.quotaBytes;
+      this.quotaBlocked = scan.truncated || this.usedBytes > this.quotaBytes;
       return {
         scannedEntries: scan.scannedEntries,
         removedPartialFiles,
@@ -329,34 +395,30 @@ export class DownloadStorage {
   async write(
     operation: OperationState,
     data: Uint8Array,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     return this.withLock(async () => {
+      throwIfAborted(signal);
+      await this.assertRootIdentity(signal);
       this.assertTracked(operation, "active");
       if (operation.failure) return false;
-      if (
-        operation.bytesWritten + data.byteLength > this.maxFileBytes
-      ) {
+      if (operation.bytesWritten + data.byteLength > this.maxFileBytes) {
         operation.failure = new DownloadStorageError("output_too_large", {
           retriable: false,
         });
         return false;
       }
       try {
-        await this.ensureCapacity(data.byteLength);
-      } catch (error) {
-        operation.failure = asStorageError(error, true);
-        return false;
-      }
-      if (data.byteLength === 0) return true;
+        await this.ensureCapacity(data.byteLength, signal);
+        throwIfAborted(signal);
+        if (data.byteLength === 0) return true;
 
-      const handle = operation.handle;
-      if (!handle) {
-        operation.failure = unavailable(true);
-        return false;
-      }
-      try {
+        const handle = operation.handle;
+        if (!handle) throw unavailable(true);
+        await this.assertExactPart(operation, true, signal);
         let offset = 0;
         while (offset < data.byteLength) {
+          throwIfAborted(signal);
           const { bytesWritten } = await handle.write(
             data,
             offset,
@@ -364,15 +426,24 @@ export class DownloadStorage {
           );
           if (bytesWritten <= 0) throw unavailable(true);
           offset += bytesWritten;
+          operation.bytesWritten += bytesWritten;
+          this.usedBytes += bytesWritten;
+          throwIfAborted(signal);
         }
-        operation.bytesWritten += data.byteLength;
-        this.usedBytes += data.byteLength;
+        await this.assertExactPart(operation, true, signal);
         return true;
       } catch (error) {
         operation.failure = asStorageError(error, true);
+        if (signal?.aborted) {
+          const cleanupFailure = await this.cleanupFailedOperation(
+            operation,
+            false,
+          );
+          if (cleanupFailure) operation.failure = cleanupFailure;
+        }
         return false;
       }
-    });
+    }, signal);
   }
 
   async commit(
@@ -404,87 +475,114 @@ export class DownloadStorage {
     return this.withLock(async () => {
       this.assertTracked(operation, "active");
       operation.state = "committing";
-      let renamed = false;
+      let published = false;
       try {
-        await this.ensureCapacity(0);
-        throwIfAborted(signal);
+        await this.assertRootIdentity(signal);
+        await this.ensureCapacity(0, signal);
+        await this.assertExactPart(operation, true, signal);
         const handle = operation.handle;
-        if (!handle) throw unavailable(true);
+        if (!handle) throw unavailable(false);
+
+        throwIfAborted(signal);
         await handle.sync();
+        throwIfAborted(signal);
+        await this.assertExactPart(operation, true, signal);
         await handle.close();
         operation.handle = undefined;
         throwIfAborted(signal);
+        await this.assertExactPart(operation, false, signal);
 
-        const partStat = await lstat(operation.partPath);
-        if (
-          partStat.isSymbolicLink() ||
-          !partStat.isFile() ||
-          partStat.size !== operation.bytesWritten
-        ) {
-          throw unavailable(false);
-        }
-        try {
-          await lstat(operation.finalPath);
-          throw unavailable(false);
-        } catch (error) {
-          if (
-            error instanceof DownloadStorageError ||
-            !isMissingFileError(error)
-          ) {
-            throw error;
-          }
-        }
-
-        await rename(operation.partPath, operation.finalPath);
-        renamed = true;
+        await this.dependencies.beforePublish?.();
         throwIfAborted(signal);
-        const finalStat = await lstat(operation.finalPath);
-        if (
-          finalStat.isSymbolicLink() ||
-          !finalStat.isFile() ||
-          finalStat.size !== operation.bytesWritten
-        ) {
-          throw unavailable(false);
+        await this.assertRootIdentity(signal);
+        try {
+          throwIfAborted(signal);
+          await link(operation.partPath, operation.finalPath);
+          published = true;
+          throwIfAborted(signal);
+        } catch (error) {
+          throw asStorageError(error, !isPathSafetyCollision(error));
         }
+
+        await this.assertExactFile(
+          operation.finalPath,
+          operation.partIdentity,
+          operation.bytesWritten,
+          signal,
+        );
+        await this.assertExactPart(operation, false, signal);
+        await this.assertRootIdentity(signal);
+        throwIfAborted(signal);
+        const partRemoval = await this.removeExactFile(
+          operation.partPath,
+          operation.partIdentity,
+          operation.bytesWritten,
+          signal,
+        );
+        if (partRemoval !== "removed") throw unavailable(false);
+        await this.assertRootIdentity(signal);
+        await this.assertExactFile(
+          operation.finalPath,
+          operation.partIdentity,
+          operation.bytesWritten,
+          signal,
+        );
+
         operation.state = "committed";
-        this.operations.delete(operation.partPath);
+        this.pinnedFinals.set(operation.finalPath, operation.token);
         return result;
       } catch (error) {
-        await this.closeHandle(operation);
-        const cleanupPath = renamed
-          ? operation.finalPath
-          : operation.partPath;
-        await removeRegularFile(cleanupPath);
-        this.usedBytes = Math.max(0, this.usedBytes - operation.bytesWritten);
-        operation.state = "aborted";
-        this.operations.delete(operation.partPath);
-        throw asStorageError(error, true);
+        const cleanupFailure = await this.cleanupFailedOperation(
+          operation,
+          published,
+        );
+        throw cleanupFailure ?? asStorageError(error, true);
       }
-    });
+    }, signal);
   }
 
-  async abort(operation: OperationState): Promise<void> {
+  async abort(operation: OperationState, signal?: AbortSignal): Promise<void> {
     await this.withLock(async () => {
-      if (operation.state === "aborted") {
-        return;
-      }
-      if (operation.state === "committed") {
-        await removeRegularFile(operation.finalPath);
-        this.usedBytes = Math.max(0, this.usedBytes - operation.bytesWritten);
-        operation.state = "aborted";
+      if (operation.state === "aborted" || operation.state === "finalized") {
         return;
       }
       this.assertTracked(operation);
-      await this.closeHandle(operation);
-      await removeRegularFile(operation.partPath);
-      this.usedBytes = Math.max(0, this.usedBytes - operation.bytesWritten);
+      await this.assertRootIdentity(signal);
+      await this.closeHandle(operation, signal);
+
+      const targetPath =
+        operation.state === "committed"
+          ? operation.finalPath
+          : operation.partPath;
+      const removal = await this.removeExactFile(
+        targetPath,
+        operation.partIdentity,
+        operation.bytesWritten,
+        signal,
+      );
+      if (removal === "removed") {
+        this.usedBytes = Math.max(0, this.usedBytes - operation.bytesWritten);
+      }
       operation.state = "aborted";
       this.operations.delete(operation.partPath);
-    });
+      this.pinnedFinals.delete(operation.finalPath);
+      if (removal === "mismatch") throw unavailable(false);
+    }, signal);
+  }
+
+  finalize(operation: OperationState): void {
+    this.assertTracked(operation, "committed");
+    if (this.pinnedFinals.get(operation.finalPath) !== operation.token) {
+      throw unavailable(false);
+    }
+    operation.state = "finalized";
+    this.pinnedFinals.delete(operation.finalPath);
+    this.operations.delete(operation.partPath);
   }
 
   private async removeStartupPartials(): Promise<void> {
     await this.withLock(async () => {
+      await this.assertRootIdentity();
       const scan = await this.scanOwnedEntries();
       if (scan.truncated) {
         this.quotaBlocked = true;
@@ -492,7 +590,7 @@ export class DownloadStorage {
       }
       for (const entry of scan.entries) {
         if (entry.kind === "part") {
-          await removeRegularFile(entry.fullPath);
+          await this.removeOwnedEntry(entry);
         }
       }
       this.quotaBlocked = scan.truncated;
@@ -501,18 +599,23 @@ export class DownloadStorage {
 
   private async refreshUsage(): Promise<void> {
     await this.withLock(async () => {
+      await this.assertRootIdentity();
       const scan = await this.scanOwnedEntries();
       this.usedBytes = scan.entries.reduce(
         (total, entry) => total + entry.size,
         0,
       );
-      this.quotaBlocked =
-        scan.truncated || this.usedBytes > this.quotaBytes;
+      this.quotaBlocked = scan.truncated || this.usedBytes > this.quotaBytes;
     });
   }
 
-  private async ensureCapacity(additionalBytes: number): Promise<void> {
-    const scan = await this.scanOwnedEntries();
+  private async ensureCapacity(
+    additionalBytes: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    throwIfAborted(signal);
+    await this.assertRootIdentity(signal);
+    const scan = await this.scanOwnedEntries(signal);
     let bytesRemaining = scan.entries.reduce(
       (total, entry) => total + entry.size,
       0,
@@ -528,7 +631,10 @@ export class DownloadStorage {
     const oldestFirst = (left: OwnedEntry, right: OwnedEntry): number =>
       left.mtimeMs - right.mtimeMs || compareNames(left.name, right.name);
     const finals = scan.entries
-      .filter((entry) => entry.kind === "file")
+      .filter(
+        (entry) =>
+          entry.kind === "file" && !this.pinnedFinals.has(entry.fullPath),
+      )
       .sort(oldestFirst);
     const expired = finals.filter(
       (entry) => this.now() - entry.mtimeMs >= this.ttlMs,
@@ -536,38 +642,41 @@ export class DownloadStorage {
     const retained = finals.filter((entry) => !expired.includes(entry));
 
     for (const entry of expired) {
-      if (await removeRegularFile(entry.fullPath)) {
+      throwIfAborted(signal);
+      if ((await this.removeOwnedEntry(entry, signal)) === "removed") {
         bytesRemaining -= entry.size;
       }
     }
     for (const entry of retained) {
       if (bytesRemaining + additionalBytes <= this.quotaBytes) break;
-      if (await removeRegularFile(entry.fullPath)) {
+      throwIfAborted(signal);
+      if ((await this.removeOwnedEntry(entry, signal)) === "removed") {
         bytesRemaining -= entry.size;
       }
     }
 
     this.usedBytes = Math.max(0, bytesRemaining);
-    this.quotaBlocked =
-      this.usedBytes + additionalBytes > this.quotaBytes;
+    this.quotaBlocked = this.usedBytes + additionalBytes > this.quotaBytes;
     if (this.quotaBlocked) {
       throw new DownloadStorageError("storage_quota_exceeded", {
         retriable: false,
       });
     }
+    await this.assertRootIdentity(signal);
   }
 
-  private async scanOwnedEntries(): Promise<ScanResult> {
+  private async scanOwnedEntries(signal?: AbortSignal): Promise<ScanResult> {
+    throwIfAborted(signal);
     const names: string[] = [];
     const directory = await opendir(this.root);
+    throwIfAborted(signal);
     for await (const entry of directory) {
+      throwIfAborted(signal);
       names.push(entry.name);
       if (names.length > this.maxSweepEntries) break;
     }
     const truncated = names.length > this.maxSweepEntries;
-    const selected = names
-      .slice(0, this.maxSweepEntries)
-      .sort(compareNames);
+    const selected = names.slice(0, this.maxSweepEntries).sort(compareNames);
     const entries: OwnedEntry[] = [];
     for (const name of selected) {
       const kind = OWNED_FILE.test(name)
@@ -578,19 +687,23 @@ export class DownloadStorage {
       if (!kind) continue;
       const fullPath = this.containedPath(name);
       try {
-        const stat = await lstat(fullPath);
+        throwIfAborted(signal);
+        const stat = await lstat(fullPath, { bigint: true });
+        throwIfAborted(signal);
         if (stat.isSymbolicLink() || !stat.isFile()) continue;
         entries.push({
           name,
           fullPath,
           kind,
-          size: stat.size,
-          mtimeMs: stat.mtimeMs,
+          size: safeInteger(stat.size),
+          mtimeMs: safeInteger(stat.mtimeMs),
+          identity: identityOf(stat),
         });
       } catch (error) {
         if (!isMissingFileError(error)) throw error;
       }
     }
+    await this.assertRootIdentity(signal);
     return {
       entries,
       scannedEntries: selected.length,
@@ -600,23 +713,28 @@ export class DownloadStorage {
 
   private containedPath(name: string): string {
     const candidate = path.resolve(this.root, name);
-    if (
-      path.dirname(candidate) !== this.root ||
-      candidate === this.root
-    ) {
+    if (path.dirname(candidate) !== this.root || candidate === this.root) {
       throw unavailable(false);
     }
     return candidate;
   }
 
-  private async assertRoot(): Promise<void> {
-    const stat = await lstat(this.root);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+  private async assertRootIdentity(signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    const stat = await lstat(this.root, { bigint: true });
+    throwIfAborted(signal);
+    if (
+      stat.isSymbolicLink() ||
+      !stat.isDirectory() ||
+      !sameIdentity(identityOf(stat), this.rootIdentity)
+    ) {
       throw unavailable(false);
     }
+    throwIfAborted(signal);
     if ((await realpath(this.root)) !== this.root) {
       throw unavailable(false);
     }
+    throwIfAborted(signal);
   }
 
   private assertTracked(
@@ -631,13 +749,147 @@ export class DownloadStorage {
     }
   }
 
-  private async closeHandle(operation: OperationState): Promise<void> {
+  private async closeHandle(
+    operation: OperationState,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    throwIfAborted(signal);
     const handle = operation.handle;
     operation.handle = undefined;
-    if (handle) await handle.close().catch(() => undefined);
+    if (handle) {
+      await handle.close().catch(() => undefined);
+      throwIfAborted(signal);
+    }
   }
 
-  private async withLock<T>(operation: () => Promise<T>): Promise<T> {
+  private async assertExactPart(
+    operation: OperationState,
+    requireOpenHandle: boolean,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.assertExactFile(
+      operation.partPath,
+      operation.partIdentity,
+      operation.bytesWritten,
+      signal,
+    );
+    if (!requireOpenHandle) return;
+    const handle = operation.handle;
+    if (!handle) throw unavailable(false);
+    throwIfAborted(signal);
+    const handleStat = await handle.stat({ bigint: true });
+    throwIfAborted(signal);
+    if (
+      !handleStat.isFile() ||
+      !sameIdentity(identityOf(handleStat), operation.partIdentity) ||
+      handleStat.size !== BigInt(operation.bytesWritten)
+    ) {
+      throw unavailable(false);
+    }
+  }
+
+  private async assertExactFile(
+    filePath: string,
+    identity: FileIdentity,
+    size: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.assertRootIdentity(signal);
+    throwIfAborted(signal);
+    const stat = await lstat(filePath, { bigint: true });
+    throwIfAborted(signal);
+    if (
+      stat.isSymbolicLink() ||
+      !stat.isFile() ||
+      !sameIdentity(identityOf(stat), identity) ||
+      stat.size !== BigInt(size)
+    ) {
+      throw unavailable(false);
+    }
+  }
+
+  private async removeOwnedEntry(
+    entry: OwnedEntry,
+    signal?: AbortSignal,
+  ): Promise<RemovalResult> {
+    return this.removeExactFile(
+      entry.fullPath,
+      entry.identity,
+      entry.size,
+      signal,
+    );
+  }
+
+  private async removeExactFile(
+    filePath: string,
+    identity: FileIdentity,
+    size: number,
+    signal?: AbortSignal,
+  ): Promise<RemovalResult> {
+    await this.assertRootIdentity(signal);
+    throwIfAborted(signal);
+    let stat: BigIntStats;
+    try {
+      stat = await lstat(filePath, { bigint: true });
+    } catch (error) {
+      if (isMissingFileError(error)) return "missing";
+      throw error;
+    }
+    throwIfAborted(signal);
+    if (
+      stat.isSymbolicLink() ||
+      !stat.isFile() ||
+      !sameIdentity(identityOf(stat), identity) ||
+      stat.size !== BigInt(size)
+    ) {
+      return "mismatch";
+    }
+    await this.assertRootIdentity(signal);
+    throwIfAborted(signal);
+    await unlink(filePath);
+    throwIfAborted(signal);
+    await this.assertRootIdentity(signal);
+    return "removed";
+  }
+
+  private async cleanupFailedOperation(
+    operation: OperationState,
+    published: boolean,
+  ): Promise<DownloadStorageError | undefined> {
+    let cleanupUnsafe = false;
+    try {
+      await this.closeHandle(operation);
+      if (published) {
+        const finalRemoval = await this.removeExactFile(
+          operation.finalPath,
+          operation.partIdentity,
+          operation.bytesWritten,
+        );
+        cleanupUnsafe ||= finalRemoval === "mismatch";
+      }
+      const partRemoval = await this.removeExactFile(
+        operation.partPath,
+        operation.partIdentity,
+        operation.bytesWritten,
+      );
+      cleanupUnsafe ||= partRemoval === "mismatch";
+      if (published || partRemoval === "removed") {
+        this.usedBytes = Math.max(0, this.usedBytes - operation.bytesWritten);
+      }
+    } catch {
+      cleanupUnsafe = true;
+    }
+    operation.state = "aborted";
+    this.operations.delete(operation.partPath);
+    this.pinnedFinals.delete(operation.finalPath);
+    return cleanupUnsafe ? unavailable(false) : undefined;
+  }
+
+  private async withLock<T>(
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    throwIfAborted(signal);
     const previous = this.lockTail;
     let release: (() => void) | undefined;
     this.lockTail = new Promise<void>((resolve) => {
@@ -645,6 +897,7 @@ export class DownloadStorage {
     });
     await previous;
     try {
+      throwIfAborted(signal);
       return await operation();
     } finally {
       release?.();
@@ -659,6 +912,14 @@ function positiveInteger(value: number): number {
   return value;
 }
 
+function safeInteger(value: bigint): number {
+  const converted = Number(value);
+  if (!Number.isSafeInteger(converted) || converted < 0) {
+    throw unavailable(false);
+  }
+  return converted;
+}
+
 function unavailable(retriable: boolean): DownloadStorageError {
   return new DownloadStorageError("storage_unavailable", { retriable });
 }
@@ -667,9 +928,7 @@ function asStorageError(
   error: unknown,
   retriable: boolean,
 ): DownloadStorageError {
-  return error instanceof DownloadStorageError
-    ? error
-    : unavailable(retriable);
+  return error instanceof DownloadStorageError ? error : unavailable(retriable);
 }
 
 function isMissingFileError(error: unknown): boolean {
@@ -681,16 +940,36 @@ function isMissingFileError(error: unknown): boolean {
   );
 }
 
-async function removeRegularFile(filePath: string): Promise<boolean> {
-  try {
-    const stat = await lstat(filePath);
-    if (stat.isSymbolicLink() || !stat.isFile()) return false;
-    await rm(filePath, { force: true });
-    return true;
-  } catch (error) {
-    if (isMissingFileError(error)) return false;
-    throw error;
-  }
+function isPathSafetyCollision(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    ["EEXIST", "EISDIR", "ENOTDIR", "ELOOP"].includes(String(error.code))
+  );
+}
+
+function identityOf(stat: BigIntStats): FileIdentity {
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+  };
+}
+
+function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameRegularFile(
+  pathStat: BigIntStats,
+  handleStat: BigIntStats,
+): boolean {
+  return (
+    !pathStat.isSymbolicLink() &&
+    pathStat.isFile() &&
+    handleStat.isFile() &&
+    sameIdentity(identityOf(pathStat), identityOf(handleStat))
+  );
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

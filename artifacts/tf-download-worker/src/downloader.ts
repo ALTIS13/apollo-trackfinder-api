@@ -1,9 +1,6 @@
 import type { DownloadQuality } from "@workspace/tf-download-contract";
 import { spawn } from "node:child_process";
-import type {
-  ChildProcessByStdio,
-  SpawnOptions,
-} from "node:child_process";
+import type { ChildProcessByStdio, SpawnOptions } from "node:child_process";
 import type { Readable } from "node:stream";
 
 export interface DownloaderProcessExit {
@@ -15,6 +12,7 @@ export interface DownloaderProcess {
   readonly stdout: Readable;
   readonly stderr: Readable;
   readonly completion: Promise<DownloaderProcessExit>;
+  readonly closed: Promise<void>;
   kill(signal: NodeJS.Signals): void;
 }
 
@@ -66,15 +64,23 @@ export function spawnYtDlpDownload(
     windowsHide: true,
     signal: options.signal,
   });
+  let resolveClosed: (() => void) | undefined;
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
   const completion = new Promise<DownloaderProcessExit>((resolve, reject) => {
     child.once("error", reject);
-    child.once("close", (code, signal) => resolve({ code, signal }));
+    child.once("close", (code, signal) => {
+      resolveClosed?.();
+      resolve({ code, signal });
+    });
   });
 
   return {
     stdout: child.stdout,
     stderr: child.stderr,
     completion,
+    closed,
     kill(signal) {
       child.kill(signal);
     },

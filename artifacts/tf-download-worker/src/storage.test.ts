@@ -4,6 +4,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
   utimes,
@@ -12,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DownloadStorage } from "./storage";
+import { DownloadStorage, DownloadStorageError } from "./storage";
 
 const JOB_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_JOB_ID = "22222222-2222-4222-8222-222222222222";
@@ -101,9 +102,9 @@ describe("DownloadStorage", () => {
         "storage_unavailable",
       );
     }
-    await expect(
-      storage.begin(JOB_ID, "../mp3" as "mp3"),
-    ).rejects.toThrow("storage_unavailable");
+    await expect(storage.begin(JOB_ID, "../mp3" as "mp3")).rejects.toThrow(
+      "storage_unavailable",
+    );
     expect(await listNames(root)).toEqual([]);
   });
 
@@ -120,7 +121,9 @@ describe("DownloadStorage", () => {
     await expect(storage.begin(JOB_ID, "mp3")).rejects.toThrow(
       "storage_unavailable",
     );
-    expect((await lstat(path.join(root, partName))).isSymbolicLink()).toBe(true);
+    expect((await lstat(path.join(root, partName))).isSymbolicLink()).toBe(
+      true,
+    );
     expect(await readFile(marker, "utf8")).toBe("outside");
 
     await rm(path.join(root, partName));
@@ -202,9 +205,21 @@ describe("DownloadStorage", () => {
       path.join(root, symlinkKey),
       outside,
     );
-    await utimes(path.join(root, expiredKey), new Date(now - 2_000), new Date(now - 2_000));
-    await utimes(path.join(root, oldestKey), new Date(now - 900), new Date(now - 900));
-    await utimes(path.join(root, newestKey), new Date(now - 800), new Date(now - 800));
+    await utimes(
+      path.join(root, expiredKey),
+      new Date(now - 2_000),
+      new Date(now - 2_000),
+    );
+    await utimes(
+      path.join(root, oldestKey),
+      new Date(now - 900),
+      new Date(now - 900),
+    );
+    await utimes(
+      path.join(root, newestKey),
+      new Date(now - 800),
+      new Date(now - 800),
+    );
 
     const storage = await DownloadStorage.create({
       root,
@@ -236,9 +251,21 @@ describe("DownloadStorage", () => {
     await writeFile(path.join(root, expiredKey), Buffer.alloc(2));
     await writeFile(path.join(root, oldestKey), Buffer.alloc(2));
     await writeFile(path.join(root, newestKey), Buffer.alloc(2));
-    await utimes(path.join(root, expiredKey), new Date(now - 2_000), new Date(now - 2_000));
-    await utimes(path.join(root, oldestKey), new Date(now - 900), new Date(now - 900));
-    await utimes(path.join(root, newestKey), new Date(now - 800), new Date(now - 800));
+    await utimes(
+      path.join(root, expiredKey),
+      new Date(now - 2_000),
+      new Date(now - 2_000),
+    );
+    await utimes(
+      path.join(root, oldestKey),
+      new Date(now - 900),
+      new Date(now - 900),
+    );
+    await utimes(
+      path.join(root, newestKey),
+      new Date(now - 800),
+      new Date(now - 800),
+    );
 
     const storage = await DownloadStorage.create({
       root,
@@ -248,18 +275,12 @@ describe("DownloadStorage", () => {
     });
     const output = await storage.begin(JOB_ID, "mp3");
     expect(await output.write(Buffer.alloc(2))).toBe(true);
-    expect(await listNames(root)).toEqual([
-      `${JOB_ID}.mp3.part`,
-      newestKey,
-    ]);
+    expect(await listNames(root)).toEqual([`${JOB_ID}.mp3.part`, newestKey]);
 
     const result = await output.commit(metadata);
 
     expect(result.storageKey).toBe(`${JOB_ID}.mp3`);
-    expect(await listNames(root)).toEqual([
-      `${JOB_ID}.mp3`,
-      newestKey,
-    ]);
+    expect(await listNames(root)).toEqual([`${JOB_ID}.mp3`, newestKey]);
   });
 
   it("rescans and evicts an owned final introduced before commit", async () => {
@@ -277,11 +298,7 @@ describe("DownloadStorage", () => {
     const expiredKey = `${SECOND_JOB_ID}.mp3`;
     const expiredPath = path.join(root, expiredKey);
     await writeFile(expiredPath, Buffer.alloc(4));
-    await utimes(
-      expiredPath,
-      new Date(now - 2_000),
-      new Date(now - 2_000),
-    );
+    await utimes(expiredPath, new Date(now - 2_000), new Date(now - 2_000));
 
     const result = await output.commit(metadata);
 
@@ -322,9 +339,9 @@ describe("DownloadStorage", () => {
       second.commit(metadata),
     ]);
 
-    expect(outcomes.filter(({ status }) => status === "fulfilled")).toHaveLength(
-      1,
-    );
+    expect(
+      outcomes.filter(({ status }) => status === "fulfilled"),
+    ).toHaveLength(1);
     expect(outcomes.filter(({ status }) => status === "rejected")).toHaveLength(
       1,
     );
@@ -358,5 +375,232 @@ describe("DownloadStorage", () => {
       `${SECOND_JOB_ID}.mp3`,
       `${THIRD_JOB_ID}.mp3`,
     ]);
+  });
+
+  it("does not unlink a same-sized replacement partial during failed commit cleanup", async () => {
+    const root = await createRoot();
+    const storage = await DownloadStorage.create({ root });
+    const output = await storage.begin(JOB_ID, "mp3");
+    const partPath = path.join(root, `${JOB_ID}.mp3.part`);
+    const operation = (
+      output as unknown as {
+        operation: {
+          handle: { close(): Promise<void> } | undefined;
+        };
+      }
+    ).operation;
+
+    expect(await output.write(Buffer.from("owned"))).toBe(true);
+    await operation.handle?.close();
+    operation.handle = undefined;
+    await rm(partPath);
+    await writeFile(partPath, "other");
+
+    const failure = await output
+      .commit(metadata)
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(DownloadStorageError);
+    expect(failure).toMatchObject({
+      code: "storage_unavailable",
+      retriable: false,
+    });
+    expect(await readFile(partPath, "utf8")).toBe("other");
+  });
+
+  it("does not unlink a same-sized replacement partial during abort cleanup", async () => {
+    const root = await createRoot();
+    const storage = await DownloadStorage.create({ root });
+    const output = await storage.begin(JOB_ID, "mp3");
+    const partPath = path.join(root, `${JOB_ID}.mp3.part`);
+    const operation = (
+      output as unknown as {
+        operation: {
+          handle: { close(): Promise<void> } | undefined;
+        };
+      }
+    ).operation;
+
+    expect(await output.write(Buffer.from("owned"))).toBe(true);
+    await operation.handle?.close();
+    operation.handle = undefined;
+    await rm(partPath);
+    await writeFile(partPath, "other");
+
+    const failure = await output.abort().catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(DownloadStorageError);
+    expect(failure).toMatchObject({
+      code: "storage_unavailable",
+      retriable: false,
+    });
+    expect(await readFile(partPath, "utf8")).toBe("other");
+  });
+
+  it.each(["file", "directory", "symlink"] as const)(
+    "atomically refuses a %s created at the final path before publication",
+    async (collisionKind) => {
+      const root = await createRoot();
+      const outside = await createRoot();
+      const finalPath = path.join(root, `${JOB_ID}.mp3`);
+      const marker = path.join(outside, "marker");
+      await writeFile(marker, "outside");
+      const storage = await DownloadStorage.create(
+        { root },
+        {
+          beforePublish: async () => {
+            if (collisionKind === "file") {
+              await writeFile(finalPath, "foreign");
+            } else if (collisionKind === "directory") {
+              await mkdir(finalPath);
+            } else {
+              await symlink(
+                outside,
+                finalPath,
+                process.platform === "win32" ? "junction" : "dir",
+              );
+            }
+          },
+        },
+      );
+      const output = await storage.begin(JOB_ID, "mp3");
+      expect(await output.write(Buffer.from("audio"))).toBe(true);
+
+      const failure = await output
+        .commit(metadata)
+        .catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(DownloadStorageError);
+      expect(failure).toMatchObject({
+        code: "storage_unavailable",
+        retriable: false,
+      });
+      if (collisionKind === "file") {
+        expect(await readFile(finalPath, "utf8")).toBe("foreign");
+      } else {
+        const stat = await lstat(finalPath);
+        expect(
+          collisionKind === "directory"
+            ? stat.isDirectory()
+            : stat.isSymbolicLink(),
+        ).toBe(true);
+      }
+      expect(await readFile(marker, "utf8")).toBe("outside");
+      expect(await listNames(root)).not.toContain(`${JOB_ID}.mp3.part`);
+    },
+  );
+
+  it("revalidates the retained root identity immediately before publication", async () => {
+    const root = await createRoot();
+    const movedRoot = `${root}-moved`;
+    roots.push(movedRoot);
+    const storage = await DownloadStorage.create(
+      { root },
+      {
+        beforePublish: async () => {
+          await rename(root, movedRoot);
+          await mkdir(root, { mode: 0o700 });
+        },
+      },
+    );
+    const output = await storage.begin(JOB_ID, "mp3");
+    expect(await output.write(Buffer.from("audio"))).toBe(true);
+
+    const failure = await output
+      .commit(metadata)
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(DownloadStorageError);
+    expect(failure).toMatchObject({
+      code: "storage_unavailable",
+      retriable: false,
+    });
+    expect(await listNames(root)).toEqual([]);
+    expect(
+      await readFile(path.join(movedRoot, `${JOB_ID}.mp3.part`), "utf8"),
+    ).toBe("audio");
+  });
+
+  it("does not publish when the operation signal aborts at the publication boundary", async () => {
+    const root = await createRoot();
+    let enteredPublish: (() => void) | undefined;
+    let releasePublish: (() => void) | undefined;
+    const entered = new Promise<void>((resolve) => {
+      enteredPublish = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releasePublish = resolve;
+    });
+    const storage = await DownloadStorage.create(
+      { root },
+      {
+        beforePublish: async () => {
+          enteredPublish?.();
+          await release;
+        },
+      },
+    );
+    const output = await storage.begin(JOB_ID, "mp3");
+    expect(await output.write(Buffer.from("audio"))).toBe(true);
+    const controller = new AbortController();
+    const commit = output.commit(metadata, controller.signal);
+
+    const firstOutcome = await Promise.race([
+      entered.then(() => "entered" as const),
+      commit.then(
+        () => "committed" as const,
+        () => "rejected" as const,
+      ),
+    ]);
+    expect(firstOutcome).toBe("entered");
+    controller.abort();
+    releasePublish?.();
+
+    await expect(commit).rejects.toBeInstanceOf(DownloadStorageError);
+    expect(await listNames(root)).toEqual([]);
+  });
+
+  it("closes and identity-removes a partial when abort arrives after open", async () => {
+    const root = await createRoot();
+    const controller = new AbortController();
+    const storage = await DownloadStorage.create(
+      { root },
+      {
+        afterOpen: () => controller.abort(),
+      },
+    );
+
+    await expect(
+      storage.begin(JOB_ID, "mp3", controller.signal),
+    ).rejects.toBeInstanceOf(DownloadStorageError);
+    expect(await listNames(root)).toEqual([]);
+  });
+
+  it("pins a committed final until finalize releases it for quota eviction", async () => {
+    const root = await createRoot();
+    const storage = await DownloadStorage.create({
+      root,
+      maxFileBytes: 4,
+      quotaBytes: 4,
+    });
+    const first = await storage.begin(JOB_ID, "mp3");
+    expect(await first.write(Buffer.alloc(4, 1))).toBe(true);
+    await first.commit(metadata);
+
+    const blocked = await storage.begin(SECOND_JOB_ID, "mp3");
+    expect(await blocked.write(Buffer.alloc(1, 2))).toBe(false);
+    expect(blocked.failure).toMatchObject({
+      code: "storage_quota_exceeded",
+      retriable: false,
+    });
+    await blocked.abort();
+    expect(await listNames(root)).toEqual([`${JOB_ID}.mp3`]);
+
+    first.finalize();
+    const later = await storage.begin(THIRD_JOB_ID, "mp3");
+    expect(await later.write(Buffer.alloc(1, 3))).toBe(true);
+    await later.commit(metadata);
+
+    expect(await listNames(root)).toEqual([`${THIRD_JOB_ID}.mp3`]);
   });
 });

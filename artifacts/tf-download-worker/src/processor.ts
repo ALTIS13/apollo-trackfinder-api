@@ -1,5 +1,6 @@
 import {
   downloadJobDataSchema,
+  downloadJobResultSchema,
   parseAllowedDownloadSourceUrl,
 } from "@workspace/tf-download-contract";
 import type {
@@ -13,10 +14,7 @@ import {
   type DownloaderProcess,
   type SpawnDownload,
 } from "./downloader";
-import {
-  noopDownloadLogger,
-  type DownloadLogger,
-} from "./logger";
+import { noopDownloadLogger, type DownloadLogger } from "./logger";
 import {
   DownloadStorageError,
   type DownloadCommitMetadata,
@@ -26,6 +24,7 @@ import {
 const DEFAULT_DEADLINE_MS = 30 * 60 * 1_000;
 const MAX_CANCELLATION_POLL_MS = 250;
 const DEFAULT_KILL_GRACE_MS = 2_000;
+const DEFAULT_CLEANUP_GRACE_MS = 2_000;
 const CANONICAL_JOB_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const FORBIDDEN_FILENAME_CHARACTERS = /[\r\n/\\\0]/g;
@@ -58,12 +57,13 @@ export class DownloadProcessingError extends Error {
 
 interface StorageOutputBoundary {
   readonly failure?: DownloadStorageError;
-  write(data: Uint8Array): Promise<boolean>;
+  write(data: Uint8Array, signal?: AbortSignal): Promise<boolean>;
   commit(
     metadata: DownloadCommitMetadata,
     signal?: AbortSignal,
   ): Promise<DownloadJobResult>;
-  abort(): Promise<void>;
+  abort(signal?: AbortSignal): Promise<void>;
+  finalize(): void;
 }
 
 interface StorageBoundary {
@@ -88,6 +88,7 @@ export interface CreateDownloadProcessorOptions {
   readonly deadlineMs?: number;
   readonly cancellationPollMs?: number;
   readonly killGraceMs?: number;
+  readonly cleanupGraceMs?: number;
   readonly now?: () => number;
 }
 
@@ -112,6 +113,10 @@ export function createDownloadProcessor(
     options.killGraceMs,
     DEFAULT_KILL_GRACE_MS,
   );
+  const cleanupGraceMs = boundedPositiveInteger(
+    options.cleanupGraceMs,
+    DEFAULT_CLEANUP_GRACE_MS,
+  );
   const now = options.now ?? Date.now;
 
   return async (job, externalSignal) => {
@@ -127,9 +132,10 @@ export function createDownloadProcessor(
     };
     const onExternalAbort = (): void => abortWith(canceledError());
     if (externalSignal.aborted) onExternalAbort();
-    else externalSignal.addEventListener("abort", onExternalAbort, {
-      once: true,
-    });
+    else
+      externalSignal.addEventListener("abort", onExternalAbort, {
+        once: true,
+      });
     const deadlineTimer = setTimeout(
       () => abortWith(deadlineError()),
       Math.max(0, deadlineAt - now()),
@@ -137,8 +143,8 @@ export function createDownloadProcessor(
 
     let output: StorageOutputBoundary | undefined;
     let child: DownloaderProcess | undefined;
-    let childExited = false;
-    let stopCancellationMonitor: (() => void) | undefined;
+    let childClosed = false;
+    let cancellationMonitor: CancellationMonitor | undefined;
     const jobId = typeof job.id === "string" ? job.id : "";
     const logJobId = CANONICAL_JOB_ID.test(jobId) ? jobId : "invalid";
 
@@ -167,12 +173,15 @@ export function createDownloadProcessor(
       }
       throwSignalReason(controller.signal);
 
-      const canceledBeforeSpawn = await raceWithAbort(
-        options.cancellationStore.isCanceled(jobId, controller.signal),
-        controller.signal,
-      );
-      if (canceledBeforeSpawn) throw canceledError();
-      throwSignalReason(controller.signal);
+      cancellationMonitor = startCancellationMonitor({
+        store: options.cancellationStore,
+        jobId,
+        signal: controller.signal,
+        pollMs: cancellationPollMs,
+        canceledError,
+        onFailure: abortWith,
+      });
+      await raceWithAbort(cancellationMonitor.ready, controller.signal);
 
       const extension: DownloadExtension =
         parsed.data.quality === "flac" ? "flac" : "mp3";
@@ -182,15 +191,14 @@ export function createDownloadProcessor(
         extension,
       );
       const mimeType =
-        extension === "flac" ? ("audio/flac" as const) : ("audio/mpeg" as const);
+        extension === "flac"
+          ? ("audio/flac" as const)
+          : ("audio/mpeg" as const);
       output = await raceWithAbort(
         options.storage.begin(jobId, extension, controller.signal),
         controller.signal,
       );
-      if (controller.signal.aborted) {
-        await output.abort();
-        throwSignalReason(controller.signal);
-      }
+      throwSignalReason(controller.signal);
 
       child = spawnDownload({
         executable: downloaderExecutable,
@@ -198,16 +206,11 @@ export function createDownloadProcessor(
         sourceUrl: sourceUrl.href,
         signal: controller.signal,
       });
-      const childCompletion = child.completion.then(
-        (exit) => {
-          childExited = true;
-          return exit;
-        },
-        (error: unknown) => {
-          childExited = true;
-          throw error;
-        },
-      );
+      const childClosedTask = child.closed.then(() => {
+        childClosed = true;
+      });
+      void childClosedTask.catch(() => undefined);
+      const childCompletion = child.completion;
       void childCompletion.catch(() => undefined);
       await raceWithAbort(
         Promise.resolve(job.updateProgress(5)),
@@ -215,25 +218,7 @@ export function createDownloadProcessor(
       );
       logger.info({ jobId: logJobId, state: "started" });
 
-      const monitorStop = createDeferred();
-      stopCancellationMonitor = monitorStop.resolve;
-      void monitorCancellation({
-        store: options.cancellationStore,
-        jobId,
-        signal: controller.signal,
-        pollMs: cancellationPollMs,
-        stop: monitorStop.promise,
-      }).catch((error: unknown) => {
-        abortWith(
-          error instanceof DownloadProcessingError
-            ? error
-            : new DownloadProcessingError("download_failed", {
-                retriable: true,
-              }),
-        );
-      });
-
-      const stdoutTask = writeStdout(child.stdout, output);
+      const stdoutTask = writeStdout(child.stdout, output, controller.signal);
       const stderrTask = discardStderr(child.stderr);
       const downloadTask = Promise.all([
         childCompletion,
@@ -259,14 +244,22 @@ export function createDownloadProcessor(
         mimeType,
         completedAt: new Date(now()).toISOString(),
       };
-      const result = await output.commit(metadata, controller.signal);
+      const committedResult = await raceWithAbort(
+        output.commit(metadata, controller.signal),
+        controller.signal,
+      );
       throwSignalReason(controller.signal);
-      stopCancellationMonitor();
-      stopCancellationMonitor = undefined;
+      const result = downloadJobResultSchema.parse({
+        ...committedResult,
+        completedAt: new Date(now()).toISOString(),
+      });
       await raceWithAbort(
         Promise.resolve(job.updateProgress(100)),
         controller.signal,
       );
+      cancellationMonitor.stop();
+      throwSignalReason(controller.signal);
+      output.finalize();
       clearTimeout(deadlineTimer);
       logger.info({
         jobId: logJobId,
@@ -278,15 +271,16 @@ export function createDownloadProcessor(
     } catch (error) {
       const failure = toProcessingError(error, controller.signal);
       abortWith(failure);
-      stopCancellationMonitor?.();
+      cancellationMonitor?.stop();
       if (child) {
-        await terminateChild(
-          child,
-          () => childExited,
-          killGraceMs,
-        );
+        await terminateChild(child, () => childClosed, killGraceMs);
       }
-      await output?.abort().catch(() => undefined);
+      if (output) {
+        await boundedAbort(output, cleanupGraceMs);
+      }
+      if (cancellationMonitor) {
+        await Promise.race([cancellationMonitor.task, delay(cleanupGraceMs)]);
+      }
       const event = {
         jobId: logJobId,
         state:
@@ -302,7 +296,7 @@ export function createDownloadProcessor(
     } finally {
       clearTimeout(deadlineTimer);
       externalSignal.removeEventListener("abort", onExternalAbort);
-      stopCancellationMonitor?.();
+      cancellationMonitor?.stop();
     }
   };
 }
@@ -310,15 +304,19 @@ export function createDownloadProcessor(
 async function writeStdout(
   stdout: NodeJS.ReadableStream,
   output: StorageOutputBoundary,
+  signal: AbortSignal,
 ): Promise<number> {
   let bytesWritten = 0;
   for await (const chunk of stdout) {
     const data =
       typeof chunk === "string" ? Buffer.from(chunk) : new Uint8Array(chunk);
-    if (!(await output.write(data))) {
-      throw output.failure ?? new DownloadStorageError("storage_unavailable", {
-        retriable: true,
-      });
+    if (!(await raceWithAbort(output.write(data, signal), signal))) {
+      throw (
+        output.failure ??
+        new DownloadStorageError("storage_unavailable", {
+          retriable: true,
+        })
+      );
     }
     bytesWritten += data.byteLength;
   }
@@ -331,38 +329,117 @@ async function discardStderr(stderr: NodeJS.ReadableStream): Promise<void> {
   }
 }
 
-async function monitorCancellation(options: {
+interface CancellationMonitor {
+  readonly ready: Promise<void>;
+  readonly task: Promise<void>;
+  stop(): void;
+}
+
+function startCancellationMonitor(options: {
   readonly store: DownloadCancellationStore;
   readonly jobId: string;
   readonly signal: AbortSignal;
   readonly pollMs: number;
-  readonly stop: Promise<void>;
-}): Promise<void> {
-  while (!options.signal.aborted) {
-    const stopped = await Promise.race([
-      delay(options.pollMs).then(() => false),
-      options.stop.then(() => true),
-    ]);
-    if (stopped || options.signal.aborted) return;
-    if (await options.store.isCanceled(options.jobId, options.signal)) {
-      throw new DownloadProcessingError("download_canceled", {
-        retriable: false,
-      });
+  readonly canceledError: () => DownloadProcessingError;
+  readonly onFailure: (error: DownloadProcessingError) => void;
+}): CancellationMonitor {
+  const monitorController = new AbortController();
+  let stopped = false;
+  let readySettled = false;
+  let resolveReady: (() => void) | undefined;
+  let rejectReady: ((error: unknown) => void) | undefined;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const settleReady = (error?: unknown): void => {
+    if (readySettled) return;
+    readySettled = true;
+    if (error === undefined) resolveReady?.();
+    else rejectReady?.(error);
+  };
+  const onJobAbort = (): void => {
+    if (!monitorController.signal.aborted) {
+      monitorController.abort(options.signal.reason);
     }
-  }
+  };
+  if (options.signal.aborted) onJobAbort();
+  else options.signal.addEventListener("abort", onJobAbort, { once: true });
+
+  const task = (async () => {
+    try {
+      while (true) {
+        const canceled = await raceWithAbort(
+          options.store.isCanceled(options.jobId, monitorController.signal),
+          monitorController.signal,
+        );
+        if (canceled) throw options.canceledError();
+        settleReady();
+        await raceWithAbort(delay(options.pollMs), monitorController.signal);
+      }
+    } catch (error) {
+      if (stopped || options.signal.aborted) {
+        settleReady(options.signal.reason ?? error);
+        return;
+      }
+      const failure =
+        error instanceof DownloadProcessingError
+          ? error
+          : new DownloadProcessingError("download_failed", {
+              retriable: true,
+            });
+      settleReady(failure);
+      options.onFailure(failure);
+    } finally {
+      options.signal.removeEventListener("abort", onJobAbort);
+    }
+  })();
+  void task.catch(() => undefined);
+
+  return {
+    ready,
+    task,
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      options.signal.removeEventListener("abort", onJobAbort);
+      if (!monitorController.signal.aborted) {
+        monitorController.abort();
+      }
+    },
+  };
+}
+
+async function boundedAbort(
+  output: StorageOutputBoundary,
+  graceMs: number,
+): Promise<void> {
+  const controller = new AbortController();
+  const cleanupTask = settled(
+    Promise.resolve().then(() => output.abort(controller.signal)),
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve();
+    }, graceMs);
+  });
+  await Promise.race([cleanupTask, timeout]);
+  if (timer) clearTimeout(timer);
 }
 
 async function terminateChild(
   child: DownloaderProcess,
-  hasExited: () => boolean,
+  hasClosed: () => boolean,
   graceMs: number,
 ): Promise<void> {
-  if (hasExited()) return;
+  if (hasClosed()) return;
   safeKill(child, "SIGTERM");
-  await Promise.race([settled(child.completion), delay(graceMs)]);
-  if (hasExited()) return;
+  await Promise.race([settled(child.closed), delay(graceMs)]);
+  if (hasClosed()) return;
   safeKill(child, "SIGKILL");
-  await Promise.race([settled(child.completion), delay(graceMs)]);
+  await Promise.race([settled(child.closed), delay(graceMs)]);
 }
 
 function safeKill(child: DownloaderProcess, signal: NodeJS.Signals): void {
@@ -377,10 +454,7 @@ function toProcessingError(
   error: unknown,
   signal: AbortSignal,
 ): DownloadProcessingError {
-  if (
-    signal.aborted &&
-    signal.reason instanceof DownloadProcessingError
-  ) {
+  if (signal.aborted && signal.reason instanceof DownloadProcessingError) {
     return signal.reason;
   }
   if (error instanceof DownloadProcessingError) return error;
@@ -456,18 +530,4 @@ function settled(promise: Promise<unknown>): Promise<void> {
     () => undefined,
     () => undefined,
   );
-}
-
-function createDeferred(): {
-  readonly promise: Promise<void>;
-  readonly resolve: () => void;
-} {
-  let resolve: (() => void) | undefined;
-  const promise = new Promise<void>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return {
-    promise,
-    resolve: () => resolve?.(),
-  };
 }
