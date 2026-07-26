@@ -52,6 +52,7 @@ export interface CreateTfIntegrationsAppOptions {
   readonly commandTimeoutMs?: number;
   readonly maxConcurrentCommands?: number;
   readonly shutdownSignal?: AbortSignal;
+  readonly now?: () => number;
 }
 
 export function createTfIntegrationsReadiness(
@@ -209,11 +210,14 @@ interface CommandAbortScope extends TfIntegrationsCommandContext {
   dispose(): void;
 }
 
-function commandContextExpired(context: TfIntegrationsCommandContext): boolean {
+function commandContextExpired(
+  context: TfIntegrationsCommandContext,
+  now: () => number,
+): boolean {
   return (
     context.signal.aborted ||
     !Number.isSafeInteger(context.deadlineAt) ||
-    Date.now() >= context.deadlineAt
+    now() >= context.deadlineAt
   );
 }
 
@@ -227,15 +231,16 @@ function createCommandAbortScope(
   req: Request,
   res: Response,
   timeoutMs: number,
+  now: () => number,
   shutdownSignal?: AbortSignal,
 ): CommandAbortScope {
   const controller = new AbortController();
-  const deadlineAt = Date.now() + timeoutMs;
+  const deadlineAt = now() + timeoutMs;
   const abort = (): void => controller.abort();
   const abortOnClose = (): void => {
     if (!res.writableEnded) abort();
   };
-  const timeout = setTimeout(abort, Math.max(0, deadlineAt - Date.now()));
+  const timeout = setTimeout(abort, Math.max(0, deadlineAt - now()));
 
   req.once("aborted", abort);
   res.once("close", abortOnClose);
@@ -257,6 +262,7 @@ function createCommandAbortScope(
 export function createTfIntegrationsApp(
   options: CreateTfIntegrationsAppOptions,
 ): Express {
+  const now = options.now ?? Date.now;
   const commandTimeoutMs = boundedInteger(
     options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS,
     1,
@@ -317,12 +323,13 @@ export function createTfIntegrationsApp(
         req,
         res,
         commandTimeoutMs,
+        now,
         options.shutdownSignal,
       );
       try {
         if (
           !(await isReady(options.readiness)) ||
-          commandContextExpired(scope)
+          commandContextExpired(scope, now)
         ) {
           respondIntegrationsUnavailable(res);
           return;
@@ -337,7 +344,7 @@ export function createTfIntegrationsApp(
           return;
         }
         const rawResponse = await options.service.execute(command.data, scope);
-        if (commandContextExpired(scope)) {
+        if (commandContextExpired(scope, now)) {
           respondIntegrationsUnavailable(res);
           return;
         }
@@ -357,9 +364,15 @@ export function createTfIntegrationsApp(
           res.status(500).json({ error: "internal_error" });
           return;
         }
-        res.status(200).json(parsed);
+        const responseBytes = Buffer.from(JSON.stringify(parsed), "utf8");
+        res.status(200).type("application/json");
+        if (commandContextExpired(scope, now)) {
+          respondIntegrationsUnavailable(res);
+          return;
+        }
+        res.send(responseBytes);
       } catch {
-        if (commandContextExpired(scope)) {
+        if (commandContextExpired(scope, now)) {
           respondIntegrationsUnavailable(res);
           return;
         }

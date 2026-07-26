@@ -345,7 +345,7 @@ async function provisionNativeSecretOwnership(
       "--read-only",
       "--mount",
       `type=bind,source=${directory},target=/secrets`,
-      "postgres:16-bookworm",
+      "postgres:17-bookworm",
       "sh",
       "-eu",
       "-c",

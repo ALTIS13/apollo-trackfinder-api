@@ -50,8 +50,21 @@ export function createIntegrationsPool(
 
 export async function probeIntegrationsDatabase(pool: Pool): Promise<boolean> {
   try {
-    await pool.query("select 1");
-    return true;
+    const result = await pool.query<{
+      server_version_num: number;
+      transaction_timeout: string | null;
+    }>(`
+      select current_setting('server_version_num')::integer
+               as server_version_num,
+             current_setting('transaction_timeout', true)
+               as transaction_timeout
+    `);
+    const capability = result.rows[0];
+    return (
+      capability !== undefined &&
+      capability.server_version_num >= 170_000 &&
+      capability.transaction_timeout !== null
+    );
   } catch {
     return false;
   }

@@ -1,7 +1,7 @@
 import { createCipheriv, randomBytes, randomUUID } from "node:crypto";
 
 import type { Pool, PoolClient } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   PostgresProviderAccountRepository,
@@ -54,6 +54,7 @@ async function delay(milliseconds: number): Promise<void> {
 
 async function waitForBlockedMutation(client: PoolClient): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
+    await client.query("select pg_stat_clear_snapshot()");
     const result = await client.query<{ blocked: boolean }>(`
       select exists (
         select 1
@@ -314,6 +315,158 @@ describePostgres("integrations disposable PostgreSQL boundary", () => {
         await blocker.query("ROLLBACK");
       }
       blocker.release();
+    }
+  });
+
+  it("never makes a deadline-expired in-flight mutation visible without an explicit abort", async () => {
+    const repository = new PostgresProviderAccountRepository(pool);
+    const accountId = randomUUID();
+    const original: ProviderAccountWrite = {
+      accountId,
+      provider: "yandex",
+      tokenEnvelope: encryptCanary(accountId, `original-${randomUUID()}`),
+      providerUserId: "deadline-original-user",
+      providerLogin: "deadline-original-login",
+      displayName: "Deadline Original User",
+    };
+    await repository.upsert(original, commandContext());
+
+    const blocker = await pool.connect();
+    let blockerTransaction = false;
+    try {
+      await blocker.query("BEGIN");
+      blockerTransaction = true;
+      await blocker.query(
+        `
+          select 1
+          from apollo_tf_integrations.provider_accounts
+          where account_id = $1 and provider = $2
+          for update
+        `,
+        [accountId, "yandex"],
+      );
+
+      const deadlineAt = Date.now() + 1_500;
+      const pending = repository.upsert(
+        {
+          ...original,
+          providerUserId: "deadline-replacement-user",
+          providerLogin: "deadline-replacement-login",
+          displayName: "Deadline Replacement User",
+        },
+        commandContext(new AbortController(), deadlineAt),
+      );
+      const outcome = pending.then(
+        () => ({ status: "resolved" as const }),
+        (error: unknown) => ({
+          status: "rejected" as const,
+          code:
+            typeof error === "object" && error !== null && "code" in error
+              ? error.code
+              : undefined,
+        }),
+      );
+      await waitForBlockedMutation(blocker);
+
+      await expect(outcome).resolves.toEqual({
+        status: "rejected",
+        code: "storage_unavailable",
+      });
+      await blocker.query("ROLLBACK");
+      blockerTransaction = false;
+      await delay(Math.max(0, deadlineAt - Date.now()) + 150);
+
+      await expect(repository.get(accountId, "yandex")).resolves.toMatchObject({
+        providerUserId: "deadline-original-user",
+        providerLogin: "deadline-original-login",
+        displayName: "Deadline Original User",
+      });
+    } finally {
+      if (blockerTransaction) await blocker.query("ROLLBACK");
+      blocker.release();
+    }
+  });
+
+  it("uses the server transaction timeout to reject deferred commit work after the total deadline", async () => {
+    const beforeTrigger = "provider_accounts_test_delay_before";
+    const deferredTrigger = "provider_accounts_test_delay_commit";
+    const beforeFunction =
+      "apollo_tf_integrations.test_delay_provider_account_before";
+    const deferredFunction =
+      "apollo_tf_integrations.test_delay_provider_account_commit";
+    await pool.query(`
+      create function ${beforeFunction}()
+      returns trigger
+      language plpgsql
+      as $$
+      begin
+        perform pg_sleep(0.35);
+        return new;
+      end
+      $$;
+
+      create function ${deferredFunction}()
+      returns trigger
+      language plpgsql
+      as $$
+      begin
+        perform pg_sleep(0.35);
+        return new;
+      end
+      $$;
+
+      create trigger ${beforeTrigger}
+      before insert or update
+      on apollo_tf_integrations.provider_accounts
+      for each row execute function ${beforeFunction}();
+
+      create constraint trigger ${deferredTrigger}
+      after insert or update
+      on apollo_tf_integrations.provider_accounts
+      deferrable initially deferred
+      for each row execute function ${deferredFunction}();
+    `);
+
+    const accountId = randomUUID();
+    const repository = new PostgresProviderAccountRepository(pool);
+    const nativeSetTimeout = globalThis.setTimeout;
+    let timerSpy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      timerSpy = vi
+        .spyOn(globalThis, "setTimeout")
+        .mockImplementationOnce(
+          ((handler: (...args: unknown[]) => void, _delay?: number) =>
+            nativeSetTimeout(handler, 5_000)) as typeof setTimeout,
+        );
+      const pending = repository.upsert(
+        {
+          accountId,
+          provider: "yandex",
+          tokenEnvelope: encryptCanary(accountId, `deferred-${randomUUID()}`),
+          providerUserId: "deferred-user",
+          providerLogin: "deferred-login",
+          displayName: "Deferred User",
+        },
+        commandContext(new AbortController(), Date.now() + 500),
+      );
+      timerSpy.mockRestore();
+      timerSpy = undefined;
+
+      await expect(pending).rejects.toMatchObject({
+        code: "storage_unavailable",
+      });
+      await delay(800);
+      await expect(repository.get(accountId, "yandex")).resolves.toBeNull();
+    } finally {
+      timerSpy?.mockRestore();
+      await pool.query(`
+        drop trigger if exists ${beforeTrigger}
+          on apollo_tf_integrations.provider_accounts;
+        drop trigger if exists ${deferredTrigger}
+          on apollo_tf_integrations.provider_accounts;
+        drop function if exists ${beforeFunction}();
+        drop function if exists ${deferredFunction}();
+      `);
     }
   });
 });

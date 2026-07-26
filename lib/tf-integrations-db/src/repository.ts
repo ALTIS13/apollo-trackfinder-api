@@ -319,7 +319,14 @@ export class PostgresProviderAccountRepository implements ProviderAccountReposit
     let client: PoolClient | undefined;
     let released = false;
     let cancelled = false;
-    let transactionStarted = false;
+    let sessionTimeoutConfigured = false;
+    let sessionSettingUncertain = false;
+    let transactionState:
+      | "none"
+      | "beginning"
+      | "active"
+      | "committing"
+      | "committed" = "none";
     let cleanupFailed = false;
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
     let failed = false;
@@ -327,16 +334,24 @@ export class PostgresProviderAccountRepository implements ProviderAccountReposit
     let result: T | undefined;
     let hasResult = false;
 
-    const destroyClient = (): void => {
-      cancelled = true;
+    const releaseClient = (destroy: boolean): void => {
       if (client === undefined || released) return;
       const target = client;
       released = true;
       try {
-        target.release(true);
-      } catch {
+        if (destroy) target.release(true);
+        else target.release();
+      } catch (error) {
         cleanupFailed = true;
+        if (!failed) {
+          failed = true;
+          failure = error;
+        }
       }
+    };
+    const destroyClient = (): void => {
+      cancelled = true;
+      releaseClient(true);
     };
     const requireActive = (): number => {
       const remaining = remainingCommandMilliseconds(context);
@@ -345,6 +360,13 @@ export class PostgresProviderAccountRepository implements ProviderAccountReposit
         throw storageError("storage_unavailable");
       }
       return remaining;
+    };
+    const resetSessionTimeout = async (): Promise<void> => {
+      if (client === undefined || !sessionTimeoutConfigured || released) return;
+      sessionSettingUncertain = true;
+      await client.query("RESET transaction_timeout");
+      sessionTimeoutConfigured = false;
+      sessionSettingUncertain = false;
     };
     const onAbort = (): void => destroyClient();
 
@@ -355,46 +377,82 @@ export class PostgresProviderAccountRepository implements ProviderAccountReposit
 
       client = await this.#pool.connect();
       requireActive();
-      await client.query("BEGIN");
-      transactionStarted = true;
+      const transactionTimeoutMs = requireActive();
+      sessionSettingUncertain = true;
+      await client.query(
+        `SET SESSION transaction_timeout = ${transactionTimeoutMs}`,
+      );
+      sessionTimeoutConfigured = true;
+      sessionSettingUncertain = false;
 
-      const statementTimeoutMs = requireActive();
-      await client.query(`SET LOCAL statement_timeout = ${statementTimeoutMs}`);
-      const lockTimeoutMs = Math.min(MAX_LOCK_TIMEOUT_MS, requireActive());
+      requireActive();
+      transactionState = "beginning";
+      await client.query("BEGIN");
+      transactionState = "active";
+
+      requireActive();
+      await client.query(
+        `SET LOCAL statement_timeout = ${transactionTimeoutMs}`,
+      );
+      const lockTimeoutMs = Math.min(
+        MAX_LOCK_TIMEOUT_MS,
+        transactionTimeoutMs,
+      );
+      requireActive();
       await client.query(`SET LOCAL lock_timeout = ${lockTimeoutMs}`);
 
       requireActive();
       result = await operation(client);
       requireActive();
+      transactionState = "committing";
       await client.query("COMMIT");
-      transactionStarted = false;
+      transactionState = "committed";
+      requireActive();
+      await resetSessionTimeout();
       requireActive();
       hasResult = true;
     } catch (error) {
       failed = true;
       failure = error;
-      if (client !== undefined && transactionStarted && !released) {
-        try {
-          await client.query("ROLLBACK");
-          transactionStarted = false;
-        } catch {
+      if (client !== undefined && !released) {
+        if (
+          sessionSettingUncertain ||
+          transactionState === "beginning" ||
+          transactionState === "committing"
+        ) {
           destroyClient();
+        } else {
+          if (transactionState === "active") {
+            try {
+              await client.query("ROLLBACK");
+              transactionState = "none";
+            } catch {
+              destroyClient();
+            }
+          }
+          if (!released && sessionTimeoutConfigured) {
+            try {
+              await resetSessionTimeout();
+            } catch {
+              destroyClient();
+            }
+          }
         }
       }
     } finally {
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
       context.signal.removeEventListener("abort", onAbort);
       if (client !== undefined && !released) {
-        const target = client;
-        released = true;
-        try {
-          target.release();
-        } catch (error) {
-          cleanupFailed = true;
-          if (!failed) {
-            failed = true;
-            failure = error;
-          }
+        if (
+          sessionTimeoutConfigured ||
+          sessionSettingUncertain ||
+          transactionState === "beginning" ||
+          transactionState === "active" ||
+          transactionState === "committing"
+        ) {
+          destroyClient();
+        } else {
+          releaseClient(false);
         }
       }
     }

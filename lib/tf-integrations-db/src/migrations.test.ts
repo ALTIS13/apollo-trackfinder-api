@@ -309,9 +309,42 @@ describe("integrations migrations", () => {
 
     const healthy = {
       query: async (text: string) => {
-        expect(text).toBe("select 1");
-        return { rows: [{ "?column?": 1 }], rowCount: 1 };
+        expect(text).toMatch(/current_setting\('server_version_num'\)/i);
+        expect(text).toMatch(
+          /current_setting\('transaction_timeout', true\)/i,
+        );
+        return {
+          rows: [
+            {
+              server_version_num: 170_000,
+              transaction_timeout: "0",
+            },
+          ],
+          rowCount: 1,
+        };
       },
+    } as unknown as Pool;
+    const postgres16 = {
+      query: async () => ({
+        rows: [
+          {
+            server_version_num: 160_000,
+            transaction_timeout: null,
+          },
+        ],
+        rowCount: 1,
+      }),
+    } as unknown as Pool;
+    const missingTransactionTimeout = {
+      query: async () => ({
+        rows: [
+          {
+            server_version_num: 170_000,
+            transaction_timeout: null,
+          },
+        ],
+        rowCount: 1,
+      }),
     } as unknown as Pool;
     const unavailable = {
       query: async () => {
@@ -322,6 +355,10 @@ describe("integrations migrations", () => {
     } as unknown as Pool;
 
     await expect(probeIntegrationsDatabase(healthy)).resolves.toBe(true);
+    await expect(probeIntegrationsDatabase(postgres16)).resolves.toBe(false);
+    await expect(
+      probeIntegrationsDatabase(missingTransactionTimeout),
+    ).resolves.toBe(false);
     await expect(probeIntegrationsDatabase(unavailable)).resolves.toBe(false);
   });
 });

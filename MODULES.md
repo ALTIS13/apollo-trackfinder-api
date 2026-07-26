@@ -535,7 +535,7 @@ tf-integrations-migrate
 tf-integrations
 ```
 
-`tf-integrations-postgres` -- отдельный PostgreSQL 16 Bookworm с базой
+`tf-integrations-postgres` -- отдельный PostgreSQL 17 Bookworm с базой
 `apollo_tf_integrations`; он не разделяет volume, database, role или URL с TF
 API и Apollo Platform. One-shot `tf-integrations-migrate` подключается ролью
 `apollo_tf_integrations_migrator`, а runtime `tf-integrations` -- отдельной
@@ -628,11 +628,18 @@ Provider token сохраняется только как AES-256-GCM envelope �
 имеет status `unknown`; после expiry он снова `unknown` и восстанавливается
 только новым valid heartbeat. Heartbeat stop повторно проверяет shutdown
 после awaited readiness и не создаёт поздний request. Readiness модуля зависит
-только от exact migration history и bounded database probe; недоступность
-Spotify/Yandex не делает `/readyz` неуспешным.
+только от exact migration history и bounded database capability probe, который
+требует PostgreSQL 17+ и доступный session parameter `transaction_timeout`;
+недоступность Spotify/Yandex не делает `/readyz` неуспешным.
 
 Каждая command получает единый abort signal от HTTP disconnect, runtime
 shutdown и fixed `8s` deadline, который короче API gateway timeout `10s`.
+Каждая mutation устанавливает session `transaction_timeout` из оставшегося
+absolute budget до `BEGIN`, сохраняет transaction-local statement/lock
+timeouts как defense in depth и сбрасывает session setting перед возвратом
+исправного client в pool. Abort, deadline или uncertain transaction/reset
+outcome уничтожает checked-out connection, поэтому PostgreSQL откатывает
+незавершённую transaction.
 Module допускает не более `32` active commands; provider boundary -- `8`
 active calls плюс `24` queued. Spotify/Yandex читают response JSON streaming
 с limit `1 MiB`, передают signal во все fixed HTTPS endpoints и

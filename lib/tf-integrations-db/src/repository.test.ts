@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   INTEGRATIONS_MIGRATION_MANIFEST,
@@ -213,6 +213,7 @@ describe("PostgresProviderAccountRepository", () => {
 
     expect(pool.connectCalls).toBe(1);
     expect(pool.queries.map(({ text }) => text.trim())).toEqual([
+      expect.stringMatching(/^SET SESSION transaction_timeout = \d+$/i),
       "BEGIN",
       expect.stringMatching(/^SET LOCAL statement_timeout = \d+$/i),
       expect.stringMatching(/^SET LOCAL lock_timeout = \d+$/i),
@@ -220,6 +221,7 @@ describe("PostgresProviderAccountRepository", () => {
         /^insert into apollo_tf_integrations\.provider_accounts/i,
       ),
       "COMMIT",
+      "RESET transaction_timeout",
     ]);
     expect(pool.client.releases).toEqual([undefined]);
     expect(pool.client.destroyed).toBe(false);
@@ -227,11 +229,18 @@ describe("PostgresProviderAccountRepository", () => {
     const statementTimeout = Number(
       findQuery(pool, /^SET LOCAL statement_timeout/i).text.match(/\d+/)?.[0],
     );
+    const transactionTimeout = Number(
+      findQuery(pool, /^SET SESSION transaction_timeout/i).text.match(
+        /\d+/,
+      )?.[0],
+    );
     const lockTimeout = Number(
       findQuery(pool, /^SET LOCAL lock_timeout/i).text.match(/\d+/)?.[0],
     );
+    expect(transactionTimeout).toBeGreaterThan(0);
+    expect(transactionTimeout).toBeLessThanOrEqual(5_000);
     expect(statementTimeout).toBeGreaterThan(0);
-    expect(statementTimeout).toBeLessThanOrEqual(5_000);
+    expect(statementTimeout).toBeGreaterThanOrEqual(transactionTimeout);
     expect(lockTimeout).toBeGreaterThan(0);
     expect(lockTimeout).toBeLessThanOrEqual(3_000);
   });
@@ -415,8 +424,45 @@ describe("PostgresProviderAccountRepository", () => {
     expect(errorText).not.toContain(parameterCanary);
     expect(errorText).not.toMatch(/insert|sqlstate/i);
     expect(pool.queries.map(({ text }) => text.trim())).toContain("ROLLBACK");
+    expect(pool.queries.map(({ text }) => text.trim())).toContain(
+      "RESET transaction_timeout",
+    );
     expect(pool.queries.map(({ text }) => text.trim())).not.toContain("COMMIT");
     expect(pool.client.releases).toEqual([undefined]);
+  });
+
+  it("destroys a connection when COMMIT outcome is uncertain", async () => {
+    const pool = new RepositoryPoolDouble();
+    pool.failure = new Error("commit outcome canary");
+    pool.failurePattern = /^COMMIT$/i;
+
+    await expect(
+      repository(pool).upsert(record(), commandContext()),
+    ).rejects.toMatchObject({ code: "storage_unavailable" });
+
+    expect(pool.client.releases).toEqual([true]);
+    expect(pool.queries.map(({ text }) => text.trim())).not.toContain(
+      "ROLLBACK",
+    );
+    expect(pool.queries.map(({ text }) => text.trim())).not.toContain(
+      "RESET transaction_timeout",
+    );
+  });
+
+  it("destroys a committed connection when session timeout reset fails", async () => {
+    const pool = new RepositoryPoolDouble();
+    pool.failure = new Error("reset failure canary");
+    pool.failurePattern = /^RESET transaction_timeout$/i;
+
+    await expect(
+      repository(pool).upsert(record(), commandContext()),
+    ).rejects.toMatchObject({ code: "storage_unavailable" });
+
+    expect(pool.queries.map(({ text }) => text.trim())).toContain("COMMIT");
+    expect(pool.queries.map(({ text }) => text.trim())).toContain(
+      "RESET transaction_timeout",
+    );
+    expect(pool.client.releases).toEqual([true]);
   });
 
   it("destroys an in-flight mutation connection on abort so it cannot commit later", async () => {
@@ -441,5 +487,44 @@ describe("PostgresProviderAccountRepository", () => {
     expect(pool.client.destroyed).toBe(true);
     expect(pool.client.releases).toEqual([true]);
     expect(pool.queries.map(({ text }) => text.trim())).not.toContain("COMMIT");
+  });
+
+  it("destroys an in-flight mutation connection when only its absolute deadline expires", async () => {
+    vi.useFakeTimers();
+    try {
+      const pool = new RepositoryPoolDouble();
+      const started = pool.blockNextMutation(
+        /insert into apollo_tf_integrations\.provider_accounts/i,
+      );
+      const pending = repository(pool).upsert(record(), {
+        signal: new AbortController().signal,
+        deadlineAt: Date.now() + 100,
+      });
+      const rejected = expect(pending).rejects.toMatchObject({
+        code: "storage_unavailable",
+      });
+
+      await started;
+      await vi.advanceTimersByTimeAsync(100);
+
+      await rejected;
+      expect(pool.client.releases).toEqual([true]);
+      expect(pool.queries.map(({ text }) => text.trim())).not.toContain(
+        "COMMIT",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("removes stale abort ownership after one reusable release", async () => {
+    const pool = new RepositoryPoolDouble();
+    const controller = new AbortController();
+
+    await repository(pool).upsert(record(), commandContext(controller));
+    controller.abort();
+
+    expect(pool.client.releases).toEqual([undefined]);
+    expect(pool.client.destroyed).toBe(false);
   });
 });

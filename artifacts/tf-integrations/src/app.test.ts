@@ -77,6 +77,7 @@ function app(
     readonly commandTimeoutMs?: number;
     readonly maxConcurrentCommands?: number;
     readonly shutdownSignal?: AbortSignal;
+    readonly now?: () => number;
   } = {},
 ) {
   return createTfIntegrationsApp({
@@ -97,6 +98,7 @@ function app(
     ...(options.shutdownSignal === undefined
       ? {}
       : { shutdownSignal: options.shutdownSignal }),
+    ...(options.now === undefined ? {} : { now: options.now }),
   });
 }
 
@@ -570,6 +572,35 @@ describe("TF integrations private HTTP runtime", () => {
     });
   });
 
+  it("checks the absolute deadline after serializing and immediately before writing success bytes", async () => {
+    let clockReads = 0;
+    const now = vi.fn(() => {
+      clockReads += 1;
+      return clockReads < 5 ? 10_000 : 10_101;
+    });
+    const body = Buffer.from(JSON.stringify(command), "utf8");
+
+    const result = await request(
+      app({
+        commandTimeoutMs: 100,
+        now,
+        execute: async () => response,
+      }),
+      "/v1/commands",
+      {
+        method: "POST",
+        headers: signedHeaders("/v1/commands", body, 54),
+        body,
+      },
+    );
+
+    expect(result.status).toBe(503);
+    expect(await result.text()).toBe(
+      '{"error":"integrations_unavailable"}',
+    );
+    expect(now).toHaveBeenCalledTimes(5);
+  });
+
   it("aborts command work when the HTTP client disconnects", async () => {
     let observedSignal: AbortSignal | undefined;
     let started: (() => void) | undefined;
@@ -735,7 +766,10 @@ describe("TF integrations private HTTP runtime", () => {
       body,
     });
     expect(success.status).toBe(200);
-    await expect(success.json()).resolves.toEqual(response);
+    expect(success.headers.get("content-type")).toBe(
+      "application/json; charset=utf-8",
+    );
+    expect(await success.text()).toBe(JSON.stringify(response));
 
     const canary = "raw-upstream-secret-canary";
     const mismatched = await request(

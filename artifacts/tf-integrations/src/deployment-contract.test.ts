@@ -454,7 +454,7 @@ describe("tf-integrations deployment contract", () => {
       readFile(startupScriptPath, "utf8"),
       readFile(roleInitScriptPath, "utf8"),
     ]);
-    expect(dockerfile).toContain("FROM postgres:16-bookworm AS postgres-role-init");
+    expect(dockerfile).toContain("FROM postgres:17-bookworm AS postgres-role-init");
     expect(dockerfile.match(/^FROM node:[^\s]+ AS (?:builder|runtime)$/gm)).toEqual([
       "FROM node:24-bookworm-slim AS builder",
       "FROM node:24-bookworm-slim AS runtime",

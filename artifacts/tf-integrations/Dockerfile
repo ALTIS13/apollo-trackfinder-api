@@ -1,4 +1,4 @@
-FROM postgres:16-bookworm AS postgres-role-init
+FROM postgres:17-bookworm AS postgres-role-init
 
 COPY artifacts/tf-integrations/container/init-roles.sh /docker-entrypoint-initdb.d/010-tf-integrations-roles.sh
 RUN chmod 0555 /docker-entrypoint-initdb.d/010-tf-integrations-roles.sh
