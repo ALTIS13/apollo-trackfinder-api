@@ -40,6 +40,12 @@ export type ModuleHeartbeatPayload = z.infer<
 export const moduleHeartbeatPayloadSchema: z.ZodType<ModuleHeartbeatPayload> =
   moduleHeartbeatPayloadObjectSchema;
 
+export function isValidModuleHeartbeatSecret(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const byteLength = new TextEncoder().encode(value).byteLength;
+  return byteLength >= 32 && byteLength <= 512;
+}
+
 export function createSignedBodySignature(input: SignedBodyInput): string {
   const bodyHash = createHash("sha256").update(input.rawBody).digest("hex");
   const canonical = [
@@ -56,7 +62,9 @@ export function hasMatchingSignedBodySignature(
   provided: string | undefined,
   expected: string,
 ): boolean {
-  const providedDigest = createHash("sha256").update(provided ?? "").digest();
+  const providedDigest = createHash("sha256")
+    .update(provided ?? "")
+    .digest();
   const expectedDigest = createHash("sha256").update(expected).digest();
   return timingSafeEqual(providedDigest, expectedDigest);
 }

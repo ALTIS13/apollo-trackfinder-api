@@ -1,6 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import path from "node:path";
 import { TextDecoder } from "node:util";
+import { isValidModuleHeartbeatSecret } from "@workspace/module-runtime-contract";
 
 const MAX_FILE_BYTES = 1_073_741_824;
 const DEFAULT_STORAGE_QUOTA_BYTES = 20 * 1_024 * 1_024 * 1_024;
@@ -39,6 +40,7 @@ export interface TfDownloadWorkerConfig {
 
 export type TfDownloadWorkerFileReader = (
   filePath: string,
+  maximumBytes: number,
 ) => Promise<Buffer>;
 
 function invalid(): never {
@@ -50,10 +52,7 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
   return value === undefined || value.length === 0 ? invalid() : value;
 }
 
-function optionalExactBoolean(
-  env: NodeJS.ProcessEnv,
-  name: string,
-): boolean {
+function optionalExactBoolean(env: NodeJS.ProcessEnv, name: string): boolean {
   const value = env[name];
   if (value === undefined) return false;
   if (value !== "true") return invalid();
@@ -71,11 +70,7 @@ function integer(
   if (raw === undefined) return fallback;
   if (!/^(?:0|[1-9]\d*)$/.test(raw)) return invalid();
   const value = Number(raw);
-  if (
-    !Number.isSafeInteger(value) ||
-    value < minimum ||
-    value > maximum
-  ) {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
     return invalid();
   }
   return value;
@@ -101,10 +96,7 @@ function isPrivateHostname(hostname: string): boolean {
   return PRIVATE_SERVICE_NAME.test(hostname);
 }
 
-function parseHeartbeatOrigin(
-  value: string,
-  allowInsecure: boolean,
-): string {
+function parseHeartbeatOrigin(value: string, allowInsecure: boolean): string {
   let url: URL;
   try {
     url = new URL(value);
@@ -131,10 +123,7 @@ function parseHeartbeatOrigin(
   return invalid();
 }
 
-function parseQueueRedisUrl(
-  value: string,
-  allowInsecure: boolean,
-): string {
+function parseQueueRedisUrl(value: string, allowInsecure: boolean): string {
   let url: URL;
   try {
     url = new URL(value);
@@ -151,8 +140,9 @@ function parseQueueRedisUrl(
   }
   const port = Number(url.port || "6379");
   if (!Number.isInteger(port) || port < 1 || port > 65_535) return invalid();
+  let decodedPassword: string | undefined;
   try {
-    for (const credential of [url.username, url.password]) {
+    for (const [index, credential] of [url.username, url.password].entries()) {
       const decoded = decodeURIComponent(credential);
       if (
         Buffer.byteLength(decoded, "utf8") > 512 ||
@@ -160,6 +150,7 @@ function parseQueueRedisUrl(
       ) {
         return invalid();
       }
+      if (index === 1 && credential !== "") decodedPassword = decoded;
     }
   } catch {
     return invalid();
@@ -169,10 +160,10 @@ function parseQueueRedisUrl(
     url.protocol === "redis:" &&
     allowInsecure &&
     url.hostname === "tf-download-redis" &&
-    port === 6_379 &&
+    url.port === "6379" &&
     url.pathname === "/0" &&
-    url.username === "" &&
-    url.password === "";
+    decodedPassword !== undefined &&
+    decodedPassword.length > 0;
   return sameNode ? value : invalid();
 }
 
@@ -191,8 +182,7 @@ function parseDeployedAt(value: string | undefined): string | undefined {
   const hour = Number(match[4]);
   const minute = Number(match[5]);
   const second = Number(match[6]);
-  const leapYear =
-    year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
   const daysInMonth = [
     31,
     leapYear ? 29 : 28,
@@ -228,7 +218,7 @@ async function readBounded(
   if (!isAbsoluteNormalized(filePath)) return invalid();
   let bytes: Buffer;
   try {
-    bytes = await reader(filePath);
+    bytes = await reader(filePath, maximumBytes);
   } catch {
     return invalid();
   }
@@ -246,6 +236,33 @@ async function readBounded(
   }
 }
 
+async function readBoundedRegularFile(
+  filePath: string,
+  maximumBytes: number,
+): Promise<Buffer> {
+  const handle = await open(filePath, "r");
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size > maximumBytes) return invalid();
+
+    const bytes = Buffer.alloc(maximumBytes + 1);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const result = await handle.read(
+        bytes,
+        offset,
+        bytes.byteLength - offset,
+        null,
+      );
+      if (result.bytesRead === 0) break;
+      offset += result.bytesRead;
+    }
+    return bytes.subarray(0, offset);
+  } finally {
+    await handle.close();
+  }
+}
+
 function parseSecret(value: string): string {
   const bytes = Buffer.byteLength(value, "utf8");
   return bytes >= 32 && bytes <= 512 ? value : invalid();
@@ -253,7 +270,7 @@ function parseSecret(value: string): string {
 
 export async function parseTfDownloadWorkerConfig(
   env: NodeJS.ProcessEnv,
-  reader: TfDownloadWorkerFileReader = (filePath) => readFile(filePath),
+  reader: TfDownloadWorkerFileReader = readBoundedRegularFile,
 ): Promise<TfDownloadWorkerConfig> {
   if (INLINE_CONFIGURATION_NAMES.some((name) => name in env)) return invalid();
 
@@ -266,14 +283,8 @@ export async function parseTfDownloadWorkerConfig(
     "TF_DOWNLOAD_HEARTBEAT_ALLOW_INSECURE_HTTP",
   );
   const queueFile = required(env, "TF_DOWNLOAD_QUEUE_REDIS_URL_FILE");
-  const commandFile = required(
-    env,
-    "TF_DOWNLOAD_INTERNAL_AUTH_SECRET_FILE",
-  );
-  const heartbeatFile = required(
-    env,
-    "TF_DOWNLOAD_HEARTBEAT_SECRET_FILE",
-  );
+  const commandFile = required(env, "TF_DOWNLOAD_INTERNAL_AUTH_SECRET_FILE");
+  const heartbeatFile = required(env, "TF_DOWNLOAD_HEARTBEAT_SECRET_FILE");
   if (new Set([queueFile, commandFile, heartbeatFile]).size !== 3) {
     return invalid();
   }
@@ -285,9 +296,12 @@ export async function parseTfDownloadWorkerConfig(
   const internalAuthSecret = parseSecret(
     await readBounded(reader, commandFile, MAX_SECRET_FILE_BYTES),
   );
-  const heartbeatSecret = parseSecret(
-    await readBounded(reader, heartbeatFile, MAX_SECRET_FILE_BYTES),
+  const heartbeatSecret = await readBounded(
+    reader,
+    heartbeatFile,
+    MAX_SECRET_FILE_BYTES,
   );
+  if (!isValidModuleHeartbeatSecret(heartbeatSecret)) return invalid();
   if (internalAuthSecret === heartbeatSecret) return invalid();
 
   const storageRoot = required(env, "TF_DOWNLOAD_STORAGE_ROOT");

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { open } from "node:fs/promises";
 
 import {
   DOWNLOAD_QUEUE_NAME,
@@ -15,6 +15,7 @@ import { Queue } from "bullmq";
 import Redis, { type RedisOptions } from "ioredis";
 
 const QUEUE_CAPACITY = 200;
+const MAX_QUEUE_FILE_BYTES = 2_048;
 const CANCELLATION_TTL_MS = 1_800_000;
 const PRODUCER_COMMAND_TIMEOUT_MS = 5_000;
 const RESERVE_ADMISSION_INTENT_SCRIPT = `
@@ -137,7 +138,7 @@ interface Clients {
 }
 interface AdapterOptions {
   environment?: NodeJS.ProcessEnv;
-  readFile?: (path: string) => Promise<Buffer>;
+  readFile?: (path: string, maximumBytes: number) => Promise<Buffer>;
   createQueue?: (
     name: string,
     options: ConstructorParameters<typeof Queue>[1],
@@ -171,6 +172,33 @@ function attachErrorListener(client: {
   client.on?.("error", () => {});
 }
 
+async function readBoundedRegularFile(
+  filePath: string,
+  maximumBytes: number,
+): Promise<Buffer> {
+  const handle = await open(filePath, "r");
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size > maximumBytes) throw invalid();
+
+    const bytes = Buffer.alloc(maximumBytes + 1);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const result = await handle.read(
+        bytes,
+        offset,
+        bytes.byteLength - offset,
+        null,
+      );
+      if (result.bytesRead === 0) break;
+      offset += result.bytesRead;
+    }
+    return bytes.subarray(0, offset);
+  } finally {
+    await handle.close();
+  }
+}
+
 function parseQueueUrl(value: string): RedisOptions {
   let url: URL;
   try {
@@ -178,16 +206,7 @@ function parseQueueUrl(value: string): RedisOptions {
   } catch {
     throw invalid();
   }
-  const local =
-    url.protocol === "redis:" &&
-    url.hostname === "tf-download-redis" &&
-    url.port === "6379" &&
-    url.pathname === "/0" &&
-    url.search === "" &&
-    url.hash === "" &&
-    url.username === "" &&
-    url.password === "";
-  if (!url.hostname || (url.protocol !== "rediss:" && !local)) throw invalid();
+  if (!url.hostname) throw invalid();
   if (url.search || url.hash || !/^\/(?:0|[1-9]|1[0-5])$/.test(url.pathname))
     throw invalid();
   const port = Number(url.port || "6379");
@@ -197,9 +216,26 @@ function parseQueueUrl(value: string): RedisOptions {
   try {
     username = url.username ? decodeURIComponent(url.username) : undefined;
     password = url.password ? decodeURIComponent(url.password) : undefined;
+    for (const credential of [username, password]) {
+      if (
+        credential !== undefined &&
+        (Buffer.byteLength(credential, "utf8") > 512 ||
+          /[\u0000-\u001f\u007f]/.test(credential))
+      ) {
+        throw invalid();
+      }
+    }
   } catch {
     throw invalid();
   }
+  const local =
+    url.protocol === "redis:" &&
+    url.hostname === "tf-download-redis" &&
+    url.port === "6379" &&
+    url.pathname === "/0" &&
+    password !== undefined &&
+    password.length > 0;
+  if (url.protocol !== "rediss:" && !local) throw invalid();
   return {
     host: url.hostname,
     port,
@@ -211,7 +247,7 @@ function parseQueueUrl(value: string): RedisOptions {
 }
 async function configuration(
   env: NodeJS.ProcessEnv,
-  read: (path: string) => Promise<Buffer>,
+  read: (path: string, maximumBytes: number) => Promise<Buffer>,
 ): Promise<{
   producer: RedisOptions;
   telemetry: RedisOptions;
@@ -221,11 +257,11 @@ async function configuration(
   if (!path) throw invalid();
   let bytes: Buffer;
   try {
-    bytes = await read(path);
+    bytes = await read(path, MAX_QUEUE_FILE_BYTES);
   } catch {
     throw invalid();
   }
-  if (bytes.length < 1 || bytes.length > 2048) throw invalid();
+  if (bytes.length < 1 || bytes.length > MAX_QUEUE_FILE_BYTES) throw invalid();
   const raw = bytes.toString("utf8").trim();
   const parsed = parseQueueUrl(raw);
   if (
@@ -298,7 +334,7 @@ export async function collectDownloadQueueTelemetry(
 
 export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
   const env = options.environment ?? process.env;
-  const read = options.readFile ?? readFile;
+  const read = options.readFile ?? readBoundedRegularFile;
   const makeQueue =
     options.createQueue ??
     ((name, queueOptions) =>

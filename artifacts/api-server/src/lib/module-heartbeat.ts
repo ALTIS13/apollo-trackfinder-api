@@ -5,6 +5,7 @@ import type { HealthStatus } from "@workspace/admin-dashboard-contract";
 import {
   createModuleHeartbeatSignature,
   hasMatchingSignedBodySignature,
+  isValidModuleHeartbeatSecret,
   moduleHeartbeatPayloadSchema,
 } from "@workspace/module-runtime-contract";
 export {
@@ -36,7 +37,10 @@ const CANONICAL_HEARTBEAT_PATH_PATTERN =
   /^\/api\/internal\/modules\/[a-z0-9]+(?:-[a-z0-9]+)*\/heartbeat$/;
 const DUMMY_SECRET = randomBytes(32).toString("hex");
 
-const heartbeatKeysSchema = z.record(z.string(), z.string().min(32).max(512));
+const heartbeatKeysSchema = z.record(
+  z.string(),
+  z.string().refine(isValidModuleHeartbeatSecret),
+);
 const REQUIRED_EXTERNAL_MODULE_IDS = [
   "search-media",
   "account-integrations",
@@ -124,11 +128,7 @@ export function assertRequiredModuleHeartbeatKeys(
   if (
     REQUIRED_EXTERNAL_MODULE_IDS.some((moduleId) => {
       const secret = keys.get(moduleId);
-      return (
-        typeof secret !== "string" ||
-        secret.length < 32 ||
-        secret.length > 512
-      );
+      return !isValidModuleHeartbeatSecret(secret);
     })
   ) {
     throw new Error("invalid runtime configuration");

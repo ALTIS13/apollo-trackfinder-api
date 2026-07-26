@@ -568,20 +568,14 @@ describe("ModuleHeartbeatService", () => {
     expect(
       state.service
         .snapshot()
-        .find(
-          (observation) =>
-            observation.moduleId === "account-integrations",
-        ),
+        .find((observation) => observation.moduleId === "account-integrations"),
     ).toMatchObject({ status: "healthy", requestsPerMinute: 42 });
 
     state.advanceBy(90_001);
     expect(
       state.service
         .snapshot()
-        .find(
-          (observation) =>
-            observation.moduleId === "account-integrations",
-        ),
+        .find((observation) => observation.moduleId === "account-integrations"),
     ).toMatchObject({ status: "unknown", requestsPerMinute: 0 });
 
     expect(
@@ -597,10 +591,7 @@ describe("ModuleHeartbeatService", () => {
     expect(
       state.service
         .snapshot()
-        .find(
-          (observation) =>
-            observation.moduleId === "account-integrations",
-        ),
+        .find((observation) => observation.moduleId === "account-integrations"),
     ).toMatchObject({ status: "healthy", requestsPerMinute: 42 });
   });
 
@@ -739,6 +730,35 @@ describe("parseModuleHeartbeatKeys", () => {
     );
   });
 
+  it("parses heartbeat secret boundaries in UTF-8 bytes", () => {
+    const minimum = "é".repeat(16);
+    const maximum = "é".repeat(256);
+
+    expect(
+      parseModuleHeartbeatKeys(
+        JSON.stringify({
+          "search-media": minimum,
+          "download-worker": maximum,
+        }),
+      ),
+    ).toEqual(
+      new Map([
+        ["search-media", minimum],
+        ["download-worker", maximum],
+      ]),
+    );
+    expect(
+      parseModuleHeartbeatKeys(
+        JSON.stringify({ "search-media": "é".repeat(15) }),
+      ),
+    ).toEqual(new Map());
+    expect(
+      parseModuleHeartbeatKeys(
+        JSON.stringify({ "search-media": "é".repeat(257) }),
+      ),
+    ).toEqual(new Map());
+  });
+
   it.each([
     ["missing", undefined],
     ["malformed JSON", "{"],
@@ -793,9 +813,30 @@ describe("parseModuleHeartbeatKeys", () => {
       }
       expect(String(caught)).toBe("Error: invalid runtime configuration");
       expect(String(caught)).not.toContain(SEARCH_MEDIA_SECRET);
-      expect(String(caught)).not.toContain(
-        ACCOUNT_INTEGRATIONS_SECRET,
-      );
+      expect(String(caught)).not.toContain(ACCOUNT_INTEGRATIONS_SECRET);
     }
+  });
+
+  it("asserts required heartbeat keys by UTF-8 byte length", () => {
+    const minimum = "é".repeat(16);
+    expect(() =>
+      assertRequiredModuleHeartbeatKeys(
+        new Map([
+          ["search-media", minimum],
+          ["account-integrations", minimum],
+          ["download-worker", minimum],
+        ]),
+      ),
+    ).not.toThrow();
+
+    expect(() =>
+      assertRequiredModuleHeartbeatKeys(
+        new Map([
+          ["search-media", "é".repeat(257)],
+          ["account-integrations", minimum],
+          ["download-worker", minimum],
+        ]),
+      ),
+    ).toThrow("invalid runtime configuration");
   });
 });

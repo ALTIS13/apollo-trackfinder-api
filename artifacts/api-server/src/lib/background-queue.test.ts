@@ -1,4 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import { DOWNLOAD_QUEUE_PREFIX } from "@workspace/tf-download-contract";
 import { describe, expect, it, vi } from "vitest";
@@ -230,7 +232,7 @@ function createAdapter(
     redis?: FakeRedis;
     environment?: Record<string, string | undefined>;
     queueUrl?: string;
-    readFile?: () => Promise<Buffer>;
+    readFile?: (path: string, maximumBytes: number) => Promise<Buffer>;
     createQueue?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
@@ -265,7 +267,10 @@ function createAdapter(
       readFile:
         options.readFile ??
         (async () =>
-          Buffer.from(options.queueUrl ?? "redis://tf-download-redis:6379/0")),
+          Buffer.from(
+            options.queueUrl ??
+              "redis://default:p%40ss@tf-download-redis:6379/0",
+          )),
       createQueue: createQueue as never,
       createRedis,
     }),
@@ -302,6 +307,49 @@ describe("download queue producer boundary", () => {
     }
   });
 
+  it("passes the queue file bound to injectable readers", async () => {
+    const readQueueFile = vi.fn(async (_path: string, _maximumBytes: number) =>
+      Buffer.from("redis://default:p%40ss@tf-download-redis:6379/0"),
+    );
+    const { adapter } = createAdapter({ readFile: readQueueFile });
+
+    await adapter.init();
+
+    expect(readQueueFile).toHaveBeenCalledOnce();
+    expect(readQueueFile).toHaveBeenCalledWith("/queue-url", 2_048);
+  });
+
+  it("rejects an oversized sparse queue file before creating clients", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "apollo-api-queue-"));
+    const queueFile = path.join(directory, "queue-url");
+    const file = await open(queueFile, "w");
+    try {
+      await file.truncate(2_147_483_648);
+    } finally {
+      await file.close();
+    }
+    const createQueue = vi.fn();
+    const createRedis = vi.fn();
+    const adapter = queueModule.createDownloadQueueAdapter({
+      environment: {
+        TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: queueFile,
+        TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+      },
+      createQueue: createQueue as never,
+      createRedis,
+    });
+
+    try {
+      await expect(adapter.init()).rejects.toThrow(
+        "invalid runtime configuration",
+      );
+      expect(createQueue).not.toHaveBeenCalled();
+      expect(createRedis).not.toHaveBeenCalled();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("preserves strict Redis URL, database, and encoded credential handling", async () => {
     const { adapter, createQueue, createRedis } = createAdapter({
       queueUrl: "rediss://user%20name:p%40ss@queue.example.test:6380/3",
@@ -312,6 +360,19 @@ describe("download queue producer boundary", () => {
       connection: { username: "user name", password: "p@ss", db: 3 },
     });
     expect(createRedis.mock.calls[0]![0]).toMatchObject({ db: 3 });
+    const authenticatedLocal = createAdapter({
+      queueUrl: "redis://user%20name:p%40ss@tf-download-redis:6379/0",
+    });
+    await authenticatedLocal.adapter.init();
+    expect(authenticatedLocal.createQueue.mock.calls[0]![1]).toMatchObject({
+      connection: {
+        host: "tf-download-redis",
+        port: 6379,
+        db: 0,
+        username: "user name",
+        password: "p@ss",
+      },
+    });
     for (const queueUrl of [
       "rediss://queue.example.test/03",
       "rediss://queue.example.test/16",
@@ -320,7 +381,13 @@ describe("download queue producer boundary", () => {
       "rediss://queue.example.test/3#fragment",
       "rediss:///0",
       "redis://tf-download-redis:6379/1",
-      "redis://user:password@tf-download-redis:6379/0",
+      "redis://tf-download-redis:6379/0",
+      "redis://default:@tf-download-redis:6379/0",
+      "redis://default:password@tf-download-redis:6380/0",
+      "redis://default:password@api-server:6379/0",
+      "redis://default:password@10.0.0.2:6379/0",
+      "redis://user%ZZ:password@tf-download-redis:6379/0",
+      "redis://default:password%E0%A4%A@tf-download-redis:6379/0",
       "redis://tf-download-redis:6379/0?query=value",
     ]) {
       await expect(createAdapter({ queueUrl }).adapter.init()).rejects.toThrow(

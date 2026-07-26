@@ -1,3 +1,5 @@
+import { mkdtemp, open, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
@@ -35,11 +37,13 @@ function files(
 }
 
 function reader(values = files()) {
-  return vi.fn(async (filePath: string): Promise<Buffer> => {
-    const value = values[filePath];
-    if (value === undefined) throw new Error("unreadable");
-    return Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
-  });
+  return vi.fn(
+    async (filePath: string, _maximumBytes: number): Promise<Buffer> => {
+      const value = values[filePath];
+      if (value === undefined) throw new Error("unreadable");
+      return Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
+    },
+  );
 }
 
 describe("TF download worker runtime configuration", () => {
@@ -50,8 +54,7 @@ describe("TF download worker runtime configuration", () => {
       parseTfDownloadWorkerConfig(environment(), readFile),
     ).resolves.toEqual({
       port: 8080,
-      queueRedisUrl:
-        "rediss://worker:password@queue.apollot.ru:6380/3",
+      queueRedisUrl: "rediss://worker:password@queue.apollot.ru:6380/3",
       internalAuthSecret: commandSecret,
       heartbeatSecret,
       heartbeatApiOrigin: "https://api.apollot.ru",
@@ -72,6 +75,32 @@ describe("TF download worker runtime configuration", () => {
       "/run/secrets/download-command",
       "/run/secrets/download-heartbeat",
     ]);
+    expect(readFile.mock.calls.map(([, maximumBytes]) => maximumBytes)).toEqual(
+      [2_048, 1_024, 1_024],
+    );
+  });
+
+  it("rejects an oversized sparse file without loading it into memory", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "apollo-tf-config-"));
+    const queueFile = path.join(directory, "queue-url");
+    const file = await open(queueFile, "w");
+    try {
+      await file.truncate(2_147_483_648);
+    } finally {
+      await file.close();
+    }
+
+    try {
+      await expect(
+        parseTfDownloadWorkerConfig(
+          environment({
+            TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: queueFile,
+          }),
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("rejects every inline secret or queue URL by presence", async () => {
@@ -82,17 +111,19 @@ describe("TF download worker runtime configuration", () => {
     ]) {
       for (const value of ["", "inline-secret"]) {
         await expect(
-          parseTfDownloadWorkerConfig(
-            environment({ [name]: value }),
-            reader(),
-          ),
+          parseTfDownloadWorkerConfig(environment({ [name]: value }), reader()),
         ).rejects.toThrow("invalid runtime configuration");
       }
     }
   });
 
   it("requires readable bounded files and distinct 32..512 byte secrets", async () => {
-    for (const value of ["", "x".repeat(31), "x".repeat(513), "🙂".repeat(129)]) {
+    for (const value of [
+      "",
+      "x".repeat(31),
+      "x".repeat(513),
+      "🙂".repeat(129),
+    ]) {
       await expect(
         parseTfDownloadWorkerConfig(
           environment(),
@@ -119,6 +150,33 @@ describe("TF download worker runtime configuration", () => {
         }),
       ),
     ).rejects.toThrow("invalid runtime configuration");
+  });
+
+  it("uses UTF-8 byte boundaries for heartbeat secrets", async () => {
+    for (const value of ["é".repeat(16), "é".repeat(256)]) {
+      await expect(
+        parseTfDownloadWorkerConfig(
+          environment(),
+          reader(
+            files({
+              "/run/secrets/download-heartbeat": value,
+            }),
+          ),
+        ),
+      ).resolves.toMatchObject({ heartbeatSecret: value });
+    }
+    for (const value of ["é".repeat(15), "é".repeat(257)]) {
+      await expect(
+        parseTfDownloadWorkerConfig(
+          environment(),
+          reader(
+            files({
+              "/run/secrets/download-heartbeat": value,
+            }),
+          ),
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+    }
   });
 
   it("rejects malformed UTF-8 in every file-backed value", async () => {
@@ -151,6 +209,8 @@ describe("TF download worker runtime configuration", () => {
   });
 
   it("allows private same-node redis/http only with exact explicit flags", async () => {
+    const authenticatedQueueUrl =
+      "redis://default:p%40ss@tf-download-redis:6379/0";
     await expect(
       parseTfDownloadWorkerConfig(
         environment({
@@ -158,8 +218,7 @@ describe("TF download worker runtime configuration", () => {
         }),
         reader(
           files({
-            "/run/secrets/download-queue-url":
-              "redis://tf-download-redis:6379/0",
+            "/run/secrets/download-queue-url": authenticatedQueueUrl,
           }),
         ),
       ),
@@ -174,13 +233,12 @@ describe("TF download worker runtime configuration", () => {
         }),
         reader(
           files({
-            "/run/secrets/download-queue-url":
-              "redis://tf-download-redis:6379/0",
+            "/run/secrets/download-queue-url": authenticatedQueueUrl,
           }),
         ),
       ),
     ).resolves.toMatchObject({
-      queueRedisUrl: "redis://tf-download-redis:6379/0",
+      queueRedisUrl: authenticatedQueueUrl,
       heartbeatApiOrigin: "http://api-server:8080",
     });
 
@@ -191,10 +249,7 @@ describe("TF download worker runtime configuration", () => {
       ["TF_DOWNLOAD_HEARTBEAT_ALLOW_INSECURE_HTTP", ""],
     ]) {
       await expect(
-        parseTfDownloadWorkerConfig(
-          environment({ [name]: value }),
-          reader(),
-        ),
+        parseTfDownloadWorkerConfig(environment({ [name]: value }), reader()),
       ).rejects.toThrow("invalid runtime configuration");
     }
   });
@@ -221,6 +276,14 @@ describe("TF download worker runtime configuration", () => {
       "rediss://queue.apollot.ru/16",
       "rediss://queue.apollot.ru/0?secret=value",
       "redis://public.apollot.ru:6379/0",
+      "redis://10.0.0.2:6379/0",
+      "redis://tf-download-redis:6379/0",
+      "redis://default:@tf-download-redis:6379/0",
+      "redis://default:password@tf-download-redis:6379/1",
+      "redis://default:password@tf-download-redis:6380/0",
+      "redis://default:password@api-server:6379/0",
+      "redis://user%ZZ:password@tf-download-redis:6379/0",
+      "redis://default:password%E0%A4%A@tf-download-redis:6379/0",
       "rediss://user%ZZ:password@queue.apollot.ru/0",
       "rediss://user:password%E0%A4%A@queue.apollot.ru/0",
     ]) {
@@ -248,14 +311,12 @@ describe("TF download worker runtime configuration", () => {
         ),
       ),
     ).resolves.toMatchObject({
-      queueRedisUrl:
-        "rediss://user%20name:p%40ss@queue.apollot.ru:6380/3",
+      queueRedisUrl: "rediss://user%20name:p%40ss@queue.apollot.ru:6380/3",
     });
     await expect(
       parseTfDownloadWorkerConfig(
         environment({
-          TF_DOWNLOAD_STORAGE_ROOT:
-            `${storageRoot}${path.sep}..${path.sep}downloads`,
+          TF_DOWNLOAD_STORAGE_ROOT: `${storageRoot}${path.sep}..${path.sep}downloads`,
         }),
         reader(),
       ),
@@ -280,10 +341,7 @@ describe("TF download worker runtime configuration", () => {
     ] as const;
     for (const [name, value] of invalid) {
       await expect(
-        parseTfDownloadWorkerConfig(
-          environment({ [name]: value }),
-          reader(),
-        ),
+        parseTfDownloadWorkerConfig(environment({ [name]: value }), reader()),
       ).rejects.toThrow("invalid runtime configuration");
     }
 

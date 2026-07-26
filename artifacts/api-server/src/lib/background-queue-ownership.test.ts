@@ -81,7 +81,8 @@ function createAdapter(
         TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url",
         TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
       },
-      readFile: async () => Buffer.from("redis://tf-download-redis:6379/0"),
+      readFile: async () =>
+        Buffer.from("redis://default:p%40ss@tf-download-redis:6379/0"),
       createQueue: vi
         .fn()
         .mockReturnValueOnce(producer)

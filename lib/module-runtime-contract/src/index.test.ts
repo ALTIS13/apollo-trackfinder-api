@@ -4,6 +4,7 @@ import {
   canonicalNonceSchema,
   createSignedBodySignature,
   hasMatchingSignedBodySignature,
+  isValidModuleHeartbeatSecret,
 } from "./index";
 
 const rawBody = Buffer.from('{"schemaVersion":1}', "utf8");
@@ -44,19 +45,26 @@ describe("module runtime contract", () => {
     ["nonce", { nonce: "B".repeat(43) }],
     ["body", { rawBody: Buffer.from('{"schemaVersion":2}', "utf8") }],
     ["secret", { secret: "t".repeat(32) }],
-  ] as const)("changes the signature when the %s changes", (_field, mutation) => {
-    expect(createSignedBodySignature({ ...signatureInput, ...mutation })).not.toBe(
-      createSignedBodySignature(signatureInput),
-    );
-  });
+  ] as const)(
+    "changes the signature when the %s changes",
+    (_field, mutation) => {
+      expect(
+        createSignedBodySignature({ ...signatureInput, ...mutation }),
+      ).not.toBe(createSignedBodySignature(signatureInput));
+    },
+  );
 
   it("matches only the exact full signature", () => {
     const expected = createSignedBodySignature(signatureInput);
 
     expect(hasMatchingSignedBodySignature(expected, expected)).toBe(true);
     expect(hasMatchingSignedBodySignature(undefined, expected)).toBe(false);
-    expect(hasMatchingSignedBodySignature(`${expected}0`, expected)).toBe(false);
-    expect(hasMatchingSignedBodySignature(expected.replace("v1=", "v2="), expected)).toBe(false);
+    expect(hasMatchingSignedBodySignature(`${expected}0`, expected)).toBe(
+      false,
+    );
+    expect(
+      hasMatchingSignedBodySignature(expected.replace("v1=", "v2="), expected),
+    ).toBe(false);
   });
 
   it("accepts only canonical 32-byte base64url nonces", () => {
@@ -75,14 +83,44 @@ describe("module runtime contract", () => {
     );
     expect(canonicalNonceSchema.safeParse(fullBytesNonce).success).toBe(true);
 
-    expect(Buffer.from(nonCanonicalZeroBytesAlias, "base64url")).toHaveLength(32);
+    expect(Buffer.from(nonCanonicalZeroBytesAlias, "base64url")).toHaveLength(
+      32,
+    );
     expect(
-      Buffer.from(nonCanonicalZeroBytesAlias, "base64url").toString("base64url"),
+      Buffer.from(nonCanonicalZeroBytesAlias, "base64url").toString(
+        "base64url",
+      ),
     ).toBe(zeroBytesNonce);
-    expect(canonicalNonceSchema.safeParse(nonCanonicalZeroBytesAlias).success).toBe(false);
+    expect(
+      canonicalNonceSchema.safeParse(nonCanonicalZeroBytesAlias).success,
+    ).toBe(false);
 
     expect(canonicalNonceSchema.safeParse("A".repeat(42)).success).toBe(false);
-    expect(canonicalNonceSchema.safeParse("A".repeat(43) + "=").success).toBe(false);
-    expect(canonicalNonceSchema.safeParse("A".repeat(42) + "+").success).toBe(false);
+    expect(canonicalNonceSchema.safeParse("A".repeat(43) + "=").success).toBe(
+      false,
+    );
+    expect(canonicalNonceSchema.safeParse("A".repeat(42) + "+").success).toBe(
+      false,
+    );
+  });
+
+  it("validates module heartbeat secret length in UTF-8 bytes", () => {
+    for (const secret of [
+      "s".repeat(32),
+      "s".repeat(512),
+      "é".repeat(16),
+      "é".repeat(256),
+    ]) {
+      expect(isValidModuleHeartbeatSecret(secret)).toBe(true);
+    }
+    for (const secret of [
+      "s".repeat(31),
+      "s".repeat(513),
+      "é".repeat(15),
+      "é".repeat(257),
+      undefined,
+    ]) {
+      expect(isValidModuleHeartbeatSecret(secret)).toBe(false);
+    }
   });
 });
