@@ -354,7 +354,11 @@ export function createSpotifyRouter(
         allTracks.push(...result.result.tracks.map(mapTrack));
         offset += MAX_PAGE_SIZE;
         if (result.result.tracks.length < MAX_PAGE_SIZE) break;
-      } catch {
+      } catch (error) {
+        if (error instanceof TfIntegrationsUnavailableError) {
+          response.status(503).json({ error: "spotify_unavailable" });
+          return;
+        }
         break;
       }
     }

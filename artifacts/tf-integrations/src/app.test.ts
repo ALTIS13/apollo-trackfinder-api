@@ -49,9 +49,11 @@ function service(
   return { execute };
 }
 
-function signedHeaders(path: string, rawBody: Buffer, nonceByte = 1) {
+function signedHeaders(path: string, rawBody: Buffer, nonceIndex = 1) {
   const timestamp = String(Math.floor(Date.now() / 1_000));
-  const nonce = Buffer.alloc(32, nonceByte).toString("base64url");
+  const nonceBytes = Buffer.alloc(32);
+  nonceBytes.writeUInt32BE(nonceIndex, 28);
+  const nonce = nonceBytes.toString("base64url");
   return {
     "content-type": "application/json",
     "x-apollo-internal-timestamp": timestamp,
@@ -378,6 +380,85 @@ describe("TF integrations private HTTP runtime", () => {
     expect(execute).toHaveBeenCalledOnce();
   });
 
+  it("does not consume replay state when readiness rejects a command", async () => {
+    let ready = false;
+    const execute = vi.fn<TestService["execute"]>(async () => response);
+    const instance = app({
+      execute,
+      readiness: createTfIntegrationsReadiness({
+        isMigrationCurrent: async () => ready,
+        probeDatabase: async () => true,
+      }),
+    });
+    const body = Buffer.from(JSON.stringify(command), "utf8");
+    const headers = signedHeaders("/v1/commands", body, 41);
+
+    const rejected = await request(instance, "/v1/commands", {
+      method: "POST",
+      headers,
+      body,
+    });
+    expect(rejected.status).toBe(503);
+    expect(execute).not.toHaveBeenCalled();
+
+    ready = true;
+    const admitted = await request(instance, "/v1/commands", {
+      method: "POST",
+      headers,
+      body,
+    });
+    expect(admitted.status).toBe(200);
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces replay backpressure after the live nonce capacity is exhausted", async () => {
+    const execute = vi.fn<TestService["execute"]>(async (input) => {
+      if (input.operation !== "spotify.liked.list") {
+        throw new Error("unexpected operation");
+      }
+      return {
+        schemaVersion: 1,
+        requestId: input.requestId,
+        accountId: input.accountId,
+        operation: input.operation,
+        result: {
+          tracks: [],
+          total: 12_850,
+          offset: input.input.offset,
+          limit: input.input.limit,
+        },
+      };
+    });
+    const instance = app({ execute });
+
+    for (let page = 0; page <= 256; page += 1) {
+      const pageCommand: TfIntegrationsCommand = {
+        schemaVersion: 1,
+        requestId: `10000000-0000-4000-8000-${String(page + 1).padStart(12, "0")}`,
+        accountId,
+        operation: "spotify.liked.list",
+        input: { offset: page * 50, limit: 50 },
+      };
+      const body = Buffer.from(JSON.stringify(pageCommand), "utf8");
+      const result = await request(instance, "/v1/commands", {
+        method: "POST",
+        headers: signedHeaders("/v1/commands", body, 80 + page),
+        body,
+      });
+      if (page < 256) {
+        expect(result.status).toBe(200);
+        await result.body?.cancel();
+      } else {
+        expect(result.status).toBe(503);
+        await expect(result.json()).resolves.toEqual({
+          error: "integrations_unavailable",
+        });
+      }
+    }
+
+    expect(execute).toHaveBeenCalledTimes(256);
+  });
+
   it("propagates a fixed sub-10-second command deadline and runtime shutdown abort", async () => {
     const timeoutSignals: AbortSignal[] = [];
     const timeoutResult = await request(
@@ -568,14 +649,64 @@ describe("TF integrations private HTTP runtime", () => {
       }),
     ]);
     if (rejectionTimer !== undefined) clearTimeout(rejectionTimer);
-    release?.();
     expect(rejected).not.toBe("timeout");
     expect((rejected as Response).status).toBe(503);
     await expect((rejected as Response).json()).resolves.toEqual({
       error: "integrations_unavailable",
     });
-    expect(calls).toBe(2);
-    await Promise.all([first, second, third]);
+    release?.();
+    await Promise.all([first, second]);
+    const retried = await send(63);
+    expect(retried.status).toBe(200);
+    await retried.body?.cancel();
+    expect(calls).toBe(3);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it("atomically rejects a duplicate only after both requests pass command admission", async () => {
+    let calls = 0;
+    let started: (() => void) | undefined;
+    const executionStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const readiness = {
+      check: vi.fn(async () => true),
+    };
+    const instance = app({
+      maxConcurrentCommands: 2,
+      readiness,
+      execute: async () => {
+        calls += 1;
+        started?.();
+        await blocked;
+        return response;
+      },
+    });
+    const server = instance.listen(0, "127.0.0.1");
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const { port } = server.address() as AddressInfo;
+    const body = Buffer.from(JSON.stringify(command), "utf8");
+    const headers = signedHeaders("/v1/commands", body, 64);
+    const send = () =>
+      fetch(`http://127.0.0.1:${port}/v1/commands`, {
+        method: "POST",
+        headers,
+        body,
+      });
+
+    const first = send();
+    await executionStarted;
+    const duplicate = await send();
+
+    expect(duplicate.status).toBe(401);
+    expect(readiness.check).toHaveBeenCalledTimes(2);
+    expect(calls).toBe(1);
+    release?.();
+    expect((await first).status).toBe(200);
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 

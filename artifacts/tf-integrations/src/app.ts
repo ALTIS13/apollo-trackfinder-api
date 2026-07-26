@@ -295,10 +295,6 @@ export function createTfIntegrationsApp(
         res.status(400).json({ error: "invalid_request" });
         return;
       }
-      if (!options.auth.claim(command.data.accountId, proof)) {
-        res.status(401).json({ error: "unauthorized" });
-        return;
-      }
       if (activeCommands >= maxConcurrentCommands) {
         res.status(503).json({ error: "integrations_unavailable" });
         return;
@@ -317,6 +313,15 @@ export function createTfIntegrationsApp(
           scope.signal.aborted
         ) {
           res.status(503).json({ error: "integrations_unavailable" });
+          return;
+        }
+        const claim = options.auth.claim(command.data.accountId, proof);
+        if (claim !== "accepted") {
+          if (claim === "capacity_exhausted") {
+            res.status(503).json({ error: "integrations_unavailable" });
+          } else {
+            res.status(401).json({ error: "unauthorized" });
+          }
           return;
         }
         const rawResponse = await options.service.execute(command.data, {

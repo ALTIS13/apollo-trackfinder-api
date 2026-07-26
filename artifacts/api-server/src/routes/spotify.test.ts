@@ -549,6 +549,38 @@ describe("Spotify gateway routes", () => {
     ]);
   });
 
+  it("fails explicitly when liked-all exceeds replay admission capacity", async () => {
+    let likedCalls = 0;
+    const current = spotifyDependencies(async (command) => {
+      if (command.operation !== "spotify.liked.list") {
+        return success(command, defaultResult(command));
+      }
+      likedCalls += 1;
+      if (likedCalls === 257) {
+        throw new TfIntegrationsUnavailableError();
+      }
+      const tracks = Array.from({ length: 50 }, (_, index) => ({
+        ...track,
+        id: `track-${command.input.offset + index}`,
+      }));
+      return success(command, {
+        tracks,
+        total: 12_850,
+        offset: command.input.offset,
+        limit: command.input.limit,
+      });
+    });
+    const baseUrl = await startSpotifyServer(current.dependencies);
+
+    const response = await request(baseUrl, "/spotify/liked-all");
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "spotify_unavailable",
+    });
+    expect(current.execute).toHaveBeenCalledTimes(257);
+  });
+
   it("maps integration errors to existing sanitized public Spotify errors", async () => {
     const canary = "private-provider-code-canary";
     let statusCalls = 0;

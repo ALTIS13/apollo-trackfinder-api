@@ -6,8 +6,8 @@ import {
   hasMatchingSignedBodySignature,
 } from "@workspace/module-runtime-contract";
 
-const MAX_NONCES = 256;
-const MAX_NONCES_PER_ACCOUNT = 32;
+const MAX_ACCOUNT_PARTITIONS = 256;
+const MAX_NONCES_PER_ACCOUNT = 256;
 const TIMESTAMP_TOLERANCE_MS = 60_000;
 const CANONICAL_UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -28,8 +28,14 @@ export interface InternalRequestAuthenticator {
   claim(
     accountId: string,
     proof: VerifiedInternalRequest,
-  ): boolean;
+  ): InternalRequestClaimResult;
 }
+
+export type InternalRequestClaimResult =
+  | "accepted"
+  | "replayed"
+  | "capacity_exhausted"
+  | "invalid";
 
 export interface VerifiedInternalRequest {
   readonly __opaqueInternalRequestProof: unique symbol;
@@ -54,7 +60,6 @@ export class HmacInternalRequestAuthenticator implements InternalRequestAuthenti
   readonly #now: () => number;
   readonly #monotonicNow: () => number;
   readonly #nonces = new Map<string, Map<string, number>>();
-  #nonceCount = 0;
 
   constructor(options: HmacInternalRequestAuthenticatorOptions) {
     this.#options = options;
@@ -122,8 +127,8 @@ export class HmacInternalRequestAuthenticator implements InternalRequestAuthenti
   claim(
     accountId: string,
     proof: VerifiedInternalRequest,
-  ): boolean {
-    if (!CANONICAL_UUID_PATTERN.test(accountId)) return false;
+  ): InternalRequestClaimResult {
+    if (!CANONICAL_UUID_PATTERN.test(accountId)) return "invalid";
     const candidate = proof as unknown as {
       readonly owner?: unknown;
       readonly nonce?: unknown;
@@ -134,7 +139,7 @@ export class HmacInternalRequestAuthenticator implements InternalRequestAuthenti
       typeof candidate.nonce !== "string" ||
       typeof candidate.expiresAt !== "number"
     ) {
-      return false;
+      return "invalid";
     }
 
     const monotonicTime = this.#monotonicNow();
@@ -142,24 +147,26 @@ export class HmacInternalRequestAuthenticator implements InternalRequestAuthenti
       !Number.isFinite(monotonicTime) ||
       monotonicTime > candidate.expiresAt
     ) {
-      return false;
+      return "invalid";
     }
     this.#prune(monotonicTime);
 
-    const partition = this.#nonces.get(accountId) ?? new Map<string, number>();
-    if (
-      partition.has(candidate.nonce) ||
-      partition.size >= MAX_NONCES_PER_ACCOUNT ||
-      this.#nonceCount >= MAX_NONCES
-    ) {
-      return false;
+    let partition = this.#nonces.get(accountId);
+    if (partition?.has(candidate.nonce)) {
+      return "replayed";
     }
-    partition.set(candidate.nonce, candidate.expiresAt);
-    if (!this.#nonces.has(accountId)) {
+    if (partition === undefined) {
+      if (this.#nonces.size >= MAX_ACCOUNT_PARTITIONS) {
+        return "capacity_exhausted";
+      }
+      partition = new Map<string, number>();
       this.#nonces.set(accountId, partition);
     }
-    this.#nonceCount += 1;
-    return true;
+    if (partition.size >= MAX_NONCES_PER_ACCOUNT) {
+      return "capacity_exhausted";
+    }
+    partition.set(candidate.nonce, candidate.expiresAt);
+    return "accepted";
   }
 
   #prune(monotonicTime: number): void {
@@ -167,7 +174,6 @@ export class HmacInternalRequestAuthenticator implements InternalRequestAuthenti
       for (const [recordedNonce, expiresAt] of partition) {
         if (monotonicTime > expiresAt) {
           partition.delete(recordedNonce);
-          this.#nonceCount -= 1;
         }
       }
       if (partition.size === 0) {

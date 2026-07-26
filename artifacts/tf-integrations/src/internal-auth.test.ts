@@ -57,6 +57,10 @@ function nonceFor(index: number): string {
   return bytes.toString("base64url");
 }
 
+function accountFor(index: number): string {
+  return `${index.toString(16).padStart(8, "0")}-0000-4000-8000-000000000001`;
+}
+
 function verified(
   auth: HmacInternalRequestAuthenticator,
   input: InternalAuthenticationInput,
@@ -71,8 +75,8 @@ describe("TF integrations internal authentication", () => {
     const auth = authenticator(1_060_000);
     const proof = verified(auth, signedInput());
 
-    expect(auth.claim(accountId, proof)).toBe(true);
-    expect(auth.claim(accountId, proof)).toBe(false);
+    expect(auth.claim(accountId, proof)).toBe("accepted");
+    expect(auth.claim(accountId, proof)).toBe("replayed");
   });
 
   it("authenticates exact raw bytes and time before any replay claim", () => {
@@ -104,68 +108,71 @@ describe("TF integrations internal authentication", () => {
     ).toBeUndefined();
   });
 
-  it("partitions bounded replay capacity by canonical account without evicting live nonces", async () => {
+  it("admits the configured account capacity and classifies overflow as backpressure", async () => {
     const auth = authenticator();
+    let firstProof: ReturnType<typeof verified> | undefined;
 
-    for (let index = 0; index < 32; index += 1) {
-      expect(
-        auth.claim(
-          accountId,
-          verified(auth, signedInput({ nonce: nonceFor(index) })),
-        ),
-      ).toBe(true);
+    for (let index = 0; index < 256; index += 1) {
+      const proof = verified(auth, signedInput({ nonce: nonceFor(index) }));
+      firstProof ??= proof;
+      expect(auth.claim(accountId, proof)).toBe("accepted");
     }
     expect(
       auth.claim(
         accountId,
-        verified(auth, signedInput({ nonce: nonceFor(32) })),
+        verified(auth, signedInput({ nonce: nonceFor(256) })),
       ),
-    ).toBe(false);
+    ).toBe("capacity_exhausted");
+    expect(auth.claim(accountId, firstProof!)).toBe("replayed");
     expect(
       auth.claim(
         otherAccountId,
-        verified(auth, signedInput({ nonce: nonceFor(33) })),
+        verified(auth, signedInput({ nonce: nonceFor(257) })),
       ),
-    ).toBe(true);
+    ).toBe("accepted");
 
     const concurrentProof = verified(
       auth,
-      signedInput({ nonce: nonceFor(34) }),
+      signedInput({ nonce: nonceFor(258) }),
     );
     const concurrent = await Promise.all(
       Array.from({ length: 16 }, async () =>
         auth.claim(otherAccountId, concurrentProof),
       ),
     );
-    expect(concurrent.filter(Boolean)).toHaveLength(1);
+    expect(concurrent.filter((result) => result === "accepted")).toHaveLength(
+      1,
+    );
+    expect(concurrent.filter((result) => result === "replayed")).toHaveLength(
+      15,
+    );
+  });
 
-    const full = authenticator();
+  it("bounds account partitions without evicting or blocking an existing partition", () => {
+    const auth = authenticator();
     let firstProof: ReturnType<typeof verified> | undefined;
-    for (let account = 0; account < 8; account += 1) {
-      const partition =
-        `${String(account).padStart(8, "0")}-0000-4000-8000-000000000001`;
-      for (let entry = 0; entry < 32; entry += 1) {
-        const proof = verified(
-          full,
-          signedInput({ nonce: nonceFor(account * 32 + entry) }),
-        );
-        firstProof ??= proof;
-        expect(full.claim(partition, proof)).toBe(true);
-      }
+
+    for (let index = 0; index < 256; index += 1) {
+      const proof = verified(
+        auth,
+        signedInput({ nonce: nonceFor(1_000 + index) }),
+      );
+      firstProof ??= proof;
+      expect(auth.claim(accountFor(index), proof)).toBe("accepted");
     }
-    const ninthAccount = "90000000-0000-4000-8000-000000000009";
     expect(
-      full.claim(
-        ninthAccount,
-        verified(full, signedInput({ nonce: nonceFor(300) })),
+      auth.claim(
+        "ffffffff-0000-4000-8000-000000000001",
+        verified(auth, signedInput({ nonce: nonceFor(1_300) })),
       ),
-    ).toBe(false);
+    ).toBe("capacity_exhausted");
     expect(
-      full.claim(
-        "00000000-0000-4000-8000-000000000001",
-        firstProof!,
+      auth.claim(
+        accountFor(0),
+        verified(auth, signedInput({ nonce: nonceFor(1_301) })),
       ),
-    ).toBe(false);
+    ).toBe("accepted");
+    expect(auth.claim(accountFor(0), firstProof!)).toBe("replayed");
   });
 
   it("retains each nonce exactly through its signed 60-second validity window", () => {
@@ -180,48 +187,44 @@ describe("TF integrations internal authentication", () => {
       auth,
       signedInput({ timestamp: "1060", nonce: nonceFor(400) }),
     );
-    expect(auth.claim(accountId, futureProof)).toBe(true);
+    expect(auth.claim(accountId, futureProof)).toBe("accepted");
 
-    wallNow += 60_001;
-    monotonicNow += 60_001;
-    const stillReplayValid = verified(
-      auth,
-      signedInput({ timestamp: "1060", nonce: nonceFor(400) }),
-    );
-    expect(auth.claim(accountId, stillReplayValid)).toBe(false);
-
-    wallNow = 1_120_001;
-    monotonicNow = 125_002;
-    expect(
-      auth.verify(
-        signedInput({ timestamp: "1060", nonce: nonceFor(400) }),
-      ),
-    ).toBeUndefined();
-
-    for (let index = 0; index < 32; index += 1) {
+    for (let index = 1; index < 256; index += 1) {
       expect(
         auth.claim(
           accountId,
           verified(
             auth,
             signedInput({
-              timestamp: "1120",
-              nonce: nonceFor(500 + index),
+              timestamp: "1060",
+              nonce: nonceFor(400 + index),
             }),
           ),
         ),
-      ).toBe(true);
+      ).toBe("accepted");
     }
+
+    wallNow = 1_120_000;
+    monotonicNow = 125_000;
+    const stillReplayValid = verified(
+      auth,
+      signedInput({ timestamp: "1060", nonce: nonceFor(400) }),
+    );
+    expect(auth.claim(accountId, stillReplayValid)).toBe("replayed");
+
+    wallNow = 1_120_001;
+    monotonicNow = 125_001;
+    expect(
+      auth.verify(signedInput({ timestamp: "1060", nonce: nonceFor(400) })),
+    ).toBeUndefined();
     expect(
       auth.claim(
         accountId,
         verified(
           auth,
-          signedInput({ timestamp: "1120", nonce: nonceFor(600) }),
+          signedInput({ timestamp: "1120", nonce: nonceFor(700) }),
         ),
       ),
-    ).toBe(
-      false,
-    );
+    ).toBe("accepted");
   });
 });
