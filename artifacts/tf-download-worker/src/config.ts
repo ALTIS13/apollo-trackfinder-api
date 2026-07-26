@@ -2,6 +2,10 @@ import { open } from "node:fs/promises";
 import path from "node:path";
 import { TextDecoder } from "node:util";
 import { isValidModuleHeartbeatSecret } from "@workspace/module-runtime-contract";
+import {
+  parseDownloadQueueRedisConnection,
+  type DownloadQueueRedisConnection,
+} from "@workspace/tf-download-contract";
 
 const MAX_FILE_BYTES = 1_073_741_824;
 const DEFAULT_STORAGE_QUOTA_BYTES = 20 * 1_024 * 1_024 * 1_024;
@@ -22,7 +26,7 @@ const INLINE_CONFIGURATION_NAMES = [
 
 export interface TfDownloadWorkerConfig {
   readonly port: number;
-  readonly queueRedisUrl: string;
+  readonly queueRedisConnection: DownloadQueueRedisConnection;
   readonly internalAuthSecret: string;
   readonly heartbeatSecret: string;
   readonly heartbeatApiOrigin: string;
@@ -121,50 +125,6 @@ function parseHeartbeatOrigin(value: string, allowInsecure: boolean): string {
     return url.origin;
   }
   return invalid();
-}
-
-function parseQueueRedisUrl(value: string, allowInsecure: boolean): string {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return invalid();
-  }
-  if (
-    url.hostname === "" ||
-    url.search !== "" ||
-    url.hash !== "" ||
-    !/^\/(?:0|[1-9]|1[0-5])$/.test(url.pathname)
-  ) {
-    return invalid();
-  }
-  const port = Number(url.port || "6379");
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) return invalid();
-  let decodedPassword: string;
-  try {
-    const decodedUsername = decodeURIComponent(url.username);
-    decodedPassword = decodeURIComponent(url.password);
-    const passwordBytes = Buffer.byteLength(decodedPassword, "utf8");
-    if (
-      Buffer.byteLength(decodedUsername, "utf8") > 512 ||
-      /[\u0000-\u001f\u007f]/.test(decodedUsername) ||
-      passwordBytes < 32 ||
-      passwordBytes > 512 ||
-      /[\u0000-\u001f\u007f]/.test(decodedPassword)
-    ) {
-      return invalid();
-    }
-  } catch {
-    return invalid();
-  }
-  if (url.protocol === "rediss:") return value;
-  const sameNode =
-    url.protocol === "redis:" &&
-    allowInsecure &&
-    url.hostname === "tf-download-redis" &&
-    url.port === "6379" &&
-    url.pathname === "/0";
-  return sameNode ? value : invalid();
 }
 
 function parseDeployedAt(value: string | undefined): string | undefined {
@@ -289,10 +249,11 @@ export async function parseTfDownloadWorkerConfig(
     return invalid();
   }
 
-  const queueRedisUrl = parseQueueRedisUrl(
+  const queueRedisConnection = parseDownloadQueueRedisConnection(
     await readBounded(reader, queueFile, MAX_QUEUE_FILE_BYTES),
     allowInsecureRedis,
   );
+  if (queueRedisConnection === undefined) return invalid();
   const internalAuthSecret = parseSecret(
     await readBounded(reader, commandFile, MAX_SECRET_FILE_BYTES),
   );
@@ -330,7 +291,7 @@ export async function parseTfDownloadWorkerConfig(
 
   return {
     port: integer(env, "PORT", 8_080, 1, 65_535),
-    queueRedisUrl,
+    queueRedisConnection,
     internalAuthSecret,
     heartbeatSecret,
     heartbeatApiOrigin: parseHeartbeatOrigin(

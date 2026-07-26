@@ -9,15 +9,11 @@ import { fileURLToPath } from "node:url";
 import {
   DOWNLOAD_QUEUE_NAME,
   DOWNLOAD_QUEUE_PREFIX,
+  type DownloadQueueRedisConnection,
   type DownloadJobData,
   type DownloadJobResult,
 } from "@workspace/tf-download-contract";
-import {
-  Queue,
-  UnrecoverableError,
-  Worker,
-  type Job,
-} from "bullmq";
+import { Queue, UnrecoverableError, Worker, type Job } from "bullmq";
 import Redis from "ioredis";
 import type { RedisOptions } from "ioredis";
 
@@ -41,10 +37,7 @@ import {
   type CreateDownloadProcessorOptions,
   type DownloadProcessor,
 } from "./processor.js";
-import {
-  DownloadStorage,
-  type DownloadStorageSweepResult,
-} from "./storage.js";
+import { DownloadStorage, type DownloadStorageSweepResult } from "./storage.js";
 
 type RuntimeHandler = (
   request: IncomingMessage,
@@ -108,7 +101,7 @@ export interface TfDownloadWorkerRuntimeDependencies {
     config: TfDownloadWorkerConfig,
   ) => Promise<RuntimeStorage>;
   readonly createRedis: (
-    queueUrl: string,
+    connection: DownloadQueueRedisConnection,
     role: "worker" | "lookup" | "cancellation",
   ) => RuntimeRedis;
   readonly createQueue: (
@@ -156,10 +149,7 @@ export interface TfDownloadWorkerRuntime {
   shutdown(): Promise<void>;
 }
 
-type TfDownloadWorkerRedisRole =
-  | "worker"
-  | "lookup"
-  | "cancellation";
+type TfDownloadWorkerRedisRole = "worker" | "lookup" | "cancellation";
 
 export function createTfDownloadWorkerRedisOptions(
   role: TfDownloadWorkerRedisRole,
@@ -179,13 +169,18 @@ export function createTfDownloadWorkerRedisOptions(
 }
 
 function createRedis(
-  queueUrl: string,
+  connection: DownloadQueueRedisConnection,
   role: TfDownloadWorkerRedisRole,
 ): RuntimeRedis {
-  const client = new Redis(
-    queueUrl,
-    createTfDownloadWorkerRedisOptions(role),
-  );
+  const client = new Redis({
+    host: connection.host,
+    port: connection.port,
+    db: connection.db,
+    username: connection.username,
+    password: connection.password,
+    ...(connection.protocol === "rediss:" ? { tls: {} } : {}),
+    ...createTfDownloadWorkerRedisOptions(role),
+  });
   client.on("error", () => {});
   return client;
 }
@@ -293,15 +288,13 @@ const defaultDependencies: TfDownloadWorkerRuntimeDependencies = {
     return worker as unknown as RuntimeWorker;
   },
   createProcessor: createDownloadProcessor,
-  createAuthenticator: (options) =>
-    new HmacFileRequestAuthenticator(options),
+  createAuthenticator: (options) => new HmacFileRequestAuthenticator(options),
   createApp: createTfDownloadWorkerApp,
   listenHttp,
   probeStorage,
   probeDownloader,
   startHeartbeat: startTfDownloadWorkerHeartbeat,
-  setSweepInterval: (task, milliseconds) =>
-    setInterval(task, milliseconds),
+  setSweepInterval: (task, milliseconds) => setInterval(task, milliseconds),
   clearSweepInterval: (handle) =>
     clearInterval(handle as ReturnType<typeof setInterval>),
 };
@@ -378,10 +371,16 @@ export async function startTfDownloadWorkerRuntime(
     storage = await dependencies.createStorage(config);
     await storage.sweep();
 
-    workerRedis = dependencies.createRedis(config.queueRedisUrl, "worker");
-    lookupRedis = dependencies.createRedis(config.queueRedisUrl, "lookup");
+    workerRedis = dependencies.createRedis(
+      config.queueRedisConnection,
+      "worker",
+    );
+    lookupRedis = dependencies.createRedis(
+      config.queueRedisConnection,
+      "lookup",
+    );
     cancellationRedis = dependencies.createRedis(
-      config.queueRedisUrl,
+      config.queueRedisConnection,
       "cancellation",
     );
     await withTimeout(
@@ -405,10 +404,7 @@ export async function startTfDownloadWorkerRuntime(
       connection: lookupRedis,
       prefix: DOWNLOAD_QUEUE_PREFIX,
     });
-    await withTimeout(
-      queue.waitUntilReady(),
-      config.queueProbeTimeoutMs,
-    );
+    await withTimeout(queue.waitUntilReady(), config.queueProbeTimeoutMs);
 
     const cancellationClient = cancellationRedis;
     const processor = dependencies.createProcessor({
@@ -441,10 +437,7 @@ export async function startTfDownloadWorkerRuntime(
         completions.push(Date.now());
         return result;
       } catch (error) {
-        if (
-          error instanceof DownloadProcessingError &&
-          !error.retriable
-        ) {
+        if (error instanceof DownloadProcessingError && !error.retriable) {
           throw new UnrecoverableError(error.code);
         }
         throw error;
@@ -453,20 +446,13 @@ export async function startTfDownloadWorkerRuntime(
         complete();
       }
     };
-    worker = dependencies.createWorker(
-      DOWNLOAD_QUEUE_NAME,
-      processJob,
-      {
-        connection: workerRedis,
-        prefix: DOWNLOAD_QUEUE_PREFIX,
-        concurrency: 2,
-        autorun: false,
-      },
-    );
-    await withTimeout(
-      worker.waitUntilReady(),
-      config.queueProbeTimeoutMs,
-    );
+    worker = dependencies.createWorker(DOWNLOAD_QUEUE_NAME, processJob, {
+      connection: workerRedis,
+      prefix: DOWNLOAD_QUEUE_PREFIX,
+      concurrency: 2,
+      autorun: false,
+    });
+    await withTimeout(worker.waitUntilReady(), config.queueProbeTimeoutMs);
 
     const queueClient = queue;
     const ownedStorage = storage;
@@ -475,22 +461,17 @@ export async function startTfDownloadWorkerRuntime(
       async check(): Promise<boolean> {
         if (!ready || workerFailed) return false;
         try {
-          const [pong, , storageReady, downloaderReady] =
-            await withTimeout(
-              Promise.all([
-                lookupRedis!.ping(),
-                queueClient.getJobCounts("waiting", "active"),
-                dependencies.probeStorage(ownedStorage),
-                dependencies.probeDownloader(
-                  runtimeConfig.downloaderExecutable,
-                ),
-              ]),
-              runtimeConfig.queueProbeTimeoutMs,
-            );
+          const [pong, , storageReady, downloaderReady] = await withTimeout(
+            Promise.all([
+              lookupRedis!.ping(),
+              queueClient.getJobCounts("waiting", "active"),
+              dependencies.probeStorage(ownedStorage),
+              dependencies.probeDownloader(runtimeConfig.downloaderExecutable),
+            ]),
+            runtimeConfig.queueProbeTimeoutMs,
+          );
           return (
-            pong === "PONG" &&
-            storageReady === true &&
-            downloaderReady === true
+            pong === "PONG" && storageReady === true && downloaderReady === true
           );
         } catch {
           return false;
@@ -535,18 +516,16 @@ export async function startTfDownloadWorkerRuntime(
       ready: () => readiness.check(),
       observe: () => {
         const cutoff = Date.now() - 60_000;
-        while (
-          completions.length > 0 &&
-          (completions[0] ?? 0) < cutoff
-        ) {
+        while (completions.length > 0 && (completions[0] ?? 0) < cutoff) {
           completions.shift();
         }
         return {
-          status: !ready || workerFailed
-            ? "degraded"
-            : sweepFailed
-              ? "warning"
-              : "healthy",
+          status:
+            !ready || workerFailed
+              ? "degraded"
+              : sweepFailed
+                ? "warning"
+                : "healthy",
           jobsPerMinute: completions.length,
         };
       },
@@ -582,9 +561,7 @@ export async function startTfDownloadWorkerRuntime(
           process.off("SIGINT", signalHandler);
         }
         await settleWithin(worker!.pause(true), closeTimeoutMs);
-        if (
-          !(await settleWithin(listener!.close(), closeTimeoutMs))
-        ) {
+        if (!(await settleWithin(listener!.close(), closeTimeoutMs))) {
           listener!.destroyConnections();
         }
         if (sweepTimer !== undefined) {
@@ -592,8 +569,7 @@ export async function startTfDownloadWorkerRuntime(
           sweepTimer = undefined;
         }
 
-        const activeDeadline =
-          Date.now() + runtimeConfig.shutdownGraceMs;
+        const activeDeadline = Date.now() + runtimeConfig.shutdownGraceMs;
         const activeAtShutdown = Array.from(
           active.values(),
           ({ done }) => done,
@@ -606,10 +582,7 @@ export async function startTfDownloadWorkerRuntime(
         if (!drainedGracefully) {
           drainedGracefully = await settleWithin(
             Promise.allSettled(activeAtShutdown),
-            Math.max(
-              1,
-              runtimeConfig.shutdownGraceMs - cleanupReserveMs,
-            ),
+            Math.max(1, runtimeConfig.shutdownGraceMs - cleanupReserveMs),
           );
         }
         if (!drainedGracefully) {
@@ -620,10 +593,7 @@ export async function startTfDownloadWorkerRuntime(
           for (const { controller } of active.values()) {
             controller.abort(cancellation);
           }
-          const remainingForCleanup = Math.max(
-            0,
-            activeDeadline - Date.now(),
-          );
+          const remainingForCleanup = Math.max(0, activeDeadline - Date.now());
           if (active.size > 0 && remainingForCleanup > 0) {
             await settleWithin(
               Promise.allSettled(
@@ -633,10 +603,7 @@ export async function startTfDownloadWorkerRuntime(
             );
           }
           const cleanup = ownedStorage.sweep();
-          const remainingForSweep = Math.max(
-            0,
-            activeDeadline - Date.now(),
-          );
+          const remainingForSweep = Math.max(0, activeDeadline - Date.now());
           if (remainingForSweep > 0) {
             await settleWithin(cleanup, remainingForSweep);
           } else {
@@ -644,10 +611,7 @@ export async function startTfDownloadWorkerRuntime(
           }
         }
 
-        await settleWithin(
-          worker!.close(!drainedGracefully),
-          closeTimeoutMs,
-        );
+        await settleWithin(worker!.close(!drainedGracefully), closeTimeoutMs);
         await settleWithin(queueClient.close(), closeTimeoutMs);
         await closeRedis(workerRedis!, closeTimeoutMs);
         await closeRedis(lookupRedis!, closeTimeoutMs);

@@ -8,9 +8,18 @@ import {
   startTfDownloadWorkerRuntime,
 } from "./index.js";
 
+const queueRedisConnection = {
+  protocol: "rediss:",
+  host: "queue.apollot.ru",
+  port: 6380,
+  db: 3,
+  username: "worker",
+  password: "p".repeat(32),
+} as const;
+
 const config: TfDownloadWorkerConfig = {
   port: 8_080,
-  queueRedisUrl: "rediss://worker:password@queue.apollot.ru:6380/3",
+  queueRedisConnection,
   internalAuthSecret: "c".repeat(32),
   heartbeatSecret: "h".repeat(32),
   heartbeatApiOrigin: "https://api.apollot.ru",
@@ -27,10 +36,7 @@ const config: TfDownloadWorkerConfig = {
 };
 
 interface HarnessOptions {
-  readonly processJob?: (
-    job: unknown,
-    signal: AbortSignal,
-  ) => Promise<unknown>;
+  readonly processJob?: (job: unknown, signal: AbortSignal) => Promise<unknown>;
   readonly shutdownGraceMs?: number;
   readonly hangHttpClose?: boolean;
   readonly hangPostGraceClose?: boolean;
@@ -66,11 +72,10 @@ function createHarness(options: HarnessOptions = {}) {
     },
   }));
   let redisIndex = 0;
-  let workerProcessor:
-    | ((job: unknown) => Promise<unknown>)
-    | undefined;
+  let workerProcessor: ((job: unknown) => Promise<unknown>) | undefined;
   let workerOptions: unknown;
   let queueOptions: unknown;
+  const redisConnections: unknown[] = [];
   let appOptions: unknown;
   let sweepTask: (() => void) | undefined;
   let heartbeatOptions: unknown;
@@ -145,8 +150,7 @@ function createHarness(options: HarnessOptions = {}) {
       order.push("config");
       return {
         ...config,
-        shutdownGraceMs:
-          options.shutdownGraceMs ?? config.shutdownGraceMs,
+        shutdownGraceMs: options.shutdownGraceMs ?? config.shutdownGraceMs,
         queueProbeTimeoutMs:
           options.queueProbeTimeoutMs ?? config.queueProbeTimeoutMs,
       };
@@ -155,8 +159,9 @@ function createHarness(options: HarnessOptions = {}) {
       order.push("storage:create");
       return storage;
     },
-    createRedis() {
+    createRedis(passedConnection: unknown) {
       order.push(`redis:${redisIndex}:create`);
+      redisConnections.push(passedConnection);
       return redis[redisIndex++]!;
     },
     createQueue(_name: string, passedOptions: unknown) {
@@ -176,18 +181,15 @@ function createHarness(options: HarnessOptions = {}) {
     },
     createProcessor() {
       order.push("processor:create");
-      return (
-        options.processJob ??
+      return (options.processJob ??
         (async () => ({
           schemaVersion: 1,
-          storageKey:
-            "10000000-0000-4000-8000-000000000001.mp3",
+          storageKey: "10000000-0000-4000-8000-000000000001.mp3",
           fileSize: 1,
           mimeType: "audio/mpeg",
           filename: "track.mp3",
           completedAt: "2026-07-26T12:00:00.000Z",
-        }))
-      ) as never;
+        }))) as never;
     },
     createAuthenticator() {
       order.push("auth:create");
@@ -258,6 +260,9 @@ function createHarness(options: HarnessOptions = {}) {
     get queueOptions() {
       return queueOptions;
     },
+    get redisConnections() {
+      return redisConnections;
+    },
     get appOptions() {
       return appOptions;
     },
@@ -316,6 +321,11 @@ describe("TF download worker runtime", () => {
     expect(harness.queueOptions).toMatchObject({
       prefix: "{apollo-tf-downloads}",
     });
+    expect(harness.redisConnections).toEqual([
+      queueRedisConnection,
+      queueRedisConnection,
+      queueRedisConnection,
+    ]);
     expect(harness.appOptions).toMatchObject({
       jobs: harness.queue,
       storage: harness.storage,
@@ -329,11 +339,10 @@ describe("TF download worker runtime", () => {
     expect(harness.order).toContain("sweeper:start:300000");
 
     harness.sweepTask?.();
-    await vi.waitFor(
-      () =>
-        expect(
-          harness.order.filter((entry) => entry === "storage:sweep"),
-        ).toHaveLength(2),
+    await vi.waitFor(() =>
+      expect(
+        harness.order.filter((entry) => entry === "storage:sweep"),
+      ).toHaveLength(2),
     );
     await runtime.shutdown();
   });
@@ -405,11 +414,9 @@ describe("TF download worker runtime", () => {
       processJob: async (_job, signal) => {
         observedSignal = signal;
         await new Promise<void>((_resolve, reject) => {
-          signal.addEventListener(
-            "abort",
-            () => reject(signal.reason),
-            { once: true },
-          );
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
         });
       },
     });
@@ -429,57 +436,49 @@ describe("TF download worker runtime", () => {
     ).toBeGreaterThanOrEqual(2);
   });
 
-  it(
-    "bounds keep-alive HTTP close and destroys connections before continuing",
-    async () => {
-      const harness = createHarness({
-        shutdownGraceMs: 5,
-        hangHttpClose: true,
-      });
-      const runtime = await startTfDownloadWorkerRuntime({
-        registerSignals: false,
-        dependencies: harness.dependencies as never,
-      });
+  it("bounds keep-alive HTTP close and destroys connections before continuing", async () => {
+    const harness = createHarness({
+      shutdownGraceMs: 5,
+      hangHttpClose: true,
+    });
+    const runtime = await startTfDownloadWorkerRuntime({
+      registerSignals: false,
+      dependencies: harness.dependencies as never,
+    });
 
-      await runtime.shutdown();
-      expect(harness.order).toContain("http:destroy");
-      expect(harness.order.indexOf("http:destroy")).toBeLessThan(
-        harness.order.indexOf("worker:close:false"),
-      );
-    },
-    250,
-  );
+    await runtime.shutdown();
+    expect(harness.order).toContain("http:destroy");
+    expect(harness.order.indexOf("http:destroy")).toBeLessThan(
+      harness.order.indexOf("worker:close:false"),
+    );
+  }, 250);
 
-  it(
-    "bounds every post-grace close and preserves best-effort close order",
-    async () => {
-      const harness = createHarness({
-        shutdownGraceMs: 5,
-        hangPostGraceClose: true,
-      });
-      const runtime = await startTfDownloadWorkerRuntime({
-        registerSignals: false,
-        dependencies: harness.dependencies as never,
-      });
+  it("bounds every post-grace close and preserves best-effort close order", async () => {
+    const harness = createHarness({
+      shutdownGraceMs: 5,
+      hangPostGraceClose: true,
+    });
+    const runtime = await startTfDownloadWorkerRuntime({
+      registerSignals: false,
+      dependencies: harness.dependencies as never,
+    });
 
-      await runtime.shutdown();
-      const attempts = harness.order.filter((entry) =>
-        /^(worker:close|queue:close|redis:\d:quit|storage:close|heartbeat:stop)/.test(
-          entry,
-        ),
-      );
-      expect(attempts).toEqual([
-        "worker:close:false",
-        "queue:close",
-        "redis:0:quit",
-        "redis:1:quit",
-        "redis:2:quit",
-        "storage:close",
-        "heartbeat:stop",
-      ]);
-    },
-    500,
-  );
+    await runtime.shutdown();
+    const attempts = harness.order.filter((entry) =>
+      /^(worker:close|queue:close|redis:\d:quit|storage:close|heartbeat:stop)/.test(
+        entry,
+      ),
+    );
+    expect(attempts).toEqual([
+      "worker:close:false",
+      "queue:close",
+      "redis:0:quit",
+      "redis:1:quit",
+      "redis:2:quit",
+      "storage:close",
+      "heartbeat:stop",
+    ]);
+  }, 500);
 
   it("readiness probes only queue, owned storage, and downloader", async () => {
     const harness = createHarness();
@@ -530,24 +529,20 @@ describe("TF download worker runtime", () => {
     expect(harness.order).not.toContain("http:listen");
   });
 
-  it(
-    "bounds Redis and BullMQ startup readiness with the configured probe timeout",
-    async () => {
-      const harness = createHarness({
-        hangStartupPing: true,
-        queueProbeTimeoutMs: 5,
-        shutdownGraceMs: 5,
-      });
+  it("bounds Redis and BullMQ startup readiness with the configured probe timeout", async () => {
+    const harness = createHarness({
+      hangStartupPing: true,
+      queueProbeTimeoutMs: 5,
+      shutdownGraceMs: 5,
+    });
 
-      await expect(
-        startTfDownloadWorkerRuntime({
-          registerSignals: false,
-          dependencies: harness.dependencies as never,
-        }),
-      ).rejects.toThrow("runtime startup failed");
-      expect(harness.order).not.toContain("http:listen");
-      expect(harness.order).toContain("redis:0:quit");
-    },
-    250,
-  );
+    await expect(
+      startTfDownloadWorkerRuntime({
+        registerSignals: false,
+        dependencies: harness.dependencies as never,
+      }),
+    ).rejects.toThrow("runtime startup failed");
+    expect(harness.order).not.toContain("http:listen");
+    expect(harness.order).toContain("redis:0:quit");
+  }, 250);
 });

@@ -6,6 +6,7 @@ import {
   downloadFileCommandSchema,
   encodeDownloadAdmissionIntent,
   getDownloadQueueAdmissionLedgerKey,
+  parseDownloadQueueRedisConnection,
   parseDownloadAdmissionIntent,
   downloadJobDataSchema,
   downloadJobResultSchema,
@@ -18,6 +19,8 @@ const ACCOUNT_ID = "a0000000-0000-4000-8000-000000000001";
 const REQUEST_ID = "b0000000-0000-4000-8000-000000000002";
 const JOB_ID = "c0000000-0000-4000-8000-000000000003";
 const CREATED_AT = "2026-07-26T00:00:00.000Z";
+const REDIS_PASSWORD = `p@ss${"q".repeat(28)}`;
+const ENCODED_REDIS_PASSWORD = encodeURIComponent(REDIS_PASSWORD);
 const MAX_SOURCE_URL = `https://youtube.com/${"x".repeat(4_076)}`;
 const FORBIDDEN_SOURCE_URLS = [
   "http://youtube.com/watch?v=example",
@@ -56,6 +59,75 @@ describe("tf download contract", () => {
     expect(DOWNLOAD_MAX_FILE_BYTES).toBe(1_073_741_824);
     expect(DOWNLOAD_QUEUE_PREFIX).toBe("{apollo-tf-downloads}");
     expect(DOWNLOAD_QUEUE_PREFIX).toMatch(/^\{[^{}]+\}$/);
+  });
+
+  it("parses canonical Redis URLs into one structured queue connection", () => {
+    expect(
+      parseDownloadQueueRedisConnection(
+        `rediss://user%20name:${ENCODED_REDIS_PASSWORD}@queue.example.test:6380/15`,
+        false,
+      ),
+    ).toEqual({
+      protocol: "rediss:",
+      host: "queue.example.test",
+      port: 6380,
+      db: 15,
+      username: "user name",
+      password: REDIS_PASSWORD,
+    });
+    expect(
+      parseDownloadQueueRedisConnection(
+        `redis://default:${ENCODED_REDIS_PASSWORD}@tf-download-redis:6379/0`,
+        true,
+      ),
+    ).toEqual({
+      protocol: "redis:",
+      host: "tf-download-redis",
+      port: 6379,
+      db: 0,
+      username: "default",
+      password: REDIS_PASSWORD,
+    });
+    expect(
+      parseDownloadQueueRedisConnection(
+        `redis://default:${ENCODED_REDIS_PASSWORD}@tf-download-redis:6379/0`,
+        false,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("rejects every noncanonical raw Redis database path", () => {
+    for (const databasePath of [
+      "/15/../0",
+      "/./0",
+      "/15/%2e%2e/0",
+      "/15/%2E%2E/0",
+      "/15/%2e./0",
+      "/15/.%2e/0",
+      "/15/%252e%252e/0",
+      "/15%2f..%2f0",
+      "/15%2F..%2F0",
+      "/15%5c..%5c0",
+      "/15%252f..%252f0",
+      "/15%255c..%255c0",
+      "/0/0",
+      "/0/",
+      "//0",
+      "/00",
+      "/01",
+      "/+0",
+      "/-0",
+      "/%30",
+      "/",
+      "",
+    ]) {
+      expect(
+        parseDownloadQueueRedisConnection(
+          `rediss://worker:${ENCODED_REDIS_PASSWORD}@queue.example.test:6380${databasePath}`,
+          false,
+        ),
+      ).toBeUndefined();
+    }
   });
 
   it("encodes owner-bound admission intents through the queue's own prefix", () => {

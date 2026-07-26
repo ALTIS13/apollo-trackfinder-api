@@ -492,6 +492,42 @@ describe("download queue producer boundary", () => {
     }
   });
 
+  it("rejects every noncanonical raw Redis database path", async () => {
+    for (const databasePath of [
+      "/15/../0",
+      "/./0",
+      "/15/%2e%2e/0",
+      "/15/%2E%2E/0",
+      "/15/%2e./0",
+      "/15/.%2e/0",
+      "/15/%252e%252e/0",
+      "/15%2f..%2f0",
+      "/15%2F..%2F0",
+      "/15%5c..%5c0",
+      "/15%252f..%252f0",
+      "/15%255c..%255c0",
+      "/0/0",
+      "/0/",
+      "//0",
+      "/00",
+      "/01",
+      "/+0",
+      "/-0",
+      "/%30",
+      "/",
+      "",
+    ]) {
+      await expect(
+        createAdapter({
+          queueUrl: `rediss://worker:${ENCODED_QUEUE_PASSWORD}@queue.example.test:6380${databasePath}`,
+          environment: {
+            TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/queue-url",
+          },
+        }).adapter.init(),
+      ).rejects.toThrow("invalid runtime configuration");
+    }
+  });
+
   it("uses full bounded default job options and strict account-owned data", async () => {
     const { adapter, createQueue, producer } = createAdapter();
     await adapter.init();

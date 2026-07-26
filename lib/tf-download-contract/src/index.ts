@@ -5,6 +5,105 @@ export const DOWNLOAD_QUEUE_NAME = "apollo-tf-downloads-v1";
 export const DOWNLOAD_QUEUE_PREFIX = "{apollo-tf-downloads}";
 export const DOWNLOAD_MAX_FILE_BYTES = 1_073_741_824;
 
+export interface DownloadQueueRedisConnection {
+  readonly protocol: "redis:" | "rediss:";
+  readonly host: string;
+  readonly port: number;
+  readonly db: number;
+  readonly username?: string;
+  readonly password: string;
+}
+
+function rawRedisDatabasePath(value: string): string | undefined {
+  const schemeEnd = value.indexOf("://");
+  if (schemeEnd < 1) return undefined;
+  const pathStart = value.indexOf("/", schemeEnd + 3);
+  if (pathStart < 0) return undefined;
+  const suffix = value.slice(pathStart);
+  const boundary = suffix.search(/[?#]/);
+  return boundary < 0 ? suffix : suffix.slice(0, boundary);
+}
+
+export function parseDownloadQueueRedisConnection(
+  value: string,
+  allowInsecureSameNode: boolean,
+): DownloadQueueRedisConnection | undefined {
+  const rawDatabasePath = rawRedisDatabasePath(value);
+  if (
+    rawDatabasePath === undefined ||
+    !/^\/(?:0|[1-9]|1[0-5])$/.test(rawDatabasePath)
+  ) {
+    return undefined;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (
+    url.hostname === "" ||
+    url.pathname !== rawDatabasePath ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    return undefined;
+  }
+
+  const port = Number(url.port || "6379");
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) return undefined;
+
+  let username: string | undefined;
+  let password: string;
+  try {
+    username =
+      url.username === "" ? undefined : decodeURIComponent(url.username);
+    password = decodeURIComponent(url.password);
+  } catch {
+    return undefined;
+  }
+  const usernameBytes =
+    username === undefined ? 0 : new TextEncoder().encode(username).byteLength;
+  const passwordBytes = new TextEncoder().encode(password).byteLength;
+  if (
+    usernameBytes > 512 ||
+    (username !== undefined && /[\u0000-\u001f\u007f]/.test(username)) ||
+    passwordBytes < 32 ||
+    passwordBytes > 512 ||
+    /[\u0000-\u001f\u007f]/.test(password)
+  ) {
+    return undefined;
+  }
+
+  const db = Number(rawDatabasePath.slice(1));
+  const protocol =
+    url.protocol === "redis:"
+      ? "redis:"
+      : url.protocol === "rediss:"
+        ? "rediss:"
+        : undefined;
+  if (protocol === undefined) return undefined;
+  if (
+    protocol === "redis:" &&
+    (!allowInsecureSameNode ||
+      url.hostname !== "tf-download-redis" ||
+      url.port !== "6379" ||
+      db !== 0)
+  ) {
+    return undefined;
+  }
+
+  return {
+    protocol,
+    host: url.hostname,
+    port,
+    db,
+    ...(username === undefined ? {} : { username }),
+    password,
+  };
+}
+
 export type DownloadAdmissionIntentState = "pending" | "confirmed";
 
 export function getDownloadQueueAdmissionLedgerKey(
@@ -165,9 +264,7 @@ export function createTfDownloadFileSignature(
     input.nonce,
     bodyHash,
   ].join("\n");
-  return createHmac("sha256", input.secret)
-    .update(canonical)
-    .digest("hex");
+  return createHmac("sha256", input.secret).update(canonical).digest("hex");
 }
 
 const isAllowedSourceHost = (hostname: string): boolean =>
