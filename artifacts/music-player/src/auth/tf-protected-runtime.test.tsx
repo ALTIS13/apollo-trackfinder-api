@@ -184,8 +184,15 @@ describe("protected generated API auth failures", () => {
       await screen.findByRole("button", { name: "Play generated stream" }),
     );
 
+    await waitFor(() => expect(runtime.streamQuery).toHaveBeenCalledTimes(1), {
+      timeout: 3_000,
+    });
     expect(
-      await screen.findByRole("heading", { name: "Требуется вход" }),
+      await screen.findByRole(
+        "heading",
+        { name: "Требуется вход" },
+        { timeout: 3_000 },
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("protected-runtime")).not.toBeInTheDocument();
     expect(runtime.toast).toHaveBeenCalledWith(
