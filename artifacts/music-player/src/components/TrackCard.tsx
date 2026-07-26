@@ -60,8 +60,8 @@ export function TrackCard({ track, index }: TrackCardProps) {
     previousDownloadStateRef.current = downloadState;
     if (downloadState === "completed") {
       toast({
-        title: "Загрузка начата",
-        description: `Скачиваем ${track.title}...`,
+        title: "Загрузка завершена",
+        description: track.title,
       });
     } else if (downloadState === "failed") {
       toast({
@@ -86,7 +86,7 @@ export function TrackCard({ track, index }: TrackCardProps) {
       : downloadState === "canceled"
         ? "Загрузка отменена"
         : downloadState === "completed"
-          ? "Файл открывается"
+          ? "Загрузка завершена"
           : null;
 
   type TypeVariant = "original" | "remix" | "live" | "cover" | "outline";

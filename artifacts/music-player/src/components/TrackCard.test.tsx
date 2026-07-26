@@ -15,6 +15,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TrackCard } from "./TrackCard";
 
+const toast = vi.hoisted(() => vi.fn());
+
 vi.mock("@workspace/api-client-react", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@workspace/api-client-react")>();
@@ -38,7 +40,7 @@ vi.mock("@/hooks/use-player", () => ({
 }));
 
 vi.mock("@/hooks/use-toast", () => ({
-  useToast: () => ({ toast: vi.fn() }),
+  useToast: () => ({ toast }),
 }));
 
 vi.mock("@/lib/tf-session-client", async (importOriginal) => {
@@ -75,6 +77,7 @@ beforeEach(() => {
     jobId: "job-1",
     status: "canceled",
   });
+  toast.mockReset();
   vi.stubGlobal("location", { assign: vi.fn() });
 });
 
@@ -182,8 +185,32 @@ describe("TrackCard download action", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Скачать" }));
 
-    await screen.findByText("Файл открывается");
-    expectReservedTerminalRow("Файл открывается");
+    await screen.findByText("Загрузка завершена");
+    expectReservedTerminalRow("Загрузка завершена");
     expect(screen.getByRole("button", { name: "Скачать" })).toBeDisabled();
+  });
+
+  it("renders neutral completed feedback when DELETE reports completion without navigation", async () => {
+    vi.mocked(queueTrackDownloads).mockResolvedValue({
+      results: [{ trackId: track.id, jobId: "job-1", position: 1 }],
+    });
+    vi.mocked(cancelDownloadJob).mockResolvedValue({
+      jobId: "job-1",
+      status: "completed",
+    });
+    render(<TrackCard track={track} index={0} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Скачать" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Отменить загрузку" }),
+    );
+
+    await screen.findByText("Загрузка завершена");
+    expectReservedTerminalRow("Загрузка завершена");
+    expect(window.location.assign).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith({
+      title: "Загрузка завершена",
+      description: track.title,
+    });
   });
 });
