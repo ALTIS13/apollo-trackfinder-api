@@ -2,8 +2,6 @@ import { z } from "zod";
 
 export const DOWNLOAD_QUEUE_NAME = "apollo-tf-downloads-v1";
 export const DOWNLOAD_MAX_FILE_BYTES = 1_073_741_824;
-export const DOWNLOAD_QUEUE_RESERVATION_KEY = `${DOWNLOAD_QUEUE_NAME}:reservations`;
-export const DOWNLOAD_QUEUE_RESERVATION_TTL_MS = 86_400_000;
 
 const MAX_SOURCE_URL_LENGTH = 4_096;
 const MAX_TRACK_ID_LENGTH = 4_096;

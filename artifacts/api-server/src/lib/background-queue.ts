@@ -3,8 +3,6 @@ import { readFile } from "node:fs/promises";
 
 import {
   DOWNLOAD_QUEUE_NAME,
-  DOWNLOAD_QUEUE_RESERVATION_KEY,
-  DOWNLOAD_QUEUE_RESERVATION_TTL_MS,
   downloadJobDataSchema,
   downloadJobResultSchema,
   type DownloadJobData,
@@ -15,8 +13,25 @@ import Redis, { type RedisOptions } from "ioredis";
 
 const QUEUE_CAPACITY = 200;
 const CANCELLATION_TTL_MS = 1_800_000;
-const RESERVE_SCRIPT =
-  "redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1]); if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then return 0 end; redis.call('ZADD', KEYS[1], ARGV[2], ARGV[4]); return 1";
+const PRODUCER_COMMAND_TIMEOUT_MS = 5_000;
+const MAX_ADMISSION_COMMANDS = 3;
+const ADMISSION_LOCK_LEASE_MS = 20_000;
+const ADMISSION_LOCK_RETRY_WINDOW_MS = 250;
+const ADMISSION_LOCK_KEY = `${DOWNLOAD_QUEUE_NAME}:producer-admission-lock`;
+const RELEASE_ADMISSION_LOCK_SCRIPT =
+  "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0";
+const MAX_CRITICAL_SECTION_COMMAND_WINDOW_MS =
+  PRODUCER_COMMAND_TIMEOUT_MS * MAX_ADMISSION_COMMANDS;
+
+if (ADMISSION_LOCK_LEASE_MS <= MAX_CRITICAL_SECTION_COMMAND_WINDOW_MS) {
+  throw new Error("invalid admission lock policy");
+}
+
+export const DOWNLOAD_ADMISSION_LOCK_POLICY = {
+  leaseMs: ADMISSION_LOCK_LEASE_MS,
+  maxCriticalSectionCommandWindowMs: MAX_CRITICAL_SECTION_COMMAND_WINDOW_MS,
+  retryWindowMs: ADMISSION_LOCK_RETRY_WINDOW_MS,
+} as const;
 
 export { type DownloadJobData, type DownloadJobResult };
 export class DownloadQueueUnavailableError extends Error {
@@ -74,6 +89,7 @@ interface QueueClient {
   close(): Promise<unknown>;
   getWaitingCount(): Promise<number>;
   getActiveCount(): Promise<number>;
+  getJobCounts(...states: string[]): Promise<Record<string, number>>;
   add(
     name: string,
     data: DownloadJobData,
@@ -91,8 +107,7 @@ interface RedisClient {
   connect?(): Promise<unknown>;
   ping?(): Promise<unknown>;
   eval(script: string, keys: number, ...args: string[]): Promise<unknown>;
-  zrem(key: string, member: string): Promise<unknown>;
-  set(key: string, value: string, mode: "PX", ttl: number): Promise<unknown>;
+  set(...args: Array<string | number>): Promise<unknown>;
   del(key: string): Promise<unknown>;
   quit(): Promise<unknown>;
 }
@@ -150,8 +165,10 @@ function parseQueueUrl(value: string): RedisOptions {
     url.port === "6379" &&
     url.pathname === "/0" &&
     url.search === "" &&
-    url.hash === "";
-  if (url.protocol !== "rediss:" && !local) throw invalid();
+    url.hash === "" &&
+    url.username === "" &&
+    url.password === "";
+  if (!url.hostname || (url.protocol !== "rediss:" && !local)) throw invalid();
   if (url.search || url.hash || !/^\/(?:0|[1-9]|1[0-5])$/.test(url.pathname))
     throw invalid();
   const port = Number(url.port || "6379");
@@ -207,7 +224,7 @@ async function configuration(
     retryStrategy: () => null,
   };
   return {
-    producer: { ...common, commandTimeout: 5000 },
+    producer: { ...common, commandTimeout: PRODUCER_COMMAND_TIMEOUT_MS },
     telemetry: common,
     cancellation: common,
   };
@@ -241,6 +258,21 @@ function statusOf(job: Job, raw: string, position?: number): JobStatus {
     ...(position === undefined ? {} : { position }),
     ...(result.success ? { fileSize: result.data.fileSize } : {}),
   };
+}
+function capacityTotal(counts: Record<string, number>): number {
+  const states = [
+    "wait",
+    "active",
+    "delayed",
+    "prioritized",
+    "waiting-children",
+    "paused",
+  ];
+  return states.reduce((total, state) => {
+    const count = counts[state];
+    if (!Number.isSafeInteger(count) || count < 0) throw unavailable();
+    return total + count;
+  }, 0);
 }
 
 export async function collectDownloadQueueTelemetry(
@@ -278,8 +310,29 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
     if (!clients) throw unavailable();
     return clients;
   };
-  const release = async (client: RedisClient, jobId: string): Promise<void> => {
-    await client.zrem(DOWNLOAD_QUEUE_RESERVATION_KEY, jobId);
+  const acquireAdmissionLock = async (): Promise<string> => {
+    const token = randomUUID();
+    const deadline = Date.now() + ADMISSION_LOCK_RETRY_WINDOW_MS;
+    do {
+      const acquired = await requireClients().cancellation.set(
+        ADMISSION_LOCK_KEY,
+        token,
+        "NX",
+        "PX",
+        ADMISSION_LOCK_LEASE_MS,
+      );
+      if (acquired === "OK") return token;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } while (Date.now() < deadline);
+    throw unavailable();
+  };
+  const releaseAdmissionLock = async (token: string): Promise<void> => {
+    await requireClients().cancellation.eval(
+      RELEASE_ADMISSION_LOCK_SCRIPT,
+      1,
+      ADMISSION_LOCK_KEY,
+      token,
+    );
   };
   const cancelState = async (
     current: Clients,
@@ -291,7 +344,6 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
     if (state === "waiting") {
       try {
         await job.remove();
-        await release(current.cancellation, jobId);
         return { status: "canceled" };
       } catch {
         const reread = await job.getState();
@@ -383,29 +435,41 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
       if (!parsed.success) throw new Error("invalid download job");
       try {
         const current = requireClients();
+        const token = await acquireAdmissionLock();
         const jobId = randomUUID();
-        const now = Date.now();
-        const admitted = Number(
-          await current.cancellation.eval(
-            RESERVE_SCRIPT,
-            1,
-            DOWNLOAD_QUEUE_RESERVATION_KEY,
-            String(now),
-            String(now + DOWNLOAD_QUEUE_RESERVATION_TTL_MS),
-            String(QUEUE_CAPACITY),
-            jobId,
-          ),
-        );
-        if (admitted !== 1) throw new DownloadQueueCapacityError();
         try {
-          const job = await current.producer.add("download", parsed.data, {
-            jobId,
-          });
-          if (!job.id) throw unavailable();
-          return { jobId, position: 0 };
-        } catch (error) {
-          await release(current.cancellation, jobId).catch(() => {});
-          throw error;
+          const counts = await current.producer.getJobCounts(
+            "wait",
+            "active",
+            "delayed",
+            "prioritized",
+            "waiting-children",
+            "paused",
+          );
+          const total = capacityTotal(counts);
+          if (total >= QUEUE_CAPACITY) throw new DownloadQueueCapacityError();
+          let job: { id?: string };
+          try {
+            job = await current.producer.add("download", parsed.data, {
+              jobId,
+            });
+          } catch {
+            const accepted = await current.producer
+              .getJob(jobId)
+              .catch(() => undefined);
+            if (
+              accepted !== undefined &&
+              owned(accepted.data, parsed.data.accountId) &&
+              JSON.stringify(accepted.data) === JSON.stringify(parsed.data)
+            ) {
+              return { jobId, position: total + 1 };
+            }
+            throw unavailable();
+          }
+          if (job.id !== jobId) throw unavailable();
+          return { jobId, position: total + 1 };
+        } finally {
+          await releaseAdmissionLock(token).catch(() => {});
         }
       } catch (error) {
         if (

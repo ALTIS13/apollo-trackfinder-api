@@ -2,8 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   DOWNLOAD_MAX_FILE_BYTES,
   DOWNLOAD_QUEUE_NAME,
-  DOWNLOAD_QUEUE_RESERVATION_KEY,
-  DOWNLOAD_QUEUE_RESERVATION_TTL_MS,
   downloadFileCommandSchema,
   downloadJobDataSchema,
   downloadJobResultSchema,
@@ -52,13 +50,6 @@ describe("tf download contract", () => {
   it("exports the versioned queue constants", () => {
     expect(DOWNLOAD_QUEUE_NAME).toBe("apollo-tf-downloads-v1");
     expect(DOWNLOAD_MAX_FILE_BYTES).toBe(1_073_741_824);
-  });
-
-  it("exports shared bounded queue reservation coordination constants", () => {
-    expect(DOWNLOAD_QUEUE_RESERVATION_KEY).toBe(
-      "apollo-tf-downloads-v1:reservations",
-    );
-    expect(DOWNLOAD_QUEUE_RESERVATION_TTL_MS).toBe(86_400_000);
   });
 
   it("accepts every download quality", () => {

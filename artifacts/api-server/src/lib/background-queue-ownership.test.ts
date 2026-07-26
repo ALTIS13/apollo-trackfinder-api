@@ -33,33 +33,33 @@ function job(
   };
 }
 
-function createAdapter(jobs: Map<string, ReturnType<typeof job>>) {
-  const byState = (state: string) => async () =>
-    [...jobs.values()].filter((candidate) =>
-      candidate.getState.mock.results.length === 0 ? false : false,
-    );
+function createAdapter(
+  jobs: Map<string, ReturnType<typeof job>>,
+  collections: Partial<
+    Record<"waiting" | "delayed" | "active" | "completed" | "failed", unknown[]>
+  > = {},
+) {
   const producer = {
     on: vi.fn(),
     waitUntilReady: async () => {},
     getJob: async (id: string) => jobs.get(id),
     getWaitingCount: async () => 0,
     getActiveCount: async () => 0,
-    getWaiting: async () => [...jobs.values()],
-    getDelayed: async () => [...jobs.values()],
-    getActive: async () => [...jobs.values()],
-    getCompleted: async () => [...jobs.values()],
-    getFailed: async () => [...jobs.values()],
+    getJobCounts: async () => ({}),
+    getWaiting: async () => collections.waiting ?? [...jobs.values()],
+    getDelayed: async () => collections.delayed ?? [],
+    getActive: async () => collections.active ?? [],
+    getCompleted: async () => collections.completed ?? [],
+    getFailed: async () => collections.failed ?? [],
     add: async () => ({ id: "new" }),
     close: async () => {},
   };
-  void byState;
   const telemetry = { ...producer, on: vi.fn() };
   const redis = {
     on: vi.fn(),
     connect: async () => {},
     ping: async () => "PONG",
     eval: async () => 1,
-    zrem: vi.fn(async () => 1),
     set: vi.fn(async () => "OK"),
     del: vi.fn(async () => 1),
     quit: async () => {},
@@ -114,7 +114,13 @@ describe("download queue ownership, states, and cancellation", () => {
 
   it("maps delayed and other pending BullMQ states to waiting and lists delayed jobs", async () => {
     const delayed = job("delayed", JOB_DATA, ["delayed", "delayed"]);
-    const { adapter } = createAdapter(new Map([[delayed.id, delayed]]));
+    const { adapter } = createAdapter(new Map([[delayed.id, delayed]]), {
+      waiting: [],
+      delayed: [delayed],
+      active: [],
+      completed: [],
+      failed: [],
+    });
     await adapter.init();
     await expect(adapter.status("delayed", ACCOUNT_ID)).resolves.toMatchObject({
       status: "waiting",
@@ -124,7 +130,7 @@ describe("download queue ownership, states, and cancellation", () => {
     ]);
   });
 
-  it("removes waiting or delayed jobs and releases their reservations", async () => {
+  it("removes delayed jobs without a separate capacity record", async () => {
     const delayed = job("delayed", JOB_DATA, ["delayed"]);
     const { adapter, redis } = createAdapter(new Map([[delayed.id, delayed]]));
     await adapter.init();
@@ -132,10 +138,6 @@ describe("download queue ownership, states, and cancellation", () => {
       status: "canceled",
     });
     expect(delayed.remove).toHaveBeenCalledOnce();
-    expect(redis.zrem).toHaveBeenCalledWith(
-      "apollo-tf-downloads-v1:reservations",
-      "delayed",
-    );
   });
 
   it("rereads a remove race and cancels active work with the exact TTL", async () => {
