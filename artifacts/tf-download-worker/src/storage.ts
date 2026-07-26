@@ -237,10 +237,14 @@ export class DownloadStorage {
     return this.withLock(async () => {
       await this.assertRootIdentity(signal);
       throwIfAborted(signal);
-      await this.ensureCapacity(0, signal);
 
       const partPath = this.containedPath(`${jobId}.${extension}.part`);
       const finalPath = this.containedPath(`${jobId}.${extension}`);
+      if (this.operations.has(partPath) || this.pinnedFinals.has(finalPath)) {
+        throw unavailable(true);
+      }
+      await this.ensureCapacity(0, signal);
+
       let handle: FileHandle;
       throwIfAborted(signal);
       try {
@@ -529,6 +533,12 @@ export class DownloadStorage {
         );
 
         operation.state = "committed";
+        if (
+          this.operations.get(operation.partPath) !== operation.token ||
+          this.pinnedFinals.has(operation.finalPath)
+        ) {
+          throw unavailable(false);
+        }
         this.pinnedFinals.set(operation.finalPath, operation.token);
         return result;
       } catch (error) {
@@ -564,8 +574,7 @@ export class DownloadStorage {
         this.usedBytes = Math.max(0, this.usedBytes - operation.bytesWritten);
       }
       operation.state = "aborted";
-      this.operations.delete(operation.partPath);
-      this.pinnedFinals.delete(operation.finalPath);
+      this.releaseTracking(operation);
       if (removal === "mismatch") throw unavailable(false);
     }, signal);
   }
@@ -576,8 +585,7 @@ export class DownloadStorage {
       throw unavailable(false);
     }
     operation.state = "finalized";
-    this.pinnedFinals.delete(operation.finalPath);
-    this.operations.delete(operation.partPath);
+    this.releaseTracking(operation);
   }
 
   private async removeStartupPartials(): Promise<void> {
@@ -880,9 +888,17 @@ export class DownloadStorage {
       cleanupUnsafe = true;
     }
     operation.state = "aborted";
-    this.operations.delete(operation.partPath);
-    this.pinnedFinals.delete(operation.finalPath);
+    this.releaseTracking(operation);
     return cleanupUnsafe ? unavailable(false) : undefined;
+  }
+
+  private releaseTracking(operation: OperationState): void {
+    if (this.operations.get(operation.partPath) === operation.token) {
+      this.operations.delete(operation.partPath);
+    }
+    if (this.pinnedFinals.get(operation.finalPath) === operation.token) {
+      this.pinnedFinals.delete(operation.finalPath);
+    }
   }
 
   private async withLock<T>(

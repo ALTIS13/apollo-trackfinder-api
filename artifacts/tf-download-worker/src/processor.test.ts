@@ -925,12 +925,7 @@ describe("createDownloadProcessor", () => {
       stdout: [Buffer.from("partial")],
       holdOpen: true,
     });
-    let cleanupSignal: AbortSignal | undefined;
-    const abort = vi.fn((signal?: AbortSignal) => {
-      cleanupSignal = signal;
-      expect(signal?.aborted).toBe(false);
-      return new Promise<void>(() => undefined);
-    });
+    const abort = vi.fn(() => new Promise<void>(() => undefined));
     const processor = createDownloadProcessor({
       storage: {
         begin: vi.fn(async () => ({
@@ -964,8 +959,140 @@ describe("createDownloadProcessor", () => {
     });
     expect(child.kills[0]).toBe("SIGTERM");
     expect(abort).toHaveBeenCalledTimes(1);
-    expect(cleanupSignal).not.toBe(jobController.signal);
-    expect(cleanupSignal?.aborted).toBe(true);
+    expect(abort.mock.calls[0]).toEqual([]);
+  }, 1_000);
+
+  it("clears the cleanup grace timer when cleanup finishes early", async () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    const abort = vi.fn(async () => undefined);
+    const job = createJob();
+    job.updateProgress.mockRejectedValue(new Error("progress_failed"));
+    const processor = createDownloadProcessor({
+      storage: {
+        begin: vi.fn(async () => ({
+          write: vi.fn(async () => true),
+          commit: vi.fn(),
+          abort,
+          finalize: vi.fn(),
+        })),
+      },
+      cancellationStore: createCancellationStore(),
+      spawnDownload: vi.fn(() => createFakeProcess({ holdOpen: true })),
+      logger: createLogger(),
+      deadlineMs: 1_000,
+      cancellationPollMs: 11,
+      killGraceMs: 13,
+      cleanupGraceMs: 37,
+    });
+
+    try {
+      await expect(
+        processor(job, new AbortController().signal),
+      ).rejects.toMatchObject({
+        code: "download_failed",
+        retriable: true,
+      });
+      expect(abort).toHaveBeenCalledTimes(1);
+
+      const cleanupTimerIndex = setTimeoutSpy.mock.calls.findIndex(
+        ([, milliseconds]) => milliseconds === 37,
+      );
+      expect(cleanupTimerIndex).toBeGreaterThanOrEqual(0);
+      const cleanupTimer = setTimeoutSpy.mock.results[cleanupTimerIndex]?.value;
+      expect(
+        clearTimeoutSpy.mock.calls.some(([timer]) => timer === cleanupTimer),
+      ).toBe(true);
+    } finally {
+      clearTimeoutSpy.mockRestore();
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it("returns within cleanup grace and lets real storage cleanup converge", async () => {
+    const root = await mkdtemp(
+      path.join(tmpdir(), "tf-download-processor-cleanup-"),
+    );
+    roots.push(root);
+    const lockEntered = deferred<void>();
+    const releaseLock = deferred<void>();
+    let holdNextOpen = false;
+    const storage = await DownloadStorage.create(
+      {
+        root,
+        maxFileBytes: 4,
+        quotaBytes: 4,
+      },
+      {
+        afterOpen: async () => {
+          if (!holdNextOpen) return;
+          holdNextOpen = false;
+          lockEntered.resolve();
+          await releaseLock.promise;
+        },
+      },
+    );
+    const finalProgressEntered = deferred<void>();
+    const job = createJob();
+    job.updateProgress.mockImplementation(async (progress: number) => {
+      if (progress === 100) {
+        finalProgressEntered.resolve();
+        await new Promise<void>(() => undefined);
+      }
+    });
+    const processor = createDownloadProcessor({
+      storage,
+      cancellationStore: createCancellationStore(),
+      spawnDownload: vi.fn(() =>
+        createFakeProcess({ stdout: [Buffer.alloc(4, 1)] }),
+      ),
+      logger: createLogger(),
+      deadlineMs: 1_000,
+      cleanupGraceMs: 20,
+    });
+    const controller = new AbortController();
+    const processing = processor(job, controller.signal);
+    await finalProgressEntered.promise;
+
+    holdNextOpen = true;
+    const blockerPending = storage.begin(SECOND_JOB_ID, "mp3");
+    await lockEntered.promise;
+    const canceledAt = Date.now();
+    controller.abort();
+
+    const failure = await processing.catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: "download_canceled",
+      retriable: false,
+    });
+    expect(Date.now() - canceledAt).toBeLessThan(250);
+    expect(await readdir(root)).toEqual([
+      `${JOB_ID}.mp3`,
+      `${SECOND_JOB_ID}.mp3.part`,
+    ]);
+
+    let retrySettled = false;
+    const retryPending = storage.begin(JOB_ID, "mp3");
+    void retryPending.then(
+      () => {
+        retrySettled = true;
+      },
+      () => {
+        retrySettled = true;
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(retrySettled).toBe(false);
+
+    releaseLock.resolve();
+    const blocker = await blockerPending;
+    const retry = await retryPending;
+    await blocker.abort();
+
+    expect(await readdir(root)).toEqual([`${JOB_ID}.mp3.part`]);
+    expect(await retry.write(Buffer.alloc(4, 3))).toBe(true);
+    await retry.abort();
+    expect(await readdir(root)).toEqual([]);
   }, 1_000);
 
   it("applies the deadline while the cancellation store ignores its signal", async () => {

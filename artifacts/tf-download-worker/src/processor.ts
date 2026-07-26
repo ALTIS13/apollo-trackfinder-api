@@ -414,19 +414,13 @@ async function boundedAbort(
   output: StorageOutputBoundary,
   graceMs: number,
 ): Promise<void> {
-  const controller = new AbortController();
-  const cleanupTask = settled(
-    Promise.resolve().then(() => output.abort(controller.signal)),
-  );
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<void>((resolve) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      resolve();
-    }, graceMs);
+  const cleanupTask = settled(Promise.resolve().then(() => output.abort()));
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const grace = new Promise<void>((resolve) => {
+    graceTimer = setTimeout(resolve, graceMs);
   });
-  await Promise.race([cleanupTask, timeout]);
-  if (timer) clearTimeout(timer);
+  await Promise.race([cleanupTask, grace]);
+  if (graceTimer) clearTimeout(graceTimer);
 }
 
 async function terminateChild(

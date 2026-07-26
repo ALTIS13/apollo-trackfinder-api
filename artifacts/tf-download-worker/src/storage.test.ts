@@ -576,6 +576,54 @@ describe("DownloadStorage", () => {
     expect(await listNames(root)).toEqual([]);
   });
 
+  it("preserves pinned same-job ownership and keeps the final no-replace after finalize", async () => {
+    const root = await createRoot();
+    const finalPath = path.join(root, `${JOB_ID}.mp3`);
+    const storage = await DownloadStorage.create({
+      root,
+      maxFileBytes: 5,
+      quotaBytes: 8,
+    });
+    const first = await storage.begin(JOB_ID, "mp3");
+    expect(await first.write(Buffer.from("old!"))).toBe(true);
+    await first.commit(metadata);
+
+    const reentryFailure = await storage
+      .begin(JOB_ID, "mp3")
+      .catch((error: unknown) => error);
+
+    expect(reentryFailure).toBeInstanceOf(DownloadStorageError);
+    expect(reentryFailure).toMatchObject({
+      code: "storage_unavailable",
+      retriable: true,
+    });
+    expect(await listNames(root)).toEqual([`${JOB_ID}.mp3`]);
+
+    const competing = await storage.begin(SECOND_JOB_ID, "mp3");
+    expect(await competing.write(Buffer.alloc(5, 2))).toBe(false);
+    expect(competing.failure).toMatchObject({
+      code: "storage_quota_exceeded",
+      retriable: false,
+    });
+    await competing.abort();
+    expect(await readFile(finalPath, "utf8")).toBe("old!");
+
+    expect(() => first.finalize()).not.toThrow();
+    const afterFinalize = await storage.begin(JOB_ID, "mp3");
+    expect(await afterFinalize.write(Buffer.from("new!"))).toBe(true);
+    const collision = await afterFinalize
+      .commit(metadata)
+      .catch((error: unknown) => error);
+
+    expect(collision).toBeInstanceOf(DownloadStorageError);
+    expect(collision).toMatchObject({
+      code: "storage_unavailable",
+      retriable: false,
+    });
+    expect(await readFile(finalPath, "utf8")).toBe("old!");
+    expect(await listNames(root)).toEqual([`${JOB_ID}.mp3`]);
+  });
+
   it("pins a committed final until finalize releases it for quota eviction", async () => {
     const root = await createRoot();
     const storage = await DownloadStorage.create({
