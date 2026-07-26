@@ -125,14 +125,16 @@ class CancellationRedis {
         state = "unknown";
       }
 
-      if (state !== "waiting" && state !== "active") return state;
-
+      const pending = state === "waiting" || state === "active";
+      const terminal =
+        state === "completed" || state === "failed" || state === "canceled";
+      if (!pending && !terminal) return state;
       const ledger = this.hash(ledgerKey!);
       const storedIntent = ledger.get(jobId!);
       if (storedIntent !== undefined && storedIntent !== expectedIntent) {
         return "ledger_mismatch";
       }
-      this.hash(jobKey!).set(markerField!, markerSentinel!);
+      if (pending) this.hash(jobKey!).set(markerField!, markerSentinel!);
       if (storedIntent === expectedIntent) ledger.delete(jobId!);
       return state;
     },
@@ -354,6 +356,51 @@ describe("download queue ownership, states, and cancellation", () => {
   );
 
   it.each([
+    ["completed", "completed", undefined],
+    ["failed", "failed", "upstream_failed"],
+    ["failed", "canceled", "download_canceled"],
+  ] as const)(
+    "releases the exact pending owner intent before returning terminal %s as %s",
+    async (state, expected, failedReason) => {
+      const { adapter, producer, redis } = createAdapter();
+      const jobId = `terminal-${expected}`;
+      seedState(redis, producer, jobId, state, { failedReason });
+      ledger(redis, producer).set(
+        jobId,
+        encodeDownloadAdmissionIntent("pending", ACCOUNT_ID),
+      );
+      await adapter.init();
+
+      await expect(adapter.cancel(jobId, ACCOUNT_ID)).resolves.toEqual({
+        status: expected,
+      });
+      expect(marker(redis, producer, jobId)).toBeUndefined();
+      expect(ledger(redis, producer).has(jobId)).toBe(false);
+    },
+  );
+
+  it.each([
+    encodeDownloadAdmissionIntent("pending", FOREIGN_ACCOUNT_ID),
+    encodeDownloadAdmissionIntent("confirmed", ACCOUNT_ID),
+    "corrupt",
+  ])(
+    "fails closed without mutating terminal ownership evidence for ledger value %s",
+    async (intent) => {
+      const { adapter, producer, redis } = createAdapter();
+      const jobId = "terminal-ledger-mismatch";
+      seedState(redis, producer, jobId, "completed");
+      ledger(redis, producer).set(jobId, intent);
+      await adapter.init();
+
+      await expect(adapter.cancel(jobId, ACCOUNT_ID)).rejects.toBeInstanceOf(
+        queueModule.DownloadQueueUnavailableError,
+      );
+      expect(marker(redis, producer, jobId)).toBeUndefined();
+      expect(ledger(redis, producer).get(jobId)).toBe(intent);
+    },
+  );
+
+  it.each([
     ["foreign", JSON.stringify({ ...JOB_DATA, accountId: FOREIGN_ACCOUNT_ID })],
     ["malformed-json", "{"],
     ["json-string", JSON.stringify("legacy")],
@@ -495,7 +542,7 @@ describe("download queue ownership, states, and cancellation", () => {
     expect(ledger(redis, producer).has(jobId)).toBe(false);
   });
 
-  it("returns completed without mutation when active races completed", async () => {
+  it("returns completed and releases the exact intent when active races completed", async () => {
     const { adapter, producer, redis } = createAdapter();
     const jobId = "active-completed";
     seedState(redis, producer, jobId, "active");
@@ -512,9 +559,7 @@ describe("download queue ownership, states, and cancellation", () => {
       status: "completed",
     });
     expect(marker(redis, producer, jobId)).toBeUndefined();
-    expect(ledger(redis, producer).get(jobId)).toBe(
-      encodeDownloadAdmissionIntent("pending", ACCOUNT_ID),
-    );
+    expect(ledger(redis, producer).has(jobId)).toBe(false);
   });
 
   it("uses one same-slot Lua call and no remove, events, tombstones, or cancel keys", async () => {

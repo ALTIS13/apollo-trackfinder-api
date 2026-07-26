@@ -258,14 +258,97 @@ describe("useTrackDownload", () => {
     expect(window.location.assign).not.toHaveBeenCalled();
   });
 
+  it("polls the exact job from a waiting DELETE response until canceled without another DELETE", async () => {
+    const cancellationPoll = deferred<DownloadJobStatus>();
+    vi.mocked(queueTrackDownloads).mockResolvedValue({
+      results: [{ trackId: track.id, jobId: "job-1", position: 1 }],
+    });
+    vi.mocked(getDownloadJobStatus)
+      .mockResolvedValueOnce(active)
+      .mockReturnValueOnce(cancellationPoll.promise);
+    vi.mocked(cancelDownloadJob)
+      .mockResolvedValueOnce({ jobId: "job-1", status: "waiting" })
+      .mockResolvedValueOnce({ jobId: "job-1", status: "canceled" });
+    const { result } = renderHook(() => useTrackDownload());
+
+    await act(async () => {
+      await result.current.start(track);
+    });
+    await flushMicrotasks();
+
+    await act(async () => {
+      await result.current.cancel();
+    });
+
+    expect(result.current.state).toBe("waiting");
+    expect(result.current.progress).toBe(64);
+    expect(getDownloadJobStatus).toHaveBeenCalledTimes(2);
+    expect(getDownloadJobStatus).toHaveBeenLastCalledWith(
+      "job-1",
+      expect.objectContaining({ credentials: "include", method: "GET" }),
+    );
+
+    await act(async () => {
+      await result.current.cancel();
+      await result.current.cancel();
+    });
+    expect(cancelDownloadJob).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      cancellationPoll.resolve({ status: "canceled", progress: 73 });
+    });
+    await flushMicrotasks();
+
+    expect(result.current.state).toBe("canceled");
+    expect(result.current.progress).toBe(73);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(window.location.assign).not.toHaveBeenCalled();
+  });
+
+  it("polls an active DELETE response to completed without navigating to the file", async () => {
+    const cancellationPoll = deferred<DownloadJobStatus>();
+    vi.mocked(queueTrackDownloads).mockResolvedValue({
+      results: [{ trackId: track.id, jobId: "job-1", position: 1 }],
+    });
+    vi.mocked(getDownloadJobStatus)
+      .mockResolvedValueOnce(active)
+      .mockReturnValueOnce(cancellationPoll.promise);
+    vi.mocked(cancelDownloadJob).mockResolvedValue({
+      jobId: "job-1",
+      status: "active",
+    });
+    const { result } = renderHook(() => useTrackDownload());
+
+    await act(async () => {
+      await result.current.start(track);
+    });
+    await flushMicrotasks();
+
+    await act(async () => {
+      await result.current.cancel();
+    });
+
+    expect(result.current.state).toBe("active");
+    expect(result.current.progress).toBe(64);
+    expect(getDownloadJobStatus).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      cancellationPoll.resolve({ status: "completed", progress: 100 });
+    });
+    await flushMicrotasks();
+
+    expect(result.current.state).toBe("completed");
+    expect(result.current.progress).toBe(100);
+    expect(cancelDownloadJob).toHaveBeenCalledTimes(1);
+    expect(window.location.assign).not.toHaveBeenCalled();
+  });
+
   it.each([
-    ["waiting", "waiting", 64, true],
-    ["active", "active", 64, true],
-    ["completed", "completed", 100, false],
-    ["failed", "failed", 64, false],
+    ["completed", "completed", 100],
+    ["failed", "failed", 64],
   ] as const)(
     "maps a known-job DELETE %s response to %s",
-    async (responseStatus, expectedState, expectedProgress, retryable) => {
+    async (responseStatus, expectedState, expectedProgress) => {
       vi.mocked(queueTrackDownloads).mockResolvedValue({
         results: [{ trackId: track.id, jobId: "job-1", position: 1 }],
       });
@@ -297,17 +380,7 @@ describe("useTrackDownload", () => {
         await result.current.cancel();
       });
 
-      if (retryable) {
-        expect(cancelDownloadJob).toHaveBeenCalledTimes(2);
-        expect(cancelDownloadJob).toHaveBeenNthCalledWith(
-          2,
-          "job-1",
-          expect.any(Object),
-        );
-        expect(result.current.state).toBe("canceled");
-      } else {
-        expect(cancelDownloadJob).toHaveBeenCalledTimes(1);
-      }
+      expect(cancelDownloadJob).toHaveBeenCalledTimes(1);
     },
   );
 
@@ -477,13 +550,11 @@ describe("useTrackDownload", () => {
   });
 
   it.each([
-    ["waiting", "waiting", 0, true],
-    ["active", "active", 0, true],
-    ["completed", "completed", 100, false],
-    ["failed", "failed", 0, false],
+    ["completed", "completed", 100],
+    ["failed", "failed", 0],
   ] as const)(
     "maps a late-ack compensating DELETE %s response to %s",
-    async (responseStatus, expectedState, expectedProgress, retryable) => {
+    async (responseStatus, expectedState, expectedProgress) => {
       const queued = deferred<{
         results: Array<{ trackId: string; jobId: string; position: number }>;
       }>();
@@ -521,17 +592,7 @@ describe("useTrackDownload", () => {
         await result.current.cancel();
       });
 
-      if (retryable) {
-        expect(cancelDownloadJob).toHaveBeenCalledTimes(2);
-        expect(cancelDownloadJob).toHaveBeenNthCalledWith(
-          2,
-          "job-late",
-          expect.any(Object),
-        );
-        expect(result.current.state).toBe("canceled");
-      } else {
-        expect(cancelDownloadJob).toHaveBeenCalledTimes(1);
-      }
+      expect(cancelDownloadJob).toHaveBeenCalledTimes(1);
     },
   );
 

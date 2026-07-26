@@ -67,6 +67,7 @@ export function useTrackDownload(): TrackDownloadController {
   const snapshotRef = useRef(snapshot);
   const generationRef = useRef(0);
   const jobIdRef = useRef<string | null>(null);
+  const cancellationRequestedJobIdRef = useRef<string | null>(null);
   const pendingQueuesRef = useRef(new Map<number, PendingQueueGeneration>());
   const cancelAbortControllersRef = useRef(new Set<AbortController>());
   const knownCancelPromiseRef = useRef<Promise<void> | null>(null);
@@ -92,6 +93,84 @@ export function useTrackDownload(): TrackDownloadController {
     [isCurrent],
   );
 
+  const stopPolling = useCallback(() => {
+    if (pollTimerRef.current !== null) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    pollAbortRef.current?.abort();
+    pollAbortRef.current = null;
+    pollInFlightRef.current = false;
+  }, []);
+
+  const pollJob = useCallback(
+    (jobId: string, generation: number, navigateOnComplete: boolean): void => {
+      const poll = async (attempt: number): Promise<void> => {
+        if (!isCurrent(generation, jobId) || pollInFlightRef.current) return;
+
+        const pollAbort = new AbortController();
+        pollAbortRef.current = pollAbort;
+        pollInFlightRef.current = true;
+        let nextDelay: number | null = null;
+
+        try {
+          const status = await getDownloadJobStatus(
+            jobId,
+            tfRequestInit({
+              method: "GET",
+              signal: pollAbort.signal,
+            }),
+          );
+          if (!isCurrent(generation, jobId)) return;
+
+          const progress = clampProgress(status.progress);
+          if (status.status === "waiting" || status.status === "active") {
+            commit(generation, { state: status.status, progress });
+            nextDelay =
+              POLL_DELAYS_MS[Math.min(attempt, POLL_DELAYS_MS.length - 1)];
+          } else {
+            jobIdRef.current = null;
+            cancellationRequestedJobIdRef.current = null;
+            if (status.status === "completed") {
+              commit(generation, { state: "completed", progress: 100 });
+              if (
+                navigateOnComplete &&
+                navigationGenerationRef.current !== generation
+              ) {
+                navigationGenerationRef.current = generation;
+                window.location.assign(fileNavigationUrl(jobId));
+              }
+            } else {
+              commit(generation, { state: status.status, progress });
+            }
+          }
+        } catch (error) {
+          if (!isCurrent(generation, jobId) || pollAbort.signal.aborted) return;
+          reportTfAuthError(error);
+          commit(generation, {
+            state: "failed",
+            progress: snapshotRef.current.progress,
+          });
+        } finally {
+          if (pollAbortRef.current === pollAbort) {
+            pollAbortRef.current = null;
+            pollInFlightRef.current = false;
+          }
+        }
+
+        if (nextDelay !== null && isCurrent(generation, jobId)) {
+          pollTimerRef.current = setTimeout(() => {
+            pollTimerRef.current = null;
+            void poll(attempt + 1);
+          }, nextDelay);
+        }
+      };
+
+      void poll(0);
+    },
+    [commit, isCurrent],
+  );
+
   const applyCancelResponse = useCallback(
     (
       generation: number,
@@ -102,25 +181,19 @@ export function useTrackDownload(): TrackDownloadController {
       const retainsJob =
         response.status === "waiting" || response.status === "active";
       jobIdRef.current = retainsJob ? response.jobId : null;
+      cancellationRequestedJobIdRef.current = retainsJob
+        ? response.jobId
+        : null;
       navigationGenerationRef.current = null;
       commit(generation, {
         state: response.status,
         progress:
           response.status === "completed" ? 100 : clampProgress(progress),
       });
+      if (retainsJob) pollJob(response.jobId, generation, false);
     },
-    [commit, isCurrent],
+    [commit, isCurrent, pollJob],
   );
-
-  const stopPolling = useCallback(() => {
-    if (pollTimerRef.current !== null) {
-      clearTimeout(pollTimerRef.current);
-      pollTimerRef.current = null;
-    }
-    pollAbortRef.current?.abort();
-    pollAbortRef.current = null;
-    pollInFlightRef.current = false;
-  }, []);
 
   const cancelJob = useCallback(
     async (jobId: string): Promise<DownloadJobCancelResponse> => {
@@ -175,62 +248,9 @@ export function useTrackDownload(): TrackDownloadController {
       };
       pendingQueuesRef.current.set(generation, pendingQueue);
       jobIdRef.current = null;
+      cancellationRequestedJobIdRef.current = null;
       navigationGenerationRef.current = null;
       commit(generation, { state: "waiting", progress: 0 });
-
-      const poll = async (jobId: string, attempt: number): Promise<void> => {
-        if (!isCurrent(generation, jobId) || pollInFlightRef.current) return;
-
-        const pollAbort = new AbortController();
-        pollAbortRef.current = pollAbort;
-        pollInFlightRef.current = true;
-        let nextDelay: number | null = null;
-
-        try {
-          const status = await getDownloadJobStatus(
-            jobId,
-            tfRequestInit({
-              method: "GET",
-              signal: pollAbort.signal,
-            }),
-          );
-          if (!isCurrent(generation, jobId)) return;
-
-          const progress = clampProgress(status.progress);
-          if (status.status === "waiting" || status.status === "active") {
-            commit(generation, { state: status.status, progress });
-            nextDelay =
-              POLL_DELAYS_MS[Math.min(attempt, POLL_DELAYS_MS.length - 1)];
-          } else if (status.status === "completed") {
-            commit(generation, { state: "completed", progress: 100 });
-            if (navigationGenerationRef.current !== generation) {
-              navigationGenerationRef.current = generation;
-              window.location.assign(fileNavigationUrl(jobId));
-            }
-          } else {
-            commit(generation, { state: status.status, progress });
-          }
-        } catch (error) {
-          if (!isCurrent(generation, jobId) || pollAbort.signal.aborted) return;
-          reportTfAuthError(error);
-          commit(generation, {
-            state: "failed",
-            progress: snapshotRef.current.progress,
-          });
-        } finally {
-          if (pollAbortRef.current === pollAbort) {
-            pollAbortRef.current = null;
-            pollInFlightRef.current = false;
-          }
-        }
-
-        if (nextDelay !== null && isCurrent(generation, jobId)) {
-          pollTimerRef.current = setTimeout(() => {
-            pollTimerRef.current = null;
-            void poll(jobId, attempt + 1);
-          }, nextDelay);
-        }
-      };
 
       try {
         const response = await queueTrackDownloads(
@@ -298,7 +318,7 @@ export function useTrackDownload(): TrackDownloadController {
         if (!isCurrent(generation) || pendingQueue.abort.signal.aborted) return;
         if (!jobId) throw new Error("download queue returned no job");
         jobIdRef.current = jobId;
-        void poll(jobId, 0);
+        pollJob(jobId, generation, true);
       } catch (error) {
         if (
           pendingQueue.canceled ||
@@ -315,7 +335,7 @@ export function useTrackDownload(): TrackDownloadController {
         }
       }
     },
-    [applyCancelResponse, cancelJob, commit, isCurrent, stopPolling],
+    [applyCancelResponse, cancelJob, commit, isCurrent, pollJob, stopPolling],
   );
 
   const cancel = useCallback(async () => {
@@ -346,6 +366,7 @@ export function useTrackDownload(): TrackDownloadController {
 
     const jobId = jobIdRef.current;
     if (jobId === null) return;
+    if (cancellationRequestedJobIdRef.current === jobId) return;
     const previousSnapshot = snapshotRef.current;
     const generation = ++generationRef.current;
     stopPolling();

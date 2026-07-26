@@ -102,10 +102,12 @@ else
   end
 end
 
-if state ~= "waiting" and state ~= "active" then return state end
+local pending = state == "waiting" or state == "active"
+local terminal = state == "completed" or state == "failed" or state == "canceled"
+if not pending and not terminal then return state end
 local intent = rcall("HGET", KEYS[10], jobId)
 if intent and intent ~= ARGV[5] then return "ledger_mismatch" end
-rcall("HSET", KEYS[9], ARGV[3], ARGV[4])
+if pending then rcall("HSET", KEYS[9], ARGV[3], ARGV[4]) end
 if intent == ARGV[5] then rcall("HDEL", KEYS[10], jobId) end
 return state
 `;

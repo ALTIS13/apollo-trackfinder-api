@@ -80,7 +80,7 @@ async function waitForState(
 
 describe("download cancellation with Redis 7 and BullMQ", () => {
   integrationIt(
-    "keeps capacity in BullMQ until the worker records cancellation failure",
+    "keeps jobs until worker terminal state and releases capacity before retention",
     async () => {
       if (INTEGRATION_REDIS_URL === undefined) {
         throw new Error("integration Redis URL is required");
@@ -270,6 +270,38 @@ describe("download cancellation with Redis 7 and BullMQ", () => {
         await expect(
           adapter.cancel(FAILED_JOB_ID, ACCOUNT_ID),
         ).resolves.toEqual({ status: "failed" });
+        await inspection.hset(
+          ledgerKey,
+          FAILED_JOB_ID,
+          encodeDownloadAdmissionIntent("pending", ACCOUNT_ID),
+        );
+        await expect(
+          adapter.cancel(FAILED_JOB_ID, ACCOUNT_ID),
+        ).resolves.toEqual({ status: "failed" });
+        await expect(inspection.hget(ledgerKey, FAILED_JOB_ID)).resolves.toBe(
+          null,
+        );
+
+        const failedJob = await queue.getJob(FAILED_JOB_ID);
+        await failedJob?.remove();
+        await expect(queue.getJob(FAILED_JOB_ID)).resolves.toBeUndefined();
+        await expect(
+          inspection.exists(
+            getDownloadQueueJobHashKey(queue.toKey.bind(queue), FAILED_JOB_ID),
+          ),
+        ).resolves.toBe(0);
+
+        const retainedIntents = Object.fromEntries(
+          Array.from({ length: 198 }, (_, index) => [
+            `retained-${index}`,
+            encodeDownloadAdmissionIntent("pending", ACCOUNT_ID),
+          ]),
+        );
+        await inspection.hset(ledgerKey, retainedIntents);
+        await expect(adapter.enqueue(jobData)).resolves.toEqual({
+          jobId: expect.any(String),
+          position: 200,
+        });
       } finally {
         releaseActive?.();
         await worker?.close(true).catch(() => undefined);
