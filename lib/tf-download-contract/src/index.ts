@@ -21,7 +21,49 @@ const canonicalUuidSchema = z
   .string()
   .uuid()
   .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
-const timestampSchema = z.string().datetime({ offset: true });
+const isRealIsoInstant = (value: string): boolean => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/.exec(
+    value,
+  );
+  if (!match) {
+    return false;
+  }
+
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, offset, offsetHourText, offsetMinuteText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+
+  if (
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    (offset !== "Z" && (Number(offsetHourText) > 23 || Number(offsetMinuteText) > 59))
+  ) {
+    return false;
+  }
+
+  const calendarDate = new Date(0);
+  calendarDate.setUTCFullYear(year, month - 1, day);
+  calendarDate.setUTCHours(hour, minute, second, 0);
+  return (
+    calendarDate.getUTCFullYear() === year &&
+    calendarDate.getUTCMonth() === month - 1 &&
+    calendarDate.getUTCDate() === day &&
+    calendarDate.getUTCHours() === hour &&
+    calendarDate.getUTCMinutes() === minute &&
+    calendarDate.getUTCSeconds() === second
+  );
+};
+const timestampSchema = z
+  .string()
+  .datetime({ offset: true })
+  .refine(isRealIsoInstant, "Expected a real ISO instant with a legal offset");
+const boundedTrimmedStringSchema = (max: number) =>
+  z.string().min(1).max(max).trim().min(1);
 
 export const downloadQualitySchema = z.enum(["128", "192", "256", "320", "flac"]);
 export type DownloadQuality = z.infer<typeof downloadQualitySchema>;
@@ -79,11 +121,7 @@ export const parseAllowedDownloadSourceUrl = (value: string): URL | null => {
   }
 };
 
-const sourceUrlSchema = z
-  .string()
-  .trim()
-  .min(1)
-  .max(MAX_SOURCE_URL_LENGTH)
+const sourceUrlSchema = boundedTrimmedStringSchema(MAX_SOURCE_URL_LENGTH)
   .refine((value) => parseAllowedDownloadSourceUrl(value) !== null, {
     message: "Expected an allowed HTTPS download source URL",
   });
@@ -92,9 +130,9 @@ const downloadJobDataObjectSchema = z
   .object({
     schemaVersion: z.literal(1),
     accountId: canonicalUuidSchema,
-    trackId: z.string().trim().min(1).max(MAX_TRACK_ID_LENGTH),
-    artist: z.string().trim().min(1).max(MAX_ARTIST_LENGTH),
-    title: z.string().trim().min(1).max(MAX_TITLE_LENGTH),
+    trackId: boundedTrimmedStringSchema(MAX_TRACK_ID_LENGTH),
+    artist: boundedTrimmedStringSchema(MAX_ARTIST_LENGTH),
+    title: boundedTrimmedStringSchema(MAX_TITLE_LENGTH),
     quality: downloadQualitySchema,
     sourceUrl: sourceUrlSchema,
     createdAt: timestampSchema,

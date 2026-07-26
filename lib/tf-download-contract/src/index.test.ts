@@ -14,6 +14,17 @@ const ACCOUNT_ID = "a0000000-0000-4000-8000-000000000001";
 const REQUEST_ID = "b0000000-0000-4000-8000-000000000002";
 const JOB_ID = "c0000000-0000-4000-8000-000000000003";
 const CREATED_AT = "2026-07-26T00:00:00.000Z";
+const MAX_SOURCE_URL = `https://youtube.com/${"x".repeat(4_076)}`;
+const FORBIDDEN_SOURCE_URLS = [
+  "http://youtube.com/watch?v=example",
+  "https://user:pass@youtube.com/watch?v=example",
+  "https://youtube.com:444/watch?v=example",
+  "https://youtube.com/watch?v=example#fragment",
+  "https://youtube.com.evil.test/watch?v=example",
+  "https://notyoutube.com/watch?v=example",
+  "https://yоutube.com/watch?v=example",
+  "not a URL",
+] as const;
 
 const downloadJobData = {
   schemaVersion: 1,
@@ -69,6 +80,57 @@ describe("tf download contract", () => {
     expect(downloadJobDataSchema.safeParse({ ...downloadJobData, createdAt: "not-a-date" }).success).toBe(false);
   });
 
+  it("rejects raw download job strings that exceed bounds before trimming", () => {
+    expect(
+      downloadJobDataSchema.safeParse({ ...downloadJobData, trackId: `${"x".repeat(4_096)} ` })
+        .success,
+    ).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({ ...downloadJobData, artist: `${"x".repeat(300)} ` })
+        .success,
+    ).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({ ...downloadJobData, title: `${"x".repeat(500)} ` })
+        .success,
+    ).toBe(false);
+    expect(
+      downloadJobDataSchema.safeParse({ ...downloadJobData, sourceUrl: ` ${MAX_SOURCE_URL}` })
+        .success,
+    ).toBe(false);
+  });
+
+  it("accepts exact string bounds and rejects the next value", () => {
+    expect(
+      downloadJobDataSchema.safeParse({
+        ...downloadJobData,
+        trackId: "x".repeat(4_096),
+        artist: "x".repeat(300),
+        title: "x".repeat(500),
+        sourceUrl: MAX_SOURCE_URL,
+      }).success,
+    ).toBe(true);
+    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, trackId: "x".repeat(4_097) }).success).toBe(false);
+    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, artist: "x".repeat(301) }).success).toBe(false);
+    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, title: "x".repeat(501) }).success).toBe(false);
+    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, sourceUrl: `${MAX_SOURCE_URL}x` }).success).toBe(false);
+    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, filename: "x".repeat(255) }).success).toBe(true);
+    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, filename: "x".repeat(256) }).success).toBe(false);
+  });
+
+  it("rejects timestamps that are not real ISO instants", () => {
+    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, createdAt: "2026-07-26T00:00:00+99:99" }).success).toBe(false);
+    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, createdAt: "2026-02-30T00:00:00Z" }).success).toBe(false);
+    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, completedAt: "2026-07-26T00:00:00-99:99" }).success).toBe(false);
+    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, completedAt: "2026-02-30T00:00:00Z" }).success).toBe(false);
+    expect(downloadJobDataSchema.safeParse({ ...downloadJobData, createdAt: "2026-07-26T00:00:00+23:59" }).success).toBe(true);
+  });
+
+  it("rejects every forbidden source URL through job data parsing", () => {
+    for (const sourceUrl of FORBIDDEN_SOURCE_URLS) {
+      expect(downloadJobDataSchema.safeParse({ ...downloadJobData, sourceUrl }).success).toBe(false);
+    }
+  });
+
   it("allows only safe HTTPS URLs from exact or subdomain provider hosts", () => {
     for (const value of [
       "https://youtube.com/watch?v=example",
@@ -85,16 +147,7 @@ describe("tf download contract", () => {
       expect(parseAllowedDownloadSourceUrl(value)?.href).toBe(new URL(value).href);
     }
 
-    for (const value of [
-      "http://youtube.com/watch?v=example",
-      "https://user:pass@youtube.com/watch?v=example",
-      "https://youtube.com:444/watch?v=example",
-      "https://youtube.com/watch?v=example#fragment",
-      "https://youtube.com.evil.test/watch?v=example",
-      "https://notyoutube.com/watch?v=example",
-      "https://yоutube.com/watch?v=example",
-      "not a URL",
-    ]) {
+    for (const value of FORBIDDEN_SOURCE_URLS) {
       expect(parseAllowedDownloadSourceUrl(value)).toBeNull();
     }
 
@@ -108,6 +161,8 @@ describe("tf download contract", () => {
     expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, fileSize: DOWNLOAD_MAX_FILE_BYTES + 1 }).success).toBe(false);
     expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, fileSize: 1.5 }).success).toBe(false);
     expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, mimeType: "audio/wav" }).success).toBe(false);
+    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, storageKey: `${JOB_ID}.flac` }).success).toBe(false);
+    expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, storageKey: `${JOB_ID}.flac`, mimeType: "audio/flac" }).success).toBe(true);
     expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, filename: "bad/name.mp3" }).success).toBe(false);
     expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, filename: "bad\\name.mp3" }).success).toBe(false);
     expect(downloadJobResultSchema.safeParse({ ...downloadJobResult, filename: "bad\r\nname.mp3" }).success).toBe(false);
@@ -138,6 +193,7 @@ describe("tf download contract", () => {
     expect(downloadFileCommandSchema.safeParse({ ...command, requestId: "not-a-uuid" }).success).toBe(false);
     expect(downloadFileCommandSchema.safeParse({ ...command, jobId: JOB_ID.toUpperCase() }).success).toBe(false);
     expect(downloadFileCommandSchema.safeParse({ ...command, range: { start: -1 } }).success).toBe(false);
+    expect(downloadFileCommandSchema.safeParse({ ...command, range: { start: 0, end: DOWNLOAD_MAX_FILE_BYTES } }).success).toBe(false);
     expect(downloadFileCommandSchema.safeParse({ ...command, range: { start: 2, end: 1 } }).success).toBe(false);
     expect(downloadFileCommandSchema.safeParse({ ...command, range: { start: 0, extra: true } }).success).toBe(false);
     expect(downloadFileCommandSchema.safeParse({ ...command, extra: true }).success).toBe(false);
