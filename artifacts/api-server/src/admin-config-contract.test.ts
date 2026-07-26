@@ -348,17 +348,25 @@ describe("admin telemetry container contract", () => {
     expect(adminEntrypoint).toContain("unset ADMIN_ACCESS_PASSWORD");
   });
 
-  it("separates blocking worker connections from bounded telemetry commands", () => {
-    expect(backgroundQueueSource).toMatch(
-      /const workerConnection:\s*RedisOptions\s*=/,
+  it("separates producer, telemetry, and cancellation clients without embedding a worker", () => {
+    expect(backgroundQueueSource).toContain(
+      'import { Queue } from "bullmq";',
+    );
+    expect(backgroundQueueSource).not.toMatch(
+      /import\s*{[^}]*\bWorker\b[^}]*}\s*from\s*"bullmq"/,
     );
     expect(backgroundQueueSource).toMatch(
-      /const telemetryConnection:\s*RedisOptions\s*=/,
+      /interface Clients\s*{[\s\S]*producer:\s*QueueClient;[\s\S]*telemetry:\s*QueueClient;[\s\S]*cancellation:\s*RedisClient;[\s\S]*}/,
     );
     expect(backgroundQueueSource).toContain("commandTimeout: 1000");
-    expect(backgroundQueueSource).toContain("{ connection: workerConnection");
     expect(backgroundQueueSource).toContain(
-      "{ connection: telemetryConnection }",
+      "producer: { ...common, commandTimeout: PRODUCER_COMMAND_TIMEOUT_MS }",
     );
+    expect(backgroundQueueSource).toContain("connection: config.producer");
+    expect(backgroundQueueSource).toContain("connection: config.telemetry");
+    expect(backgroundQueueSource).toContain(
+      "const cancellation = makeRedis(config.cancellation)",
+    );
+    expect(backgroundQueueSource).toContain("workerEmbedded: false");
   });
 });
