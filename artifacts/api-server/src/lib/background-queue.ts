@@ -56,13 +56,6 @@ if not stored then return 1 end
 if stored ~= ARGV[2] then return 0 end
 return redis.call("HDEL", KEYS[1], ARGV[1])
 `;
-const RECORD_WAITING_CANCELLATION_SCRIPT = `
-local stored = redis.call("HGET", KEYS[1], ARGV[1])
-if stored and stored ~= ARGV[2] then return 0 end
-redis.call("SET", KEYS[2], ARGV[3], "PX", ARGV[4])
-if stored then redis.call("HDEL", KEYS[1], ARGV[1]) end
-return 1
-`;
 
 export { type DownloadJobData, type DownloadJobResult };
 export class DownloadQueueUnavailableError extends Error {
@@ -372,25 +365,30 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
       throw unavailable();
     return position;
   };
-  const recordWaitingCancellation = async (
+  const persistWaitingCancellation = async (
     producer: QueueClient,
     cancellation: RedisClient,
     jobId: string,
     accountId: string,
   ): Promise<void> => {
-    const recorded = Number(
-      await cancellation.eval(
-        RECORD_WAITING_CANCELLATION_SCRIPT,
-        2,
-        getDownloadQueueAdmissionLedgerKey((suffix) => producer.toKey(suffix)),
-        producer.toKey(`canceled:${jobId}`),
-        jobId,
-        encodeDownloadAdmissionIntent("pending", accountId),
-        accountId,
-        String(JOB_RETENTION_MS),
-      ),
+    const recorded = await cancellation.set(
+      producer.toKey(`canceled:${jobId}`),
+      accountId,
+      "PX",
+      JOB_RETENTION_MS,
     );
-    if (recorded !== 1) throw unavailable();
+    if (recorded !== "OK") throw unavailable();
+  };
+  const hasWaitingCancellation = async (
+    producer: QueueClient,
+    cancellation: RedisClient,
+    jobId: string,
+    accountId: string,
+  ): Promise<boolean> => {
+    const tombstone = await cancellation.get(
+      producer.toKey(`canceled:${jobId}`),
+    );
+    return tombstone === accountId;
   };
   const cancelState = async (
     current: Clients,
@@ -401,15 +399,32 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
   ): Promise<{ status: JobStatus["status"] }> => {
     const state = mapState(raw, job.failedReason);
     if (state === "waiting") {
+      await persistWaitingCancellation(
+        current.producer,
+        current.cancellation,
+        jobId,
+        data.accountId,
+      );
       try {
         await job.remove();
       } catch {
         const reread = await job.getState();
-        if (mapState(reread, job.failedReason) === "waiting")
-          throw unavailable();
+        const rereadState = mapState(reread, job.failedReason);
+        if (rereadState === "waiting") throw unavailable();
+        if (
+          rereadState === "unknown" &&
+          (await hasWaitingCancellation(
+            current.producer,
+            current.cancellation,
+            jobId,
+            data.accountId,
+          ))
+        ) {
+          return { status: "canceled" };
+        }
         return cancelState(current, job, jobId, reread, data);
       }
-      await recordWaitingCancellation(
+      await releaseAdmissionIntent(
         current.producer,
         current.cancellation,
         jobId,

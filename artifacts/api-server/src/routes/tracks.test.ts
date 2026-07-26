@@ -775,6 +775,91 @@ describe("track account ownership", () => {
     );
   });
 
+  it.each([
+    [
+      "credentials",
+      "yt",
+      "https://user:password@www.youtube.com/watch?v=private",
+    ],
+    [
+      "a non-default port",
+      "yt",
+      "https://www.youtube.com:8443/watch?v=private",
+    ],
+    ["the default port", "yt", "https://www.youtube.com:443/watch?v=private"],
+    ["a fragment", "yt", "https://www.youtube.com/watch?v=private#fragment"],
+    ["non-HTTPS", "yt", "http://www.youtube.com/watch?v=private"],
+    [
+      "a mismatched provider host",
+      "yt",
+      "https://soundcloud.com/artist/private",
+    ],
+    ["an internal host", "sc", "https://127.0.0.1/private"],
+  ] as const)(
+    "rejects an encoded track URL with %s before enqueue",
+    async (_label, source, sourceUrl) => {
+      const dependencies = routeDependencies();
+      const baseUrl = await startTracksServer(dependencies);
+
+      const response = await fetch(`${baseUrl}/tracks/download/queue`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          tracks: [queueTrack({ trackId: trackIdFor(source, sourceUrl) })],
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({ error: "bad_request" });
+      expect(dependencies.enqueueDownload).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["yt", "https://music.youtube.com/watch?v=valid-query&list=preserved"],
+    ["sc", "https://api-v2.soundcloud.com/tracks/1?client_id=preserved"],
+    ["bc", "https://artist.bandcamp.com/track/valid?from=preserved"],
+  ] as const)(
+    "accepts a strict %s provider URL and preserves its query string",
+    async (source, sourceUrl) => {
+      const dependencies = routeDependencies();
+      const baseUrl = await startTracksServer(dependencies);
+      const trackId = trackIdFor(source, sourceUrl);
+
+      const response = await fetch(`${baseUrl}/tracks/download/queue`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tracks: [queueTrack({ trackId })] }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(dependencies.enqueueDownload).toHaveBeenCalledWith(
+        expect.objectContaining({ trackId, sourceUrl }),
+      );
+    },
+  );
+
+  it("accepts a strict Deezer provider URL with a query string", async () => {
+    const gateway = searchGateway();
+    gateway.search.mockResolvedValue(searchResponse());
+    const dependencies = routeDependencies({ searchGateway: gateway });
+    const baseUrl = await startTracksServer(dependencies);
+    const trackId = trackIdFor(
+      "dz",
+      "https://api.deezer.com/track/1?utm_source=preserved",
+    );
+
+    const response = await fetch(`${baseUrl}/tracks/download/queue`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tracks: [queueTrack({ trackId })] }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(gateway.search).toHaveBeenCalledOnce();
+    expect(dependencies.enqueueDownload).toHaveBeenCalledOnce();
+  });
+
   it("resolves a Deezer download through tf-search only with live tf.search access", async () => {
     const gateway = searchGateway();
     const resolvedSourceUrl =
@@ -1127,15 +1212,14 @@ describe("track account ownership", () => {
       cancelDownloadJob: vi.fn().mockResolvedValue({ status: "canceled" }),
     });
     const canceledUrl = await startTracksServer(alreadyCanceled);
-    const first = await fetch(`${canceledUrl}/tracks/download/jobs/${JOB_ID}`, {
-      method: "DELETE",
-    });
-    const second = await fetch(
-      `${canceledUrl}/tracks/download/jobs/${JOB_ID}`,
-      {
+    const [first, second] = await Promise.all([
+      fetch(`${canceledUrl}/tracks/download/jobs/${JOB_ID}`, {
         method: "DELETE",
-      },
-    );
+      }),
+      fetch(`${canceledUrl}/tracks/download/jobs/${JOB_ID}`, {
+        method: "DELETE",
+      }),
+    ]);
 
     expect([first.status, second.status]).toEqual([200, 200]);
     await expect(first.json()).resolves.toEqual({

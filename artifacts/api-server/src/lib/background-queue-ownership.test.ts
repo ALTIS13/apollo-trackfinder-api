@@ -79,7 +79,7 @@ function createAdapter(
         return 1;
       },
     ),
-    set: vi.fn(async (key: string, value: string) => {
+    set: vi.fn(async (key: string, value: string): Promise<string | null> => {
       values.set(key, value);
       return "OK";
     }),
@@ -207,6 +207,145 @@ describe("download queue ownership, states, and cancellation", () => {
     expect(ledger).toEqual(new Map());
   });
 
+  it("writes the owner tombstone before removal and releases capacity afterward", async () => {
+    const waiting = job("waiting-job", JOB_DATA, ["waiting"]);
+    const jobs = new Map([[waiting.id, waiting]]);
+    const events: string[] = [];
+    waiting.remove.mockImplementation(async () => {
+      events.push("remove");
+      jobs.delete(waiting.id);
+    });
+    const { adapter, producer, redis, ledger, values } = createAdapter(jobs);
+    ledger.set(waiting.id, `pending:${ACCOUNT_ID}`);
+    redis.set.mockImplementation(async (key: string, value: string) => {
+      events.push("tombstone");
+      values.set(key, value);
+      return "OK";
+    });
+    const evaluate = redis.eval.getMockImplementation()!;
+    redis.eval.mockImplementation(
+      async (script: string, keyCount: number, ...args: string[]) => {
+        events.push("release");
+        return evaluate(script, keyCount, ...args);
+      },
+    );
+    await adapter.init();
+
+    await expect(adapter.cancel(waiting.id, ACCOUNT_ID)).resolves.toEqual({
+      status: "canceled",
+    });
+    expect(events).toEqual(["tombstone", "remove", "release"]);
+    expect(ledger).toEqual(new Map());
+    expect(redis.set).toHaveBeenCalledWith(
+      producer.toKey(`canceled:${waiting.id}`),
+      ACCOUNT_ID,
+      "PX",
+      86_400_000,
+    );
+    expect(values.get(producer.toKey(`canceled:${waiting.id}`))).toBe(
+      ACCOUNT_ID,
+    );
+  });
+
+  it("does not remove a waiting job when the tombstone write fails", async () => {
+    const waiting = job("waiting-job", JOB_DATA, ["waiting"]);
+    const { adapter, redis, ledger } = createAdapter(
+      new Map([[waiting.id, waiting]]),
+    );
+    ledger.set(waiting.id, `pending:${ACCOUNT_ID}`);
+    redis.set.mockResolvedValueOnce(null);
+    await adapter.init();
+
+    await expect(adapter.cancel(waiting.id, ACCOUNT_ID)).rejects.toBeInstanceOf(
+      queueModule.DownloadQueueUnavailableError,
+    );
+    expect(waiting.remove).not.toHaveBeenCalled();
+    expect(ledger).toEqual(new Map([[waiting.id, `pending:${ACCOUNT_ID}`]]));
+  });
+
+  it("retries an existing waiting job after an ambiguous remove failure", async () => {
+    const waiting = job("waiting-job", JOB_DATA, [
+      "waiting",
+      "waiting",
+      "waiting",
+    ]);
+    const jobs = new Map([[waiting.id, waiting]]);
+    waiting.remove
+      .mockRejectedValueOnce(new Error("remove failed"))
+      .mockImplementationOnce(async () => {
+        jobs.delete(waiting.id);
+      });
+    const { adapter, producer, ledger, values } = createAdapter(jobs);
+    ledger.set(waiting.id, `pending:${ACCOUNT_ID}`);
+    await adapter.init();
+
+    await expect(adapter.cancel(waiting.id, ACCOUNT_ID)).rejects.toBeInstanceOf(
+      queueModule.DownloadQueueUnavailableError,
+    );
+    expect(values.get(producer.toKey(`canceled:${waiting.id}`))).toBe(
+      ACCOUNT_ID,
+    );
+    expect(ledger).toEqual(new Map([[waiting.id, `pending:${ACCOUNT_ID}`]]));
+
+    await expect(adapter.cancel(waiting.id, ACCOUNT_ID)).resolves.toEqual({
+      status: "canceled",
+    });
+    expect(waiting.remove).toHaveBeenCalledTimes(2);
+    expect(ledger).toEqual(new Map());
+  });
+
+  it("resolves an ambiguous remove-to-unknown race through the owner tombstone", async () => {
+    const raced = job("raced-unknown", JOB_DATA, ["waiting", "unknown"]);
+    raced.remove.mockRejectedValueOnce(new Error("already removed"));
+    const { adapter } = createAdapter(new Map([[raced.id, raced]]));
+    await adapter.init();
+
+    await expect(adapter.cancel(raced.id, ACCOUNT_ID)).resolves.toEqual({
+      status: "canceled",
+    });
+  });
+
+  it("makes concurrent same-owner waiting cancellations both idempotent", async () => {
+    const waiting = job("waiting-job", JOB_DATA, []);
+    const jobs = new Map([[waiting.id, waiting]]);
+    let state = "waiting";
+    let removeCalls = 0;
+    let releaseFirstRemove!: () => void;
+    let finishFirstRemove!: () => void;
+    const firstRemoveGate = new Promise<void>((resolve) => {
+      releaseFirstRemove = resolve;
+    });
+    const firstRemoveFinished = new Promise<void>((resolve) => {
+      finishFirstRemove = resolve;
+    });
+    waiting.getState.mockImplementation(async () => state);
+    waiting.remove.mockImplementation(async () => {
+      removeCalls += 1;
+      if (removeCalls === 1) {
+        await firstRemoveGate;
+        state = "unknown";
+        jobs.delete(waiting.id);
+        finishFirstRemove();
+        return;
+      }
+      await firstRemoveFinished;
+      throw new Error("already removed");
+    });
+    const { adapter } = createAdapter(jobs);
+    await adapter.init();
+
+    const first = adapter.cancel(waiting.id, ACCOUNT_ID);
+    await vi.waitFor(() => expect(waiting.remove).toHaveBeenCalledTimes(1));
+    const second = adapter.cancel(waiting.id, ACCOUNT_ID);
+    await vi.waitFor(() => expect(waiting.remove).toHaveBeenCalledTimes(2));
+    releaseFirstRemove();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { status: "canceled" },
+      { status: "canceled" },
+    ]);
+  });
+
   it("keeps waiting cancellation idempotent only for the exact owner", async () => {
     const waiting = job("waiting-job", JOB_DATA, ["waiting"]);
     const jobs = new Map([[waiting.id, waiting]]);
@@ -227,15 +366,11 @@ describe("download queue ownership, states, and cancellation", () => {
     ).resolves.toEqual({ status: "unknown" });
     const tombstoneKey = producer.toKey(`canceled:${waiting.id}`);
     expect(values.get(tombstoneKey)).toBe(ACCOUNT_ID);
-    expect(redis.eval).toHaveBeenCalledWith(
-      expect.stringContaining("SET"),
-      2,
-      producer.toKey("admission-intents"),
+    expect(redis.set).toHaveBeenCalledWith(
       tombstoneKey,
-      waiting.id,
-      `pending:${ACCOUNT_ID}`,
       ACCOUNT_ID,
-      "86400000",
+      "PX",
+      86_400_000,
     );
     expect(redis.get).toHaveBeenCalledWith(tombstoneKey);
   });

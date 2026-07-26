@@ -172,26 +172,34 @@ function hasLegacyInvalidSearchOptions(body: unknown): boolean {
   );
 }
 
-const ALLOWED_HOSTS: Record<string, string[]> = {
-  yt: ["www.youtube.com", "youtube.com", "m.youtube.com", "youtu.be"],
-  sc: [
-    "soundcloud.com",
-    "www.soundcloud.com",
-    "api.soundcloud.com",
-    "api-v2.soundcloud.com",
-  ],
+const TRACK_SOURCE_HOSTS = {
+  yt: ["youtube.com"],
+  sc: ["soundcloud.com"],
   bc: ["bandcamp.com"],
-  dz: ["dzcdn.net", "cdns-preview-e.dzcdn.net"],
-};
+  dz: ["deezer.com", "dzcdn.net"],
+} as const;
+type TrackSource = keyof typeof TRACK_SOURCE_HOSTS;
+
+function isProviderHost(source: TrackSource, hostname: string): boolean {
+  return TRACK_SOURCE_HOSTS[source].some(
+    (allowedHost) =>
+      hostname === allowedHost || hostname.endsWith(`.${allowedHost}`),
+  );
+}
+
+function hasExplicitPort(value: string, parsed: URL): boolean {
+  const authority = /^https:\/\/([^/?#]+)/i.exec(value)?.[1];
+  return authority === undefined || authority.toLowerCase() !== parsed.hostname;
+}
 
 function decodeTrackUrl(id: string): { source: string; url: string } | null {
-  const prefixes = ["yt_", "sc_", "bc_", "dz_"];
-  let source: string | null = null;
+  const prefixes = ["yt_", "sc_", "bc_", "dz_"] as const;
+  let source: TrackSource | null = null;
   let encodedPart: string | null = null;
 
   for (const p of prefixes) {
     if (id.startsWith(p)) {
-      source = p.slice(0, -1);
+      source = p.slice(0, -1) as TrackSource;
       encodedPart = id.slice(p.length);
       break;
     }
@@ -206,16 +214,12 @@ function decodeTrackUrl(id: string): { source: string; url: string } | null {
     return null;
   }
 
-  try {
-    const parsed = new URL(url);
-    const hostname = parsed.hostname.toLowerCase();
-    const allowed = ALLOWED_HOSTS[source] ?? [];
-    const isAllowed = allowed.some(
-      (h) => hostname === h || hostname.endsWith(`.${h}`),
-    );
-    if (!isAllowed) return null;
-    if (parsed.protocol !== "https:") return null;
-  } catch {
+  const parsed = parseAllowedDownloadSourceUrl(url);
+  if (
+    parsed === null ||
+    hasExplicitPort(url, parsed) ||
+    !isProviderHost(source, parsed.hostname)
+  ) {
     return null;
   }
 
