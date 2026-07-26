@@ -1,3 +1,4 @@
+import { createHash, createHmac } from "node:crypto";
 import { z } from "zod";
 
 export const DOWNLOAD_QUEUE_NAME = "apollo-tf-downloads-v1";
@@ -142,6 +143,31 @@ export interface DownloadFileCommand {
   readonly accountId: string;
   readonly jobId: string;
   readonly range?: { readonly start: number; readonly end?: number };
+}
+
+export interface TfDownloadFileSignatureInput {
+  readonly method: string;
+  readonly path: string;
+  readonly timestamp: string;
+  readonly nonce: string;
+  readonly rawBody: Uint8Array;
+  readonly secret: string | Uint8Array;
+}
+
+export function createTfDownloadFileSignature(
+  input: TfDownloadFileSignatureInput,
+): string {
+  const bodyHash = createHash("sha256").update(input.rawBody).digest("hex");
+  const canonical = [
+    input.method,
+    input.path,
+    input.timestamp,
+    input.nonce,
+    bodyHash,
+  ].join("\n");
+  return createHmac("sha256", input.secret)
+    .update(canonical)
+    .digest("hex");
 }
 
 const isAllowedSourceHost = (hostname: string): boolean =>

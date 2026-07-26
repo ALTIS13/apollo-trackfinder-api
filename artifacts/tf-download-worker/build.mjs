@@ -9,8 +9,10 @@ const distDir = path.join(artifactDir, "dist");
 await rm(distDir, { recursive: true, force: true });
 await build({
   entryPoints: [
+    "src/app.ts",
     "src/cancellation.ts",
     "src/downloader.ts",
+    "src/internal-auth.ts",
     "src/logger.ts",
     "src/processor.ts",
     "src/storage.ts",

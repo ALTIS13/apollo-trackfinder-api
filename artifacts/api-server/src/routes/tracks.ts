@@ -1,3 +1,5 @@
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { Router, type IRouter } from "express";
 import {
   getStreamUrl,
@@ -23,6 +25,11 @@ import type {
   TfSearchResult,
   TfSearchSource,
 } from "@workspace/tf-search-contract";
+import { DOWNLOAD_MAX_FILE_BYTES } from "@workspace/tf-download-contract";
+import {
+  TfDownloadWorkerError,
+  type TfDownloadWorkerGateway,
+} from "../lib/tf-download-worker-client.js";
 
 interface RecentTrack {
   readonly trackId: string;
@@ -50,6 +57,7 @@ export interface TrackRouteDependencies {
   readonly enqueueDownload: typeof enqueueDownload;
   readonly listDownloadJobs: typeof listSessionDownloadJobs;
   readonly getDownloadJobStatus: typeof getDownloadJobStatus;
+  readonly downloadWorkerGateway: TfDownloadWorkerGateway;
 }
 
 const ALL_SEARCH_SOURCES: readonly TfSearchSource[] = ["yt", "sc", "bc", "dz"];
@@ -69,6 +77,14 @@ function unavailableGateway(): TfSearchGateway {
     search: unavailable,
     discoverArtist: unavailable,
     suggestions: unavailable,
+  };
+}
+
+function unavailableDownloadWorkerGateway(): TfDownloadWorkerGateway {
+  return {
+    async openFile(): Promise<never> {
+      throw new TfDownloadWorkerError(503);
+    },
   };
 }
 
@@ -216,6 +232,7 @@ const defaultTrackRouteDependencies: TrackRouteDependencies = {
   enqueueDownload,
   listDownloadJobs: listSessionDownloadJobs,
   getDownloadJobStatus,
+  downloadWorkerGateway: unavailableDownloadWorkerGateway(),
 };
 
 export function createTracksRouter(
@@ -1009,7 +1026,82 @@ export function createTracksRouter(
   });
 
   router.get("/tracks/download/file/:jobId", async (req, res) => {
-    res.status(404).json({ error: "File not ready or access denied" });
+    const { jobId } = req.params as { jobId: string };
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+        jobId,
+      )
+    ) {
+      res.status(404).json({ error: "file_not_found" });
+      return;
+    }
+    const rangeHeader = req.get("range");
+    let range: { start: number; end?: number } | undefined;
+    if (rangeHeader !== undefined) {
+      const match = /^bytes=(0|[1-9]\d*)-(?:(0|[1-9]\d*))?$/.exec(
+        rangeHeader,
+      );
+      const start = match === null ? NaN : Number(match[1]);
+      const end =
+        match?.[2] === undefined ? undefined : Number(match[2]);
+      if (
+        match === null ||
+        !Number.isSafeInteger(start) ||
+        start < 0 ||
+        start >= DOWNLOAD_MAX_FILE_BYTES ||
+        (end !== undefined &&
+          (!Number.isSafeInteger(end) ||
+            end < start ||
+            end >= DOWNLOAD_MAX_FILE_BYTES))
+      ) {
+        res.status(416).json({ error: "range_not_satisfiable" });
+        return;
+      }
+      range = end === undefined ? { start } : { start, end };
+    }
+
+    const controller = new AbortController();
+    const abort = (): void => controller.abort();
+    const abortOnClose = (): void => {
+      if (!res.writableEnded) abort();
+    };
+    req.once("aborted", abort);
+    res.once("close", abortOnClose);
+    if (req.aborted) abort();
+    try {
+      const file = await routeDependencies.downloadWorkerGateway.openFile({
+        accountId: req.tfPrincipal!.accountId,
+        jobId,
+        ...(range === undefined ? {} : { range }),
+        signal: controller.signal,
+      });
+      res.status(file.status);
+      res.setHeader("content-type", file.contentType);
+      res.setHeader("content-length", String(file.contentLength));
+      res.setHeader("content-disposition", file.contentDisposition);
+      res.setHeader("accept-ranges", "bytes");
+      res.setHeader("cache-control", "private, no-store");
+      if (file.contentRange !== undefined) {
+        res.setHeader("content-range", file.contentRange);
+      }
+      const downstream = Readable.fromWeb(
+        file.body as unknown as import("node:stream/web").ReadableStream<Uint8Array>,
+      );
+      await pipeline(downstream, res, { signal: controller.signal });
+    } catch (error) {
+      if (res.headersSent) {
+        if (!res.destroyed) res.destroy();
+        return;
+      }
+      const workerError =
+        error instanceof TfDownloadWorkerError
+          ? error
+          : new TfDownloadWorkerError(503);
+      res.status(workerError.status).json({ error: workerError.code });
+    } finally {
+      req.off("aborted", abort);
+      res.off("close", abortOnClose);
+    }
   });
 
   return router;

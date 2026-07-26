@@ -12,7 +12,7 @@ import {
   realpath,
   unlink,
 } from "node:fs/promises";
-import type { BigIntStats } from "node:fs";
+import type { BigIntStats, ReadStream } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
@@ -73,6 +73,47 @@ export interface DownloadStorageSweepResult {
   readonly removedStorageKeys: readonly string[];
   readonly bytesRemaining: number;
   readonly quotaSatisfied: boolean;
+}
+
+export interface DownloadStorageReadRange {
+  readonly start: number;
+  readonly end: number;
+}
+
+export class DownloadStorageRead {
+  private closed = false;
+  private streamCreated = false;
+
+  constructor(
+    private readonly handle: FileHandle,
+    readonly size: number,
+  ) {}
+
+  createReadStream(range: DownloadStorageReadRange): ReadStream {
+    if (
+      this.closed ||
+      this.streamCreated ||
+      !Number.isSafeInteger(range.start) ||
+      !Number.isSafeInteger(range.end) ||
+      range.start < 0 ||
+      range.end < range.start ||
+      range.end >= this.size
+    ) {
+      throw unavailable(false);
+    }
+    this.streamCreated = true;
+    return this.handle.createReadStream({
+      start: range.start,
+      end: range.end,
+      autoClose: false,
+    });
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    await this.handle.close().catch(() => undefined);
+  }
 }
 
 interface OwnedEntry {
@@ -316,6 +357,69 @@ export class DownloadStorage {
     }, signal).catch((error: unknown) => {
       throw asStorageError(error, true);
     });
+  }
+
+  async openOwnedFile(
+    candidate: DownloadJobResult,
+    signal?: AbortSignal,
+  ): Promise<DownloadStorageRead> {
+    let result: DownloadJobResult;
+    try {
+      result = downloadJobResultSchema.parse(candidate);
+    } catch {
+      throw unavailable(false);
+    }
+    const completedAt = Date.parse(result.completedAt);
+    if (
+      !Number.isFinite(completedAt) ||
+      completedAt > this.now() ||
+      this.now() - completedAt >= this.ttlMs
+    ) {
+      throw unavailable(false);
+    }
+
+    let handle: FileHandle | undefined;
+    try {
+      throwIfAborted(signal);
+      await this.assertRootIdentity(signal);
+      const filePath = this.containedPath(result.storageKey);
+      const pathStat = await lstat(filePath, { bigint: true });
+      throwIfAborted(signal);
+      if (
+        pathStat.isSymbolicLink() ||
+        !pathStat.isFile() ||
+        pathStat.size !== BigInt(result.fileSize)
+      ) {
+        throw unavailable(false);
+      }
+      const identity = identityOf(pathStat);
+
+      handle = await open(filePath, "r");
+      const handleStat = await handle.stat({ bigint: true });
+      throwIfAborted(signal);
+      if (
+        !handleStat.isFile() ||
+        handleStat.size !== BigInt(result.fileSize) ||
+        !sameIdentity(identityOf(handleStat), identity)
+      ) {
+        throw unavailable(false);
+      }
+      await this.assertRootIdentity(signal);
+      const currentPathStat = await lstat(filePath, { bigint: true });
+      throwIfAborted(signal);
+      if (
+        currentPathStat.isSymbolicLink() ||
+        !currentPathStat.isFile() ||
+        currentPathStat.size !== BigInt(result.fileSize) ||
+        !sameIdentity(identityOf(currentPathStat), identity)
+      ) {
+        throw unavailable(false);
+      }
+      return new DownloadStorageRead(handle, result.fileSize);
+    } catch (error) {
+      await handle?.close().catch(() => undefined);
+      throw asStorageError(error, false);
+    }
   }
 
   async sweep(): Promise<DownloadStorageSweepResult> {

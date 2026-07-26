@@ -4,8 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./app": "./src/app.ts",
     "./cancellation": "./src/cancellation.ts",
     "./downloader": "./src/downloader.ts",
+    "./internal-auth": "./src/internal-auth.ts",
     "./logger": "./src/logger.ts",
     "./processor": "./src/processor.ts",
     "./storage": "./src/storage.ts"

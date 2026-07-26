@@ -10,6 +10,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   TfSearchGateway,
 } from "../lib/tf-search-client.js";
+import {
+  TfDownloadWorkerError,
+  type TfDownloadWorkerGateway,
+} from "../lib/tf-download-worker-client.js";
 import { createTracksRouter, type TrackRouteDependencies } from "./tracks.js";
 
 const ytdlpMocks = vi.hoisted(() => ({
@@ -127,6 +131,14 @@ function searchGateway() {
   } satisfies TfSearchGateway;
 }
 
+function downloadWorkerGateway(): TfDownloadWorkerGateway & {
+  readonly openFile: ReturnType<typeof vi.fn>;
+} {
+  return {
+    openFile: vi.fn().mockRejectedValue(new TfDownloadWorkerError(404)),
+  };
+}
+
 function routeDependencies(
   overrides: Partial<TrackRouteDependencies> = {},
 ) {
@@ -150,6 +162,7 @@ function routeDependencies(
       id: "job-1",
       state: "waiting",
     }),
+    downloadWorkerGateway: downloadWorkerGateway(),
   };
   return Object.assign(
     dependencies,
@@ -690,5 +703,149 @@ describe("track account ownership", () => {
     ]) {
       expect(JSON.stringify(spy.mock.calls)).not.toContain(OTHER_ACCOUNT_ID);
     }
+  });
+});
+
+describe("download worker file proxy", () => {
+  it("binds the worker command to the principal and forwards one range as a stream", async () => {
+    const worker = downloadWorkerGateway();
+    worker.openFile.mockResolvedValue({
+      status: 206,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(Buffer.from("udi"));
+          controller.close();
+        },
+      }),
+      contentLength: 3,
+      contentType: "audio/mpeg",
+      contentDisposition:
+        "attachment; filename=\"Artist - Title.mp3\"; filename*=UTF-8''Artist%20-%20Title.mp3",
+      contentRange: "bytes 1-3/5",
+    });
+    const dependencies = routeDependencies({
+      downloadWorkerGateway: worker,
+    });
+    const baseUrl = await startTracksServer(dependencies);
+
+    const response = await fetch(
+      `${baseUrl}/tracks/download/file/30000000-0000-4000-8000-000000000003`,
+      {
+        headers: {
+          range: "bytes=1-3",
+          "x-client-session": OTHER_ACCOUNT_ID,
+        },
+      },
+    );
+
+    expect(response.status).toBe(206);
+    expect(response.headers.get("content-type")).toBe("audio/mpeg");
+    expect(response.headers.get("content-length")).toBe("3");
+    expect(response.headers.get("content-range")).toBe("bytes 1-3/5");
+    expect(response.headers.get("accept-ranges")).toBe("bytes");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    await expect(response.text()).resolves.toBe("udi");
+    expect(worker.openFile).toHaveBeenCalledTimes(1);
+    expect(worker.openFile).toHaveBeenCalledWith({
+      accountId: ACCOUNT_ID,
+      jobId: "30000000-0000-4000-8000-000000000003",
+      range: { start: 1, end: 3 },
+      signal: expect.any(AbortSignal),
+    });
+    expect(JSON.stringify(worker.openFile.mock.calls)).not.toContain(
+      OTHER_ACCOUNT_ID,
+    );
+  });
+
+  it.each([
+    "bytes=3-1",
+    "bytes=-3",
+    "bytes=1-2,4-5",
+    "items=1-2",
+    "bytes=1073741824-",
+  ])("rejects invalid or multiple public range %s before dispatch", async (
+    range,
+  ) => {
+    const worker = downloadWorkerGateway();
+    const baseUrl = await startTracksServer(
+      routeDependencies({ downloadWorkerGateway: worker }),
+    );
+
+    const response = await fetch(
+      `${baseUrl}/tracks/download/file/30000000-0000-4000-8000-000000000003`,
+      { headers: { range } },
+    );
+
+    expect(response.status).toBe(416);
+    await expect(response.json()).resolves.toEqual({
+      error: "range_not_satisfiable",
+    });
+    expect(worker.openFile).not.toHaveBeenCalled();
+  });
+
+  it.each([404, 409, 416, 503] as const)(
+    "maps intended worker status %s without downstream details",
+    async (status) => {
+      const worker = downloadWorkerGateway();
+      worker.openFile.mockRejectedValue(new TfDownloadWorkerError(status));
+      const baseUrl = await startTracksServer(
+        routeDependencies({ downloadWorkerGateway: worker }),
+      );
+
+      const response = await fetch(
+        `${baseUrl}/tracks/download/file/30000000-0000-4000-8000-000000000003`,
+      );
+      const body = await response.json();
+
+      expect(response.status).toBe(status);
+      expect(body).toEqual({
+        error:
+          status === 404
+            ? "file_not_found"
+            : status === 409
+              ? "file_not_ready"
+              : status === 416
+                ? "range_not_satisfiable"
+                : "worker_unavailable",
+      });
+      expect(JSON.stringify(body)).not.toContain("downstream");
+    },
+  );
+
+  it("aborts the worker stream when the browser disconnects", async () => {
+    const worker = downloadWorkerGateway();
+    let workerSignal: AbortSignal | undefined;
+    const canceled = vi.fn();
+    worker.openFile.mockImplementation(async (input) => {
+      workerSignal = input.signal;
+      return {
+        status: 200 as const,
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(Buffer.from("a"));
+          },
+          cancel: canceled,
+        }),
+        contentLength: 5,
+        contentType: "audio/mpeg" as const,
+        contentDisposition:
+          "attachment; filename=\"file.mp3\"; filename*=UTF-8''file.mp3",
+      };
+    });
+    const baseUrl = await startTracksServer(
+      routeDependencies({ downloadWorkerGateway: worker }),
+    );
+    const browser = new AbortController();
+    const response = await fetch(
+      `${baseUrl}/tracks/download/file/30000000-0000-4000-8000-000000000003`,
+      { signal: browser.signal },
+    );
+    const reader = response.body!.getReader();
+    await reader.read();
+
+    browser.abort();
+
+    await vi.waitFor(() => expect(workerSignal?.aborted).toBe(true));
+    await vi.waitFor(() => expect(canceled).toHaveBeenCalled());
   });
 });
