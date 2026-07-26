@@ -9,6 +9,7 @@ fail() {
 [ "$(id -u)" = "10001" ] || fail
 [ "$(id -g)" = "10001" ] || fail
 
+[ "${TF_DOWNLOAD_SMOKE_FIXTURES+x}" != "x" ] || fail
 [ "${TF_DOWNLOAD_QUEUE_REDIS_URL+x}" != "x" ] || fail
 [ "${TF_DOWNLOAD_INTERNAL_AUTH_SECRET+x}" != "x" ] || fail
 [ "${TF_DOWNLOAD_HEARTBEAT_SECRET+x}" != "x" ] || fail

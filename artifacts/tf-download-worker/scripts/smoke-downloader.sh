@@ -6,6 +6,12 @@ for argument in "$@"; do
 done
 
 case "${source_url:-}" in
+  *mode=stderr*)
+    stderr_value=${source_url##*stderr=}
+    stderr_value=${stderr_value%%&*}
+    printf '%s\n' "$stderr_value" >&2
+    exit 17
+    ;;
   *mode=size*)
     head -c 2048 /dev/zero | tr '\000' 'S'
     ;;

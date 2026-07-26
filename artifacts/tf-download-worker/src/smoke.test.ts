@@ -1,5 +1,13 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -18,6 +26,114 @@ const smokeEntrypoint = path.join(
 );
 const ADMIN_TOKEN = "task-7-download-smoke-admin";
 const WEB_ORIGIN_HOST = "127.0.0.1";
+const SMOKE_TEST_TIMEOUT_MS = 25 * 60_000;
+const SMOKE_CLEANUP_RESERVE_MS = 5 * 60_000;
+const DEFAULT_DOCKER_TIMEOUT_MS = 30_000;
+const BUILD_DOCKER_TIMEOUT_MS = 12 * 60_000;
+const START_DOCKER_TIMEOUT_MS = 6 * 60_000;
+
+interface BoundedFetchOptions {
+  readonly fetchImplementation?: typeof fetch;
+  readonly timeoutMs?: number;
+}
+
+interface WaitUntilOptions {
+  readonly intervalMs?: number;
+  readonly probeTimeoutMs?: number;
+  readonly timeoutMs?: number;
+}
+
+async function boundedOperation<T>(
+  name: string,
+  operation: () => Promise<T>,
+  timeoutMs: number,
+  onTimeout?: () => void,
+): Promise<T> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new Error(`${name} deadline exceeded`);
+  }
+
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      onTimeout?.();
+      reject(new Error(`${name} deadline exceeded`));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([Promise.resolve().then(operation), deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function boundedFetch(
+  input: string | URL | Request,
+  init: RequestInit = {},
+  options: BoundedFetchOptions = {},
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? 5_000;
+  const fetchImplementation = options.fetchImplementation ?? fetch;
+  const callerSignal = init.signal;
+  const abortFromCaller = (): void => controller.abort(callerSignal?.reason);
+
+  if (callerSignal?.aborted) abortFromCaller();
+  else callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+
+  try {
+    return await boundedOperation(
+      "fetch",
+      () =>
+        fetchImplementation(input, {
+          ...init,
+          signal: controller.signal,
+        }),
+      timeoutMs,
+      () => controller.abort(new Error("fetch deadline exceeded")),
+    );
+  } finally {
+    callerSignal?.removeEventListener("abort", abortFromCaller);
+  }
+}
+
+async function waitUntil<T>(
+  name: string,
+  probe: () => Promise<T | false>,
+  options: WaitUntilOptions = {},
+): Promise<T> {
+  const timeoutMs = options.timeoutMs ?? 60_000;
+  const probeTimeoutMs = options.probeTimeoutMs ?? 5_000;
+  const intervalMs = options.intervalMs ?? 250;
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+
+  while (Date.now() < deadline) {
+    const remainingMs = deadline - Date.now();
+    try {
+      const value = await boundedOperation(
+        `${name} probe`,
+        probe,
+        Math.max(1, Math.min(probeTimeoutMs, remainingMs)),
+      );
+      if (value !== false) return value;
+    } catch (error) {
+      lastError = error;
+    }
+
+    const sleepMs = Math.min(intervalMs, Math.max(0, deadline - Date.now()));
+    if (sleepMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+    }
+  }
+
+  throw new Error(
+    `${name} deadline exceeded${
+      lastError instanceof Error ? `: ${lastError.name}` : ""
+    }`,
+  );
+}
 
 function shellPath(value: string): string {
   if (process.platform !== "win32") return value;
@@ -29,6 +145,17 @@ function shellPath(value: string): string {
 interface SmokeResult {
   readonly project: string;
   readonly observations: {
+    readonly productionFlagRejected: boolean;
+    readonly productionImageFixtureFree: boolean;
+    readonly secretOwnershipEvidence:
+      | "docker-desktop-functional"
+      | "native-linux";
+    readonly queueWeakPasswordRejected: boolean;
+    readonly queueUnreadablePasswordRejected: boolean;
+    readonly queueUrlMismatchRejected: boolean;
+    readonly rawSignatureRejected: boolean;
+    readonly pathCanarySanitized: boolean;
+    readonly stderrCanaryFailureBounded: boolean;
     readonly apiHealthy: boolean;
     readonly queueHealthy: boolean;
     readonly workerHealthy: boolean;
@@ -99,15 +226,20 @@ async function reservePort(): Promise<number> {
 async function docker(
   args: readonly string[],
   environment: NodeJS.ProcessEnv,
-  timeout = 300_000,
+  timeout = DEFAULT_DOCKER_TIMEOUT_MS,
 ): Promise<DockerResult> {
-  return execute("docker", [...args], {
-    cwd: repositoryRoot,
-    env: environment,
-    maxBuffer: 16 * 1024 * 1024,
-    timeout,
-    windowsHide: true,
-  });
+  return boundedOperation(
+    "docker command",
+    () =>
+      execute("docker", [...args], {
+        cwd: repositoryRoot,
+        env: environment,
+        maxBuffer: 16 * 1024 * 1024,
+        timeout,
+        windowsHide: true,
+      }),
+    timeout + 1_000,
+  );
 }
 
 function assertCondition(value: unknown, message: string): asserts value {
@@ -119,20 +251,10 @@ async function waitFor<T>(
   probe: () => Promise<T | false>,
   timeoutMs = 60_000,
 ): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  let lastError: unknown;
-  while (Date.now() < deadline) {
-    try {
-      const value = await probe();
-      if (value !== false) return value;
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error(
-    `${name} deadline exceeded${lastError instanceof Error ? `: ${lastError.name}` : ""}`,
-  );
+  return waitUntil(name, probe, {
+    probeTimeoutMs: 5_000,
+    timeoutMs,
+  });
 }
 
 async function fetchJson(
@@ -143,8 +265,12 @@ async function fetchJson(
   readonly body: Record<string, unknown> | null;
   readonly text: string;
 }> {
-  const response = await fetch(url, { redirect: "error", ...init });
-  const text = await response.text();
+  const response = await boundedFetch(url, { redirect: "error", ...init });
+  const text = await boundedOperation(
+    "fetch body",
+    () => response.text(),
+    5_000,
+  );
   let body: Record<string, unknown> | null = null;
   try {
     body =
@@ -168,14 +294,23 @@ function sessionHeaders(
   };
 }
 
-function trackIdFor(mode: string, sourceCanary: string): string {
+function trackIdFor(
+  mode: string,
+  sourceCanary: string,
+  pathCanary: string,
+  stderrCanary: string,
+): string {
   const url =
     `https://youtube.com/watch?v=fixture-${mode}` +
-    `&mode=${mode}&source=${sourceCanary}`;
+    `&mode=${mode}&source=${sourceCanary}` +
+    `&path=${pathCanary}&stderr=${stderrCanary}`;
   return `yt_${Buffer.from(url).toString("base64url")}`;
 }
 
 async function runDisposableSmoke(): Promise<SmokeResult> {
+  const cleanupReserveMs = SMOKE_CLEANUP_RESERVE_MS;
+  const operationDeadline =
+    Date.now() + SMOKE_TEST_TIMEOUT_MS - cleanupReserveMs;
   const project =
     `apollo-tf-download-smoke-${process.pid}-` + randomBytes(4).toString("hex");
   const temporaryDirectory = await mkdtemp(path.join(tmpdir(), `${project}-`));
@@ -195,6 +330,10 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
   const signatureCanary = `signature-${generatedSecret()}`;
   const pathCanary = `path-${generatedSecret()}`;
   const stderrCanary = `stderr-${generatedSecret()}`;
+  const wrongKeyCanary = `wrong-key-${generatedSecret()}`;
+  const wrongQueuePassword = generatedSecret();
+  const weakQueuePassword = `weak-${randomBytes(4).toString("hex")}`;
+  const unreadableQueuePassword = generatedSecret();
   const canaries = [
     queuePassword,
     commandSecret,
@@ -208,6 +347,10 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
     signatureCanary,
     pathCanary,
     stderrCanary,
+    wrongKeyCanary,
+    wrongQueuePassword,
+    weakQueuePassword,
+    unreadableQueuePassword,
   ];
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
@@ -226,21 +369,316 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
     "-p",
     project,
   ] as const;
+  const boundedTimeout = (requestedMs: number): number => {
+    const remainingMs = operationDeadline - Date.now();
+    if (remainingMs < 1) {
+      throw new Error("smoke operation deadline exceeded");
+    }
+    return Math.min(requestedMs, remainingMs);
+  };
+  const dockerWithin = (
+    args: readonly string[],
+    timeout = DEFAULT_DOCKER_TIMEOUT_MS,
+  ): Promise<DockerResult> =>
+    docker(args, environment, boundedTimeout(timeout));
   const compose = (
     args: readonly string[],
-    timeout?: number,
-  ): Promise<DockerResult> =>
-    docker([...composeBase, ...args], environment, timeout);
+    timeout = DEFAULT_DOCKER_TIMEOUT_MS,
+  ): Promise<DockerResult> => dockerWithin([...composeBase, ...args], timeout);
+  const finalWorkerImage = `${project}-worker-final:local`;
+  const probeVolumes = [
+    `${project}-weak-password`,
+    `${project}-unreadable-password`,
+  ];
   const responseSurfaces: string[] = [];
+  const failureSurfaces: string[] = [];
   let logs = "";
   let primaryError: unknown;
   let result: SmokeResult | undefined;
+  let secrets: Record<string, string> = {};
+
+  const expectGenericDockerFailure = async (
+    args: readonly string[],
+    genericMessage: string,
+    timeoutMs = DEFAULT_DOCKER_TIMEOUT_MS,
+  ): Promise<string> => {
+    try {
+      await dockerWithin(args, timeoutMs);
+    } catch (error) {
+      const failure = error as Error & {
+        readonly code?: number | string;
+        readonly stderr?: string;
+        readonly stdout?: string;
+      };
+      const output = `${failure.stdout ?? ""}\n${failure.stderr ?? ""}`.trim();
+      assertCondition(
+        failure.code !== undefined && failure.code !== 0,
+        "negative Docker probe did not report a nonzero exit",
+      );
+      assertCondition(
+        output === genericMessage,
+        "negative Docker probe was not generic",
+      );
+      for (const canary of canaries) {
+        assertCondition(
+          !output.includes(canary),
+          "negative Docker probe exposed a canary",
+        );
+      }
+      failureSurfaces.push(output);
+      return output;
+    }
+    throw new Error("negative Docker probe unexpectedly succeeded");
+  };
+
+  const provisionNativeSecretOwnership = async (): Promise<
+    "docker-desktop-functional" | "native-linux"
+  > => {
+    if (process.platform !== "linux") return "docker-desktop-functional";
+
+    const security = await dockerWithin([
+      "info",
+      "--format",
+      "{{json .SecurityOptions}}",
+    ]);
+    assertCondition(
+      !security.stdout.toLowerCase().includes("rootless"),
+      "native Linux smoke requires rootful Docker UID ownership",
+    );
+    await dockerWithin([
+      "run",
+      "--rm",
+      "--name",
+      `${project}-secret-owner`,
+      "--label",
+      `com.docker.compose.project=${project}`,
+      "--mount",
+      `type=bind,src=${secretDirectory},dst=/secrets`,
+      "--user",
+      "0:0",
+      "node:20-bookworm-slim",
+      "sh",
+      "-ceu",
+      "chmod 0400 /secrets/*; chown 10001:10001 /secrets/*; chown 999:999 /secrets/tf_postgres_password /secrets/tf_download_queue_password",
+    ]);
+
+    const redisOwned = new Set([
+      "tf_postgres_password",
+      "tf_download_queue_password",
+    ]);
+    for (const name of Object.keys(secrets)) {
+      const metadata = await stat(path.join(secretDirectory, name));
+      const expectedOwner = redisOwned.has(name) ? 999 : 10001;
+      assertCondition(
+        metadata.uid === expectedOwner && metadata.gid === expectedOwner,
+        "native Linux secret owner mismatch",
+      );
+      assertCondition(
+        (metadata.mode & 0o777) === 0o400,
+        "native Linux secret mode mismatch",
+      );
+    }
+    return "native-linux";
+  };
+
+  const replaceQueueUrl = async (password: string): Promise<void> => {
+    const filePath = path.join(secretDirectory, "tf_download_queue_redis_url");
+    await rm(filePath, { force: true });
+    await writeFile(
+      filePath,
+      `redis://default:${encodeURIComponent(password)}@tf-download-redis:6379/0`,
+      { encoding: "utf8", mode: 0o400 },
+    );
+    if (process.platform !== "win32") await chmod(filePath, 0o400);
+    await provisionNativeSecretOwnership();
+  };
+
+  const proveProductionFixtureRejection = async (): Promise<{
+    readonly fixtureFree: boolean;
+    readonly rejected: boolean;
+  }> => {
+    await dockerWithin(
+      [
+        "build",
+        "--file",
+        path.join(artifactRoot, "Dockerfile"),
+        "--target",
+        "final",
+        "--tag",
+        finalWorkerImage,
+        repositoryRoot,
+      ],
+      BUILD_DOCKER_TIMEOUT_MS,
+    );
+    await dockerWithin([
+      "run",
+      "--rm",
+      "--name",
+      `${project}-final-surface`,
+      "--label",
+      `com.docker.compose.project=${project}`,
+      "--entrypoint",
+      "/bin/sh",
+      finalWorkerImage,
+      "-ceu",
+      'test ! -e /app/bin/start-smoke-worker.sh; test ! -e /app/bin/smoke-downloader.sh; test ! -e /app/bin/smoke-deadline.mjs; test -z "${NODE_OPTIONS+x}"',
+    ]);
+    await expectGenericDockerFailure(
+      [
+        "run",
+        "--rm",
+        "--name",
+        `${project}-production-flag`,
+        "--label",
+        `com.docker.compose.project=${project}`,
+        "--env",
+        "TF_DOWNLOAD_SMOKE_FIXTURES=true",
+        finalWorkerImage,
+      ],
+      "TF download worker startup failed",
+    );
+    return { fixtureFree: true, rejected: true };
+  };
+
+  const proveQueuePasswordFailures = async (): Promise<{
+    readonly unreadable: boolean;
+    readonly weak: boolean;
+  }> => {
+    const probes = [
+      {
+        mode: "0400",
+        name: "weak",
+        owner: "999:999",
+        value: weakQueuePassword,
+        volume: probeVolumes[0]!,
+      },
+      {
+        mode: "0000",
+        name: "unreadable",
+        owner: "0:0",
+        value: unreadableQueuePassword,
+        volume: probeVolumes[1]!,
+      },
+    ] as const;
+
+    for (const probe of probes) {
+      const inputName = `${probe.name}-password`;
+      await writeFile(path.join(temporaryDirectory, inputName), probe.value, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      await dockerWithin([
+        "volume",
+        "create",
+        "--label",
+        `com.docker.compose.project=${project}`,
+        probe.volume,
+      ]);
+      await dockerWithin([
+        "run",
+        "--rm",
+        "--name",
+        `${project}-${probe.name}-password-owner`,
+        "--label",
+        `com.docker.compose.project=${project}`,
+        "--mount",
+        `type=bind,src=${temporaryDirectory},dst=/input,readonly`,
+        "--mount",
+        `type=volume,src=${probe.volume},dst=/secret`,
+        "--user",
+        "0:0",
+        "node:20-bookworm-slim",
+        "sh",
+        "-ceu",
+        `cp /input/${inputName} /secret/password; chown ${probe.owner} /secret/password; chmod ${probe.mode} /secret/password`,
+      ]);
+      await expectGenericDockerFailure(
+        [
+          "run",
+          "--rm",
+          "--name",
+          `${project}-${probe.name}-password`,
+          "--label",
+          `com.docker.compose.project=${project}`,
+          "--env",
+          "TF_DOWNLOAD_QUEUE_PASSWORD_FILE=/run/secrets/password",
+          "--mount",
+          `type=volume,src=${probe.volume},dst=/run/secrets,readonly`,
+          `${project}-redis:local`,
+        ],
+        "TF download queue startup failed",
+      );
+    }
+
+    return { unreadable: true, weak: true };
+  };
+
+  const proveQueueUrlMismatch = async (): Promise<boolean> => {
+    await replaceQueueUrl(wrongQueuePassword);
+    await compose(
+      [
+        "up",
+        "-d",
+        "--no-build",
+        "--wait",
+        "--wait-timeout",
+        "180",
+        "db",
+        "redis",
+        "tf-download-redis",
+        "platform-api",
+      ],
+      START_DOCKER_TIMEOUT_MS,
+    );
+    await compose(
+      ["up", "-d", "--no-build", "--no-deps", "tf-download-worker"],
+      60_000,
+    );
+    await compose(["up", "-d", "--no-build", "--no-deps", "api"], 60_000);
+
+    const workerFailure = await waitFor(
+      "mismatched worker startup",
+      async () => {
+        const output = await compose([
+          "logs",
+          "--no-color",
+          "tf-download-worker",
+        ]);
+        return output.stdout.includes("TF download worker startup failed")
+          ? output.stdout
+          : false;
+      },
+      30_000,
+    );
+    const apiFailure = await waitFor(
+      "mismatched API startup",
+      async () => {
+        const output = await compose(["logs", "--no-color", "api"]);
+        return output.stdout.includes("TF API startup failed")
+          ? output.stdout
+          : false;
+      },
+      30_000,
+    );
+    for (const surface of [workerFailure, apiFailure]) {
+      assertCondition(
+        !surface.includes(wrongQueuePassword),
+        "queue mismatch failure exposed its password",
+      );
+    }
+    failureSurfaces.push(workerFailure, apiFailure);
+
+    await compose(
+      ["rm", "-sf", "tf-download-worker", "api"],
+      DEFAULT_DOCKER_TIMEOUT_MS,
+    );
+    await replaceQueueUrl(queuePassword);
+    return true;
+  };
 
   try {
-    await import("node:fs/promises").then(({ mkdir }) =>
-      mkdir(secretDirectory, { recursive: true, mode: 0o700 }),
-    );
-    const secrets: Record<string, string> = {
+    await mkdir(secretDirectory, { recursive: true, mode: 0o700 });
+    secrets = {
       tf_postgres_password: databasePassword,
       tf_database_url:
         `postgres://trackfinder:${encodeURIComponent(databasePassword)}` +
@@ -266,6 +704,7 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
       if (process.platform !== "win32") await chmod(filePath, 0o400);
     }
     if (process.platform !== "win32") await chmod(secretDirectory, 0o700);
+    const secretOwnershipEvidence = await provisionNativeSecretOwnership();
 
     await writeFile(
       overridePath,
@@ -334,10 +773,18 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
     }
 
     await compose(
+      ["build", "tf-download-redis", "tf-download-worker", "api"],
+      BUILD_DOCKER_TIMEOUT_MS,
+    );
+    const productionFixture = await proveProductionFixtureRejection();
+    const queuePasswordFailures = await proveQueuePasswordFailures();
+    const queueUrlMismatchRejected = await proveQueueUrlMismatch();
+
+    await compose(
       [
         "up",
         "-d",
-        "--build",
+        "--no-build",
         "--wait",
         "--wait-timeout",
         "300",
@@ -348,7 +795,7 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
         "platform-api",
         "api",
       ],
-      15 * 60_000,
+      START_DOCKER_TIMEOUT_MS,
     );
 
     const inspectIds = (
@@ -407,7 +854,7 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
     assertCondition(workerHealthy, "worker was not healthy");
 
     const apiHealthy = await waitFor("TF API health", async () => {
-      const response = await fetch(`${origin}/api/readyz`);
+      const response = await boundedFetch(`${origin}/api/readyz`);
       return response.ok;
     });
 
@@ -438,7 +885,7 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
     const heartbeat = await dashboardModule("healthy");
     await compose(["restart", "api"]);
     await waitFor("TF API health after reset", async () => {
-      const response = await fetch(`${origin}/api/readyz`);
+      const response = await boundedFetch(`${origin}/api/readyz`);
       return response.ok;
     });
     const unknown = await dashboardModule("unknown", 10_000);
@@ -493,7 +940,7 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
         body: JSON.stringify({
           tracks: [
             {
-              trackId: trackIdFor(mode, sourceCanary),
+              trackId: trackIdFor(mode, sourceCanary, pathCanary, stderrCanary),
               artist: "Smoke Artist",
               title: `Smoke ${mode}`,
               quality: "320",
@@ -558,13 +1005,15 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
 
     const completedJob = await enqueue("normal");
     const completed = await waitForStatus(completedJob, ["completed"]);
-    const full = await fetch(
+    const full = await boundedFetch(
       `${origin}/api/tracks/download/file/${completedJob}`,
       { headers: sessionHeaders(owner, origin) },
     );
-    const fullBytes = Buffer.from(await full.arrayBuffer());
+    const fullBytes = Buffer.from(
+      await boundedOperation("full file body", () => full.arrayBuffer(), 5_000),
+    );
     responseSurfaces.push(fullBytes.toString("base64"));
-    const ranged = await fetch(
+    const ranged = await boundedFetch(
       `${origin}/api/tracks/download/file/${completedJob}`,
       {
         headers: {
@@ -573,7 +1022,13 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
         },
       },
     );
-    const rangedBytes = Buffer.from(await ranged.arrayBuffer());
+    const rangedBytes = Buffer.from(
+      await boundedOperation(
+        "range file body",
+        () => ranged.arrayBuffer(),
+        5_000,
+      ),
+    );
     responseSurfaces.push(rangedBytes.toString("base64"));
     const authenticatedBytes =
       full.status === 200 &&
@@ -597,7 +1052,7 @@ function signed(value, key = secret, nonce = randomBytes(32).toString("hex")) {
   return {timestamp,nonce,signature};
 }
 async function send(value, headers) {
-  const response = await fetch("http://127.0.0.1:8080" + path, {method:"POST",headers:{"content-type":"application/json","x-apollo-internal-timestamp":headers.timestamp,"x-apollo-internal-nonce":headers.nonce,"x-apollo-internal-signature":headers.signature},body:value});
+  const response = await fetch("http://127.0.0.1:8080" + path, {method:"POST",headers:{"content-type":"application/json","x-apollo-internal-timestamp":headers.timestamp,"x-apollo-internal-nonce":headers.nonce,"x-apollo-internal-signature":headers.signature},body:value,signal:AbortSignal.timeout(5000)});
   await response.arrayBuffer();
   return response.status;
 }
@@ -608,9 +1063,10 @@ const replay = await send(body, replayHeaders);
 const tamperHeaders = signed(body);
 const tamper = await send(body + " ", tamperHeaders);
 const wrong = await send(body, signed(body, process.env.WRONG_KEY));
+const raw = await send(body, {...signed(body),signature:process.env.RAW_SIGNATURE});
 const foreignBody = JSON.stringify({...JSON.parse(body),requestId:randomUUID(),accountId:process.env.FOREIGN_ID});
 const foreign = await send(foreignBody, signed(foreignBody));
-process.stdout.write(JSON.stringify({first,replay,tamper,wrong,foreign}));
+process.stdout.write(JSON.stringify({first,replay,tamper,wrong,raw,foreign}));
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });
 `;
@@ -624,7 +1080,9 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
       "-e",
       `JOB_ID=${completedJob}`,
       "-e",
-      `WRONG_KEY=${signatureCanary}`,
+      `WRONG_KEY=${wrongKeyCanary}`,
+      "-e",
+      `RAW_SIGNATURE=${signatureCanary}`,
       "tf-download-worker",
       "node",
       "-e",
@@ -634,6 +1092,11 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
       string,
       number
     >;
+    const rawSignatureRejected = signedStatuses["raw"] === 401;
+    assertCondition(
+      rawSignatureRejected,
+      "raw signature canary was not rejected",
+    );
 
     const activeOne = await enqueue("active");
     const activeTwo = await enqueue("active");
@@ -660,6 +1123,13 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
       "const{readdirSync}=require('node:fs');process.stdout.write(JSON.stringify(readdirSync(process.env.TF_DOWNLOAD_STORAGE_ROOT)))",
     ]);
     const storageFiles = JSON.parse(storageListing.stdout) as string[];
+    const pathCanarySanitized = storageFiles.every(
+      (name) => !name.includes(pathCanary),
+    );
+    assertCondition(
+      pathCanarySanitized,
+      "path canary reached a storage filename",
+    );
     const waitingCancellationClean =
       waitingAccepted === "waiting" &&
       !storageFiles.some((name) => name.startsWith(waiting));
@@ -713,16 +1183,35 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
       failedReason(deadlineJob),
       failedReason(quotaJob),
     ]);
+    const stderrJob = await enqueue("stderr");
+    await waitForStatus(stderrJob, ["failed"]);
+    const stderrReason = await failedReason(stderrJob);
+    const stderrCanaryFailureBounded = stderrReason === "download_failed";
+    assertCondition(
+      stderrCanaryFailureBounded,
+      "stderr fixture did not fail with the bounded generic code",
+    );
 
-    const foreignStatus = await fetch(
+    const foreignStatus = await boundedFetch(
       `${origin}/api/tracks/download/status/${completedJob}`,
       { headers: sessionHeaders(foreign, origin) },
     );
-    const foreignFile = await fetch(
+    const foreignFile = await boundedFetch(
       `${origin}/api/tracks/download/file/${completedJob}`,
       { headers: sessionHeaders(foreign, origin) },
     );
-    responseSurfaces.push(await foreignStatus.text(), await foreignFile.text());
+    responseSurfaces.push(
+      await boundedOperation(
+        "foreign status body",
+        () => foreignStatus.text(),
+        5_000,
+      ),
+      await boundedOperation(
+        "foreign file body",
+        () => foreignFile.text(),
+        5_000,
+      ),
+    );
 
     logs = (await compose(["logs", "--no-color"])).stdout;
     const imageHistory = (
@@ -731,23 +1220,39 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
           `${project}-redis:local`,
           `${project}-worker:local`,
           `${project}-api`,
+          finalWorkerImage,
         ].map(async (image) =>
-          docker(
-            ["history", "--no-trunc", "--format", "{{json .}}", image],
-            environment,
-          ).then((value) => value.stdout),
+          dockerWithin([
+            "history",
+            "--no-trunc",
+            "--format",
+            "{{json .}}",
+            image,
+          ]).then((value) => value.stdout),
         ),
       )
     ).join("\n");
     const trackedProjection = (
-      await execute("git", ["grep", "-n", "-I", "-F", "--", sourceCanary], {
-        cwd: repositoryRoot,
-        windowsHide: true,
-      }).catch(() => ({ stdout: "", stderr: "" }))
-    ).stdout;
+      await Promise.all(
+        canaries.map((canary) =>
+          boundedOperation(
+            "tracked file scan",
+            () =>
+              execute("git", ["grep", "-n", "-I", "-F", "--", canary], {
+                cwd: repositoryRoot,
+                timeout: 10_000,
+                windowsHide: true,
+              }),
+            11_000,
+          ).catch(() => ({ stdout: "", stderr: "" })),
+        ),
+      )
+    )
+      .map((scan) => scan.stdout)
+      .join("\n");
     const surfaces = [
       rendered.stdout,
-      logs,
+      `${logs}\n${failureSurfaces.join("\n")}`,
       responseSurfaces.join("\n"),
       inspection,
       imageHistory,
@@ -794,6 +1299,15 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
     result = {
       project,
       observations: {
+        productionFlagRejected: productionFixture.rejected,
+        productionImageFixtureFree: productionFixture.fixtureFree,
+        secretOwnershipEvidence,
+        queueWeakPasswordRejected: queuePasswordFailures.weak,
+        queueUnreadablePasswordRejected: queuePasswordFailures.unreadable,
+        queueUrlMismatchRejected,
+        rawSignatureRejected,
+        pathCanarySanitized,
+        stderrCanaryFailureBounded,
         apiHealthy,
         queueHealthy,
         workerHealthy,
@@ -855,7 +1369,7 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
           "tf-download-worker",
           "node",
           "-e",
-          "Promise.all(['/healthz','/readyz'].map(async p=>[p,(await fetch('http://127.0.0.1:8080'+p)).status])).then(v=>process.stdout.write(JSON.stringify(v)))",
+          "Promise.all(['/healthz','/readyz'].map(async p=>[p,(await fetch('http://127.0.0.1:8080'+p,{signal:AbortSignal.timeout(5000)})).status])).then(v=>process.stdout.write(JSON.stringify(v)))",
         ]).catch(() => ({ stdout: "worker probe unavailable", stderr: "" })),
         compose([
           "exec",
@@ -863,7 +1377,7 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
           "api",
           "node",
           "-e",
-          "Promise.all(['/api/healthz','/api/readyz'].map(async p=>[p,(await fetch('http://127.0.0.1:8080'+p)).status])).then(v=>process.stdout.write(JSON.stringify(v)))",
+          "Promise.all(['/api/healthz','/api/readyz'].map(async p=>[p,(await fetch('http://127.0.0.1:8080'+p,{signal:AbortSignal.timeout(5000)})).status])).then(v=>process.stdout.write(JSON.stringify(v)))",
         ]).catch(() => ({ stdout: "api probe unavailable", stderr: "" })),
         compose([
           "exec",
@@ -871,7 +1385,7 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
           "api",
           "node",
           "-e",
-          "fetch('http://platform-api:8080/v1/oauth/introspect',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({accountId:'00000000-0000-4000-8000-000000000001',sessionId:'00000000-0000-4000-8000-000000000002',installationId:'00000000-0000-4000-8000-000000000003',audience:'apollo-tf'})}).then(async r=>process.stdout.write(JSON.stringify([r.status,await r.text()])))",
+          "fetch('http://platform-api:8080/v1/oauth/introspect',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({accountId:'00000000-0000-4000-8000-000000000001',sessionId:'00000000-0000-4000-8000-000000000002',installationId:'00000000-0000-4000-8000-000000000003',audience:'apollo-tf'}),signal:AbortSignal.timeout(5000)}).then(async r=>process.stdout.write(JSON.stringify([r.status,await r.text()])))",
         ]).catch(() => ({ stdout: "platform probe unavailable", stderr: "" })),
       ]);
       logs = [
@@ -890,23 +1404,61 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
     }
   } finally {
     try {
-      await compose(
-        ["down", "--remove-orphans", "--volumes", "--rmi", "local"],
-        300_000,
+      await docker(
+        [
+          ...composeBase,
+          "down",
+          "--remove-orphans",
+          "--volumes",
+          "--rmi",
+          "local",
+        ],
+        environment,
+        2 * 60_000,
       );
     } catch (error) {
       primaryError ??= error;
     }
-    for (const image of [
-      `${project}-redis:local`,
-      `${project}-worker:local`,
-      `${project}-api`,
-    ]) {
-      await docker(["image", "rm", "-f", image], environment).catch(
-        () => undefined,
-      );
+    const remainingContainers = await docker(
+      ["ps", "-aq", "--filter", `label=com.docker.compose.project=${project}`],
+      environment,
+    ).catch(() => ({ stdout: "", stderr: "" }));
+    const remainingContainerIds = remainingContainers.stdout
+      .split(/\r?\n/)
+      .filter(Boolean);
+    if (remainingContainerIds.length > 0) {
+      await docker(
+        ["rm", "-f", ...remainingContainerIds],
+        environment,
+        60_000,
+      ).catch(() => undefined);
     }
-    await rm(temporaryDirectory, { force: true, recursive: true });
+    await Promise.all(
+      [
+        `${project}-redis:local`,
+        `${project}-worker:local`,
+        `${project}-api`,
+        finalWorkerImage,
+      ].map((image) =>
+        docker(["image", "rm", "-f", image], environment, 60_000).catch(
+          () => undefined,
+        ),
+      ),
+    );
+    await Promise.all(
+      probeVolumes.map((volume) =>
+        docker(["volume", "rm", "-f", volume], environment, 30_000).catch(
+          () => undefined,
+        ),
+      ),
+    );
+    await boundedOperation(
+      "temporary directory cleanup",
+      () => rm(temporaryDirectory, { force: true, recursive: true }),
+      30_000,
+    ).catch((error) => {
+      primaryError ??= error;
+    });
 
     const [containers, images, networks, volumes] = await Promise.all([
       docker(
@@ -943,7 +1495,10 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
       containers: count(containers.stdout),
       images: count(images.stdout),
       networks: count(networks.stdout),
-      temporaryDirectories: 0,
+      temporaryDirectories: await stat(temporaryDirectory).then(
+        () => 1,
+        () => 0,
+      ),
       volumes: count(volumes.stdout),
     };
     if (result !== undefined) result = { ...result, cleanup };
@@ -997,7 +1552,7 @@ describe("TF download smoke fixture gate", () => {
         shellPath(smokeEntrypoint),
         "sh",
         "-c",
-        'printf \'%s|%s\' "$TF_DOWNLOAD_YT_DLP_PATH" "$NODE_OPTIONS"',
+        'printf \'%s|%s|%s\' "$TF_DOWNLOAD_YT_DLP_PATH" "$NODE_OPTIONS" "${TF_DOWNLOAD_SMOKE_FIXTURES+x}"',
       ],
       {
         env: {
@@ -1010,7 +1565,7 @@ describe("TF download smoke fixture gate", () => {
     );
 
     expect(result.stdout).toBe(
-      "/app/bin/smoke-downloader.sh|--import=/app/bin/smoke-deadline.mjs",
+      "/app/bin/smoke-downloader.sh|--import=/app/bin/smoke-deadline.mjs|",
     );
     expect(result.stderr).toBe("");
   });
@@ -1034,6 +1589,81 @@ describe("TF download smoke fixture gate", () => {
   });
 });
 
+describe("TF download bounded smoke orchestration", () => {
+  it("aborts a never-settling fetch within its local deadline", async () => {
+    let observedSignal: AbortSignal | undefined;
+    const neverFetch = ((
+      _input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      observedSignal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    }) as typeof fetch;
+
+    await expect(
+      boundedFetch(
+        "http://127.0.0.1:1/never",
+        {},
+        {
+          fetchImplementation: neverFetch,
+          timeoutMs: 20,
+        },
+      ),
+    ).rejects.toThrow("fetch deadline exceeded");
+    expect(observedSignal?.aborted).toBe(true);
+  });
+
+  it("bounds a never-settling command abstraction", async () => {
+    await expect(
+      boundedOperation(
+        "command",
+        () => new Promise<never>(() => undefined),
+        20,
+      ),
+    ).rejects.toThrow("command deadline exceeded");
+  });
+
+  it("bounds every never-settling wait probe", async () => {
+    let probes = 0;
+    await expect(
+      waitUntil(
+        "probe",
+        () => {
+          probes += 1;
+          return new Promise<false>(() => undefined);
+        },
+        {
+          intervalMs: 1,
+          probeTimeoutMs: 10,
+          timeoutMs: 35,
+        },
+      ),
+    ).rejects.toThrow("probe deadline exceeded");
+    expect(probes).toBeGreaterThan(1);
+  });
+
+  it("retains required failure, ownership, canary, and cleanup phases offline", async () => {
+    const source = await readFile(import.meta.filename, "utf8");
+    const body = source.slice(
+      source.indexOf("async function runDisposableSmoke"),
+      source.indexOf('describe("TF download smoke fixture gate"'),
+    );
+
+    for (const requiredPhase of [
+      "proveProductionFixtureRejection",
+      "provisionNativeSecretOwnership",
+      "proveQueuePasswordFailures",
+      "proveQueueUrlMismatch",
+      "rawSignatureRejected",
+      "pathCanarySanitized",
+      "stderrCanaryFailureBounded",
+      "cleanupReserveMs",
+    ]) {
+      expect(body).toContain(requiredPhase);
+    }
+  });
+});
+
 const realDockerEnabled = process.env.TF_DOWNLOAD_SMOKE_REAL_DOCKER === "1";
 
 describe.skipIf(!realDockerEnabled)(
@@ -1048,6 +1678,18 @@ describe.skipIf(!realDockerEnabled)(
           /^apollo-tf-download-smoke-\d+-[a-f0-9]{8}$/,
         );
         expect(result.observations).toEqual({
+          productionFlagRejected: true,
+          productionImageFixtureFree: true,
+          secretOwnershipEvidence:
+            process.platform === "linux"
+              ? "native-linux"
+              : "docker-desktop-functional",
+          queueWeakPasswordRejected: true,
+          queueUnreadablePasswordRejected: true,
+          queueUrlMismatchRejected: true,
+          rawSignatureRejected: true,
+          pathCanarySanitized: true,
+          stderrCanaryFailureBounded: true,
           apiHealthy: true,
           queueHealthy: true,
           workerHealthy: true,
@@ -1080,7 +1722,7 @@ describe.skipIf(!realDockerEnabled)(
           volumes: 0,
         });
       },
-      20 * 60_000,
+      SMOKE_TEST_TIMEOUT_MS,
     );
   },
 );

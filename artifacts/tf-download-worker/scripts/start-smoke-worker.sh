@@ -9,6 +9,7 @@ if [ "${TF_DOWNLOAD_SMOKE_FIXTURES+x}" = "x" ]; then
   fi
   export TF_DOWNLOAD_YT_DLP_PATH=/app/bin/smoke-downloader.sh
   export NODE_OPTIONS=--import=/app/bin/smoke-deadline.mjs
+  unset TF_DOWNLOAD_SMOKE_FIXTURES
 fi
 
 exec "$@"

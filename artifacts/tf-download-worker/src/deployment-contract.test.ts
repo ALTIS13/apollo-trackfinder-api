@@ -215,6 +215,13 @@ describe("TF download worker build and image boundary", () => {
     expect(dockerfile).toContain("test ! -e /usr/bin/pip");
     expect(dockerfile).toContain("test ! -e /usr/local/bin/yarn");
     expect(dockerfile).toContain("USER 10001:10001");
+    const finalStage = dockerfile.slice(
+      dockerfile.lastIndexOf("FROM runtime AS final"),
+    );
+    expect(finalStage).not.toContain("start-smoke-worker.sh");
+    expect(finalStage).not.toContain("smoke-downloader.sh");
+    expect(finalStage).not.toContain("smoke-deadline.mjs");
+    expect(finalStage).not.toContain("NODE_OPTIONS");
   });
 
   it("starts only after checking file-backed inputs and owned storage without printing values", async () => {
@@ -225,6 +232,9 @@ describe("TF download worker build and image boundary", () => {
     expect(script).toContain("TF_DOWNLOAD_QUEUE_REDIS_URL_FILE");
     expect(script).toContain("TF_DOWNLOAD_INTERNAL_AUTH_SECRET_FILE");
     expect(script).toContain("TF_DOWNLOAD_HEARTBEAT_SECRET_FILE");
+    expect(script).toContain(
+      '[ "${TF_DOWNLOAD_SMOKE_FIXTURES+x}" != "x" ] || fail',
+    );
     expect(script).toContain('stat -c "%u:%g"');
     expect(script).toContain("10001:10001");
     expect(script).toContain('exec "$@"');

@@ -605,6 +605,11 @@ describe("createDownloadProcessor", () => {
       stdout: [Buffer.from("partial")],
       holdOpen: true,
     });
+    let spawned = false;
+    const spawnDownload = vi.fn(() => {
+      spawned = true;
+      return child;
+    });
     const job = createJob();
     job.updateProgress.mockImplementation(
       () => new Promise<void>(() => undefined),
@@ -613,9 +618,9 @@ describe("createDownloadProcessor", () => {
       storage,
       cancellationStore: createCancellationStore(() => {
         checks += 1;
-        return checks >= 2;
+        return spawned && checks >= 2;
       }),
-      spawnDownload: vi.fn(() => child),
+      spawnDownload,
       logger: createLogger(),
       cancellationPollMs: 10,
       deadlineMs: 100,
@@ -630,6 +635,7 @@ describe("createDownloadProcessor", () => {
       code: "download_canceled",
       retriable: false,
     });
+    expect(spawnDownload).toHaveBeenCalledTimes(1);
     expect(child.kills[0]).toBe("SIGTERM");
     expect(await readdir(root)).toEqual([]);
   });
