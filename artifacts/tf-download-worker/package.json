@@ -6,7 +6,9 @@
   "exports": {
     "./app": "./src/app.ts",
     "./cancellation": "./src/cancellation.ts",
+    "./config": "./src/config.ts",
     "./downloader": "./src/downloader.ts",
+    "./heartbeat": "./src/heartbeat.ts",
     "./internal-auth": "./src/internal-auth.ts",
     "./logger": "./src/logger.ts",
     "./processor": "./src/processor.ts",
@@ -18,8 +20,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@workspace/module-runtime-contract": "workspace:*",
     "@workspace/tf-download-contract": "workspace:*",
-    "bullmq": "^5.73.0"
+    "bullmq": "^5.73.0",
+    "ioredis": "^5.10.1"
   },
   "devDependencies": {
     "@types/node": "catalog:",

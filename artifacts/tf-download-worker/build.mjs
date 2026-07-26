@@ -8,20 +8,16 @@ const distDir = path.join(artifactDir, "dist");
 
 await rm(distDir, { recursive: true, force: true });
 await build({
-  entryPoints: [
-    "src/app.ts",
-    "src/cancellation.ts",
-    "src/downloader.ts",
-    "src/internal-auth.ts",
-    "src/logger.ts",
-    "src/processor.ts",
-    "src/storage.ts",
-  ].map((entry) => path.join(artifactDir, entry)),
+  entryPoints: [path.join(artifactDir, "src/index.ts")],
   platform: "node",
   bundle: true,
   format: "esm",
-  outdir: distDir,
+  outfile: path.join(distDir, "index.mjs"),
   outExtension: { ".js": ".mjs" },
   sourcemap: "linked",
   logLevel: "info",
+  banner: {
+    js: `import { createRequire as __createRequire } from "node:module";
+globalThis.require = __createRequire(import.meta.url);`,
+  },
 });

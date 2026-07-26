@@ -40,6 +40,7 @@ const heartbeatKeysSchema = z.record(z.string(), z.string().min(32).max(512));
 const REQUIRED_EXTERNAL_MODULE_IDS = [
   "search-media",
   "account-integrations",
+  "download-worker",
 ] as const;
 
 export interface ModuleHeartbeatIngestInput {

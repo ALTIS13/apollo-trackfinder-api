@@ -9,6 +9,7 @@ import {
 
 const SEARCH_MEDIA_SECRET = "s".repeat(32);
 const ACCOUNT_INTEGRATIONS_SECRET = "a".repeat(32);
+const DOWNLOAD_WORKER_SECRET = "d".repeat(32);
 const INITIAL_NOW = Date.parse("2026-07-15T04:31:02.000Z");
 const INITIAL_TIMESTAMP = String(Math.floor(INITIAL_NOW / 1_000));
 
@@ -766,6 +767,7 @@ describe("parseModuleHeartbeatKeys", () => {
         new Map([
           ["search-media", SEARCH_MEDIA_SECRET],
           ["account-integrations", ACCOUNT_INTEGRATIONS_SECRET],
+          ["download-worker", DOWNLOAD_WORKER_SECRET],
         ]),
       ),
     ).not.toThrow();
@@ -775,6 +777,11 @@ describe("parseModuleHeartbeatKeys", () => {
       new Map([
         ["search-media", SEARCH_MEDIA_SECRET],
         ["account-integrations", ""],
+        ["download-worker", DOWNLOAD_WORKER_SECRET],
+      ]),
+      new Map([
+        ["search-media", SEARCH_MEDIA_SECRET],
+        ["account-integrations", ACCOUNT_INTEGRATIONS_SECRET],
       ]),
       new Map<string, string>(),
     ]) {

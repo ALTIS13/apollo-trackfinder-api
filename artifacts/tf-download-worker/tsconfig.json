@@ -8,6 +8,9 @@
   "include": ["src"],
   "references": [
     {
+      "path": "../../lib/module-runtime-contract"
+    },
+    {
       "path": "../../lib/tf-download-contract"
     }
   ]

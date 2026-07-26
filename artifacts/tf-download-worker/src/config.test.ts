@@ -1,0 +1,331 @@
+import path from "node:path";
+
+import { describe, expect, it, vi } from "vitest";
+
+import { parseTfDownloadWorkerConfig } from "./config.js";
+
+const commandSecret = "c".repeat(32);
+const heartbeatSecret = "h".repeat(32);
+const storageRoot = path.resolve("C:/apollo-tf/downloads");
+
+function environment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return {
+    PORT: "8080",
+    TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/run/secrets/download-queue-url",
+    TF_DOWNLOAD_INTERNAL_AUTH_SECRET_FILE: "/run/secrets/download-command",
+    TF_DOWNLOAD_HEARTBEAT_SECRET_FILE: "/run/secrets/download-heartbeat",
+    TF_DOWNLOAD_HEARTBEAT_API_ORIGIN: "https://api.apollot.ru",
+    TF_DOWNLOAD_STORAGE_ROOT: storageRoot,
+    APOLLO_API_VERSION: "2026.7.26",
+    APOLLO_DEPLOYED_AT: "2026-07-26T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function files(
+  overrides: Readonly<Record<string, string | Buffer>> = {},
+): Readonly<Record<string, string | Buffer>> {
+  return {
+    "/run/secrets/download-queue-url":
+      "rediss://worker:password@queue.apollot.ru:6380/3",
+    "/run/secrets/download-command": commandSecret,
+    "/run/secrets/download-heartbeat": heartbeatSecret,
+    ...overrides,
+  };
+}
+
+function reader(values = files()) {
+  return vi.fn(async (filePath: string): Promise<Buffer> => {
+    const value = values[filePath];
+    if (value === undefined) throw new Error("unreadable");
+    return Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
+  });
+}
+
+describe("TF download worker runtime configuration", () => {
+  it("loads each bounded file once and returns strict runtime limits", async () => {
+    const readFile = reader();
+
+    await expect(
+      parseTfDownloadWorkerConfig(environment(), readFile),
+    ).resolves.toEqual({
+      port: 8080,
+      queueRedisUrl:
+        "rediss://worker:password@queue.apollot.ru:6380/3",
+      internalAuthSecret: commandSecret,
+      heartbeatSecret,
+      heartbeatApiOrigin: "https://api.apollot.ru",
+      storageRoot,
+      downloaderExecutable: "/usr/local/bin/yt-dlp",
+      version: "2026.7.26",
+      deployedAt: "2026-07-26T12:00:00.000Z",
+      maxFileBytes: 1_073_741_824,
+      storageQuotaBytes: 21_474_836_480,
+      fileTtlMs: 86_400_000,
+      sweepIntervalMs: 300_000,
+      shutdownGraceMs: 30_000,
+      queueProbeTimeoutMs: 3_000,
+    });
+    expect(readFile).toHaveBeenCalledTimes(3);
+    expect(readFile.mock.calls.map(([filePath]) => filePath)).toEqual([
+      "/run/secrets/download-queue-url",
+      "/run/secrets/download-command",
+      "/run/secrets/download-heartbeat",
+    ]);
+  });
+
+  it("rejects every inline secret or queue URL by presence", async () => {
+    for (const name of [
+      "TF_DOWNLOAD_QUEUE_REDIS_URL",
+      "TF_DOWNLOAD_INTERNAL_AUTH_SECRET",
+      "TF_DOWNLOAD_HEARTBEAT_SECRET",
+    ]) {
+      for (const value of ["", "inline-secret"]) {
+        await expect(
+          parseTfDownloadWorkerConfig(
+            environment({ [name]: value }),
+            reader(),
+          ),
+        ).rejects.toThrow("invalid runtime configuration");
+      }
+    }
+  });
+
+  it("requires readable bounded files and distinct 32..512 byte secrets", async () => {
+    for (const value of ["", "x".repeat(31), "x".repeat(513), "🙂".repeat(129)]) {
+      await expect(
+        parseTfDownloadWorkerConfig(
+          environment(),
+          reader(files({ "/run/secrets/download-command": value })),
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+    }
+    await expect(
+      parseTfDownloadWorkerConfig(
+        environment(),
+        reader(
+          files({
+            "/run/secrets/download-heartbeat": commandSecret,
+          }),
+        ),
+      ),
+    ).rejects.toThrow("invalid runtime configuration");
+    await expect(
+      parseTfDownloadWorkerConfig(
+        environment(),
+        reader({
+          ...files(),
+          "/run/secrets/download-queue-url": "x".repeat(2_049),
+        }),
+      ),
+    ).rejects.toThrow("invalid runtime configuration");
+  });
+
+  it("rejects malformed UTF-8 in every file-backed value", async () => {
+    for (const filePath of [
+      "/run/secrets/download-queue-url",
+      "/run/secrets/download-command",
+      "/run/secrets/download-heartbeat",
+    ]) {
+      await expect(
+        parseTfDownloadWorkerConfig(
+          environment(),
+          reader(
+            files({
+              [filePath]:
+                filePath === "/run/secrets/download-queue-url"
+                  ? Buffer.concat([
+                      Buffer.from("rediss://user:", "utf8"),
+                      Buffer.from([0xc3, 0x28]),
+                      Buffer.from("@queue.apollot.ru/0", "utf8"),
+                    ])
+                  : Buffer.concat([
+                      Buffer.from("x".repeat(32), "utf8"),
+                      Buffer.from([0xc3, 0x28]),
+                    ]),
+            }),
+          ),
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+    }
+  });
+
+  it("allows private same-node redis/http only with exact explicit flags", async () => {
+    await expect(
+      parseTfDownloadWorkerConfig(
+        environment({
+          TF_DOWNLOAD_HEARTBEAT_API_ORIGIN: "http://api-server:8080",
+        }),
+        reader(
+          files({
+            "/run/secrets/download-queue-url":
+              "redis://tf-download-redis:6379/0",
+          }),
+        ),
+      ),
+    ).rejects.toThrow("invalid runtime configuration");
+
+    await expect(
+      parseTfDownloadWorkerConfig(
+        environment({
+          TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+          TF_DOWNLOAD_HEARTBEAT_ALLOW_INSECURE_HTTP: "true",
+          TF_DOWNLOAD_HEARTBEAT_API_ORIGIN: "http://api-server:8080",
+        }),
+        reader(
+          files({
+            "/run/secrets/download-queue-url":
+              "redis://tf-download-redis:6379/0",
+          }),
+        ),
+      ),
+    ).resolves.toMatchObject({
+      queueRedisUrl: "redis://tf-download-redis:6379/0",
+      heartbeatApiOrigin: "http://api-server:8080",
+    });
+
+    for (const [name, value] of [
+      ["TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS", "TRUE"],
+      ["TF_DOWNLOAD_HEARTBEAT_ALLOW_INSECURE_HTTP", "1"],
+      ["TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS", "false"],
+      ["TF_DOWNLOAD_HEARTBEAT_ALLOW_INSECURE_HTTP", ""],
+    ]) {
+      await expect(
+        parseTfDownloadWorkerConfig(
+          environment({ [name]: value }),
+          reader(),
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+    }
+  });
+
+  it("rejects unsafe origins, queue URLs, and non-normalized paths", async () => {
+    for (const origin of [
+      "https://api.apollot.ru/",
+      "https://api.apollot.ru/path",
+      "https://user:pass@api.apollot.ru",
+      "http://192.168.1.20:8080",
+    ]) {
+      await expect(
+        parseTfDownloadWorkerConfig(
+          environment({
+            TF_DOWNLOAD_HEARTBEAT_API_ORIGIN: origin,
+            TF_DOWNLOAD_HEARTBEAT_ALLOW_INSECURE_HTTP: "true",
+          }),
+          reader(),
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+    }
+    for (const queueUrl of [
+      "rediss://queue.apollot.ru/03",
+      "rediss://queue.apollot.ru/16",
+      "rediss://queue.apollot.ru/0?secret=value",
+      "redis://public.apollot.ru:6379/0",
+      "rediss://user%ZZ:password@queue.apollot.ru/0",
+      "rediss://user:password%E0%A4%A@queue.apollot.ru/0",
+    ]) {
+      await expect(
+        parseTfDownloadWorkerConfig(
+          environment({
+            TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+          }),
+          reader(
+            files({
+              "/run/secrets/download-queue-url": queueUrl,
+            }),
+          ),
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+    }
+    await expect(
+      parseTfDownloadWorkerConfig(
+        environment(),
+        reader(
+          files({
+            "/run/secrets/download-queue-url":
+              "rediss://user%20name:p%40ss@queue.apollot.ru:6380/3",
+          }),
+        ),
+      ),
+    ).resolves.toMatchObject({
+      queueRedisUrl:
+        "rediss://user%20name:p%40ss@queue.apollot.ru:6380/3",
+    });
+    await expect(
+      parseTfDownloadWorkerConfig(
+        environment({
+          TF_DOWNLOAD_STORAGE_ROOT:
+            `${storageRoot}${path.sep}..${path.sep}downloads`,
+        }),
+        reader(),
+      ),
+    ).rejects.toThrow("invalid runtime configuration");
+  });
+
+  it("accepts only documented integer ranges and sanitized metadata", async () => {
+    const invalid = [
+      ["PORT", "0"],
+      ["PORT", "65536"],
+      ["TF_DOWNLOAD_MAX_FILE_BYTES", "1073741825"],
+      ["TF_DOWNLOAD_STORAGE_QUOTA_BYTES", "1073741823"],
+      ["TF_DOWNLOAD_FILE_TTL_MS", "59999"],
+      ["TF_DOWNLOAD_SWEEP_INTERVAL_MS", "999"],
+      ["TF_DOWNLOAD_SHUTDOWN_GRACE_MS", "999"],
+      ["TF_DOWNLOAD_QUEUE_PROBE_TIMEOUT_MS", "99"],
+      ["APOLLO_API_VERSION", "v".repeat(129)],
+      ["APOLLO_DEPLOYED_AT", "2026-07-26"],
+      ["APOLLO_DEPLOYED_AT", "2026-02-29T00:00:00.000Z"],
+      ["APOLLO_DEPLOYED_AT", "2026-02-30T00:00:00.000Z"],
+      ["APOLLO_DEPLOYED_AT", "2026-04-31T00:00:00.000Z"],
+    ] as const;
+    for (const [name, value] of invalid) {
+      await expect(
+        parseTfDownloadWorkerConfig(
+          environment({ [name]: value }),
+          reader(),
+        ),
+      ).rejects.toThrow("invalid runtime configuration");
+    }
+
+    await expect(
+      parseTfDownloadWorkerConfig(
+        environment({
+          TF_DOWNLOAD_MAX_FILE_BYTES: "536870912",
+          TF_DOWNLOAD_STORAGE_QUOTA_BYTES: "4294967296",
+          TF_DOWNLOAD_FILE_TTL_MS: "3600000",
+          TF_DOWNLOAD_SWEEP_INTERVAL_MS: "60000",
+          TF_DOWNLOAD_SHUTDOWN_GRACE_MS: "15000",
+          TF_DOWNLOAD_QUEUE_PROBE_TIMEOUT_MS: "1000",
+        }),
+        reader(),
+      ),
+    ).resolves.toMatchObject({
+      maxFileBytes: 536_870_912,
+      storageQuotaBytes: 4_294_967_296,
+      fileTtlMs: 3_600_000,
+      sweepIntervalMs: 60_000,
+      shutdownGraceMs: 15_000,
+      queueProbeTimeoutMs: 1_000,
+    });
+  });
+
+  it("uses one generic error that does not leak file values", async () => {
+    const canary = "DO_NOT_LEAK_THIS_SECRET";
+    let caught: unknown;
+    try {
+      await parseTfDownloadWorkerConfig(
+        environment(),
+        reader(
+          files({
+            "/run/secrets/download-command": canary,
+          }),
+        ),
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(String(caught)).toBe("Error: invalid runtime configuration");
+    expect(String(caught)).not.toContain(canary);
+  });
+});
