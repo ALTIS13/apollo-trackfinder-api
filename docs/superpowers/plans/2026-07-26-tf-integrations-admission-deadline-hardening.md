@@ -24,8 +24,9 @@ or implement `tf-download-worker`.
 - Replay records remain live for the complete signed 60-second validity window.
 - Replay state is bounded and partitioned so one account cannot evict another
   account's live nonces.
-- Legitimate sequential pagination, including more than 32 `liked-all` pages,
-  is not silently truncated by replay capacity.
+- Legitimate sequential pagination beyond the configured live-nonce capacity
+  is retried with a fresh signed request or fails explicitly; it is never
+  returned as a silently truncated successful `liked-all` response.
 - Every command has one absolute deadline propagated through service and
   repository layers.
 - Provider calls, encryption/decryption, reads, and mutations check
@@ -49,8 +50,8 @@ or implement `tf-download-worker`.
 
 - [ ] Add failing tests proving readiness/concurrency rejection does not claim
   a nonce, while two admitted requests with the same nonce cannot both execute.
-- [ ] Add a failing test proving at least 33 sequential `liked-all` pages are
-  preserved without replay-capacity truncation.
+- [ ] Add a failing test that exceeds the actual configured live-nonce capacity
+  and proves `liked-all` cannot report a silently truncated success.
 - [ ] Add failing tests for full 60-second replay lifetime, per-account
   isolation, and deterministic bounded-memory/backpressure behavior.
 - [ ] Implement the smallest explicit two-phase admission/replay design that
