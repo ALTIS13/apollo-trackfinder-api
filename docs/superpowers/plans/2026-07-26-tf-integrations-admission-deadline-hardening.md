@@ -91,10 +91,13 @@ or implement `tf-download-worker`.
 **Primary files:**
 
 - `IMPLEMENTATION_STATUS.md`
+- `MODULES.md`
 - `.superpowers/sdd/2026-07-26-tf-integrations-admission-deadline-hardening/*`
 
 - [ ] Correct current next-stage text so it names `tf-download-worker`; do not
   rewrite historical validation records.
+- [ ] Correct the current replay-capacity description to match the reviewed
+  account-partitioned implementation.
 - [ ] Run an independent task review after Tasks 1 and 2 and a whole-wave review
   after Task 3.
 - [ ] Run the full repository validation matrix, real PostgreSQL integration
