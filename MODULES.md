@@ -590,13 +590,16 @@ API и модуль совместно получают только
 sha256(rawBody)`. Timestamp и 32-byte base64url nonce находятся в
 `X-Apollo-Internal-Timestamp` и `X-Apollo-Internal-Nonce`; окно timestamp --
 60 секунд. Модуль сначала аутентифицирует exact raw bytes, timestamp и
-signature, затем строго разбирает command и только после этого claims nonce
-в canonical account partition. Live nonces не вытесняются и хранятся ровно
-до конца signed replay-valid окна; limits -- `32` на account и `256` global.
-Заполнение одного account partition не блокирует остальные accounts. Только
-literal `/v1/commands` допустим: query, fragment, trailing slash и любой
-дополнительный request target получают `404` без path canonicalization.
-Command key обязан отличаться от `tf_integrations_heartbeat_secret`.
+signature, затем строго разбирает command. Readiness и module-concurrency
+rejection происходят до nonce claim в canonical account partition. Replay
+state хранит до `256` live nonces на каждый canonical account в пределах не
+более `256` account partitions. Shared global nonce pool отсутствует, live
+nonces не вытесняются и хранятся ровно до конца signed replay-valid окна;
+исчерпание account или partition capacity возвращает явный `503`. Заполнение
+одного account partition не блокирует остальные accounts. Только literal
+`/v1/commands` допустим: query, fragment, trailing slash и любой дополнительный
+request target получают `404` без path canonicalization. Command key обязан
+отличаться от `tf_integrations_heartbeat_secret`.
 
 Модуль получает только шесть runtime secrets:
 `tf_integrations_runtime_database_url`, `tf_integrations_token_keyring`,
@@ -630,16 +633,19 @@ Provider token сохраняется только как AES-256-GCM envelope �
 после awaited readiness и не создаёт поздний request. Readiness модуля зависит
 только от exact migration history и bounded database capability probe, который
 требует PostgreSQL 17+ и доступный session parameter `transaction_timeout`;
-недоступность Spotify/Yandex не делает `/readyz` неуспешным.
+PG16 или отсутствие capability fail-closed возвращают `503` readiness.
+Недоступность Spotify/Yandex не делает `/readyz` неуспешным.
 
 Каждая command получает единый abort signal от HTTP disconnect, runtime
 shutdown и fixed `8s` deadline, который короче API gateway timeout `10s`.
-Каждая mutation устанавливает session `transaction_timeout` из оставшегося
-absolute budget до `BEGIN`, сохраняет transaction-local statement/lock
-timeouts как defense in depth и сбрасывает session setting перед возвратом
-исправного client в pool. Abort, deadline или uncertain transaction/reset
-outcome уничтожает checked-out connection, поэтому PostgreSQL откатывает
-незавершённую transaction.
+Каждая mutation до `BEGIN` устанавливает session `transaction_timeout` из
+оставшегося absolute budget и оставляет его активным через `COMMIT`.
+Transaction-local statement/lock timeouts сохраняются как defense in depth, а
+session setting сбрасывается перед возвратом исправного client в pool. Abort,
+deadline или uncertain transaction/reset outcome уничтожает checked-out
+connection, поэтому PostgreSQL откатывает незавершённую transaction. После
+validation и serialization ответа HTTP path выполняет финальную deadline check
+до отправки response bytes.
 Module допускает не более `32` active commands; provider boundary -- `8`
 active calls плюс `24` queued. Spotify/Yandex читают response JSON streaming
 с limit `1 MiB`, передают signal во все fixed HTTPS endpoints и
@@ -708,7 +714,7 @@ HomeNode, Coolify, Caddy, UFW и DNS не изменялись.
 
 Модули не разделяют database credentials и не получают Docker/Coolify/Caddy/SSH доступ. На одной Coolify node связь строится через private service DNS. Между разными нодами требуется отдельно одобренный TLS upstream; Docker Compose network не является межузловой сетью.
 
-Для локального bridge новый домен не нужен. Перед remote rollout нужно запросить точные upstreams для уже согласованных `apollot.ru`, `api.apollot.ru`, `tf.apollot.ru`, `api.tf.apollot.ru` и `admin.apollot.ru`. Caddy access logs обязаны удалять query string у `/api/ws`, потому что он содержит одноразовый ticket. Получение ticket веб-клиентом остаётся следующим web integration этапом. HomeNode, Coolify, Caddy, UFW и DNS в Task 9 не менялись.
+Для локального bridge новый домен не нужен. Перед remote rollout нужно запросить точные upstreams для уже согласованных `apollot.ru`, `api.apollot.ru`, `tf.apollot.ru`, `api.tf.apollot.ru` и `admin.apollot.ru`. Caddy access logs обязаны удалять query string у `/api/ws`, потому что он содержит одноразовый ticket. Web client уже получает новый ticket перед каждой WebSocket connection attempt; единственный текущий server/web implementation stage -- `tf-download-worker`. HomeNode, Coolify, Caddy, UFW и DNS остаются gated до read-only preflight и отдельного подтверждения владельца.
 
 ### `artifacts/admin-dashboard/Dockerfile`
 

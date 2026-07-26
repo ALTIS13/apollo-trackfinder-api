@@ -1,8 +1,28 @@
 # Apollo TF implementation status
 
-Last updated: 2026-07-25.
+Last updated: 2026-07-26.
 
-## TF integrations Task 7 release validation
+## TF integrations admission/deadline hardening candidate
+
+Status: `REVIEWED_CANDIDATE`. The local candidate through
+`2799b58b5a993ae3bcdc6cac766a501980313da6` has focused task review, but this
+record does not claim final whole-wave validation, push, or merge.
+
+- Replay state retains up to `256` live nonces per canonical account across at
+  most `256` account partitions. There is no shared global nonce pool and no
+  live-nonce eviction; exhausted account or partition capacity is an explicit
+  `503`. Readiness and module-concurrency rejection happen before nonce claim,
+  while duplicate admitted commands cannot execute concurrently.
+- Every command uses one absolute `8s` context. The isolated integration
+  database is PostgreSQL 17+, and session `transaction_timeout` remains active
+  through `COMMIT`; PG16 or a missing capability fails readiness
+  closed. The HTTP path performs a final deadline check after serializing the
+  validated response and before sending it.
+- The next server/web feature is `tf-download-worker`. Coolify/HomeNode rollout
+  remains gated on the later whole-wave validation, read-only preflight, and
+  explicit owner approval.
+
+## TF integrations Task 7 historical release validation
 
 Status: `DONE_WITH_CONCERNS`. The final whole-branch implementation and
 validation tip is
@@ -283,12 +303,10 @@ the runtime matrix was rerun on itself.
 
 ## Следующий логичный этап реализации
 
-- Task 6 Step 5 локально закрыт: feature опубликована, fast-forward merge и merged-result validation завершены. Остаётся отдельная публикация текущего docs tip в `origin/main`; она намеренно не выполнялась в рамках этой задачи.
-- Следующий feature stage после публикации release record -- выделение `tf-integrations` в контейнер по той же reviewed least-privilege boundary: отдельные command/heartbeat secrets, отсутствие browser/session/policy данных, same-node private networking и exact HTTPS origin для будущего cross-node Coolify placement.
 - Локальная Apollo Platform Identity/Policy foundation и production-compatible container smoke завершены. Следующий feature stage должен начинаться только по отдельному binding brief; Task 8 не включает portal/TF client zone или дальнейшую платформенную функциональность.
 - Coolify/HomeNode rollout выполняется только после локальной реализации и validation всех web/server модулей, повторного read-only preflight и явного разрешения владельца непосредственно перед удалёнными изменениями.
 - Native Android APK decision remains separate: сохранить Expo-модули через native prebuild/Gradle либо выполнить отдельную миграцию на bare React Native.
-- Apollo TF web client подключён к Platform authorize/callback, cookie-backed session, CSRF boundary и одноразовым WebSocket tickets. `tf-search` уже выделен и локально провалидирован; следующий server/web этап: выделить `tf-integrations`, затем `tf-download-worker` в независимые least-privilege контейнеры, сохранить единый root Compose для локального полного стека и подготовить Coolify deployment contracts без удалённого rollout до read-only preflight и отдельного подтверждения владельца.
+- Apollo TF web client подключён к Platform authorize/callback, cookie-backed session, CSRF boundary и одноразовым WebSocket tickets. `tf-search` и `tf-integrations` уже выделены и локально провалидированы; следующий server/web этап -- `tf-download-worker` как независимый least-privilege контейнер. Единый root Compose сохраняется для локального полного стека, а Coolify deployment contracts не переходят к удалённому rollout до read-only preflight и отдельного подтверждения владельца.
 
 ## Notes
 
