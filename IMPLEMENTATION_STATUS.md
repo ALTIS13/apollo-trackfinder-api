@@ -4,11 +4,14 @@ Last updated: 2026-07-27.
 
 ## TF download worker release candidate
 
-Status: `RELEASE_CANDIDATE`. The reviewed runtime tip is
-`955200aec6a12776fe9ea52b26c1f3bfa16201a9`, based on
-`a6c7bca84e3334ef28022947b147d16ea3d283da`. It has not yet been deployed to
-HomeNode or Coolify. The following status update is documentation-only and does
-not claim that the runtime matrix was rerun on itself.
+Status: `MERGED_VALIDATED`. The reviewed runtime tip is
+`955200aec6a12776fe9ea52b26c1f3bfa16201a9`; the validated feature/release
+record tip is `b0727979062885e1c32f679ab9e44cb5c0b67668`, based on
+`a6c7bca84e3334ef28022947b147d16ea3d283da`. Local `main` was fast-forwarded
+without a merge commit and passed the merged-result gate. It has not yet been
+deployed to HomeNode or Coolify. This following publication record is
+documentation-only and does not claim that the runtime matrix was rerun on
+itself.
 
 - The public API remains the only browser authorization, CSRF, entitlement,
   queue-admission, cancellation, and file-authorization boundary. Downloads run
@@ -46,8 +49,9 @@ skipped`; music-player passed `118/118`; the full API suite passed
   FFmpeg/libmp3lame threshold calibration after future image upgrades.
 - GitHub connectivity resolves canonically to `ALTIS13/Apollo.TF`; `origin`
   uses `https://github.com/ALTIS13/Apollo.TF.git`, remote HEAD/default branch is
-  `main`, and fetch/`ls-remote` succeed. No remote branch or `main` push is
-  claimed by this candidate record.
+  `main`, and fetch/`ls-remote` succeed. The feature ref was published at the
+  validated release-record tip; remote `main` publication is represented by the
+  Git commit history containing this documentation-only record.
 - Next rollout stage is a read-only HomeNode/Coolify/Caddy preflight, native
   Linux secret-ownership proof, and an owner-approved Coolify deployment. No
   HomeNode, Coolify, Caddy, UFW, DNS, or other remote infrastructure mutation
