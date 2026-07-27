@@ -8,6 +8,7 @@ import {
 import {
   access,
   chmod,
+  chown,
   mkdtemp,
   readFile,
   rm,
@@ -36,6 +37,7 @@ const EXPECTED_SERVICES = Object.freeze([
   "platform-postgres",
   "platform-redis",
   "tf-api",
+  "tf-migrate",
   "tf-postgres",
   "tf-redis",
 ]);
@@ -100,9 +102,15 @@ const OWNED_ENVIRONMENT_NAMES = Object.freeze([
   "PLATFORM_SECRET_DIRECTORY",
   "TF_API_PORT",
   "TF_API_IMAGE",
+  "TF_ADMIN_DATABASE_URL",
   "TF_DATABASE_URL",
+  "TF_MIGRATOR_DATABASE_URL",
+  "TF_MIGRATOR_PASSWORD",
+  "TF_POSTGRES_ADMIN_PASSWORD",
   "TF_POSTGRES_PASSWORD",
   "TF_PUBLIC_ORIGIN",
+  "TF_RUNTIME_DATABASE_URL",
+  "TF_RUNTIME_PASSWORD",
   "TF_SECRET_DIRECTORY",
 ]);
 const JSON_LIMIT = 128 * 1024;
@@ -626,7 +634,9 @@ export async function prepareSecretDirectory(environment, tfPublicOrigin) {
     const platformPostgresAdminPassword = generatedSecret();
     const platformMigratorPassword = generatedSecret();
     const platformRuntimePassword = generatedSecret();
-    const tfPostgresPassword = generatedSecret();
+    const tfPostgresAdminPassword = generatedSecret();
+    const tfMigratorPassword = generatedSecret();
+    const tfRuntimePassword = generatedSecret();
     const operatorBootstrapToken = generatedSecret();
     const oauthClientSecret = generatedSecret();
     const pkceVerifier = generatedSecret(48);
@@ -636,8 +646,14 @@ export async function prepareSecretDirectory(environment, tfPublicOrigin) {
     const platformRuntimeDatabaseUrl =
       `postgres://apollo_platform_runtime:${encodeURIComponent(platformRuntimePassword)}` +
       "@platform-postgres:5432/apollo_platform";
-    const tfDatabaseUrl =
-      `postgres://apollo_tf_runtime:${encodeURIComponent(tfPostgresPassword)}` +
+    const tfAdminDatabaseUrl =
+      `postgres://postgres:${encodeURIComponent(tfPostgresAdminPassword)}` +
+      "@tf-postgres:5432/apollo_tf";
+    const tfMigratorDatabaseUrl =
+      `postgres://apollo_tf_migrator:${encodeURIComponent(tfMigratorPassword)}` +
+      "@tf-postgres:5432/apollo_tf";
+    const tfRuntimeDatabaseUrl =
+      `postgres://apollo_tf_runtime:${encodeURIComponent(tfRuntimePassword)}` +
       "@tf-postgres:5432/apollo_tf";
     const assertionPrivateJwk = {
       alg: "EdDSA",
@@ -657,44 +673,119 @@ export async function prepareSecretDirectory(environment, tfPublicOrigin) {
       x: publicJwk.x,
     };
     const files = new Map([
-      ["platform_assertion_private_jwk", JSON.stringify(assertionPrivateJwk)],
+      [
+        "platform_assertion_private_jwk",
+        { value: JSON.stringify(assertionPrivateJwk), mode: 0o444 },
+      ],
       [
         "platform_assertion_public_jwks",
-        JSON.stringify({ keys: [assertionPublicJwk] }),
+        {
+          value: JSON.stringify({ keys: [assertionPublicJwk] }),
+          mode: 0o444,
+        },
       ],
-      ["platform_migrator_database_url", platformMigratorDatabaseUrl],
-      ["platform_migrator_password", platformMigratorPassword],
+      [
+        "platform_migrator_database_url",
+        { value: platformMigratorDatabaseUrl, mode: 0o444 },
+      ],
+      [
+        "platform_migrator_password",
+        { value: platformMigratorPassword, mode: 0o444 },
+      ],
       [
         "platform_oauth_clients",
-        JSON.stringify([
-          {
-            audience: "apollo-tf",
-            clientId: "apollo-tf-api",
-            clientSecretDigest: digest(oauthClientSecret),
-            redirectUris: [`${tfPublicOrigin}/api/auth/callback`],
-          },
-        ]),
+        {
+          value: JSON.stringify([
+            {
+              audience: "apollo-tf",
+              clientId: "apollo-tf-api",
+              clientSecretDigest: digest(oauthClientSecret),
+              redirectUris: [`${tfPublicOrigin}/api/auth/callback`],
+            },
+          ]),
+          mode: 0o444,
+        },
       ],
-      ["platform_operator_bootstrap_token", operatorBootstrapToken],
-      ["platform_postgres_admin_password", platformPostgresAdminPassword],
-      ["platform_runtime_database_url", platformRuntimeDatabaseUrl],
-      ["platform_runtime_password", platformRuntimePassword],
-      ["tf_client_secret", oauthClientSecret],
-      ["tf_database_url", tfDatabaseUrl],
-      ["tf_pkce_verifier", pkceVerifier],
-      ["tf_postgres_password", tfPostgresPassword],
+      [
+        "platform_operator_bootstrap_token",
+        { value: operatorBootstrapToken, mode: 0o444 },
+      ],
+      [
+        "platform_postgres_admin_password",
+        { value: platformPostgresAdminPassword, mode: 0o444 },
+      ],
+      [
+        "platform_runtime_database_url",
+        { value: platformRuntimeDatabaseUrl, mode: 0o444 },
+      ],
+      [
+        "platform_runtime_password",
+        { value: platformRuntimePassword, mode: 0o444 },
+      ],
+      [
+        "tf_admin_database_url",
+        { value: tfAdminDatabaseUrl, uid: 0, gid: 10002, mode: 0o440 },
+      ],
+      [
+        "tf_client_secret",
+        { value: oauthClientSecret, uid: 10001, gid: 10001, mode: 0o400 },
+      ],
+      [
+        "tf_migrator_database_url",
+        {
+          value: tfMigratorDatabaseUrl,
+          uid: 10001,
+          gid: 10001,
+          mode: 0o400,
+        },
+      ],
+      [
+        "tf_migrator_password",
+        { value: tfMigratorPassword, uid: 999, gid: 999, mode: 0o400 },
+      ],
+      [
+        "tf_pkce_verifier",
+        { value: pkceVerifier, uid: 10001, gid: 10001, mode: 0o400 },
+      ],
+      [
+        "tf_postgres_admin_password",
+        { value: tfPostgresAdminPassword, uid: 999, gid: 999, mode: 0o400 },
+      ],
+      [
+        "tf_runtime_database_url",
+        {
+          value: tfRuntimeDatabaseUrl,
+          uid: 10001,
+          gid: 10001,
+          mode: 0o400,
+        },
+      ],
+      [
+        "tf_runtime_password",
+        { value: tfRuntimePassword, uid: 999, gid: 999, mode: 0o400 },
+      ],
     ]);
     await Promise.all(
-      [...files].map(async ([name, value]) => {
+      [...files].map(async ([name, metadata]) => {
         const path = join(directory, name);
-        await writeFile(path, value, { mode: 0o600 });
-        await chmod(path, 0o444);
+        await writeFile(path, metadata.value, { mode: 0o600 });
+        if (
+          process.platform !== "win32" &&
+          metadata.uid !== undefined &&
+          metadata.gid !== undefined
+        ) {
+          await chown(path, metadata.uid, metadata.gid);
+        }
+        await chmod(path, process.platform === "win32" ? 0o444 : metadata.mode);
       }),
     );
     if (process.platform !== "win32") {
       assert.equal((await stat(directory)).mode & 0o777, 0o700);
-      for (const name of files.keys()) {
-        assert.equal((await stat(join(directory, name))).mode & 0o777, 0o444);
+      for (const [name, metadata] of files) {
+        const current = await stat(join(directory, name));
+        assert.equal(current.mode & 0o777, metadata.mode);
+        if (metadata.uid !== undefined) assert.equal(current.uid, metadata.uid);
+        if (metadata.gid !== undefined) assert.equal(current.gid, metadata.gid);
       }
     }
     environment.BRIDGE_SECRET_DIRECTORY = directory;
@@ -707,13 +798,17 @@ export async function prepareSecretDirectory(environment, tfPublicOrigin) {
         platformPostgresAdminPassword,
         platformMigratorPassword,
         platformRuntimePassword,
-        tfPostgresPassword,
+        tfPostgresAdminPassword,
+        tfMigratorPassword,
+        tfRuntimePassword,
         operatorBootstrapToken,
         oauthClientSecret,
         pkceVerifier,
         platformMigratorDatabaseUrl,
         platformRuntimeDatabaseUrl,
-        tfDatabaseUrl,
+        tfAdminDatabaseUrl,
+        tfMigratorDatabaseUrl,
+        tfRuntimeDatabaseUrl,
         assertionPrivateJwk.d,
       ],
     };
@@ -754,6 +849,24 @@ function secretSources(current) {
       typeof entry === "string" ? entry : String(entry.source ?? ""),
     )
     .sort();
+}
+
+function assertSecretMount(current, source, expected) {
+  const mount = (current.secrets ?? []).find(
+    (entry) => typeof entry !== "string" && entry.source === source,
+  );
+  assert(mount !== undefined, `Missing long-syntax secret mount ${source}`);
+  assert.deepEqual(
+    {
+      gid: mount.gid,
+      mode: mount.mode,
+      source: mount.source,
+      target: mount.target,
+      uid: mount.uid,
+    },
+    { source, ...expected },
+    `${source} mount metadata is unsafe`,
+  );
 }
 
 function assertDependencies(current, expected) {
@@ -864,9 +977,12 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     "platform_runtime_database_url",
     "platform_runtime_password",
     "tf_client_secret",
-    "tf_database_url",
+    "tf_migrator_database_url",
+    "tf_migrator_password",
     "tf_pkce_verifier",
-    "tf_postgres_password",
+    "tf_postgres_admin_password",
+    "tf_runtime_database_url",
+    "tf_runtime_password",
   ]);
   for (const name of Object.keys(config.secrets)) {
     assert.equal(
@@ -883,6 +999,7 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     "platform-api": ["bridge-edge", "platform-data", "platform-tf-control"],
     "tf-postgres": ["tf-data"],
     "tf-redis": ["tf-data"],
+    "tf-migrate": ["tf-data"],
     "tf-api": ["bridge-edge", "platform-tf-control", "tf-data"],
   };
   for (const [name, networks] of Object.entries(expectedNetworks)) {
@@ -899,6 +1016,7 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     "platform-migrate",
     "tf-postgres",
     "tf-redis",
+    "tf-migrate",
   ]) {
     assert.equal(configService(config, name).ports, undefined);
   }
@@ -915,7 +1033,8 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     "platform-postgres": "apollo-platform-postgres:bridge",
     "platform-redis": "redis:7-bookworm",
     "tf-api": "apollo-tf-api:bridge",
-    "tf-postgres": "postgres:16-bookworm",
+    "tf-migrate": "apollo-tf-api:bridge",
+    "tf-postgres": "apollo-tf-postgres:bridge",
     "tf-redis": "redis:7-bookworm",
   };
   for (const [name, image] of Object.entries(expectedImages)) {
@@ -939,9 +1058,17 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
       dockerfile: "artifacts/platform-api/Dockerfile",
       target: "runtime",
     },
+    "tf-postgres": {
+      dockerfile: "artifacts/api-server/Dockerfile",
+      target: "postgres-role-init",
+    },
+    "tf-migrate": {
+      dockerfile: "artifacts/api-server/Dockerfile",
+      target: "runner",
+    },
     "tf-api": {
       dockerfile: "artifacts/api-server/Dockerfile",
-      target: undefined,
+      target: "runner",
     },
   };
   for (const [name, expected] of Object.entries(expectedBuilds)) {
@@ -967,7 +1094,11 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
   assertDependencies(configService(config, "tf-api"), {
     "platform-api": "service_healthy",
     "tf-postgres": "service_healthy",
+    "tf-migrate": "service_completed_successfully",
     "tf-redis": "service_healthy",
+  });
+  assertDependencies(configService(config, "tf-migrate"), {
+    "tf-postgres": "service_healthy",
   });
 
   const expectedSecrets = {
@@ -985,9 +1116,18 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
       "platform_operator_bootstrap_token",
       "platform_runtime_database_url",
     ],
-    "tf-postgres": ["tf_postgres_password"],
+    "tf-postgres": [
+      "tf_migrator_password",
+      "tf_postgres_admin_password",
+      "tf_runtime_password",
+    ],
     "tf-redis": [],
-    "tf-api": ["tf_client_secret", "tf_database_url", "tf_pkce_verifier"],
+    "tf-migrate": ["tf_migrator_database_url"],
+    "tf-api": [
+      "tf_client_secret",
+      "tf_pkce_verifier",
+      "tf_runtime_database_url",
+    ],
   };
   for (const [name, expected] of Object.entries(expectedSecrets)) {
     assert.deepEqual(
@@ -996,8 +1136,45 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
       `${name} secret boundary is unsafe`,
     );
   }
+  for (const source of [
+    "tf_postgres_admin_password",
+    "tf_migrator_password",
+    "tf_runtime_password",
+  ]) {
+    assertSecretMount(configService(config, "tf-postgres"), source, {
+      target: source,
+      uid: "999",
+      gid: "999",
+      mode: "0400",
+    });
+  }
+  assertSecretMount(
+    configService(config, "tf-migrate"),
+    "tf_migrator_database_url",
+    {
+      target: "tf_migrator_database_url",
+      uid: "10001",
+      gid: "10001",
+      mode: "0400",
+    },
+  );
+  assertSecretMount(
+    configService(config, "tf-api"),
+    "tf_runtime_database_url",
+    {
+      target: "tf_runtime_database_url",
+      uid: "10001",
+      gid: "10001",
+      mode: "0400",
+    },
+  );
 
-  for (const name of ["platform-migrate", "platform-api", "tf-api"]) {
+  for (const name of [
+    "platform-migrate",
+    "platform-api",
+    "tf-migrate",
+    "tf-api",
+  ]) {
     assertHardenedRuntime(configService(config, name), name);
   }
   assert.equal(
@@ -1006,7 +1183,20 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
   );
   assert.equal(
     configService(config, "tf-postgres").environment?.POSTGRES_USER,
-    "apollo_tf_runtime",
+    "postgres",
+  );
+  assert.deepEqual(configService(config, "tf-migrate").entrypoint, [
+    "node",
+    "artifacts/api-server/dist/migrate.mjs",
+  ]);
+  assert.equal(
+    configService(config, "tf-migrate").environment
+      ?.TF_MIGRATOR_DATABASE_URL_FILE,
+    "/run/secrets/tf_migrator_database_url",
+  );
+  assert.equal(
+    configService(config, "tf-api").environment?.DATABASE_URL_FILE,
+    "/run/secrets/tf_runtime_database_url",
   );
 
   const serialized = JSON.stringify(config);
@@ -1017,6 +1207,8 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     '"network_mode":"host"',
     '"pid":"host"',
     '"ipc":"host"',
+    "tf_database_url",
+    "tf_postgres_password",
   ]) {
     assert(!serialized.includes(forbidden), "Unsafe Compose configuration");
   }
@@ -1042,6 +1234,7 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
         ],
         "platform-migrate": [],
         "platform-api": [],
+        "tf-migrate": [],
         "tf-postgres": [
           {
             source: "tf-postgres-data",
@@ -1546,7 +1739,11 @@ async function proveMountedSecretsReadable(environment, signal) {
     "platform_operator_bootstrap_token",
     "platform_runtime_database_url",
   ];
-  const tfFiles = ["tf_client_secret", "tf_database_url", "tf_pkce_verifier"];
+  const tfFiles = [
+    "tf_client_secret",
+    "tf_pkce_verifier",
+    "tf_runtime_database_url",
+  ];
   for (const [service, files] of [
     ["platform-api", platformFiles],
     ["tf-api", tfFiles],

@@ -51,9 +51,13 @@ const expectedServices = Object.freeze([
   "platform-postgres",
   "platform-redis",
   "tf-api",
+  "tf-migrate",
   "tf-postgres",
   "tf-redis",
 ]);
+const expectedBaselineServices = Object.freeze(
+  [...expectedServices, "tf-baseline", "tf-role-bootstrap"].sort(),
+);
 const secretFileNames = Object.freeze([
   "platform_assertion_private_jwk",
   "platform_assertion_public_jwks",
@@ -64,17 +68,25 @@ const secretFileNames = Object.freeze([
   "platform_postgres_admin_password",
   "platform_runtime_database_url",
   "platform_runtime_password",
+  "tf_admin_database_url",
   "tf_client_secret",
-  "tf_database_url",
+  "tf_migrator_database_url",
+  "tf_migrator_password",
   "tf_pkce_verifier",
-  "tf_postgres_password",
+  "tf_postgres_admin_password",
+  "tf_runtime_database_url",
+  "tf_runtime_password",
 ]);
 const contractCanaries = Object.freeze({
   platformDatabase:
     "postgres://apollo_platform_runtime:platform-runtime-canary@platform-postgres:5432/apollo_platform",
   platformPrivateKey: randomBytes(32).toString("base64url"),
   platformClientSecret: randomBytes(32).toString("base64url"),
-  tfDatabase:
+  tfAdminDatabase:
+    "postgres://postgres:tf-admin-canary@tf-postgres:5432/apollo_tf",
+  tfMigratorDatabase:
+    "postgres://apollo_tf_migrator:tf-migrator-canary@tf-postgres:5432/apollo_tf",
+  tfRuntimeDatabase:
     "postgres://apollo_tf_runtime:tf-runtime-canary@tf-postgres:5432/apollo_tf",
 });
 
@@ -285,8 +297,12 @@ async function withContractSecrets<T>(
           ]);
         } else if (name === "platform_runtime_database_url") {
           value = contractCanaries.platformDatabase;
-        } else if (name === "tf_database_url") {
-          value = contractCanaries.tfDatabase;
+        } else if (name === "tf_admin_database_url") {
+          value = contractCanaries.tfAdminDatabase;
+        } else if (name === "tf_migrator_database_url") {
+          value = contractCanaries.tfMigratorDatabase;
+        } else if (name === "tf_runtime_database_url") {
+          value = contractCanaries.tfRuntimeDatabase;
         } else if (name === "tf_client_secret") {
           value = contractCanaries.platformClientSecret;
         }
@@ -299,7 +315,9 @@ async function withContractSecrets<T>(
   }
 }
 
-async function renderedBridgeCompose(): Promise<{
+async function renderedBridgeCompose(
+  profiles: readonly string[] = [],
+): Promise<{
   config: ComposeConfig;
   secretDirectory: string;
 }> {
@@ -314,6 +332,7 @@ async function renderedBridgeCompose(): Promise<{
         composeFile,
         "-p",
         "apollo-bridge-contract",
+        ...profiles.flatMap((profile) => ["--profile", profile]),
         "config",
         "--format",
         "json",
@@ -364,6 +383,22 @@ function secretSources(current: ComposeService): string[] {
     .sort();
 }
 
+function secretMount(
+  current: ComposeService,
+  source: string,
+): Record<string, unknown> {
+  const secrets = (current.secrets ?? []) as Array<
+    string | Record<string, unknown>
+  >;
+  const mount = secrets.find(
+    (entry) => typeof entry !== "string" && entry.source === source,
+  );
+  if (typeof mount === "string" || mount === undefined) {
+    throw new Error(`missing long-syntax secret mount ${source}`);
+  }
+  return mount;
+}
+
 function assertLoopbackPort(current: ComposeService, published: string): void {
   expect(current.ports).toEqual([
     expect.objectContaining({
@@ -378,7 +413,12 @@ describe("Platform-TF bridge container contract", () => {
   test("renders the exact data planes and readiness ordering", async () => {
     const { config } = await renderedBridgeCompose();
     expect(Object.keys(config.services).sort()).toEqual(expectedServices);
-    for (const name of ["platform-api", "platform-migrate", "tf-api"]) {
+    for (const name of [
+      "platform-api",
+      "platform-migrate",
+      "tf-api",
+      "tf-migrate",
+    ]) {
       expect(
         resolve(
           (service(config, name).build as { context?: string } | undefined)
@@ -407,9 +447,18 @@ describe("Platform-TF bridge container contract", () => {
     });
     expect(service(config, "tf-api").depends_on).toMatchObject({
       "platform-api": { condition: "service_healthy" },
-      "tf-postgres": { condition: "service_healthy" },
+      "tf-migrate": { condition: "service_completed_successfully" },
       "tf-redis": { condition: "service_healthy" },
     });
+    expect(service(config, "tf-migrate").depends_on).toEqual({
+      "tf-postgres": {
+        condition: "service_healthy",
+        required: true,
+      },
+    });
+    expect(attachedNetworks(service(config, "tf-migrate"))).toEqual([
+      "tf-data",
+    ]);
     expect(attachedNetworks(service(config, "platform-migrate"))).toEqual([
       "platform-data",
     ]);
@@ -433,6 +482,9 @@ describe("Platform-TF bridge container contract", () => {
       "tf-data",
     ]);
     expect(attachedNetworks(service(config, "tf-redis"))).toEqual(["tf-data"]);
+    expect(attachedNetworks(service(config, "tf-migrate"))).toEqual([
+      "tf-data",
+    ]);
     expect(attachedNetworks(service(config, "platform-api"))).toEqual([
       "bridge-edge",
       "platform-data",
@@ -460,6 +512,8 @@ describe("Platform-TF bridge container contract", () => {
     const platformApi = service(config, "platform-api");
     const platformMigrate = service(config, "platform-migrate");
     const tfApi = service(config, "tf-api");
+    const tfMigrate = service(config, "tf-migrate");
+    const tfPostgres = service(config, "tf-postgres");
 
     expect(secretSources(platformApi)).toEqual([
       "platform_assertion_private_jwk",
@@ -473,8 +527,14 @@ describe("Platform-TF bridge container contract", () => {
     ]);
     expect(secretSources(tfApi)).toEqual([
       "tf_client_secret",
-      "tf_database_url",
       "tf_pkce_verifier",
+      "tf_runtime_database_url",
+    ]);
+    expect(secretSources(tfMigrate)).toEqual(["tf_migrator_database_url"]);
+    expect(secretSources(tfPostgres)).toEqual([
+      "tf_migrator_password",
+      "tf_postgres_admin_password",
+      "tf_runtime_password",
     ]);
     expect(platformApi.environment).not.toHaveProperty(
       "APOLLO_TF_CLIENT_SECRET",
@@ -484,16 +544,105 @@ describe("Platform-TF bridge container contract", () => {
       "APOLLO_ASSERTION_PRIVATE_JWK",
     );
     expect(tfApi.environment).not.toHaveProperty("DATABASE_URL");
-    expect(JSON.stringify(platformApi)).not.toContain("tf_database_url");
+    for (const name of Object.keys(config.services).filter((name) =>
+      name.startsWith("platform-"),
+    )) {
+      expect(JSON.stringify(service(config, name))).not.toMatch(
+        /tf_(?:admin|migrator|postgres|runtime)_database_url|tf_(?:migrator|postgres_admin|runtime)_password/,
+      );
+    }
     expect(JSON.stringify(tfApi)).not.toContain(
       "platform_runtime_database_url",
     );
     expect(JSON.stringify(service(config, "platform-postgres"))).not.toContain(
-      "tf_postgres_password",
+      "tf_postgres_admin_password",
     );
     expect(JSON.stringify(service(config, "tf-postgres"))).not.toContain(
       "platform_postgres_admin_password",
     );
+    expect(JSON.stringify(config)).not.toMatch(
+      /tf_database_url|tf_postgres_password/,
+    );
+  }, 20_000);
+
+  test("keeps role bootstrap and baseline manual-only with exact secret scopes", async () => {
+    const { config } = await renderedBridgeCompose(["baseline"]);
+    expect(Object.keys(config.services).sort()).toEqual(
+      expectedBaselineServices,
+    );
+
+    const roleBootstrap = service(config, "tf-role-bootstrap");
+    expect(roleBootstrap.profiles).toEqual(["baseline"]);
+    expect(roleBootstrap.build).toMatchObject({
+      dockerfile: "artifacts/api-server/Dockerfile",
+      target: "postgres-role-init",
+    });
+    expect(roleBootstrap.image).toBe("apollo-tf-postgres:bridge");
+    expect(roleBootstrap.user).toBe("999:999");
+    expect(roleBootstrap.group_add).toEqual(["10002"]);
+    expect(roleBootstrap.entrypoint).toEqual([
+      "/usr/local/bin/bootstrap-tf-roles.sh",
+    ]);
+    expect(roleBootstrap.depends_on).toMatchObject({
+      "tf-postgres": { condition: "service_healthy" },
+    });
+    expect(secretSources(roleBootstrap)).toEqual([
+      "tf_admin_database_url",
+      "tf_migrator_password",
+      "tf_runtime_password",
+    ]);
+    expect(secretMount(roleBootstrap, "tf_admin_database_url")).toMatchObject({
+      target: "tf_admin_database_url",
+      uid: "0",
+      gid: "10002",
+      mode: "0440",
+    });
+    for (const name of ["tf_migrator_password", "tf_runtime_password"]) {
+      expect(secretMount(roleBootstrap, name)).toMatchObject({
+        target: name,
+        uid: "999",
+        gid: "999",
+        mode: "0400",
+      });
+    }
+
+    const baseline = service(config, "tf-baseline");
+    expect(baseline.profiles).toEqual(["baseline"]);
+    expect(baseline.build).toMatchObject({
+      dockerfile: "artifacts/api-server/Dockerfile",
+      target: "runner",
+    });
+    expect(baseline.image).toBe("apollo-tf-api:bridge");
+    expect(baseline.user).toBe("10001:10001");
+    expect(baseline.group_add).toEqual(["10002"]);
+    expect(baseline.entrypoint).toEqual([
+      "node",
+      "artifacts/api-server/dist/migrate.mjs",
+      "--baseline-existing-startup-schema",
+    ]);
+    expect(baseline.depends_on).toEqual({
+      "tf-role-bootstrap": {
+        condition: "service_completed_successfully",
+        required: true,
+      },
+    });
+    expect(secretSources(baseline)).toEqual(["tf_admin_database_url"]);
+    expect(secretMount(baseline, "tf_admin_database_url")).toMatchObject({
+      target: "tf_admin_database_url",
+      uid: "0",
+      gid: "10002",
+      mode: "0440",
+    });
+
+    for (const name of ["tf-role-bootstrap", "tf-baseline"]) {
+      expect(service(config, name).ports).toBeUndefined();
+      expect(attachedNetworks(service(config, name))).toEqual(["tf-data"]);
+      expect(service(config, name).read_only).toBe(true);
+      expect(service(config, name).security_opt).toContain(
+        "no-new-privileges:true",
+      );
+      expect(service(config, name).cap_drop).toContain("ALL");
+    }
   }, 20_000);
 
   test("hardens runtime containers and denies host control access", async () => {
@@ -511,7 +660,11 @@ describe("Platform-TF bridge container contract", () => {
       expect(volumes).not.toContainEqual(
         expect.objectContaining({ type: "bind" }),
       );
-      if (name.endsWith("-api") || name === "platform-migrate") {
+      if (
+        name.endsWith("-api") ||
+        name === "platform-migrate" ||
+        name === "tf-migrate"
+      ) {
         expect(current.user).toBe("10001:10001");
         expect(current.read_only).toBe(true);
         expect(current.tmpfs).toBeInstanceOf(Array);
@@ -533,7 +686,9 @@ describe("Platform-TF bridge container contract", () => {
     for (const dockerfile of [platform, tf]) {
       expect(dockerfile).toMatch(/USER 10001:10001/);
       expect(dockerfile).not.toMatch(/COPY .*\.env/i);
-      expect(dockerfile).not.toMatch(/COPY .*secret/i);
+      expect(dockerfile).not.toMatch(
+        /COPY\s+.*(?:\.ops-private|\/run\/secrets|secrets?\/)/i,
+      );
       expect(dockerfile).not.toContain("/var/run/docker.sock");
     }
     expect(platform).toContain("/app/bin/start-api.sh");
@@ -625,6 +780,10 @@ describe("Platform-TF bridge container contract", () => {
       "apollo-platform-api:bridge",
     );
     expect(service(config, "tf-api").image).toBe("apollo-tf-api:bridge");
+    expect(service(config, "tf-migrate").image).toBe("apollo-tf-api:bridge");
+    expect(service(config, "tf-postgres").image).toBe(
+      "apollo-tf-postgres:bridge",
+    );
   });
 
   test("documents creation and ownership of every required TF secret file", async () => {
@@ -1091,6 +1250,12 @@ describe("bridge smoke orchestration", () => {
       },
       (candidate) => {
         service(candidate, "platform-migrate").tmpfs = [];
+      },
+      (candidate) => {
+        secretMount(
+          service(candidate, "tf-migrate"),
+          "tf_migrator_database_url",
+        ).mode = "0444";
       },
       (candidate) => {
         service(candidate, "tf-api").cap_drop = [];
@@ -1662,10 +1827,15 @@ if (command === "config") {
       },
     },
     "tf-postgres": {
-      image: "postgres:16-bookworm",
-      environment: { POSTGRES_USER: "apollo_tf_runtime" },
+      build: { context: process.cwd(), dockerfile: "artifacts/api-server/Dockerfile", target: "postgres-role-init" },
+      image: "apollo-tf-postgres:bridge",
+      environment: { POSTGRES_USER: "postgres" },
       networks: ["tf-data"],
-      secrets: ["tf_postgres_password"],
+      secrets: [
+        { source: "tf_postgres_admin_password", target: "tf_postgres_admin_password", uid: "999", gid: "999", mode: "0400" },
+        { source: "tf_migrator_password", target: "tf_migrator_password", uid: "999", gid: "999", mode: "0400" },
+        { source: "tf_runtime_password", target: "tf_runtime_password", uid: "999", gid: "999", mode: "0400" },
+      ],
       volumes: [{ type: "volume", source: "tf-postgres-data", target: "/var/lib/postgresql/data" }],
     },
     "tf-redis": {
@@ -1673,19 +1843,29 @@ if (command === "config") {
       networks: ["tf-data"],
       volumes: [{ type: "volume", source: "tf-redis-data", target: "/data" }],
     },
-    "tf-api": {
-      ...runtime(["bridge-edge","platform-tf-control","tf-data"], ["tf_client_secret","tf_database_url","tf_pkce_verifier"]),
-      build: { context: process.cwd(), dockerfile: "artifacts/api-server/Dockerfile" },
+    "tf-migrate": {
+      ...runtime(["tf-data"], [{ source: "tf_migrator_database_url", target: "tf_migrator_database_url", uid: "10001", gid: "10001", mode: "0400" }]),
+      build: { context: process.cwd(), dockerfile: "artifacts/api-server/Dockerfile", target: "runner" },
       image: "apollo-tf-api:bridge",
+      entrypoint: ["node","artifacts/api-server/dist/migrate.mjs"],
+      environment: { TF_MIGRATOR_DATABASE_URL_FILE: "/run/secrets/tf_migrator_database_url" },
+      depends_on: { "tf-postgres": { condition: "service_healthy" } },
+    },
+    "tf-api": {
+      ...runtime(["bridge-edge","platform-tf-control","tf-data"], ["tf_client_secret","tf_pkce_verifier",{ source: "tf_runtime_database_url", target: "tf_runtime_database_url", uid: "10001", gid: "10001", mode: "0400" }]),
+      build: { context: process.cwd(), dockerfile: "artifacts/api-server/Dockerfile", target: "runner" },
+      image: "apollo-tf-api:bridge",
+      environment: { DATABASE_URL_FILE: "/run/secrets/tf_runtime_database_url" },
       ports: [{ host_ip: "127.0.0.1", published: value("TF_API_PORT"), target: 8080 }],
       depends_on: {
         "platform-api": { condition: "service_healthy" },
+        "tf-migrate": { condition: "service_completed_successfully" },
         "tf-postgres": { condition: "service_healthy" },
         "tf-redis": { condition: "service_healthy" },
       },
     },
   };
-  const names = ["platform_assertion_private_jwk","platform_assertion_public_jwks","platform_migrator_database_url","platform_migrator_password","platform_oauth_clients","platform_operator_bootstrap_token","platform_postgres_admin_password","platform_runtime_database_url","platform_runtime_password","tf_client_secret","tf_database_url","tf_pkce_verifier","tf_postgres_password"];
+  const names = ["platform_assertion_private_jwk","platform_assertion_public_jwks","platform_migrator_database_url","platform_migrator_password","platform_oauth_clients","platform_operator_bootstrap_token","platform_postgres_admin_password","platform_runtime_database_url","platform_runtime_password","tf_client_secret","tf_migrator_database_url","tf_migrator_password","tf_pkce_verifier","tf_postgres_admin_password","tf_runtime_database_url","tf_runtime_password"];
   process.stdout.write(JSON.stringify({
     services,
     networks: {

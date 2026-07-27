@@ -136,28 +136,190 @@ services:
       start_period: 5s
 
   tf-postgres:
-    image: postgres:16-bookworm
+    build:
+      context: .
+      dockerfile: artifacts/api-server/Dockerfile
+      target: postgres-role-init
+    image: apollo-tf-postgres:bridge
     restart: unless-stopped
     environment:
       POSTGRES_DB: apollo_tf
-      POSTGRES_PASSWORD_FILE: /run/secrets/tf_postgres_password
-      POSTGRES_USER: apollo_tf_runtime
+      POSTGRES_PASSWORD_FILE: /run/secrets/tf_postgres_admin_password
+      POSTGRES_USER: postgres
     secrets:
-      - tf_postgres_password
+      - source: tf_postgres_admin_password
+        target: tf_postgres_admin_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: tf_migrator_password
+        target: tf_migrator_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: tf_runtime_password
+        target: tf_runtime_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
     volumes:
       - tf-postgres-data:/var/lib/postgresql/data
     networks:
       - tf-data
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "pg_isready -h 127.0.0.1 -U apollo_tf_runtime -d apollo_tf",
-        ]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d apollo_tf"]
       interval: 2s
       timeout: 3s
       retries: 30
       start_period: 5s
+
+  tf-role-bootstrap:
+    profiles: ["baseline"]
+    build:
+      context: .
+      dockerfile: artifacts/api-server/Dockerfile
+      target: postgres-role-init
+    image: apollo-tf-postgres:bridge
+    user: "999:999"
+    group_add:
+      - "10002"
+    read_only: true
+    init: true
+    entrypoint:
+      - /usr/local/bin/bootstrap-tf-roles.sh
+    environment:
+      TF_ROLE_BOOTSTRAP_DATABASE_URL_FILE: /run/secrets/tf_admin_database_url
+    secrets:
+      - source: tf_admin_database_url
+        target: tf_admin_database_url
+        uid: "0"
+        gid: "10002"
+        mode: "0440"
+      - source: tf_migrator_password
+        target: tf_migrator_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: tf_runtime_password
+        target: tf_runtime_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    stop_grace_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+          pids: 64
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    depends_on:
+      tf-postgres:
+        condition: service_healthy
+    restart: "no"
+
+  tf-migrate:
+    build:
+      context: .
+      dockerfile: artifacts/api-server/Dockerfile
+      target: runner
+    image: apollo-tf-api:bridge
+    user: "10001:10001"
+    read_only: true
+    init: true
+    entrypoint:
+      - node
+      - artifacts/api-server/dist/migrate.mjs
+    environment:
+      TF_MIGRATOR_DATABASE_URL_FILE: /run/secrets/tf_migrator_database_url
+    secrets:
+      - source: tf_migrator_database_url
+        target: tf_migrator_database_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    stop_grace_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+          pids: 64
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    depends_on:
+      tf-postgres:
+        condition: service_healthy
+    restart: "no"
+
+  tf-baseline:
+    profiles: ["baseline"]
+    build:
+      context: .
+      dockerfile: artifacts/api-server/Dockerfile
+      target: runner
+    image: apollo-tf-api:bridge
+    user: "10001:10001"
+    group_add:
+      - "10002"
+    read_only: true
+    init: true
+    entrypoint:
+      - node
+      - artifacts/api-server/dist/migrate.mjs
+      - --baseline-existing-startup-schema
+    environment:
+      TF_BASELINE_DATABASE_URL_FILE: /run/secrets/tf_admin_database_url
+    secrets:
+      - source: tf_admin_database_url
+        target: tf_admin_database_url
+        uid: "0"
+        gid: "10002"
+        mode: "0440"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    stop_grace_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+          pids: 64
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    depends_on:
+      tf-role-bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
 
   tf-redis:
     image: redis:7-bookworm
@@ -186,6 +348,7 @@ services:
     build:
       context: .
       dockerfile: artifacts/api-server/Dockerfile
+      target: runner
     image: apollo-tf-api:bridge
     user: "10001:10001"
     read_only: true
@@ -202,7 +365,7 @@ services:
       APOLLO_TF_CLIENT_ID: apollo-tf-api
       APOLLO_TF_CLIENT_SECRET_FILE: /run/secrets/tf_client_secret
       APOLLO_TF_WEB_ORIGIN: ${TF_PUBLIC_ORIGIN:?}
-      DATABASE_URL_FILE: /run/secrets/tf_database_url
+      DATABASE_URL_FILE: /run/secrets/tf_runtime_database_url
       NODE_ENV: development
       PORT: "8080"
       REDIS_URL: redis://tf-redis:6379/0
@@ -210,8 +373,12 @@ services:
       WEB_URL: ${TF_PUBLIC_ORIGIN:?}
     secrets:
       - tf_client_secret
-      - tf_database_url
       - tf_pkce_verifier
+      - source: tf_runtime_database_url
+        target: tf_runtime_database_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
       - /tmp/tf-downloads:rw,noexec,nosuid,size=64m
@@ -226,6 +393,8 @@ services:
     depends_on:
       platform-api:
         condition: service_healthy
+      tf-migrate:
+        condition: service_completed_successfully
       tf-postgres:
         condition: service_healthy
       tf-redis:
@@ -261,14 +430,22 @@ secrets:
     file: ${BRIDGE_SECRET_DIRECTORY:?}/platform_runtime_database_url
   platform_runtime_password:
     file: ${BRIDGE_SECRET_DIRECTORY:?}/platform_runtime_password
+  tf_admin_database_url:
+    file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_admin_database_url
   tf_client_secret:
     file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_client_secret
-  tf_database_url:
-    file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_database_url
+  tf_migrator_database_url:
+    file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_migrator_database_url
+  tf_migrator_password:
+    file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_migrator_password
   tf_pkce_verifier:
     file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_pkce_verifier
-  tf_postgres_password:
-    file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_postgres_password
+  tf_postgres_admin_password:
+    file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_postgres_admin_password
+  tf_runtime_database_url:
+    file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_runtime_database_url
+  tf_runtime_password:
+    file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_runtime_password
 
 volumes:
   platform-postgres-data:
