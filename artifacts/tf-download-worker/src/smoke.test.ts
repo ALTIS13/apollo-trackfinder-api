@@ -20,6 +20,7 @@ const smokeEntrypoint = path.join(
 const ADMIN_TOKEN = "task-7-download-smoke-admin";
 const WEB_ORIGIN_HOST = "127.0.0.1";
 const OUTER_TEST_TIMEOUT_MS = 25 * 60_000;
+const SETUP_TIMEOUT_MS = 30_000;
 const RUN_TIMEOUT_MS = 18 * 60_000;
 const CLEANUP_REMOVAL_RESERVE_MS = 4 * 60_000;
 const CLEANUP_AUDIT_RESERVE_MS = 60_000;
@@ -32,6 +33,8 @@ const START_DOCKER_TIMEOUT_MS = 6 * 60_000;
 const FILESYSTEM_REMOVAL_TIMEOUT_MS = 30_000;
 const FILESYSTEM_AUDIT_TIMEOUT_MS = 5_000;
 const TRACKED_FILE_TIMEOUT_MS = 5_000;
+const CREATE_TEMPORARY_DIRECTORY_SCRIPT =
+  'require("node:fs").mkdirSync(process.argv[1], { mode: 0o700 })';
 
 interface BoundedFetchOptions {
   readonly fetchImplementation?: typeof fetch;
@@ -244,16 +247,25 @@ async function runSmokeLifecycle<T>(
 
 async function runSmokeSetup<T>(dependencies: {
   readonly cleanup: () => Promise<void>;
-  readonly createTemporaryDirectory: (directory: string) => Promise<void>;
-  readonly reservePort: () => Promise<number>;
+  readonly createTemporaryDirectory: (
+    directory: string,
+    timeoutMs: number,
+  ) => Promise<void>;
+  readonly reservePort: (timeoutMs: number) => Promise<number>;
   readonly run: (temporaryDirectory: string, port: number) => Promise<T>;
+  readonly setupTimeoutMs?: number;
   readonly temporaryDirectory: string;
 }): Promise<T> {
+  const setupDeadlineAt =
+    Date.now() + (dependencies.setupTimeoutMs ?? SETUP_TIMEOUT_MS);
   return runSmokeLifecycle(async () => {
     await dependencies.createTemporaryDirectory(
       dependencies.temporaryDirectory,
+      deadlineCallTimeout("smoke setup", setupDeadlineAt, SETUP_TIMEOUT_MS),
     );
-    const port = await dependencies.reservePort();
+    const port = await dependencies.reservePort(
+      deadlineCallTimeout("smoke setup", setupDeadlineAt, SETUP_TIMEOUT_MS),
+    );
     return dependencies.run(dependencies.temporaryDirectory, port);
   }, dependencies.cleanup);
 }
@@ -563,6 +575,11 @@ interface DockerInputInvocation {
   readonly spawnChild?: typeof spawn;
 }
 
+interface TemporaryDirectoryCreationOptions {
+  readonly nodeScript?: string;
+  readonly spawnChild?: typeof spawn;
+}
+
 interface SessionFixture {
   readonly accountId: string;
   readonly csrf: string;
@@ -634,7 +651,81 @@ function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function reservePort(): Promise<number> {
+async function createTemporaryDirectoryTerminal(
+  directory: string,
+  timeoutMs: number,
+  options: TemporaryDirectoryCreationOptions = {},
+): Promise<void> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new Error("temporary directory creation deadline exceeded");
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const running = (options.spawnChild ?? spawn)(
+      process.execPath,
+      [
+        "-e",
+        options.nodeScript ?? CREATE_TEMPORARY_DIRECTORY_SCRIPT,
+        directory,
+      ],
+      {
+        cwd: repositoryRoot,
+        stdio: "ignore",
+        windowsHide: true,
+      },
+    );
+    let childError: Error | undefined;
+    let timedOut = false;
+    let timer: NodeJS.Timeout | undefined;
+
+    const removeListeners = (): void => {
+      running.removeListener("error", onError);
+      running.removeListener("close", onClose);
+    };
+    const terminate = (): void => {
+      try {
+        running.kill("SIGKILL");
+      } catch (error) {
+        childError ??=
+          error instanceof Error ? error : new Error(String(error));
+      }
+    };
+    function onError(error: Error): void {
+      childError = error;
+      terminate();
+    }
+    function onClose(code: number | null): void {
+      if (timer !== undefined) clearTimeout(timer);
+      removeListeners();
+      if (timedOut) {
+        reject(new Error("temporary directory creation deadline exceeded"));
+      } else if (childError !== undefined) {
+        reject(
+          Object.assign(new Error("temporary directory creation failed"), {
+            cause: childError,
+          }),
+        );
+      } else if (code !== 0) {
+        reject(
+          Object.assign(new Error("temporary directory creation failed"), {
+            code,
+          }),
+        );
+      } else {
+        resolve();
+      }
+    }
+
+    running.once("error", onError);
+    running.once("close", onClose);
+    timer = setTimeout(() => {
+      timedOut = true;
+      terminate();
+    }, timeoutMs);
+  });
+}
+
+async function reservePort(timeoutMs = 5_000): Promise<number> {
   const server = createServer();
   const forceClose = (): void => {
     try {
@@ -675,7 +766,7 @@ async function reservePort(): Promise<number> {
         await close();
       }
     },
-    5_000,
+    Math.min(5_000, timeoutMs),
     forceClose,
   );
 }
@@ -917,7 +1008,6 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
     tmpdir(),
     `${project}-${randomBytes(8).toString("hex")}`,
   );
-  let temporaryDirectoryOwned = false;
   let port: number | undefined;
   let cleanupResult: SmokeResult["cleanup"] | undefined;
   let smokeResult: SmokeResult | undefined;
@@ -955,9 +1045,7 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
       },
       project,
       removalDeadlineAt,
-      temporaryDirectory: temporaryDirectoryOwned
-        ? temporaryDirectory
-        : undefined,
+      temporaryDirectory,
     });
     cleanupResult = await cleanupPromise;
   };
@@ -965,12 +1053,9 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
   try {
     await runSmokeSetup({
       cleanup,
-      createTemporaryDirectory: async (directory) => {
-        await mkdir(directory, { mode: 0o700 });
-        temporaryDirectoryOwned = true;
-      },
-      reservePort: async () => {
-        port = await reservePort();
+      createTemporaryDirectory: createTemporaryDirectoryTerminal,
+      reservePort: async (timeoutMs) => {
+        port = await reservePort(timeoutMs);
         return port;
       },
       run: async (directory, reservedPort) => {
@@ -2481,6 +2566,240 @@ describe("TF download bounded smoke orchestration", () => {
     expect(cleanup).toHaveBeenCalledTimes(2);
   });
 
+  it("bounds never-settling directory creation and cleans the exact path once", async () => {
+    const exactPath = path.join(
+      tmpdir(),
+      `known-smoke-directory-${randomUUID()}`,
+    );
+    const removedPaths: string[] = [];
+    const auditedPaths: string[] = [];
+    const cleanup = vi.fn(async () => {
+      removedPaths.push(exactPath);
+      auditedPaths.push(exactPath);
+    });
+    const dependencies = {
+      cleanup,
+      createTemporaryDirectory: (
+        _directory: string,
+        timeoutMs?: number,
+      ): Promise<void> =>
+        timeoutMs === undefined
+          ? new Promise<void>(() => undefined)
+          : new Promise<void>((_resolve, reject) =>
+              setTimeout(
+                () =>
+                  reject(
+                    new Error("temporary directory creation deadline exceeded"),
+                  ),
+                timeoutMs,
+              ),
+            ),
+      reservePort: async () => 1234,
+      run: async () => undefined,
+      setupTimeoutMs: 20,
+      temporaryDirectory: exactPath,
+    };
+
+    const outcome = await Promise.race([
+      runSmokeSetup(dependencies).then(
+        () => "resolved",
+        (error: unknown) =>
+          error instanceof Error ? error.message : String(error),
+      ),
+      new Promise<"test guard exceeded">((resolve) =>
+        setTimeout(() => resolve("test guard exceeded"), 150),
+      ),
+    ]);
+
+    expect(outcome).toContain("temporary directory creation deadline exceeded");
+    expect(removedPaths).toEqual([exactPath]);
+    expect(auditedPaths).toEqual([exactPath]);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("terminates delayed directory creation before cleanup can be bypassed", async () => {
+    const exactPath = path.join(
+      tmpdir(),
+      `delayed-smoke-directory-${randomUUID()}`,
+    );
+    const removedPaths: string[] = [];
+    const auditedPaths: string[] = [];
+    const directoryExists = async (): Promise<boolean> =>
+      stat(exactPath).then(
+        () => true,
+        () => false,
+      );
+    const cleanup = vi.fn(async () => {
+      removedPaths.push(exactPath);
+      await rm(exactPath, { force: true, recursive: true });
+      auditedPaths.push(exactPath);
+      expect(await directoryExists()).toBe(false);
+    });
+
+    await expect(
+      runSmokeSetup({
+        cleanup,
+        createTemporaryDirectory: (directory, timeoutMs) =>
+          createTemporaryDirectoryTerminal(directory, timeoutMs, {
+            nodeScript:
+              'setTimeout(() => require("node:fs").mkdirSync(process.argv[1]), 200)',
+          }),
+        reservePort: async () => 1234,
+        run: async () => {
+          throw new Error("smoke run must not start");
+        },
+        setupTimeoutMs: 40,
+        temporaryDirectory: exactPath,
+      }),
+    ).rejects.toThrow("temporary directory creation deadline exceeded");
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    expect(await directoryExists()).toBe(false);
+    expect(removedPaths).toEqual([exactPath]);
+    expect(auditedPaths).toEqual([exactPath]);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates and cleans the exact path with the static terminal helper", async () => {
+    const exactPath = path.join(
+      tmpdir(),
+      `successful-smoke-directory-${randomUUID()}`,
+    );
+    const runPaths: string[] = [];
+    const cleanup = vi.fn(async () => {
+      await rm(exactPath, { force: true, recursive: true });
+      await expect(stat(exactPath)).rejects.toBeDefined();
+    });
+
+    await runSmokeSetup({
+      cleanup,
+      createTemporaryDirectory: createTemporaryDirectoryTerminal,
+      reservePort: async () => 1234,
+      run: async (directory) => {
+        runPaths.push(directory);
+        expect((await stat(directory)).isDirectory()).toBe(true);
+      },
+      setupTimeoutMs: 5_000,
+      temporaryDirectory: exactPath,
+    });
+
+    expect(runPaths).toEqual([exactPath]);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("terminates a never-settling creation helper before exact-path cleanup", async () => {
+    const exactPath = path.join(
+      tmpdir(),
+      `hung-smoke-directory-${randomUUID()}`,
+    );
+    const removedPaths: string[] = [];
+    const auditedPaths: string[] = [];
+    const cleanup = vi.fn(async () => {
+      removedPaths.push(exactPath);
+      await rm(exactPath, { force: true, recursive: true });
+      auditedPaths.push(exactPath);
+      await expect(stat(exactPath)).rejects.toBeDefined();
+    });
+
+    await expect(
+      runSmokeSetup({
+        cleanup,
+        createTemporaryDirectory: (directory, timeoutMs) =>
+          createTemporaryDirectoryTerminal(directory, timeoutMs, {
+            nodeScript: "setInterval(() => undefined, 1_000)",
+          }),
+        reservePort: async () => 1234,
+        run: async () => {
+          throw new Error("smoke run must not start");
+        },
+        setupTimeoutMs: 40,
+        temporaryDirectory: exactPath,
+      }),
+    ).rejects.toThrow("temporary directory creation deadline exceeded");
+
+    expect(removedPaths).toEqual([exactPath]);
+    expect(auditedPaths).toEqual([exactPath]);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("removes a directory created by a helper that exits nonzero", async () => {
+    const exactPath = path.join(
+      tmpdir(),
+      `failed-smoke-directory-${randomUUID()}`,
+    );
+    const removedPaths: string[] = [];
+    const auditedPaths: string[] = [];
+    const cleanup = vi.fn(async () => {
+      removedPaths.push(exactPath);
+      await rm(exactPath, { force: true, recursive: true });
+      auditedPaths.push(exactPath);
+      await expect(stat(exactPath)).rejects.toBeDefined();
+    });
+
+    await expect(
+      runSmokeSetup({
+        cleanup,
+        createTemporaryDirectory: (directory, timeoutMs) =>
+          createTemporaryDirectoryTerminal(directory, timeoutMs, {
+            nodeScript:
+              'require("node:fs").mkdirSync(process.argv[1]); process.exitCode = 23',
+          }),
+        reservePort: async () => 1234,
+        run: async () => {
+          throw new Error("smoke run must not start");
+        },
+        setupTimeoutMs: 5_000,
+        temporaryDirectory: exactPath,
+      }),
+    ).rejects.toThrow("temporary directory creation failed");
+
+    expect(removedPaths).toEqual([exactPath]);
+    expect(auditedPaths).toEqual([exactPath]);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds port setup by the remaining setup deadline and cleans once", async () => {
+    const exactPath = path.join(
+      tmpdir(),
+      `port-smoke-directory-${randomUUID()}`,
+    );
+    const observedTimeouts: number[] = [];
+    const cleanup = vi.fn(async () => {
+      await rm(exactPath, { force: true, recursive: true });
+      await expect(stat(exactPath)).rejects.toBeDefined();
+    });
+    const startedAt = Date.now();
+
+    await expect(
+      runSmokeSetup({
+        cleanup,
+        createTemporaryDirectory: async (directory) => {
+          await mkdir(directory, { mode: 0o700 });
+        },
+        reservePort: (timeoutMs) => {
+          observedTimeouts.push(timeoutMs);
+          return new Promise<number>((_resolve, reject) =>
+            setTimeout(
+              () => reject(new Error("port reservation deadline exceeded")),
+              timeoutMs,
+            ),
+          );
+        },
+        run: async () => {
+          throw new Error("smoke run must not start");
+        },
+        setupTimeoutMs: 30,
+        temporaryDirectory: exactPath,
+      }),
+    ).rejects.toThrow("port reservation deadline exceeded");
+
+    expect(Date.now() - startedAt).toBeLessThan(200);
+    expect(observedTimeouts).toHaveLength(1);
+    expect(observedTimeouts[0]).toBeGreaterThan(0);
+    expect(observedTimeouts[0]).toBeLessThanOrEqual(30);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
   it("removes the exact temp path after delayed creation and setup timeout", async () => {
     const exactPath = path.join(tmpdir(), "known-smoke-directory");
     const removedPaths: string[] = [];
@@ -2581,9 +2900,9 @@ describe("TF download bounded smoke orchestration", () => {
   });
 
   it("reserves a strict cleanup and safety margin before the outer timeout", () => {
-    expect(RUN_TIMEOUT_MS + CLEANUP_RESERVE_MS + SAFETY_MARGIN_MS).toBeLessThan(
-      OUTER_TEST_TIMEOUT_MS,
-    );
+    expect(
+      SETUP_TIMEOUT_MS + RUN_TIMEOUT_MS + CLEANUP_RESERVE_MS + SAFETY_MARGIN_MS,
+    ).toBeLessThan(OUTER_TEST_TIMEOUT_MS);
     expect(CLEANUP_REMOVAL_RESERVE_MS + CLEANUP_AUDIT_RESERVE_MS).toBe(
       CLEANUP_RESERVE_MS,
     );
