@@ -42,6 +42,8 @@ import {
 } from "./processor.js";
 import { DownloadStorage, type DownloadStorageSweepResult } from "./storage.js";
 
+export { spawnYtDlpDownload } from "./downloader.js";
+
 type RuntimeHandler = (
   request: IncomingMessage,
   response: ServerResponse,

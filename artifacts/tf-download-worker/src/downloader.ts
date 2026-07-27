@@ -1,7 +1,8 @@
 import type { DownloadQuality } from "@workspace/tf-download-contract";
 import { spawn } from "node:child_process";
 import type { ChildProcessByStdio, SpawnOptions } from "node:child_process";
-import type { Readable } from "node:stream";
+import { PassThrough } from "node:stream";
+import type { Readable, Writable } from "node:stream";
 
 export interface DownloaderProcessExit {
   readonly code: number | null;
@@ -24,17 +25,30 @@ export interface SpawnYtDlpDownloadOptions {
 }
 
 type SpawnedProcess = ChildProcessByStdio<null, Readable, Readable>;
+type SpawnedTranscoder = ChildProcessByStdio<Writable, Readable, Readable>;
 
-export type ProcessSpawner = (
-  command: string,
-  args: readonly string[],
-  options: SpawnOptions & {
-    readonly shell: false;
-    readonly stdio: readonly ["ignore", "pipe", "pipe"];
-    readonly windowsHide: true;
-    readonly signal: AbortSignal;
-  },
-) => SpawnedProcess;
+interface ProcessOptions extends SpawnOptions {
+  readonly shell: false;
+  readonly windowsHide: true;
+  readonly signal: AbortSignal;
+}
+
+export interface ProcessSpawner {
+  (
+    command: string,
+    args: readonly string[],
+    options: ProcessOptions & {
+      readonly stdio: readonly ["ignore", "pipe", "pipe"];
+    },
+  ): SpawnedProcess;
+  (
+    command: string,
+    args: readonly string[],
+    options: ProcessOptions & {
+      readonly stdio: readonly ["pipe", "pipe", "pipe"];
+    },
+  ): SpawnedTranscoder;
+}
 
 export type SpawnDownload = (
   options: SpawnYtDlpDownloadOptions,
@@ -44,45 +58,118 @@ export function spawnYtDlpDownload(
   options: SpawnYtDlpDownloadOptions,
   spawnProcess: ProcessSpawner = spawn as ProcessSpawner,
 ): DownloaderProcess {
-  const extension = options.quality === "flac" ? "flac" : "mp3";
-  const args = [
+  const downloaderArgs = [
     "--no-playlist",
     "--no-progress",
     "--no-warnings",
-    "--extract-audio",
-    "--audio-format",
-    extension,
+    "--quiet",
+    "--format",
+    "bestaudio/best",
+    "--output",
+    "-",
+    "--",
+    options.sourceUrl,
   ];
-  if (options.quality !== "flac") {
-    args.push("--audio-quality", `${options.quality}K`);
-  }
-  args.push("--output", "-", "--", options.sourceUrl);
-
-  const child = spawnProcess(options.executable, args, {
+  const downloader = spawnProcess(options.executable, downloaderArgs, {
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
     signal: options.signal,
   });
+  let transcoder: SpawnedTranscoder;
+  try {
+    transcoder = spawnProcess("ffmpeg", createFfmpegArgs(options.quality), {
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      signal: options.signal,
+    });
+  } catch (error) {
+    safeKill(downloader, "SIGKILL");
+    throw error;
+  }
+
+  downloader.stdout.pipe(transcoder.stdin);
+  transcoder.stdin.on("error", () => {
+    safeKill(downloader, "SIGTERM");
+  });
+  const stderr = new PassThrough();
+  downloader.stderr.pipe(stderr, { end: false });
+  transcoder.stderr.pipe(stderr, { end: false });
+
+  let downloaderExit: DownloaderProcessExit | undefined;
+  let transcoderExit: DownloaderProcessExit | undefined;
+  let closedCount = 0;
   let resolveClosed: (() => void) | undefined;
   const closed = new Promise<void>((resolve) => {
     resolveClosed = resolve;
   });
+  const observeClose = (): void => {
+    closedCount += 1;
+    if (closedCount !== 2) return;
+    stderr.end();
+    resolveClosed?.();
+  };
+  downloader.once("close", (code, signal) => {
+    downloaderExit = { code, signal };
+    observeClose();
+  });
+  transcoder.once("close", (code, signal) => {
+    transcoderExit = { code, signal };
+    observeClose();
+  });
+
   const completion = new Promise<DownloaderProcessExit>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code, signal) => {
-      resolveClosed?.();
-      resolve({ code, signal });
+    downloader.once("error", reject);
+    transcoder.once("error", reject);
+    void closed.then(() => {
+      const sourceExit = downloaderExit ?? { code: null, signal: null };
+      const conversionExit = transcoderExit ?? { code: null, signal: null };
+      resolve(sourceExit.code === 0 ? conversionExit : sourceExit);
     });
   });
 
   return {
-    stdout: child.stdout,
-    stderr: child.stderr,
+    stdout: transcoder.stdout,
+    stderr,
     completion,
     closed,
     kill(signal) {
-      child.kill(signal);
+      safeKill(downloader, signal);
+      safeKill(transcoder, signal);
     },
   };
+}
+
+function createFfmpegArgs(quality: DownloadQuality): string[] {
+  const output =
+    quality === "flac"
+      ? ["-codec:a", "flac", "-compression_level", "5", "-f", "flac"]
+      : ["-codec:a", "libmp3lame", "-b:a", `${quality}k`, "-f", "mp3"];
+  return [
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-nostats",
+    "-i",
+    "pipe:0",
+    "-map",
+    "0:a:0",
+    "-vn",
+    "-map_metadata",
+    "-1",
+    ...output,
+    "pipe:1",
+  ];
+}
+
+function safeKill(
+  child: Pick<SpawnedProcess, "kill"> | Pick<SpawnedTranscoder, "kill">,
+  signal: NodeJS.Signals,
+): void {
+  try {
+    child.kill(signal);
+  } catch {
+    // The sibling process still receives the same termination request.
+  }
 }

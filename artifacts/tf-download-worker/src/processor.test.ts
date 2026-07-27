@@ -204,16 +204,113 @@ afterEach(async () => {
 });
 
 describe("spawnYtDlpDownload", () => {
-  it("uses argv without a shell and passes the source URL as one final argument", async () => {
-    const child = new EventEmitter() as EventEmitter & {
+  it("transcodes the downloaded media through ffmpeg before exposing stdout", async () => {
+    const downloader = new EventEmitter() as EventEmitter & {
       stdout: PassThrough;
       stderr: PassThrough;
       kill: ReturnType<typeof vi.fn>;
     };
-    child.stdout = new PassThrough();
-    child.stderr = new PassThrough();
-    child.kill = vi.fn(() => true);
-    const spawn = vi.fn(() => child) as unknown as ProcessSpawner;
+    downloader.stdout = new PassThrough();
+    downloader.stderr = new PassThrough();
+    downloader.kill = vi.fn(() => true);
+    const transcoder = new EventEmitter() as EventEmitter & {
+      stdin: PassThrough;
+      stdout: PassThrough;
+      stderr: PassThrough;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    transcoder.stdin = new PassThrough();
+    transcoder.stdout = new PassThrough();
+    transcoder.stderr = new PassThrough();
+    transcoder.kill = vi.fn(() => true);
+    const spawn = vi
+      .fn()
+      .mockReturnValueOnce(downloader)
+      .mockReturnValueOnce(transcoder) as unknown as ProcessSpawner;
+
+    const process = spawnYtDlpDownload(
+      {
+        executable: "yt-dlp",
+        quality: "320",
+        sourceUrl: SOURCE_URL,
+        signal: new AbortController().signal,
+      },
+      spawn,
+    );
+
+    expect(spawn).toHaveBeenCalledTimes(2);
+    const [downloaderCommand, downloaderArgs] = vi.mocked(spawn).mock.calls[0];
+    expect(downloaderCommand).toBe("yt-dlp");
+    expect(downloaderArgs).not.toContain("--extract-audio");
+    expect(downloaderArgs).not.toContain("--audio-format");
+    expect(downloaderArgs.at(-2)).toBe("--");
+    expect(downloaderArgs.at(-1)).toBe(SOURCE_URL);
+    const [transcoderCommand, transcoderArgs, transcoderOptions] =
+      vi.mocked(spawn).mock.calls[1];
+    expect(transcoderCommand).toBe("ffmpeg");
+    expect(transcoderArgs).toEqual(
+      expect.arrayContaining([
+        "-i",
+        "pipe:0",
+        "-vn",
+        "-codec:a",
+        "libmp3lame",
+        "-b:a",
+        "320k",
+        "-f",
+        "mp3",
+        "pipe:1",
+      ]),
+    );
+    expect(transcoderOptions.stdio).toEqual(["pipe", "pipe", "pipe"]);
+
+    const transcoderInput = new Promise<Buffer>((resolve) => {
+      transcoder.stdin.once("data", (chunk: Buffer) => resolve(chunk));
+    });
+    downloader.stdout.end(Buffer.from("source-container"));
+    await expect(transcoderInput).resolves.toEqual(
+      Buffer.from("source-container"),
+    );
+    downloader.stderr.end();
+    transcoder.stderr.end();
+    transcoder.stdout.end(Buffer.from("ID3-transcoded"));
+    downloader.emit("close", 0, null);
+    transcoder.emit("close", 0, null);
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdout) {
+      chunks.push(Buffer.from(chunk));
+    }
+    await expect(process.completion).resolves.toEqual({
+      code: 0,
+      signal: null,
+    });
+    expect(Buffer.concat(chunks)).toEqual(Buffer.from("ID3-transcoded"));
+  });
+
+  it("uses argv without a shell and passes the source URL as one final argument", async () => {
+    const downloader = new EventEmitter() as EventEmitter & {
+      stdout: PassThrough;
+      stderr: PassThrough;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    downloader.stdout = new PassThrough();
+    downloader.stderr = new PassThrough();
+    downloader.kill = vi.fn(() => true);
+    const transcoder = new EventEmitter() as EventEmitter & {
+      stdin: PassThrough;
+      stdout: PassThrough;
+      stderr: PassThrough;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    transcoder.stdin = new PassThrough();
+    transcoder.stdout = new PassThrough();
+    transcoder.stderr = new PassThrough();
+    transcoder.kill = vi.fn(() => true);
+    const spawn = vi
+      .fn()
+      .mockReturnValueOnce(downloader)
+      .mockReturnValueOnce(transcoder) as unknown as ProcessSpawner;
     const controller = new AbortController();
 
     const process = spawnYtDlpDownload(
@@ -237,9 +334,12 @@ describe("spawnYtDlpDownload", () => {
       signal: controller.signal,
     });
 
-    child.stdout.end();
-    child.stderr.end();
-    child.emit("close", 0, null);
+    downloader.stdout.end();
+    downloader.stderr.end();
+    transcoder.stdout.end();
+    transcoder.stderr.end();
+    downloader.emit("close", 0, null);
+    transcoder.emit("close", 0, null);
     await expect(process.completion).resolves.toEqual({
       code: 0,
       signal: null,
@@ -247,15 +347,28 @@ describe("spawnYtDlpDownload", () => {
   });
 
   it("tracks close separately when spawn error arrives first", async () => {
-    const child = new EventEmitter() as EventEmitter & {
+    const downloader = new EventEmitter() as EventEmitter & {
       stdout: PassThrough;
       stderr: PassThrough;
       kill: ReturnType<typeof vi.fn>;
     };
-    child.stdout = new PassThrough();
-    child.stderr = new PassThrough();
-    child.kill = vi.fn(() => true);
-    const spawn = vi.fn(() => child) as unknown as ProcessSpawner;
+    downloader.stdout = new PassThrough();
+    downloader.stderr = new PassThrough();
+    downloader.kill = vi.fn(() => true);
+    const transcoder = new EventEmitter() as EventEmitter & {
+      stdin: PassThrough;
+      stdout: PassThrough;
+      stderr: PassThrough;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    transcoder.stdin = new PassThrough();
+    transcoder.stdout = new PassThrough();
+    transcoder.stderr = new PassThrough();
+    transcoder.kill = vi.fn(() => true);
+    const spawn = vi
+      .fn()
+      .mockReturnValueOnce(downloader)
+      .mockReturnValueOnce(transcoder) as unknown as ProcessSpawner;
     const failure = new Error("spawn_failed");
     const process = spawnYtDlpDownload(
       {
@@ -273,7 +386,7 @@ describe("spawnYtDlpDownload", () => {
       }
     ).closed;
 
-    child.emit("error", failure);
+    downloader.emit("error", failure);
     await Promise.resolve();
 
     expect(closed).toBeInstanceOf(Promise);
@@ -284,7 +397,10 @@ describe("spawnYtDlpDownload", () => {
     await Promise.resolve();
     expect(closeObserved).toBe(false);
 
-    child.emit("close", 1, null);
+    downloader.emit("close", 1, null);
+    await Promise.resolve();
+    expect(closeObserved).toBe(false);
+    transcoder.emit("close", 1, null);
 
     await expect(completion).resolves.toBe(failure);
     await expect(closed).resolves.toBeUndefined();
