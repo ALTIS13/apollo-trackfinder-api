@@ -685,12 +685,13 @@ describe("TfSessionStore sessions", () => {
     );
 
     expect(refreshed?.expiresAt).toBe(shortenedExpiry);
+    const shortenedRedisExpiry = await redis.pexpiretime(key);
     const shortenedTtl = await redis.pttl(key);
     expect(shortenedTtl).toBeLessThan(originalTtl);
     expect(shortenedTtl).toBeGreaterThanOrEqual(30 * 60 * 1_000 - 2_000);
     expect(shortenedTtl).toBeLessThanOrEqual(30 * 60 * 1_000);
-    expect(Date.now() + shortenedTtl).toBeLessThanOrEqual(
-      Date.parse(shortenedExpiry) + 50,
+    expect(shortenedRedisExpiry).toBeLessThanOrEqual(
+      Date.parse(shortenedExpiry),
     );
     await expect(store.getSession(created.handle)).resolves.toMatchObject({
       expiresAt: shortenedExpiry,
