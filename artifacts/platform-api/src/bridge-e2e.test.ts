@@ -796,8 +796,19 @@ describe("Platform-TF bridge container contract", () => {
     );
     expect(startup).toContain("TF_SECRET_DIRECTORY=");
     expect(startup).toContain("tf_client_secret");
-    expect(startup).toContain("tf_database_url");
-    expect(startup).toContain("tf_postgres_password");
+    for (const name of [
+      "tf_postgres_admin_password",
+      "tf_admin_database_url",
+      "tf_migrator_password",
+      "tf_runtime_password",
+      "tf_migrator_database_url",
+      "tf_runtime_database_url",
+    ]) {
+      expect(startup).toContain(name);
+    }
+    expect(startup).toContain("root:10002");
+    expect(startup).toContain("10001:10001");
+    expect(startup).toContain("999:999");
     expect(startup).toMatch(/(?:mkdir|install)[^\n]+TF_SECRET_DIRECTORY/);
     expect(startup).toMatch(
       /(?:install[^\n]+-m (?:700|0700)|chmod[^\n]+(?:700|0700))/,
