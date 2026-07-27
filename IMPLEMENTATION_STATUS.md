@@ -25,16 +25,25 @@ Task 5.
   mode `0400`, and the shared admin URL is `root:10002` mode `0440`.
   Supplemental group `10002` is granted only to the two profiled manual
   services.
-- A fresh PostgreSQL 16 integration proof passed all nine tests covering the
-  eleven required cases: clean/repeat migration, exact readiness/history,
-  runtime CRUD and denials, drift/unmanaged rejection, exact manual baseline,
-  ownership transfer, partial `0002` recovery, malformed-catalog rejection,
-  and absence of provider-token tables/grants. The suite is skipped without
-  all three explicit `TF_TEST_*_DATABASE_URL` values and never prints them.
-- The disposable proof used exact per-run image/container/network/volume names
-  and labels, bounded readiness, failure cleanup, and a zero-resource audit.
-  No production migration or role implementation change was required by the
-  real database proof.
+- A fresh PostgreSQL 16 integration proof passed all ten live cases plus twelve
+  target-guard cases. It covers clean/repeat migration, exact
+  readiness/history, runtime CRUD and full canary privilege denials,
+  drift/unmanaged rejection, exact manual baseline, ownership transfer,
+  partial `0002` rollback/recovery without renaming a cluster role,
+  malformed-catalog rejection, and absence of provider-token tables/grants.
+  The suite is skipped unless `TF_TEST_RUN_ID` and all three explicit
+  `TF_TEST_*_DATABASE_URL` values are present.
+- The disposable runner creates only `apollo_tf_test_<run_id>`, sets a
+  runner-owned database marker, and verifies database, marker, same-server
+  identity, PostgreSQL 16, superuser, migrator, and runtime roles with read-only
+  probes before any DDL/reset. Wrong run ID, marker, database, cross-target URL,
+  and role all fail generically while preserving a managed-table sentinel.
+  Target-validation error output excludes URLs, passwords, raw run IDs,
+  markers, hosts, and database names.
+- The proof used exact per-run image/container/network/volume names and labels,
+  bounded readiness, failure cleanup, and a zero-resource audit. No production
+  migration or role implementation change was required by the real database
+  proof.
 - The full local matrix passed: DB, API, search, integrations, download-worker,
   and Platform test suites; root typecheck; API and Platform production builds;
   all three Compose config renders; formatting and diff checks. The separate

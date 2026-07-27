@@ -665,9 +665,19 @@ git commit -m "feat(platform): gate TF bridge on migrations"
 
 **Interfaces:**
 
-- PostgreSQL integration is gated by `TF_TEST_ADMIN_DATABASE_URL`,
-  `TF_TEST_MIGRATOR_DATABASE_URL`, and `TF_TEST_RUNTIME_DATABASE_URL`.
-- Tests never print any URL or password.
+- PostgreSQL integration is gated by `TF_TEST_RUN_ID`,
+  `TF_TEST_ADMIN_DATABASE_URL`, `TF_TEST_MIGRATOR_DATABASE_URL`, and
+  `TF_TEST_RUNTIME_DATABASE_URL`. Incomplete configuration skips before
+  connection.
+- `TF_TEST_RUN_ID` is a non-secret 8-32 character lowercase ASCII identifier.
+  The runner creates only `apollo_tf_test_<run_id>` and sets the exact database
+  marker `apollo.tf.integration-run:<run_id>`.
+- Before any DDL/reset, read-only probes require all three sessions to use that
+  exact marked PostgreSQL 16 database on one non-null server address/port, with
+  a PostgreSQL superuser plus the exact migrator/runtime roles. Any mismatch
+  closes all pools and fails with one generic error.
+- Target-validation errors never print a URL, password, raw run ID, marker,
+  host, database name, or connection detail.
 - Old-volume adoption is manual-only and exact; normal migration and Compose
   never invoke it.
 
@@ -679,7 +689,9 @@ Against disposable PostgreSQL with the exact two roles, prove:
 2. second run reports both already applied;
 3. runtime reads exact history and CRUDs the five active tables;
 4. runtime cannot CREATE/ALTER/DROP/TRUNCATE, mutate history, or access a
-   canary table not explicitly granted;
+   canary table not explicitly granted; canary isolation checks SELECT, INSERT,
+   UPDATE, DELETE, TRUNCATE, REFERENCES, and TRIGGER privileges and executes
+   denied SELECT/INSERT/UPDATE/DELETE/TRUNCATE statements;
 5. extra/checksum-drifted history fails;
 6. normal migration against pre-existing managed tables with no history fails
    and inserts no history row;
@@ -687,8 +699,10 @@ Against disposable PostgreSQL with the exact two roles, prove:
    old startup schema, transfers all managed table/sequence/history ownership to
    `apollo_tf_migrator`, and normal migration then reports both migrations
    already applied; an owner-only non-superuser connection is rejected;
-8. forced `0002` failure during manual baseline leaves exact `0001` history and
-   transferred ownership, after which normal migrator applies `0002`;
+8. a test-only wrapper injects a generic query failure only for the exact
+   `0002` SQL during manual baseline, leaving exact `0001` history and
+   transferred ownership, after which normal migrator applies `0002`; no
+   cluster-global role is renamed;
 9. manual baseline rejects missing/extra/changed managed columns, defaults,
    constraints, or indexes and inserts no history;
 10. runtime cannot call `setval` on managed sequences;
