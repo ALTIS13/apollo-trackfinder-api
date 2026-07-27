@@ -25,21 +25,28 @@ Task 5.
   mode `0400`, and the shared admin URL is `root:10002` mode `0440`.
   Supplemental group `10002` is granted only to the two profiled manual
   services.
-- A fresh PostgreSQL 16 integration proof passed all ten live cases plus twelve
-  target-guard cases. It covers clean/repeat migration, exact
-  readiness/history, runtime CRUD and full canary privilege denials,
-  drift/unmanaged rejection, exact manual baseline, ownership transfer,
-  partial `0002` rollback/recovery without renaming a cluster role,
-  malformed-catalog rejection, and absence of provider-token tables/grants.
-  The suite is skipped unless `TF_TEST_RUN_ID` and all three explicit
-  `TF_TEST_*_DATABASE_URL` values are present.
-- The disposable runner creates only `apollo_tf_test_<run_id>`, sets a
-  runner-owned database marker, and verifies database, marker, same-server
-  identity, PostgreSQL 16, superuser, migrator, and runtime roles with read-only
-  probes before any DDL/reset. Wrong run ID, marker, database, cross-target URL,
-  and role all fail generically while preserving a managed-table sentinel.
-  Target-validation error output excludes URLs, passwords, raw run IDs,
-  markers, hosts, and database names.
+- A fresh PostgreSQL 16 integration proof passed `27/27`: ten live migration
+  cases, one factual live target-mutation case, and sixteen pure guard/cleanup
+  contracts. It covers clean/repeat migration, exact readiness/history, runtime
+  CRUD and full canary privilege denials, drift/unmanaged rejection, exact
+  manual baseline, ownership transfer, partial `0002` rollback/recovery without
+  renaming a cluster role, malformed-catalog rejection, and absence of
+  provider-token tables/grants. Without the integration environment the DB
+  file passes sixteen pure contracts and skips eleven live tests.
+- The disposable runner creates `apollo_tf_test_<run_id>`, an alternate
+  database, and an external sentinel outside the managed/reset object list. It
+  sets the target marker and exact sentinel content derived from the run ID;
+  the tracked test does not create the sentinel.
+- Exactly one admin, migrator, and runtime backend is checked out. Read-only
+  probes on those pinned clients verify database, marker, same-server identity,
+  PostgreSQL 16, superuser, migrator, and runtime roles before any DDL/reset.
+  All later integration SQL remains pinned; no pool reconnect can switch the
+  validated backend. Wrong run ID, expected marker, database, cross-target
+  session, and role all fail before the destructive callback while preserving
+  the external sentinel.
+- Final reset failure cannot bypass physical client release or pool closure,
+  and the primary reset failure is preserved. Target-validation error output
+  excludes URLs, passwords, raw run IDs, markers, hosts, and database names.
 - The proof used exact per-run image/container/network/volume names and labels,
   bounded readiness, failure cleanup, and a zero-resource audit. No production
   migration or role implementation change was required by the real database

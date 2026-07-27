@@ -121,9 +121,9 @@ function requireVerifiedIntegrationTarget(
 }
 
 async function loadIntegrationTargetIdentity(
-  pool: Pool,
+  client: PoolClient,
 ): Promise<IntegrationTargetIdentity> {
-  const result = await pool.query<IntegrationTargetIdentity>(`
+  const result = await client.query<IntegrationTargetIdentity>(`
     select
       current_user::text as "currentUser",
       current_database()::text as "databaseName",
@@ -143,30 +143,133 @@ async function loadIntegrationTargetIdentity(
   return identity;
 }
 
-async function openVerifiedIntegrationPools(
+type IntegrationPoolFactory = (
+  connectionString: string,
+  profile: "migration" | "runtime",
+) => Pool;
+
+interface PinnedIntegrationResource {
+  readonly client: PoolClient;
+  readonly pool: Pool;
+}
+
+interface VerifiedIntegrationSessions {
+  readonly admin: Pool;
+  readonly migrator: Pool;
+  readonly resources: readonly [
+    PinnedIntegrationResource,
+    PinnedIntegrationResource,
+    PinnedIntegrationResource,
+  ];
+  readonly runtime: Pool;
+}
+
+function createPinnedClient(client: PoolClient): PoolClient {
+  return new Proxy(client, {
+    get(target, property, receiver) {
+      if (property === "release") return () => undefined;
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+function createPinnedPool(client: PoolClient): Pool {
+  const pinnedClient = createPinnedClient(client);
+  return {
+    connect: async () => pinnedClient,
+    query: ((...args: unknown[]) =>
+      Reflect.apply(pinnedClient.query, pinnedClient, args)) as Pool["query"],
+  } as Pool;
+}
+
+async function closePinnedResources(
+  resources: readonly PinnedIntegrationResource[],
+): Promise<unknown | undefined> {
+  const releases = await Promise.allSettled(
+    resources.map(async ({ client }) => client.release()),
+  );
+  const endings = await Promise.allSettled(
+    resources.map(({ pool }) => pool.end()),
+  );
+  return [...releases, ...endings].find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  )?.reason;
+}
+
+async function closeVerifiedIntegrationSessions(
+  sessions: VerifiedIntegrationSessions,
+  finalReset?: () => Promise<void>,
+): Promise<void> {
+  let primaryError: unknown;
+  let closeError: unknown;
+  try {
+    await finalReset?.();
+  } catch (error) {
+    primaryError = error;
+  } finally {
+    closeError = await closePinnedResources(sessions.resources);
+  }
+  if (primaryError !== undefined) throw primaryError;
+  if (closeError !== undefined) throw closeError;
+}
+
+async function openVerifiedIntegrationSessions(
   configuration: IntegrationTargetConfiguration,
-): Promise<{ admin: Pool; migrator: Pool; runtime: Pool }> {
+  createPool: IntegrationPoolFactory = createTfPool,
+): Promise<VerifiedIntegrationSessions> {
   const pools = {
-    admin: createTfPool(configuration.urls.admin, "migration"),
-    migrator: createTfPool(configuration.urls.migrator, "migration"),
-    runtime: createTfPool(configuration.urls.runtime, "runtime"),
+    admin: createPool(configuration.urls.admin, "migration"),
+    migrator: createPool(configuration.urls.migrator, "migration"),
+    runtime: createPool(configuration.urls.runtime, "runtime"),
   };
+  const acquired: PinnedIntegrationResource[] = [];
 
   try {
-    const identities = await Promise.all([
-      loadIntegrationTargetIdentity(pools.admin),
-      loadIntegrationTargetIdentity(pools.migrator),
-      loadIntegrationTargetIdentity(pools.runtime),
-    ]);
+    const adminClient = await pools.admin.connect();
+    acquired.push({ client: adminClient, pool: pools.admin });
+    const migratorClient = await pools.migrator.connect();
+    acquired.push({ client: migratorClient, pool: pools.migrator });
+    const runtimeClient = await pools.runtime.connect();
+    acquired.push({ client: runtimeClient, pool: pools.runtime });
+    const identities = await Promise.all(
+      acquired.map(({ client }) => loadIntegrationTargetIdentity(client)),
+    );
     requireVerifiedIntegrationTarget(configuration, identities);
-    return pools;
+    const resources = acquired as [
+      PinnedIntegrationResource,
+      PinnedIntegrationResource,
+      PinnedIntegrationResource,
+    ];
+    return {
+      admin: createPinnedPool(adminClient),
+      migrator: createPinnedPool(migratorClient),
+      resources,
+      runtime: createPinnedPool(runtimeClient),
+    };
   } catch {
-    await Promise.allSettled([
-      pools.runtime.end(),
-      pools.migrator.end(),
-      pools.admin.end(),
-    ]);
+    await closePinnedResources(acquired);
+    const unacquiredPools = [pools.admin, pools.migrator, pools.runtime].filter(
+      (pool) => !acquired.some((resource) => resource.pool === pool),
+    );
+    await Promise.allSettled(unacquiredPools.map((pool) => pool.end()));
     throw targetValidationError();
+  }
+}
+
+async function withVerifiedIntegrationSessions<T>(
+  configuration: IntegrationTargetConfiguration,
+  operation: (sessions: VerifiedIntegrationSessions) => Promise<T>,
+  createPool: IntegrationPoolFactory = createTfPool,
+): Promise<T> {
+  const sessions = await openVerifiedIntegrationSessions(
+    configuration,
+    createPool,
+  );
+  try {
+    return await operation(sessions);
+  } finally {
+    await closeVerifiedIntegrationSessions(sessions);
   }
 }
 
@@ -206,6 +309,82 @@ const exactHistory = [
   },
 ] as const;
 
+interface RecordingPool {
+  readonly connectCount: () => number;
+  readonly endCount: () => number;
+  readonly physicalReleaseCount: () => number;
+  readonly pool: Pool;
+  readonly queries: readonly string[];
+}
+
+function createRecordingPool(
+  identity: IntegrationTargetIdentity,
+): RecordingPool {
+  let connects = 0;
+  let ends = 0;
+  let physicalReleases = 0;
+  const queries: string[] = [];
+  const client = {
+    query: async (sql: string) => {
+      queries.push(sql);
+      return sql.includes("current_database()")
+        ? { rows: [identity] }
+        : { rows: [] };
+    },
+    release: () => {
+      physicalReleases += 1;
+    },
+  } as unknown as PoolClient;
+  const pool = {
+    connect: async () => {
+      connects += 1;
+      return client;
+    },
+    end: async () => {
+      ends += 1;
+    },
+  } as unknown as Pool;
+
+  return {
+    connectCount: () => connects,
+    endCount: () => ends,
+    physicalReleaseCount: () => physicalReleases,
+    pool,
+    queries,
+  };
+}
+
+function validRecordingPools(): readonly [
+  RecordingPool,
+  RecordingPool,
+  RecordingPool,
+] {
+  const common = {
+    databaseName: "apollo_tf_test_task5guard1234",
+    marker: "apollo.tf.integration-run:task5guard1234",
+    serverAddress: "172.30.0.2",
+    serverPort: 5432,
+    serverVersion: 160_010,
+  };
+  return [
+    createRecordingPool({
+      ...common,
+      currentUser: "task5_fixture_admin",
+      isSuperuser: true,
+    }),
+    createRecordingPool({
+      ...common,
+      currentUser: "apollo_tf_migrator",
+      isSuperuser: false,
+    }),
+    createRecordingPool({
+      ...common,
+      currentUser: "apollo_tf_runtime",
+      isSuperuser: false,
+    }),
+  ];
+}
+
 describe("TF PostgreSQL integration target guard", () => {
   const environment = {
     adminUrl: "postgres://admin.invalid/ignored",
@@ -234,6 +413,14 @@ describe("TF PostgreSQL integration target guard", () => {
     expect(() =>
       createIntegrationTargetConfiguration({ ...environment, runId }),
     ).toThrowError("TF PostgreSQL integration target validation failed");
+  });
+
+  test("derives a distinct valid mutation for a maximum-length run ID", () => {
+    const runId = `${"a".repeat(31)}x`;
+    const mutation = alternateRunId(runId);
+
+    expect(mutation).not.toBe(runId);
+    expect(TEST_RUN_ID.test(mutation)).toBe(true);
   });
 
   test.each([
@@ -335,11 +522,210 @@ describe("TF PostgreSQL integration target guard", () => {
       requireVerifiedIntegrationTarget(configuration, identities),
     ).not.toThrow();
   });
+
+  test("pins one validated backend per role and never reacquires it", async () => {
+    const configuration = createIntegrationTargetConfiguration(environment)!;
+    const recordings = validRecordingPools();
+    let nextPool = 0;
+
+    const sessions = await openVerifiedIntegrationSessions(
+      configuration,
+      () => recordings[nextPool++]!.pool,
+    );
+    await sessions.admin.query("select 'admin-probe'");
+    const migrationClient = await sessions.migrator.connect();
+    await migrationClient.query("select 'migration-probe'");
+    migrationClient.release();
+    const repeatedClient = await sessions.migrator.connect();
+    await repeatedClient.query("select 'same-migration-backend'");
+    repeatedClient.release();
+
+    expect(recordings.map((entry) => entry.connectCount())).toEqual([1, 1, 1]);
+    expect(recordings[0].queries).toContain("select 'admin-probe'");
+    expect(recordings[1].queries).toContain("select 'migration-probe'");
+    expect(recordings[1].queries).toContain("select 'same-migration-backend'");
+    expect(recordings.map((entry) => entry.physicalReleaseCount())).toEqual([
+      0, 0, 0,
+    ]);
+
+    await closeVerifiedIntegrationSessions(sessions);
+    expect(recordings.map((entry) => entry.physicalReleaseCount())).toEqual([
+      1, 1, 1,
+    ]);
+    expect(recordings.map((entry) => entry.endCount())).toEqual([1, 1, 1]);
+  });
+
+  test("closes every pinned client and pool after final reset fails", async () => {
+    const configuration = createIntegrationTargetConfiguration(environment)!;
+    const recordings = validRecordingPools();
+    let nextPool = 0;
+    const sessions = await openVerifiedIntegrationSessions(
+      configuration,
+      () => recordings[nextPool++]!.pool,
+    );
+    const resetFailure = new Error("forced final reset failure");
+
+    await expect(
+      closeVerifiedIntegrationSessions(sessions, async () => {
+        throw resetFailure;
+      }),
+    ).rejects.toBe(resetFailure);
+    expect(recordings.map((entry) => entry.physicalReleaseCount())).toEqual([
+      1, 1, 1,
+    ]);
+    expect(recordings.map((entry) => entry.endCount())).toEqual([1, 1, 1]);
+  });
+
+  test("closes acquired clients and pools when pinned validation fails", async () => {
+    const configuration = createIntegrationTargetConfiguration(environment)!;
+    const recordings = validRecordingPools();
+    const invalidMigrator = createRecordingPool({
+      currentUser: "apollo_tf_runtime",
+      databaseName: configuration.databaseName,
+      isSuperuser: false,
+      marker: configuration.marker,
+      serverAddress: "172.30.0.2",
+      serverPort: 5432,
+      serverVersion: 160_010,
+    });
+    const attempted = [recordings[0], invalidMigrator, recordings[2]] as const;
+    let nextPool = 0;
+
+    await expect(
+      openVerifiedIntegrationSessions(
+        configuration,
+        () => attempted[nextPool++]!.pool,
+      ),
+    ).rejects.toThrowError(TARGET_VALIDATION_ERROR);
+    expect(attempted.map((entry) => entry.physicalReleaseCount())).toEqual([
+      1, 1, 1,
+    ]);
+    expect(attempted.map((entry) => entry.endCount())).toEqual([1, 1, 1]);
+  });
 });
+
+function databaseUrlFor(
+  connectionString: string,
+  databaseName: string,
+): string {
+  const url = new URL(connectionString);
+  url.pathname = `/${databaseName}`;
+  return url.toString();
+}
+
+function alternateRunId(runId: string): string {
+  const suffix = runId.endsWith("x") ? "y" : "x";
+  return runId.length < 32
+    ? `${runId.slice(0, 31)}${suffix}`
+    : `${runId.slice(0, -1)}${suffix}`;
+}
+
+describe
+  .skipIf(!integrationEnabled)
+  .sequential("TF PostgreSQL integration guard live proof", () => {
+    test("rejects every real target mutation before DDL and preserves the external sentinel", async () => {
+      if (!integrationTarget) throw targetValidationError();
+      const alternateDatabaseName = `apollo_tf_alt_${integrationTarget.runId}`;
+      const alternateUrls = {
+        admin: databaseUrlFor(
+          integrationTarget.urls.admin,
+          alternateDatabaseName,
+        ),
+        migrator: databaseUrlFor(
+          integrationTarget.urls.migrator,
+          alternateDatabaseName,
+        ),
+        runtime: databaseUrlFor(
+          integrationTarget.urls.runtime,
+          alternateDatabaseName,
+        ),
+      };
+      const expectedSentinel = `apollo.tf.guard-sentinel:${integrationTarget.runId}`;
+      const reference =
+        await openVerifiedIntegrationSessions(integrationTarget);
+      const expectExternalSentinel = async (): Promise<void> => {
+        const sentinel = await reference.admin.query<{ value: string }>(
+          "select value from public.tf_integration_guard_sentinel where id = 1",
+        );
+        expect(sentinel.rows).toEqual([{ value: expectedSentinel }]);
+      };
+
+      try {
+        await expectExternalSentinel();
+        const wrongRunId = alternateRunId(integrationTarget.runId);
+        const mutations = [
+          {
+            name: "wrong run ID",
+            configuration: {
+              ...integrationTarget,
+              databaseName: `${TEST_DATABASE_PREFIX}${wrongRunId}`,
+              marker: `${TEST_MARKER_PREFIX}${wrongRunId}`,
+              runId: wrongRunId,
+            },
+          },
+          {
+            name: "wrong expected marker",
+            configuration: {
+              ...integrationTarget,
+              marker: `${TEST_MARKER_PREFIX}${wrongRunId}`,
+            },
+          },
+          {
+            name: "wrong database target",
+            configuration: {
+              ...integrationTarget,
+              urls: alternateUrls,
+            },
+          },
+          {
+            name: "cross-target runtime session",
+            configuration: {
+              ...integrationTarget,
+              urls: {
+                ...integrationTarget.urls,
+                runtime: alternateUrls.runtime,
+              },
+            },
+          },
+          {
+            name: "wrong migrator role",
+            configuration: {
+              ...integrationTarget,
+              urls: {
+                ...integrationTarget.urls,
+                migrator: integrationTarget.urls.runtime,
+              },
+            },
+          },
+        ] as const;
+
+        for (const mutation of mutations) {
+          let destructiveCallbackReached = false;
+          await expect(
+            withVerifiedIntegrationSessions(
+              mutation.configuration,
+              async () => {
+                destructiveCallbackReached = true;
+                await reference.admin.query(
+                  "drop table public.tf_integration_guard_sentinel",
+                );
+              },
+            ),
+            mutation.name,
+          ).rejects.toThrowError(TARGET_VALIDATION_ERROR);
+          expect(destructiveCallbackReached, mutation.name).toBe(false);
+          await expectExternalSentinel();
+        }
+      } finally {
+        await closeVerifiedIntegrationSessions(reference);
+      }
+    });
+  });
 
 let adminPool: Pool | undefined;
 let migratorPool: Pool | undefined;
 let runtimePool: Pool | undefined;
+let verifiedSessions: VerifiedIntegrationSessions | undefined;
 
 function errorCode(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null || !("code" in error)) {
@@ -519,10 +905,11 @@ describe
   .sequential("TF PostgreSQL 16 migration integration", () => {
     beforeAll(async () => {
       if (!integrationTarget) throw targetValidationError();
-      const pools = await openVerifiedIntegrationPools(integrationTarget);
-      adminPool = pools.admin;
-      migratorPool = pools.migrator;
-      runtimePool = pools.runtime;
+      verifiedSessions =
+        await openVerifiedIntegrationSessions(integrationTarget);
+      adminPool = verifiedSessions.admin;
+      migratorPool = verifiedSessions.migrator;
+      runtimePool = verifiedSessions.runtime;
 
       const version = await adminPool.query<{ server_version_num: number }>(
         "select current_setting('server_version_num')::integer as server_version_num",
@@ -592,14 +979,11 @@ describe
     });
 
     afterAll(async () => {
-      if (adminPool) {
-        await resetTfState();
-      }
-      await Promise.allSettled([
-        runtimePool?.end(),
-        migratorPool?.end(),
-        adminPool?.end(),
-      ]);
+      if (!verifiedSessions) return;
+      await closeVerifiedIntegrationSessions(
+        verifiedSessions,
+        adminPool ? resetTfState : undefined,
+      );
     });
 
     test("applies the exact manifest once and reports both migrations on repeat", async () => {

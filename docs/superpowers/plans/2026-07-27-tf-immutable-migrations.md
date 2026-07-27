@@ -670,12 +670,24 @@ git commit -m "feat(platform): gate TF bridge on migrations"
   `TF_TEST_RUNTIME_DATABASE_URL`. Incomplete configuration skips before
   connection.
 - `TF_TEST_RUN_ID` is a non-secret 8-32 character lowercase ASCII identifier.
-  The runner creates only `apollo_tf_test_<run_id>` and sets the exact database
-  marker `apollo.tf.integration-run:<run_id>`.
-- Before any DDL/reset, read-only probes require all three sessions to use that
-  exact marked PostgreSQL 16 database on one non-null server address/port, with
-  a PostgreSQL superuser plus the exact migrator/runtime roles. Any mismatch
-  closes all pools and fails with one generic error.
+  The runner creates `apollo_tf_test_<run_id>`, an alternate database, and an
+  external sentinel outside the managed/reset object list. It sets the exact
+  target marker `apollo.tf.integration-run:<run_id>` and sentinel content
+  derived from the run ID; the test never creates the sentinel.
+- The harness checks out exactly one admin, migrator, and runtime `PoolClient`.
+  Before any DDL/reset, read-only probes on those exact clients require the
+  marked PostgreSQL 16 database on one non-null server address/port, with a
+  PostgreSQL superuser plus the exact migrator/runtime roles. All reset,
+  migration, readiness, baseline, CRUD, denial, history, and cleanup SQL then
+  uses pinned adapters over those clients; a dropped connection fails instead
+  of transparently acquiring another backend.
+- Wrong run ID, expected marker, database target, cross-target session, and
+  role assignment must fail before the destructive callback and preserve the
+  runner-owned sentinel. Final reset runs in `try`; physical client release and
+  every `Pool.end()` attempt run in `finally`, preserving the primary reset
+  failure.
+- Any mismatch closes acquired clients and all pools and fails with one generic
+  error.
 - Target-validation errors never print a URL, password, raw run ID, marker,
   host, database name, or connection detail.
 - Old-volume adoption is manual-only and exact; normal migration and Compose
