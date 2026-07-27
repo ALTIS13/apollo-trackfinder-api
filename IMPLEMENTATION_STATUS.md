@@ -2,6 +2,50 @@
 
 Last updated: 2026-07-27.
 
+## TF immutable migrations release candidate
+
+Status: `LOCAL_VALIDATION_IN_PROGRESS`. The active branch is
+`codex/feat/tf-immutable-migrations`; no remote mutation or push is part of
+Task 5.
+
+- Apollo TF uses immutable, checksummed migrations `0001` and `0002`, exact
+  prefix/full-history validation, a bounded advisory lock, separate
+  `apollo_tf_migrator`/`apollo_tf_runtime` pools, and DDL-free API startup.
+- Root, nested API and Platform bridge Compose enforce
+  `PostgreSQL -> tf-migrate -> API`. Manual `tf-role-bootstrap` and
+  `tf-baseline` services exist only in the disabled `baseline` profile.
+- The PostgreSQL cluster must be dedicated to Apollo TF. Role bootstrap
+  normalizes cluster-wide managed-role access and must never run against a
+  shared PostgreSQL instance.
+- Active setup uses six file-backed database secrets:
+  `tf_postgres_admin_password`, `tf_admin_database_url`,
+  `tf_migrator_password`, `tf_runtime_password`,
+  `tf_migrator_database_url`, and `tf_runtime_database_url`. Password sources
+  are `999:999` mode `0400`, runtime/migrator URL sources are `10001:10001`
+  mode `0400`, and the shared admin URL is `root:10002` mode `0440`.
+  Supplemental group `10002` is granted only to the two profiled manual
+  services.
+- A fresh PostgreSQL 16 integration proof passed all nine tests covering the
+  eleven required cases: clean/repeat migration, exact readiness/history,
+  runtime CRUD and denials, drift/unmanaged rejection, exact manual baseline,
+  ownership transfer, partial `0002` recovery, malformed-catalog rejection,
+  and absence of provider-token tables/grants. The suite is skipped without
+  all three explicit `TF_TEST_*_DATABASE_URL` values and never prints them.
+- The disposable proof used exact per-run image/container/network/volume names
+  and labels, bounded readiness, failure cleanup, and a zero-resource audit.
+  No production migration or role implementation change was required by the
+  real database proof.
+- No remote TF data volume is currently known to this project. Legacy adoption
+  is manual-only after verified backup and restore evidence, with exact order
+  `tf-role-bootstrap -> tf-baseline -> tf-migrate`; production execution also
+  requires owner approval. Old volumes are neither deleted nor silently
+  adopted.
+- API liveness may pass while readiness remains unavailable until exact full
+  migration history exists. Container modules remain portable across Coolify
+  nodes through private same-node DNS or separately approved cross-node TLS.
+- Task 5 did not mutate HomeNode, Coolify, Caddy, UFW, DNS, domains, GitHub, or
+  Android.
+
 ## HomeNode/Coolify read-only release preflight
 
 Status: `READ_ONLY_COMPLETE`. The active branch is
@@ -339,7 +383,7 @@ the runtime matrix was rerun on itself.
 
 - TF web-session consolidated final-review fix wave (2026-07-24): focused and full music-player suites passed `66/66`; selected API auth/boundary/ticket/policy/WebSocket tests passed `100/100`; player/root typechecks and player production build passed; exact runtime legacy/provider-secret scans and `git diff --check` were clean. `pnpm 10.33.2` regenerated `pnpm-lock.yaml` unchanged and `pnpm install --frozen-lockfile` passed. The required music-player test importer entries were retained together with pnpm's normalized shared Vitest peer snapshots and `path-scurry` deduplication to the already locked `lru-cache@11.5.2`. No tracked Compose file changed, so Compose was not rerun and no remote service or infrastructure was touched.
 
-- TF web-session local release validation (2026-07-24): music-player suite `41/41`, selected API browser-contract suite `100/100`, player/root typechecks and player production build passed. Controller validation set `TF_SECRET_DIRECTORY` to a disposable verified workspace-local directory containing only canary paths `tf_client_secret`, `tf_database_url`, and `tf_postgres_password`; exact `docker compose config` exited `0`. After absolute-path containment checks, all three files and the directory were individually deleted (`TEMP_CLEAN=True`). No real secret, Compose configuration, or remote infrastructure was changed. The exact legacy scan found three test-only assertions in `tf-api-migration.test.ts`; the runtime-only scan was clean. The exact secret-boundary scan was clean.
+- Historical TF web-session local release validation (2026-07-24): music-player suite `41/41`, selected API browser-contract suite `100/100`, player/root typechecks and player production build passed. That historical controller fixture used the then-active secret names `tf_client_secret`, `tf_database_url`, and `tf_postgres_password`; they are not current setup guidance. Exact `docker compose config` exited `0`, and all temporary files were individually deleted (`TEMP_CLEAN=True`). No real secret, Compose configuration, or remote infrastructure was changed.
 
 - Baseline 2026-06-23: `pnpm install`, full typecheck и build прошли до изменения mobile delivery target.
 - Residual search: активных Replit/Cursor артефактов в коде не найдено; оставшиеся `cursor` совпадения относятся к CSS/Redis cursor, не к Cursor IDE.
