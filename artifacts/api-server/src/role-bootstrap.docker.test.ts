@@ -663,9 +663,70 @@ describe
         "postgres",
       );
 
+      await psqlAdmin(`
+        alter default privileges for role apollo_tf_runtime
+          revoke execute on functions from public;
+      `);
+      await psqlAdmin(
+        `
+          alter default privileges for role apollo_tf_runtime
+            revoke execute on functions from public;
+        `,
+        "postgres",
+      );
+      const foreignDefaultAclFailure = await runManualBootstrap(true);
+      expect(foreignDefaultAclFailure.code).not.toBe(0);
+      expect(foreignDefaultAclFailure.stdout.toString()).toBe("");
+      expect(foreignDefaultAclFailure.stderr.toString()).toBe(
+        "TF role bootstrap failed\n",
+      );
+
+      const rollback = await psqlAdmin(`
+        select concat_ws('|',
+          (select rolconnlimit
+            from pg_roles where rolname = 'apollo_tf_runtime'),
+          exists (
+            select 1
+            from pg_default_acl defaults
+            where defaults.defaclrole = (
+              select oid
+              from pg_roles
+              where rolname = 'apollo_tf_runtime'
+            )
+              and defaults.defaclobjtype = 'f'
+          )
+        );
+      `);
+      expect(rollback.stdout.toString()).toContain("0|t");
+
+      await psqlAdmin(
+        `
+          alter default privileges for role apollo_tf_runtime
+            grant execute on functions to public;
+        `,
+        "postgres",
+      );
+
       const bootstrap = await runManualBootstrap();
       expect(bootstrap.stdout.toString()).toBe("");
       expect(bootstrap.stderr.toString()).toBe("");
+
+      const currentRuntimeDefaultAcl = await psqlAdmin(`
+        select 'current_runtime_default_acl=' || concat_ws(
+          '|',
+          count(*),
+          coalesce(sum(cardinality(defaults.defaclacl)), 0)
+        )
+        from pg_default_acl defaults
+        where defaults.defaclrole = (
+          select oid
+          from pg_roles
+          where rolname = 'apollo_tf_runtime'
+        );
+      `);
+      expect(currentRuntimeDefaultAcl.stdout.toString()).toContain(
+        "current_runtime_default_acl=1|0",
+      );
 
       const projection = await psqlAdmin(`
         select concat_ws('|',

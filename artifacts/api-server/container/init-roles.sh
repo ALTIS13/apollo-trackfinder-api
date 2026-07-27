@@ -87,7 +87,17 @@ begin
     where dependencies.refclassid = 'pg_authid'::regclass
       and dependencies.refobjid = runtime_oid
       and dependencies.deptype = 'o'
-      and dependencies.classid <> 'pg_default_acl'::regclass
+      and not (
+        dependencies.dbid = (
+          select oid from pg_database where datname = current_database()
+        )
+        and dependencies.classid = 'pg_default_acl'::regclass
+        and dependencies.objid in (
+          select defaults.oid
+          from pg_default_acl defaults
+          where defaults.defaclrole = runtime_oid
+        )
+      )
   ) then
     raise exception 'managed_role_owns_unexpected_object';
   end if;
