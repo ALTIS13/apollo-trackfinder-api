@@ -704,11 +704,26 @@ async function recordBaseline(
   first: LoadedMigration,
 ): Promise<void> {
   await inTransaction(client, async () => {
-    await client.query(
-      `lock table ${MANAGED_TABLES.map((table) => `public.${table}`).join(
-        ", ",
-      )} in access exclusive mode`,
-    );
+    try {
+      await client.query(
+        `lock table ${MANAGED_TABLES.map((table) => `public.${table}`).join(
+          ", ",
+        )} in access exclusive mode`,
+      );
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "42P01"
+      ) {
+        throw contractError(
+          "migration_baseline_mismatch",
+          "Legacy TF catalog is missing a managed table",
+        );
+      }
+      throw error;
+    }
     await validateBaselineCatalog(client);
     await client.query("create schema if not exists apollo_tf");
     await client.query(`

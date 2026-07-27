@@ -228,6 +228,7 @@ class MigrationClientDouble {
   catalog: CatalogFixture = structuredClone(exactCatalog);
   historyTableExists = false;
   managedTables: string[] = [];
+  tableLockFailure?: Error;
   databaseRole = {
     current_role: "legacy_owner",
     is_superuser: true,
@@ -249,6 +250,12 @@ class MigrationClientDouble {
     }
     if (text.includes("pg_advisory_unlock"))
       return result([{ unlocked: true }]);
+    if (
+      this.tableLockFailure &&
+      /lock table[\s\S]*access exclusive mode/i.test(text)
+    ) {
+      throw this.tableLockFailure;
+    }
     if (text.includes("select name, checksum")) {
       return result(
         [...this.history].map(([name, checksum]) => ({ name, checksum })),
@@ -604,6 +611,43 @@ describe("runTfMigrations", () => {
 });
 
 describe("baselineTfStartupSchema", () => {
+  test("classifies only a missing relation during baseline locking as catalog mismatch", async () => {
+    const missingRelation = Object.assign(
+      new Error('relation "public.playlists" does not exist'),
+      { code: "42P01" },
+    );
+    const missingPool = new MigrationPoolDouble();
+    missingPool.client.tableLockFailure = missingRelation;
+
+    await expect(
+      baselineTfStartupSchema(
+        asPool(missingPool),
+        canonicalMigrationDirectory,
+        TF_MIGRATION_MANIFEST,
+        zeroDelayOptions(),
+      ),
+    ).rejects.toMatchObject({ code: "migration_baseline_mismatch" });
+    expect(missingPool.client.events).toContain("ROLLBACK");
+    expect(missingPool.client.releaseArguments).toEqual([undefined]);
+
+    const unrelated = Object.assign(new Error("lock manager unavailable"), {
+      code: "XX000",
+    });
+    const unrelatedPool = new MigrationPoolDouble();
+    unrelatedPool.client.tableLockFailure = unrelated;
+
+    await expect(
+      baselineTfStartupSchema(
+        asPool(unrelatedPool),
+        canonicalMigrationDirectory,
+        TF_MIGRATION_MANIFEST,
+        zeroDelayOptions(),
+      ),
+    ).rejects.toBe(unrelated);
+    expect(unrelatedPool.client.events).toContain("ROLLBACK");
+    expect(unrelatedPool.client.releaseArguments).toEqual([undefined]);
+  });
+
   test("rejects substituted SQL even when canonical filenames are retained", async () => {
     const directory = await fixtureDirectory({
       "0001_tf_core_collections.sql": "select 'substituted schema';",
