@@ -62,6 +62,11 @@ function redisSlot(key: string): number {
   return crc % 16_384;
 }
 
+async function redisNowMs(redis: Redis): Promise<number> {
+  const [seconds, microseconds] = await redis.time();
+  return Number(seconds) * 1_000 + Math.floor(Number(microseconds) / 1_000);
+}
+
 async function waitForState(
   queue: Queue,
   jobId: string,
@@ -158,6 +163,7 @@ describe("download cancellation with Redis 7 and BullMQ", () => {
           queue.toKey(suffix),
         );
         const leaseKey = queue.toKey("admission-intent-leases");
+        const slotKey = queue.toKey("admission-capacity-slots");
         const waitKey = getDownloadQueueJobHashKey(
           queue.toKey.bind(queue),
           WAIT_JOB_ID,
@@ -182,10 +188,11 @@ describe("download cancellation with Redis 7 and BullMQ", () => {
           waitKey,
           ledgerKey,
           leaseKey,
+          slotKey,
         ];
         expect(new Set(stateKeys.map(redisSlot)).size).toBe(1);
 
-        const leaseExpiresAt = Date.now() + 60_000;
+        const leaseExpiresAt = (await redisNowMs(inspection)) + 60_000;
         const phantomIntents = Array.from(
           { length: 200 },
           (_, index) =>
@@ -195,15 +202,20 @@ describe("download cancellation with Redis 7 and BullMQ", () => {
             ] as const,
         );
         const leasePipeline = inspection.pipeline();
-        for (const [jobId, intent] of phantomIntents) {
+        for (const [index, [jobId, intent]] of phantomIntents.entries()) {
           leasePipeline.hset(ledgerKey, jobId, intent);
           leasePipeline.zadd(leaseKey, leaseExpiresAt, jobId);
+          leasePipeline.hset(
+            slotKey,
+            `apollo-capacity-v1-${String(index + 1).padStart(3, "0")}`,
+            jobId,
+          );
         }
         await leasePipeline.exec();
         await expect(adapter.enqueue(jobData)).rejects.toMatchObject({
           code: "download_queue_full",
         });
-        await inspection.zadd(leaseKey, Date.now() - 1, "phantom-0");
+        await inspection.zadd(leaseKey, 0, "phantom-0");
         const recovered = await adapter.enqueue(jobData);
         expect(recovered.position).toBe(200);
         await expect(inspection.hget(ledgerKey, "phantom-0")).resolves.toBe(
@@ -213,7 +225,7 @@ describe("download cancellation with Redis 7 and BullMQ", () => {
           null,
         );
         await (await queue.getJob(recovered.jobId))?.remove();
-        await inspection.del(ledgerKey, leaseKey);
+        await inspection.del(ledgerKey, leaseKey, slotKey);
 
         await queue.add("download", jobData, {
           jobId: WAIT_JOB_ID,
@@ -420,13 +432,22 @@ return 1
           ),
         ).resolves.toBe(0);
 
-        const retainedIntents = Object.fromEntries(
-          Array.from({ length: 198 }, (_, index) => [
-            `retained-${index}`,
+        const retainedPipeline = inspection.pipeline();
+        for (let index = 0; index < 198; index += 1) {
+          const jobId = `retained-${index}`;
+          retainedPipeline.hset(
+            ledgerKey,
+            jobId,
             encodeDownloadAdmissionIntent("pending", ACCOUNT_ID),
-          ]),
-        );
-        await inspection.hset(ledgerKey, retainedIntents);
+          );
+          retainedPipeline.zadd(leaseKey, leaseExpiresAt, jobId);
+          retainedPipeline.hset(
+            slotKey,
+            `apollo-capacity-v1-${String(index + 1).padStart(3, "0")}`,
+            jobId,
+          );
+        }
+        await retainedPipeline.exec();
         await expect(adapter.enqueue(jobData)).resolves.toEqual({
           jobId: expect.any(String),
           position: 200,
@@ -446,5 +467,293 @@ return 1
       }
     },
     30_000,
+  );
+
+  integrationIt.each(["replacement", "stale"] as const)(
+    "fences a stale producer when the %s add wins after lease reassignment",
+    async (winner) => {
+      if (INTEGRATION_REDIS_URL === undefined) {
+        throw new Error("integration Redis URL is required");
+      }
+      const connection = redisOptions(INTEGRATION_REDIS_URL);
+      const inspection = new Redis(connection);
+      const queue = new Queue(DOWNLOAD_QUEUE_NAME, {
+        prefix: DOWNLOAD_QUEUE_PREFIX,
+        connection,
+      });
+      const firstProducer = new Queue(DOWNLOAD_QUEUE_NAME, {
+        prefix: DOWNLOAD_QUEUE_PREFIX,
+        connection,
+      });
+      const firstTelemetry = new Queue(DOWNLOAD_QUEUE_NAME, {
+        prefix: DOWNLOAD_QUEUE_PREFIX,
+        connection,
+      });
+      const secondProducer = new Queue(DOWNLOAD_QUEUE_NAME, {
+        prefix: DOWNLOAD_QUEUE_PREFIX,
+        connection,
+      });
+      const secondTelemetry = new Queue(DOWNLOAD_QUEUE_NAME, {
+        prefix: DOWNLOAD_QUEUE_PREFIX,
+        connection,
+      });
+      let releaseStaleAdd: (() => void) | undefined;
+      let staleAddStarted!: () => void;
+      const staleAddStartedPromise = new Promise<void>((resolve) => {
+        staleAddStarted = resolve;
+      });
+      const staleAddGate = new Promise<void>((resolve) => {
+        releaseStaleAdd = resolve;
+      });
+      let releaseReplacementAdd: (() => void) | undefined;
+      let replacementAddStarted!: () => void;
+      const replacementAddStartedPromise = new Promise<void>((resolve) => {
+        replacementAddStarted = resolve;
+      });
+      const replacementAddGate = new Promise<void>((resolve) => {
+        releaseReplacementAdd = resolve;
+      });
+      const originalAdd = firstProducer.add.bind(firstProducer);
+      const originalReplacementAdd = secondProducer.add.bind(secondProducer);
+      let staleAddOptions: { deduplication?: { id: string } } | undefined;
+      let replacementAddOptions: { deduplication?: { id: string } } | undefined;
+      firstProducer.add = (async (name, data, options) => {
+        staleAddOptions = options;
+        staleAddStarted();
+        await staleAddGate;
+        return originalAdd(name, data, options);
+      }) as typeof firstProducer.add;
+      secondProducer.add = (async (name, data, options) => {
+        replacementAddOptions = options;
+        replacementAddStarted();
+        await replacementAddGate;
+        return originalReplacementAdd(name, data, options);
+      }) as typeof secondProducer.add;
+
+      const makeAdapter = (producer: Queue, telemetry: Queue) => {
+        let queueIndex = 0;
+        return createDownloadQueueAdapter({
+          environment: {
+            TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/integration-queue-url",
+            TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+          },
+          readFile: async () =>
+            Buffer.from(
+              `redis://default:${encodeURIComponent(
+                "integration-password-is-long-enough",
+              )}@tf-download-redis:6379/0`,
+            ),
+          createQueue: (() => [producer, telemetry][queueIndex++]!) as never,
+          createRedis: (() =>
+            new Redis({
+              ...connection,
+              commandTimeout: 1_000,
+              enableOfflineQueue: false,
+              lazyConnect: true,
+              maxRetriesPerRequest: 1,
+              retryStrategy: () => null,
+            })) as never,
+        });
+      };
+      const firstAdapter = makeAdapter(firstProducer, firstTelemetry);
+      const secondAdapter = makeAdapter(secondProducer, secondTelemetry);
+      let staleAdmission:
+        | Promise<{ jobId: string; position: number }>
+        | undefined;
+      let replacementAdmission:
+        | Promise<{ jobId: string; position: number }>
+        | undefined;
+
+      try {
+        await inspection.flushdb();
+        await Promise.all([
+          queue.waitUntilReady(),
+          firstAdapter.init(),
+          secondAdapter.init(),
+        ]);
+        await queue.addBulk(
+          Array.from({ length: 199 }, (_, index) => ({
+            name: "download",
+            data: jobData,
+            opts: {
+              jobId: `50000000-0000-4000-8000-${String(index).padStart(
+                12,
+                "0",
+              )}`,
+            },
+          })),
+        );
+
+        staleAdmission = firstAdapter.enqueue(jobData);
+        void staleAdmission.catch(() => undefined);
+        await waitForSignal(staleAddStartedPromise, "stale producer add");
+
+        const ledgerKey = getDownloadQueueAdmissionLedgerKey((suffix) =>
+          queue.toKey(suffix),
+        );
+        const leaseKey = queue.toKey("admission-intent-leases");
+        const staleJobIds = await inspection.hkeys(ledgerKey);
+        expect(staleJobIds).toHaveLength(1);
+        await inspection.zadd(leaseKey, 0, staleJobIds[0]!);
+
+        replacementAdmission = secondAdapter.enqueue(jobData);
+        void replacementAdmission.catch(() => undefined);
+        await waitForSignal(
+          replacementAddStartedPromise,
+          "replacement producer add",
+        );
+        const replacementJobIds = await inspection.hkeys(ledgerKey);
+        expect(replacementJobIds).toHaveLength(1);
+
+        let acceptedJobId: string;
+        let rejectedJobId: string;
+        if (winner === "replacement") {
+          releaseReplacementAdd?.();
+          acceptedJobId = (await replacementAdmission).jobId;
+          releaseStaleAdd?.();
+          await expect(staleAdmission).rejects.toMatchObject({
+            code: "download_queue_unavailable",
+          });
+          rejectedJobId = staleJobIds[0]!;
+        } else {
+          releaseStaleAdd?.();
+          acceptedJobId = (await staleAdmission).jobId;
+          releaseReplacementAdd?.();
+          await expect(replacementAdmission).rejects.toMatchObject({
+            code: "download_queue_unavailable",
+          });
+          rejectedJobId = replacementJobIds[0]!;
+        }
+
+        const acceptedSlot = await inspection.hget(
+          getDownloadQueueJobHashKey(queue.toKey.bind(queue), acceptedJobId),
+          "deid",
+        );
+        expect(acceptedSlot).toMatch(/^apollo-capacity-v1-\d{3}$/);
+        expect(staleAddOptions?.deduplication?.id).toBe(acceptedSlot);
+        expect(replacementAddOptions?.deduplication?.id).toBe(acceptedSlot);
+        await expect(queue.getWaitingCount()).resolves.toBe(200);
+        await expect(queue.getJob(rejectedJobId)).resolves.toBeUndefined();
+      } finally {
+        releaseStaleAdd?.();
+        releaseReplacementAdd?.();
+        await staleAdmission?.catch(() => undefined);
+        await replacementAdmission?.catch(() => undefined);
+        await Promise.allSettled([
+          firstAdapter.shutdown(),
+          secondAdapter.shutdown(),
+        ]);
+        await queue.obliterate({ force: true }).catch(() => undefined);
+        await Promise.allSettled([
+          queue.close(),
+          firstProducer.close(),
+          firstTelemetry.close(),
+          secondProducer.close(),
+          secondTelemetry.close(),
+        ]);
+        await inspection.flushdb().catch(() => undefined);
+        await inspection.quit().catch(() => undefined);
+      }
+    },
+    20_000,
+  );
+
+  integrationIt(
+    "does not expire an un-slotted legacy intent while its producer may add late",
+    async () => {
+      if (INTEGRATION_REDIS_URL === undefined) {
+        throw new Error("integration Redis URL is required");
+      }
+      const connection = redisOptions(INTEGRATION_REDIS_URL);
+      const inspection = new Redis(connection);
+      const queue = new Queue(DOWNLOAD_QUEUE_NAME, {
+        prefix: DOWNLOAD_QUEUE_PREFIX,
+        connection,
+      });
+      const producer = new Queue(DOWNLOAD_QUEUE_NAME, {
+        prefix: DOWNLOAD_QUEUE_PREFIX,
+        connection,
+      });
+      const telemetry = new Queue(DOWNLOAD_QUEUE_NAME, {
+        prefix: DOWNLOAD_QUEUE_PREFIX,
+        connection,
+      });
+      let queueIndex = 0;
+      const adapter = createDownloadQueueAdapter({
+        environment: {
+          TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/integration-queue-url",
+          TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+        },
+        readFile: async () =>
+          Buffer.from(
+            `redis://default:${encodeURIComponent(
+              "integration-password-is-long-enough",
+            )}@tf-download-redis:6379/0`,
+          ),
+        createQueue: (() => [producer, telemetry][queueIndex++]!) as never,
+        createRedis: (() =>
+          new Redis({
+            ...connection,
+            commandTimeout: 1_000,
+            enableOfflineQueue: false,
+            lazyConnect: true,
+            maxRetriesPerRequest: 1,
+            retryStrategy: () => null,
+          })) as never,
+      });
+      const legacyIntentId = "legacy-un-slotted-intent";
+      const legacyLateJobId = "51000000-0000-4000-8000-000000000001";
+
+      try {
+        await inspection.flushdb();
+        await Promise.all([queue.waitUntilReady(), adapter.init()]);
+        await queue.addBulk(
+          Array.from({ length: 199 }, (_, index) => ({
+            name: "download",
+            data: jobData,
+            opts: {
+              jobId: `52000000-0000-4000-8000-${String(index).padStart(
+                12,
+                "0",
+              )}`,
+            },
+          })),
+        );
+
+        const ledgerKey = getDownloadQueueAdmissionLedgerKey((suffix) =>
+          queue.toKey(suffix),
+        );
+        const leaseKey = queue.toKey("admission-intent-leases");
+        await inspection.hset(
+          ledgerKey,
+          legacyIntentId,
+          encodeDownloadAdmissionIntent("pending", ACCOUNT_ID),
+        );
+        await inspection.zadd(leaseKey, 0, legacyIntentId);
+
+        await expect(adapter.enqueue(jobData)).rejects.toMatchObject({
+          code: "download_queue_full",
+        });
+        await queue.add("download", jobData, { jobId: legacyLateJobId });
+        await expect(queue.getWaitingCount()).resolves.toBe(200);
+        await expect(adapter.enqueue(jobData)).rejects.toMatchObject({
+          code: "download_queue_full",
+        });
+        await expect(inspection.hget(ledgerKey, legacyIntentId)).resolves.toBe(
+          encodeDownloadAdmissionIntent("pending", ACCOUNT_ID),
+        );
+      } finally {
+        await adapter.shutdown().catch(() => undefined);
+        await queue.obliterate({ force: true }).catch(() => undefined);
+        await Promise.allSettled([
+          queue.close(),
+          producer.close(),
+          telemetry.close(),
+        ]);
+        await inspection.flushdb().catch(() => undefined);
+        await inspection.quit().catch(() => undefined);
+      }
+    },
+    20_000,
   );
 });

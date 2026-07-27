@@ -22,6 +22,7 @@ import Redis, { type RedisOptions } from "ioredis";
 
 const QUEUE_CAPACITY = 200;
 const ADMISSION_INTENT_LEASE_MS = 30_000;
+const CAPACITY_SLOT_PREFIX = "apollo-capacity-v1-";
 const MAX_QUEUE_FILE_BYTES = 2_048;
 const JOB_RETENTION_SECONDS = 86_400;
 const PRODUCER_COMMAND_TIMEOUT_MS = 5_000;
@@ -41,9 +42,45 @@ local function listCount(key)
 end
 local ledger = KEYS[7]
 local leases = KEYS[8]
+local slots = KEYS[9]
 local redisTime = rcall("TIME")
 local nowMs = (tonumber(redisTime[1]) * 1000) + math.floor(tonumber(redisTime[2]) / 1000)
 local leaseMs = tonumber(ARGV[5])
+local capacity = tonumber(ARGV[3])
+local availableSlot = nil
+
+for slotNumber = 1, capacity do
+  local slotId = ARGV[6] .. string.format("%03d", slotNumber)
+  local reservedJobId = rcall("HGET", slots, slotId)
+  local deduplicatedJobId = rcall("GET", ARGV[4] .. "de:" .. slotId)
+  if deduplicatedJobId then
+    if reservedJobId then
+      rcall("HDEL", slots, slotId)
+      rcall("HDEL", ledger, reservedJobId)
+      rcall("ZREM", leases, reservedJobId)
+    end
+  elseif reservedJobId then
+    if rcall("EXISTS", ARGV[4] .. reservedJobId) == 1 then
+      rcall("HDEL", slots, slotId)
+      rcall("HDEL", ledger, reservedJobId)
+      rcall("ZREM", leases, reservedJobId)
+      if not availableSlot then availableSlot = slotId end
+    else
+      local leaseExpiresAt = rcall("ZSCORE", leases, reservedJobId)
+      if not leaseExpiresAt then
+        rcall("ZADD", leases, nowMs + leaseMs, reservedJobId)
+      elseif tonumber(leaseExpiresAt) <= nowMs then
+        rcall("HDEL", slots, slotId)
+        rcall("HDEL", ledger, reservedJobId)
+        rcall("ZREM", leases, reservedJobId)
+        if not availableSlot then availableSlot = slotId end
+      end
+    end
+  elseif not availableSlot then
+    availableSlot = slotId
+  end
+end
+
 local entries = rcall("HGETALL", ledger)
 for index = 1, #entries, 2 do
   local jobId = entries[index]
@@ -52,31 +89,30 @@ for index = 1, #entries, 2 do
     rcall("EXISTS", ARGV[4] .. jobId) == 1 then
     rcall("HDEL", ledger, jobId)
     rcall("ZREM", leases, jobId)
-  elseif string.sub(intent, 1, 8) == "pending:" then
-    local leaseExpiresAt = rcall("ZSCORE", leases, jobId)
-    if not leaseExpiresAt then
-      rcall("ZADD", leases, nowMs + leaseMs, jobId)
-    elseif tonumber(leaseExpiresAt) <= nowMs then
-      rcall("HDEL", ledger, jobId)
-      rcall("ZREM", leases, jobId)
-    end
   end
 end
 local total = listCount(KEYS[1]) + rcall("LLEN", KEYS[2]) + rcall("ZCARD", KEYS[3]) + rcall("ZCARD", KEYS[4]) + rcall("ZCARD", KEYS[5]) + listCount(KEYS[6]) + rcall("HLEN", ledger)
-if total >= tonumber(ARGV[3]) then return 0 end
+if total >= capacity or not availableSlot then return {0, ""} end
 rcall("HSET", ledger, ARGV[1], ARGV[2])
+rcall("HSET", slots, availableSlot, ARGV[1])
 rcall("ZADD", leases, nowMs + leaseMs, ARGV[1])
-return total + 1
+return {total + 1, availableSlot}
 `;
 const RELEASE_ADMISSION_INTENT_SCRIPT = `
 local stored = redis.call("HGET", KEYS[1], ARGV[1])
 if not stored then
   redis.call("ZREM", KEYS[2], ARGV[1])
+  if redis.call("HGET", KEYS[3], ARGV[3]) == ARGV[1] then
+    redis.call("HDEL", KEYS[3], ARGV[3])
+  end
   return 1
 end
 if stored ~= ARGV[2] then return 0 end
 redis.call("HDEL", KEYS[1], ARGV[1])
 redis.call("ZREM", KEYS[2], ARGV[1])
+if redis.call("HGET", KEYS[3], ARGV[3]) == ARGV[1] then
+  redis.call("HDEL", KEYS[3], ARGV[3])
+end
 return 1
 `;
 const REQUEST_DOWNLOAD_CANCELLATION_SCRIPT = `
@@ -202,7 +238,7 @@ interface QueueClient {
   add(
     name: string,
     data: DownloadJobData,
-    options: { jobId: string },
+    options: { jobId: string; deduplication: { id: string } },
   ): Promise<{ id?: string }>;
   getJob(id: string): Promise<Job | undefined>;
   getWaiting(start?: number, end?: number): Promise<Job[]>;
@@ -414,15 +450,18 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
     cancellation: RedisClient,
     jobId: string,
     accountId: string,
+    slotId: string,
   ): Promise<void> => {
     const released = Number(
       await cancellation.eval(
         RELEASE_ADMISSION_INTENT_SCRIPT,
-        2,
+        3,
         getDownloadQueueAdmissionLedgerKey((suffix) => producer.toKey(suffix)),
         producer.toKey("admission-intent-leases"),
+        producer.toKey("admission-capacity-slots"),
         jobId,
         encodeDownloadAdmissionIntent("pending", accountId),
+        slotId,
       ),
     );
     if (released !== 1) throw unavailable();
@@ -432,33 +471,41 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
     cancellation: RedisClient,
     jobId: string,
     accountId: string,
-  ): Promise<number> => {
-    const position = Number(
-      await cancellation.eval(
-        RESERVE_ADMISSION_INTENT_SCRIPT,
-        8,
-        producer.toKey("wait"),
-        producer.toKey("active"),
-        producer.toKey("delayed"),
-        producer.toKey("prioritized"),
-        producer.toKey("waiting-children"),
-        producer.toKey("paused"),
-        getDownloadQueueAdmissionLedgerKey((suffix) => producer.toKey(suffix)),
-        producer.toKey("admission-intent-leases"),
-        jobId,
-        encodeDownloadAdmissionIntent("pending", accountId),
-        String(QUEUE_CAPACITY),
-        producer.toKey(""),
-        String(ADMISSION_INTENT_LEASE_MS),
-      ),
+  ): Promise<{ position: number; slotId?: string }> => {
+    const reserved = await cancellation.eval(
+      RESERVE_ADMISSION_INTENT_SCRIPT,
+      9,
+      producer.toKey("wait"),
+      producer.toKey("active"),
+      producer.toKey("delayed"),
+      producer.toKey("prioritized"),
+      producer.toKey("waiting-children"),
+      producer.toKey("paused"),
+      getDownloadQueueAdmissionLedgerKey((suffix) => producer.toKey(suffix)),
+      producer.toKey("admission-intent-leases"),
+      producer.toKey("admission-capacity-slots"),
+      jobId,
+      encodeDownloadAdmissionIntent("pending", accountId),
+      String(QUEUE_CAPACITY),
+      producer.toKey(""),
+      String(ADMISSION_INTENT_LEASE_MS),
+      CAPACITY_SLOT_PREFIX,
     );
+    if (!Array.isArray(reserved) || reserved.length !== 2) throw unavailable();
+    const position = Number(reserved[0]);
+    const slotId = String(reserved[1]);
     if (
       !Number.isSafeInteger(position) ||
       position < 0 ||
-      position > QUEUE_CAPACITY
+      position > QUEUE_CAPACITY ||
+      (position === 0 && slotId !== "") ||
+      (position > 0 &&
+        !new RegExp(
+          `^${CAPACITY_SLOT_PREFIX}(?:00[1-9]|0[1-9][0-9]|1[0-9]{2}|200)$`,
+        ).test(slotId))
     )
       throw unavailable();
-    return position;
+    return position === 0 ? { position } : { position, slotId };
   };
   const requestCancellation = async (
     producer: QueueClient,
@@ -567,13 +614,15 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
       try {
         const current = requireClients();
         const jobId = randomUUID();
-        const position = await reserveAdmissionIntent(
+        const reservation = await reserveAdmissionIntent(
           current.producer,
           current.cancellation,
           jobId,
           parsed.data.accountId,
         );
+        const { position, slotId } = reservation;
         if (position === 0) throw new DownloadQueueCapacityError();
+        if (slotId === undefined) throw unavailable();
         const reconcile = async (): Promise<EnqueueResult> => {
           let accepted: Job | undefined;
           try {
@@ -587,6 +636,7 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
               current.cancellation,
               jobId,
               parsed.data.accountId,
+              slotId,
             );
             throw unavailable();
           }
@@ -600,12 +650,14 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
             current.cancellation,
             jobId,
             parsed.data.accountId,
+            slotId,
           );
           return { jobId, position };
         };
         try {
           const added = await current.producer.add("download", parsed.data, {
             jobId,
+            deduplication: { id: slotId },
           });
           if (added.id !== jobId) return reconcile();
           await releaseAdmissionIntent(
@@ -613,6 +665,7 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
             current.cancellation,
             jobId,
             parsed.data.accountId,
+            slotId,
           );
           return { jobId, position };
         } catch {
@@ -653,7 +706,7 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
         const waiting = [
           ...(await producer.getWaiting(0, 199)),
           ...(await producer.getDelayed(0, 199)),
-        ];
+        ].slice(0, QUEUE_CAPACITY);
         const index = waiting.findIndex((candidate) => candidate.id === jobId);
         return statusOf(job, raw, index < 0 ? undefined : index + 1);
       } catch (error) {

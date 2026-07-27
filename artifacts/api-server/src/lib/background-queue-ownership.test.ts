@@ -387,6 +387,27 @@ describe("download queue ownership, states, and cancellation", () => {
     }
   });
 
+  it("omits a delayed position beyond the public queue capacity", async () => {
+    const waiting = Array.from({ length: 200 }, (_, index) =>
+      job(
+        `40000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+        JOB_DATA,
+        "waiting",
+      ),
+    );
+    const delayed = job(VALID_JOB_ID, JOB_DATA, "delayed");
+    const { adapter } = createAdapter(new Map([[delayed.id, delayed]]), {
+      waiting,
+      delayed: [delayed],
+    });
+    await adapter.init();
+
+    await expect(adapter.status(delayed.id, ACCOUNT_ID)).resolves.toEqual({
+      status: "waiting",
+      progress: 42,
+    });
+  });
+
   it.each([
     ["completed", "completed", undefined],
     ["failed", "failed", "upstream_failed"],

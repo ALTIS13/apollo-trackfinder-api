@@ -8,7 +8,7 @@ the existing Apollo TF isolation, entitlement, Coolify, and web-first
 requirements without reopening previously approved choices.
 
 Amended: 2026-07-27 after release review to record the verified non-destructive
-BullMQ cancellation protocol, crash-recoverable admission lease, and explicit
+BullMQ cancellation protocol, lifecycle-fenced admission slots, and explicit
 streaming `yt-dlp -> ffmpeg` conversion pipeline.
 
 ## Goal
@@ -121,15 +121,27 @@ browser installation IDs are forbidden in the contract.
 - production requires `TF_DOWNLOAD_QUEUE_REDIS_URL_FILE`;
 - there is no production in-memory worker or silent fallback;
 - queue unavailability is an explicit sanitized `503`;
-- global waiting plus active capacity is `200`;
+- global non-terminal queue capacity is `200`;
 - admission is reserved in a same-slot exact-owner ledger; pending reservations
   have a `30s` Redis-time lease so a crash before BullMQ job creation cannot
   consume capacity permanently;
+- each accepted reservation owns one of exactly `200` deterministic private
+  capacity-slot IDs. The BullMQ add uses that slot as an unexpired lifecycle
+  deduplication key, so a late producer whose lease was reassigned can only
+  resolve to the replacement job and cannot create a `201`st non-terminal job;
+- slot reservations, leases, and queue-state counts are inspected atomically in
+  one same-slot Redis script. An un-slotted intent is never expired
+  automatically because an older producer could still add after expiry; it
+  remains fail-closed until an operator has stopped old producers and reconciled
+  the namespace. BullMQ removes a matching slot deduplication key atomically on
+  finalization or removal;
 - one enqueue request accepts at most `50` tracks;
 - jobs are retained for at most 24 hours, with bounded completed/failed counts;
 - job ownership uses only exact canonical account IDs;
 - status never exposes source URL, Redis failure details, absolute paths, or raw
   worker errors;
+- a public waiting position is emitted only when the job is inside the first
+  `200` combined waiting/delayed entries;
 - cancel is worker-mediated and non-destructive: waiting and active jobs stay
   under BullMQ ownership, and an exact namespaced marker is stored in the
   retained job hash;
