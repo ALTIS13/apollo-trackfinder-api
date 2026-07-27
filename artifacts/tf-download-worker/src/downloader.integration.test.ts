@@ -1,22 +1,26 @@
 import { spawn } from "node:child_process";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
 const RUN_REAL_DOCKER = process.env.TF_DOWNLOAD_REAL_DOCKER === "1";
-const repositoryRoot = new URL("../../..", import.meta.url).pathname.replace(
-  /^\/([A-Za-z]:)/,
-  "$1",
-);
+const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const image = `apollo-tf-download-media-${process.pid}`;
+const container = `${image}-probe`;
 
 describe.skipIf(!RUN_REAL_DOCKER)("production media conversion", () => {
   afterAll(async () => {
-    await runDocker(["image", "rm", "--force", image], 60_000, true);
-  });
+    try {
+      await runDocker(["container", "rm", "--force", container], 60_000, true);
+    } finally {
+      await runDocker(["image", "rm", "--force", image], 60_000, true);
+    }
+  }, 180_000);
 
   it(
     "converts an offline AAC source to the declared MP3 and FLAC codecs",
     async () => {
+      await runDocker(["container", "rm", "--force", container], 60_000, true);
       await runDocker(
         [
           "build",
@@ -66,14 +70,24 @@ describe.skipIf(!RUN_REAL_DOCKER)("production media conversion", () => {
       ].join("\n");
 
       const result = await runDocker(
-        ["run", "--rm", "--entrypoint", "/bin/sh", image, "-c", shellProbe],
+        [
+          "run",
+          "--rm",
+          "--name",
+          container,
+          "--entrypoint",
+          "/bin/sh",
+          image,
+          "-c",
+          shellProbe,
+        ],
         120_000,
       );
 
       expect(result.stdout).toMatch(/^mp3=\d+ flac=\d+\r?\n$/);
       expect(result.stderr).toBe("");
     },
-    12 * 60_000,
+    15 * 60_000,
   );
 });
 
@@ -94,6 +108,7 @@ async function runDocker(
     });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
     const append = (current: string, chunk: Buffer): string =>
       `${current}${chunk.toString("utf8")}`.slice(-65_536);
     child.stdout.on("data", (chunk: Buffer) => {
@@ -102,13 +117,24 @@ async function runDocker(
     child.stderr.on("data", (chunk: Buffer) => {
       stderr = append(stderr, chunk);
     });
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
     child.once("error", (error) => {
       clearTimeout(timer);
       reject(error);
     });
     child.once("close", (code) => {
       clearTimeout(timer);
+      if (timedOut) {
+        reject(
+          new Error(
+            `docker ${args[0] ?? "command"} timed out after ${timeoutMs}ms`,
+          ),
+        );
+        return;
+      }
       if (code === 0 || allowFailure) {
         resolve({ stdout, stderr });
         return;
