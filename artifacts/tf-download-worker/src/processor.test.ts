@@ -165,6 +165,30 @@ function deferred<T>(): {
   };
 }
 
+function withFirstWriteInterlock(
+  storage: DownloadStorage,
+  firstWriteCompleted: { readonly resolve: (value: void) => void },
+) {
+  return {
+    async begin(...args: Parameters<DownloadStorage["begin"]>) {
+      const output = await storage.begin(...args);
+      return {
+        get failure() {
+          return output.failure;
+        },
+        async write(...writeArgs: Parameters<typeof output.write>) {
+          const accepted = await output.write(...writeArgs);
+          firstWriteCompleted.resolve();
+          return accepted;
+        },
+        commit: output.commit.bind(output),
+        abort: output.abort.bind(output),
+        finalize: output.finalize.bind(output),
+      };
+    },
+  };
+}
+
 async function waitUntil(predicate: () => boolean): Promise<void> {
   const deadline = Date.now() + 1_000;
   while (!predicate()) {
@@ -566,90 +590,134 @@ describe("createDownloadProcessor", () => {
   });
 
   it("observes active cancellation within 250ms and terminates the child", async () => {
-    const { root, storage } = await createStorage();
-    let checks = 0;
-    const cancellationStore = createCancellationStore(() => {
-      checks += 1;
-      return checks >= 2;
-    });
-    const child = createFakeProcess({
-      stdout: [Buffer.from("partial")],
-      holdOpen: true,
-    });
-    const processor = createDownloadProcessor({
-      storage,
-      cancellationStore,
-      spawnDownload: vi.fn(() => child),
-      logger: createLogger(),
-      cancellationPollMs: 20,
-      killGraceMs: 20,
-    });
-    const startedAt = Date.now();
+    const cancellationPollMs = 20;
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    try {
+      const { root, storage } = await createStorage();
+      const childSpawned = deferred<void>();
+      const firstWriteCompleted = deferred<void>();
+      let checks = 0;
+      const cancellationStore = {
+        isCanceled: vi.fn(async (): Promise<boolean> => {
+          checks += 1;
+          if (checks === 1) return false;
+          await Promise.all([
+            childSpawned.promise,
+            firstWriteCompleted.promise,
+          ]);
+          return true;
+        }),
+      };
+      const child = createFakeProcess({
+        stdout: [Buffer.from("partial")],
+        holdOpen: true,
+      });
+      const spawnDownload = vi.fn(() => {
+        childSpawned.resolve();
+        return child;
+      });
+      const processor = createDownloadProcessor({
+        storage: withFirstWriteInterlock(storage, firstWriteCompleted),
+        cancellationStore,
+        spawnDownload,
+        logger: createLogger(),
+        cancellationPollMs,
+        killGraceMs: 31,
+      });
 
-    await expect(
-      processor(createJob(), new AbortController().signal),
-    ).rejects.toMatchObject({
-      code: "download_canceled",
-      retriable: false,
-    });
+      await expect(
+        processor(createJob(), new AbortController().signal),
+      ).rejects.toMatchObject({
+        code: "download_canceled",
+        retriable: false,
+      });
 
-    expect(Date.now() - startedAt).toBeLessThan(250);
-    expect(child.kills[0]).toBe("SIGTERM");
-    expect(await readdir(root)).toEqual([]);
+      expect(cancellationPollMs).toBeLessThan(250);
+      expect(
+        setTimeoutSpy.mock.calls.some(
+          ([, milliseconds]) => milliseconds === cancellationPollMs,
+        ),
+      ).toBe(true);
+      expect(spawnDownload).toHaveBeenCalledTimes(1);
+      expect(cancellationStore.isCanceled).toHaveBeenCalledTimes(2);
+      expect(child.kills[0]).toBe("SIGTERM");
+      expect(await readdir(root)).toEqual([]);
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
   });
 
   it("observes cancellation while the initial progress update is hung", async () => {
-    const { root, storage } = await createStorage();
-    let checks = 0;
-    const child = createFakeProcess({
-      stdout: [Buffer.from("partial")],
-      holdOpen: true,
-    });
-    let spawned = false;
-    const spawnDownload = vi.fn(() => {
-      spawned = true;
-      return child;
-    });
-    const job = createJob();
-    job.updateProgress.mockImplementation(
-      () => new Promise<void>(() => undefined),
-    );
-    const processor = createDownloadProcessor({
-      storage,
-      cancellationStore: createCancellationStore(() => {
-        checks += 1;
-        return spawned && checks >= 2;
-      }),
-      spawnDownload,
-      logger: createLogger(),
-      cancellationPollMs: 10,
-      deadlineMs: 100,
-      killGraceMs: 10,
-    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { root, storage } = await createStorage();
+      const initialProgressEntered = deferred<void>();
+      let checks = 0;
+      const cancellationStore = {
+        isCanceled: vi.fn(async (): Promise<boolean> => {
+          checks += 1;
+          return checks >= 2;
+        }),
+      };
+      const child = createFakeProcess({
+        stdout: [Buffer.from("partial")],
+        holdOpen: true,
+      });
+      const spawnDownload = vi.fn(() => child);
+      const job = createJob();
+      job.updateProgress.mockImplementation(() => {
+        initialProgressEntered.resolve();
+        return new Promise<void>(() => undefined);
+      });
+      const processor = createDownloadProcessor({
+        storage,
+        cancellationStore,
+        spawnDownload,
+        logger: createLogger(),
+        cancellationPollMs: 10,
+        deadlineMs: 5_000,
+        killGraceMs: 10,
+      });
 
-    const failure = await processor(job, new AbortController().signal).catch(
-      (error: unknown) => error,
-    );
+      const outcome = processor(job, new AbortController().signal).catch(
+        (error: unknown) => error,
+      );
+      await initialProgressEntered.promise;
+      expect(job.updateProgress.mock.calls).toEqual([[5]]);
+      expect(cancellationStore.isCanceled).toHaveBeenCalledTimes(1);
 
-    expect(failure).toMatchObject({
-      code: "download_canceled",
-      retriable: false,
-    });
-    expect(spawnDownload).toHaveBeenCalledTimes(1);
-    expect(child.kills[0]).toBe("SIGTERM");
-    expect(await readdir(root)).toEqual([]);
+      await vi.advanceTimersByTimeAsync(10);
+      const failure = await outcome;
+
+      expect(failure).toMatchObject({
+        code: "download_canceled",
+        retriable: false,
+      });
+      expect(cancellationStore.isCanceled).toHaveBeenCalledTimes(2);
+      expect(spawnDownload).toHaveBeenCalledTimes(1);
+      expect(child.kills[0]).toBe("SIGTERM");
+      expect(await readdir(root)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("observes cancellation while final progress is hung and removes the pinned final", async () => {
     const { root, storage } = await createStorage();
-    let finalProgressStarted = false;
-    const cancellationStore = createCancellationStore(
-      () => finalProgressStarted,
-    );
+    const finalProgressStarted = deferred<void>();
+    let cancellationChecks = 0;
+    const cancellationStore = {
+      isCanceled: vi.fn(async (): Promise<boolean> => {
+        cancellationChecks += 1;
+        if (cancellationChecks === 1) return false;
+        await finalProgressStarted.promise;
+        return true;
+      }),
+    };
     const job = createJob();
     job.updateProgress.mockImplementation((progress: number) => {
       if (progress === 5) return Promise.resolve();
-      finalProgressStarted = true;
+      finalProgressStarted.resolve();
       return new Promise<void>(() => undefined);
     });
     const processor = createDownloadProcessor({
@@ -660,7 +728,7 @@ describe("createDownloadProcessor", () => {
       ),
       logger: createLogger(),
       cancellationPollMs: 10,
-      deadlineMs: 100,
+      deadlineMs: 5_000,
     });
 
     const failure = await processor(job, new AbortController().signal).catch(
@@ -671,11 +739,14 @@ describe("createDownloadProcessor", () => {
       code: "download_canceled",
       retriable: false,
     });
+    expect(cancellationStore.isCanceled).toHaveBeenCalledTimes(2);
+    expect(job.updateProgress.mock.calls).toEqual([[5], [100]]);
     expect(await readdir(root)).toEqual([]);
   });
 
   it("stops a hung cancellation-store check without delaying success", async () => {
     const { storage } = await createStorage();
+    const finalProgressStarted = deferred<void>();
     const secondCheckStarted = deferred<void>();
     let calls = 0;
     let hungSignal: AbortSignal | undefined;
@@ -684,6 +755,7 @@ describe("createDownloadProcessor", () => {
         async (_jobId: string, signal: AbortSignal): Promise<boolean> => {
           calls += 1;
           if (calls === 1) return false;
+          await finalProgressStarted.promise;
           hungSignal = signal;
           secondCheckStarted.resolve();
           return new Promise<boolean>(() => undefined);
@@ -692,7 +764,9 @@ describe("createDownloadProcessor", () => {
     };
     const job = createJob();
     job.updateProgress.mockImplementation(async (progress: number) => {
-      if (progress === 100) await secondCheckStarted.promise;
+      if (progress !== 100) return;
+      finalProgressStarted.resolve();
+      await secondCheckStarted.promise;
     });
     const processor = createDownloadProcessor({
       storage,
@@ -702,12 +776,14 @@ describe("createDownloadProcessor", () => {
       ),
       logger: createLogger(),
       cancellationPollMs: 10,
-      deadlineMs: 100,
+      deadlineMs: 5_000,
     });
 
     const result = await processor(job, new AbortController().signal);
 
     expect(result.storageKey).toBe(`${JOB_ID}.mp3`);
+    expect(cancellationStore.isCanceled).toHaveBeenCalledTimes(2);
+    expect(job.updateProgress.mock.calls).toEqual([[5], [100]]);
     expect(hungSignal?.aborted).toBe(true);
   });
 
@@ -741,38 +817,59 @@ describe("createDownloadProcessor", () => {
   });
 
   it("uses one deadline and escalates from SIGTERM to bounded SIGKILL", async () => {
-    const { root, storage } = await createStorage();
-    const child = createFakeProcess({
-      stdout: [Buffer.from("partial")],
-      holdOpen: true,
-      ignoreTerm: true,
-    });
-    const processor = createDownloadProcessor({
-      storage,
-      cancellationStore: createCancellationStore(),
-      spawnDownload: vi.fn(() => child),
-      logger: createLogger(),
-      deadlineMs: 100,
-      cancellationPollMs: 20,
-      killGraceMs: 20,
-    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { root, storage } = await createStorage();
+      const firstWriteCompleted = deferred<void>();
+      const child = createFakeProcess({
+        stdout: [Buffer.from("partial")],
+        holdOpen: true,
+        ignoreTerm: true,
+      });
+      const processor = createDownloadProcessor({
+        storage: withFirstWriteInterlock(storage, firstWriteCompleted),
+        cancellationStore: createCancellationStore(),
+        spawnDownload: vi.fn(() => child),
+        logger: createLogger(),
+        deadlineMs: 100,
+        cancellationPollMs: 20,
+        killGraceMs: 20,
+      });
 
-    await expect(
-      processor(createJob(), new AbortController().signal),
-    ).rejects.toMatchObject({
-      code: "deadline_exceeded",
-      retriable: false,
-    });
-    expect(child.kills).toEqual(["SIGTERM", "SIGKILL"]);
-    expect(await readdir(root)).toEqual([]);
+      const outcome = processor(
+        createJob(),
+        new AbortController().signal,
+      ).catch((error: unknown) => error);
+      await firstWriteCompleted.promise;
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(child.kills).toEqual(["SIGTERM"]);
+      await vi.advanceTimersByTimeAsync(20);
+      const failure = await outcome;
+
+      expect(failure).toMatchObject({
+        code: "deadline_exceeded",
+        retriable: false,
+      });
+      expect(child.kills).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(await readdir(root)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("terminates a child that emits error before actual close", async () => {
     const { root, storage } = await createStorage();
     const stdout = new PassThrough();
     const stderr = new PassThrough();
+    const childSpawned = deferred<void>();
     const closed = deferred<void>();
-    const completion = Promise.reject(new Error("spawn_failed"));
+    let rejectCompletion: ((error: Error) => void) | undefined;
+    const completion = new Promise<DownloaderProcessExit>(
+      (_resolve, reject) => {
+        rejectCompletion = reject;
+      },
+    );
     void completion.catch(() => undefined);
     const kills: NodeJS.Signals[] = [];
     const child: DownloaderProcess & { readonly closed: Promise<void> } = {
@@ -789,184 +886,233 @@ describe("createDownloadProcessor", () => {
         }
       },
     };
+    const spawnDownload = vi.fn(() => {
+      childSpawned.resolve();
+      return child;
+    });
     const processor = createDownloadProcessor({
       storage,
       cancellationStore: createCancellationStore(),
-      spawnDownload: vi.fn(() => child),
+      spawnDownload,
       logger: createLogger(),
       killGraceMs: 10,
-      deadlineMs: 100,
+      deadlineMs: 5_000,
     });
 
-    const failure = await processor(
-      createJob(),
-      new AbortController().signal,
-    ).catch((error: unknown) => error);
+    const pending = processor(createJob(), new AbortController().signal);
+    await childSpawned.promise;
+    rejectCompletion?.(new Error("spawn_failed"));
+    const failure = await pending.catch((error: unknown) => error);
 
     expect(failure).toMatchObject({
       code: "download_failed",
       retriable: true,
     });
+    expect(spawnDownload).toHaveBeenCalledTimes(1);
     expect(kills).toEqual(["SIGTERM", "SIGKILL"]);
     await expect(closed.promise).resolves.toBeUndefined();
     expect(await readdir(root)).toEqual([]);
   });
 
   it("applies the absolute deadline to a hung storage begin", async () => {
-    const spawnDownload = vi.fn(() => createFakeProcess());
-    const processor = createDownloadProcessor({
-      storage: {
-        begin: vi.fn(() => new Promise<never>(() => undefined)),
-      },
-      cancellationStore: createCancellationStore(),
-      spawnDownload,
-      logger: createLogger(),
-      deadlineMs: 20,
-    });
-    const startedAt = Date.now();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const beginEntered = deferred<void>();
+      const spawnDownload = vi.fn(() => createFakeProcess());
+      const processor = createDownloadProcessor({
+        storage: {
+          begin: vi.fn(() => {
+            beginEntered.resolve();
+            return new Promise<never>(() => undefined);
+          }),
+        },
+        cancellationStore: createCancellationStore(),
+        spawnDownload,
+        logger: createLogger(),
+        deadlineMs: 20,
+      });
 
-    await expect(
-      processor(createJob(), new AbortController().signal),
-    ).rejects.toMatchObject({
-      code: "deadline_exceeded",
-      retriable: false,
-    });
-    expect(Date.now() - startedAt).toBeLessThan(250);
-    expect(spawnDownload).not.toHaveBeenCalled();
+      const outcome = processor(
+        createJob(),
+        new AbortController().signal,
+      ).catch((error: unknown) => error);
+      await beginEntered.promise;
+      await vi.advanceTimersByTimeAsync(20);
+      const failure = await outcome;
+
+      expect(failure).toMatchObject({
+        code: "deadline_exceeded",
+        retriable: false,
+      });
+      expect(spawnDownload).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("propagates the deadline through a hung output write", async () => {
-    let writeSignal: AbortSignal | undefined;
-    const abort = vi.fn(async () => undefined);
-    const child = createFakeProcess({
-      stdout: [Buffer.from("partial")],
-      holdOpen: true,
-      ignoreTerm: true,
-    });
-    const processor = createDownloadProcessor({
-      storage: {
-        begin: vi.fn(async () => ({
-          write: vi.fn(
-            async (
-              _data: Uint8Array,
-              signal?: AbortSignal,
-            ): Promise<boolean> => {
-              writeSignal = signal;
-              return new Promise<boolean>(() => undefined);
-            },
-          ),
-          commit: vi.fn(),
-          abort,
-          finalize: vi.fn(),
-        })),
-      },
-      cancellationStore: createCancellationStore(),
-      spawnDownload: vi.fn(() => child),
-      logger: createLogger(),
-      deadlineMs: 30,
-      killGraceMs: 10,
-    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const writeEntered = deferred<void>();
+      let writeSignal: AbortSignal | undefined;
+      const abort = vi.fn(async () => undefined);
+      const child = createFakeProcess({
+        stdout: [Buffer.from("partial")],
+        holdOpen: true,
+        ignoreTerm: true,
+      });
+      const processor = createDownloadProcessor({
+        storage: {
+          begin: vi.fn(async () => ({
+            write: vi.fn(
+              async (
+                _data: Uint8Array,
+                signal?: AbortSignal,
+              ): Promise<boolean> => {
+                writeSignal = signal;
+                writeEntered.resolve();
+                return new Promise<boolean>(() => undefined);
+              },
+            ),
+            commit: vi.fn(),
+            abort,
+            finalize: vi.fn(),
+          })),
+        },
+        cancellationStore: createCancellationStore(),
+        spawnDownload: vi.fn(() => child),
+        logger: createLogger(),
+        deadlineMs: 30,
+        killGraceMs: 10,
+      });
 
-    const failure = await processor(
-      createJob(),
-      new AbortController().signal,
-    ).catch((error: unknown) => error);
+      const outcome = processor(
+        createJob(),
+        new AbortController().signal,
+      ).catch((error: unknown) => error);
+      await writeEntered.promise;
+      await vi.advanceTimersByTimeAsync(30);
+      expect(writeSignal?.aborted).toBe(true);
+      expect(child.kills).toEqual(["SIGTERM"]);
+      await vi.advanceTimersByTimeAsync(10);
+      const failure = await outcome;
 
-    expect(failure).toMatchObject({
-      code: "deadline_exceeded",
-      retriable: false,
-    });
-    expect(writeSignal?.aborted).toBe(true);
-    expect(child.kills).toEqual(["SIGTERM", "SIGKILL"]);
-    expect(abort).toHaveBeenCalledTimes(1);
+      expect(failure).toMatchObject({
+        code: "deadline_exceeded",
+        retriable: false,
+      });
+      expect(child.kills).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(abort).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("applies the deadline to a hung durable commit", async () => {
-    let commitSignal: AbortSignal | undefined;
-    const abort = vi.fn(async () => undefined);
-    const processor = createDownloadProcessor({
-      storage: {
-        begin: vi.fn(async () => ({
-          write: vi.fn(async () => true),
-          commit: vi.fn(
-            async (
-              _metadata: unknown,
-              signal?: AbortSignal,
-            ): Promise<DownloadJobResult> => {
-              commitSignal = signal;
-              return new Promise<DownloadJobResult>(() => undefined);
-            },
-          ),
-          abort,
-          finalize: vi.fn(),
-        })),
-      },
-      cancellationStore: createCancellationStore(),
-      spawnDownload: vi.fn(() =>
-        createFakeProcess({ stdout: [Buffer.from("audio")] }),
-      ),
-      logger: createLogger(),
-      deadlineMs: 30,
-    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const commitEntered = deferred<void>();
+      let commitSignal: AbortSignal | undefined;
+      const abort = vi.fn(async () => undefined);
+      const processor = createDownloadProcessor({
+        storage: {
+          begin: vi.fn(async () => ({
+            write: vi.fn(async () => true),
+            commit: vi.fn(
+              async (
+                _metadata: unknown,
+                signal?: AbortSignal,
+              ): Promise<DownloadJobResult> => {
+                commitSignal = signal;
+                commitEntered.resolve();
+                return new Promise<DownloadJobResult>(() => undefined);
+              },
+            ),
+            abort,
+            finalize: vi.fn(),
+          })),
+        },
+        cancellationStore: createCancellationStore(),
+        spawnDownload: vi.fn(() =>
+          createFakeProcess({ stdout: [Buffer.from("audio")] }),
+        ),
+        logger: createLogger(),
+        deadlineMs: 30,
+      });
 
-    const outcome = await Promise.race([
-      processor(createJob(), new AbortController().signal).catch(
-        (error: unknown) => error,
-      ),
-      new Promise<"timed_out">((resolve) =>
-        setTimeout(() => resolve("timed_out"), 250),
-      ),
-    ]);
+      const outcome = processor(
+        createJob(),
+        new AbortController().signal,
+      ).catch((error: unknown) => error);
+      await commitEntered.promise;
+      await vi.advanceTimersByTimeAsync(30);
+      const failure = await outcome;
 
-    expect(outcome).toMatchObject({
-      code: "deadline_exceeded",
-      retriable: false,
-    });
-    expect(commitSignal?.aborted).toBe(true);
-    expect(abort).toHaveBeenCalledTimes(1);
-  }, 1_000);
+      expect(failure).toMatchObject({
+        code: "deadline_exceeded",
+        retriable: false,
+      });
+      expect(commitSignal?.aborted).toBe(true);
+      expect(abort).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("bounds a hung abort cleanup after the deadline", async () => {
-    const child = createFakeProcess({
-      stdout: [Buffer.from("partial")],
-      holdOpen: true,
-    });
-    const abort = vi.fn(() => new Promise<void>(() => undefined));
-    const processor = createDownloadProcessor({
-      storage: {
-        begin: vi.fn(async () => ({
-          write: vi.fn(async () => true),
-          commit: vi.fn(),
-          abort,
-          finalize: vi.fn(),
-        })),
-      },
-      cancellationStore: createCancellationStore(),
-      spawnDownload: vi.fn(() => child),
-      logger: createLogger(),
-      deadlineMs: 30,
-      killGraceMs: 10,
-      cleanupGraceMs: 20,
-    });
-    const jobController = new AbortController();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const writeEntered = deferred<void>();
+      const abortEntered = deferred<void>();
+      const child = createFakeProcess({
+        stdout: [Buffer.from("partial")],
+        holdOpen: true,
+      });
+      const abort = vi.fn(() => {
+        abortEntered.resolve();
+        return new Promise<void>(() => undefined);
+      });
+      const processor = createDownloadProcessor({
+        storage: {
+          begin: vi.fn(async () => ({
+            write: vi.fn(async () => {
+              writeEntered.resolve();
+              return true;
+            }),
+            commit: vi.fn(),
+            abort,
+            finalize: vi.fn(),
+          })),
+        },
+        cancellationStore: createCancellationStore(),
+        spawnDownload: vi.fn(() => child),
+        logger: createLogger(),
+        deadlineMs: 30,
+        killGraceMs: 10,
+        cleanupGraceMs: 20,
+      });
 
-    const outcome = await Promise.race([
-      processor(createJob(), jobController.signal).catch(
-        (error: unknown) => error,
-      ),
-      new Promise<"timed_out">((resolve) =>
-        setTimeout(() => resolve("timed_out"), 250),
-      ),
-    ]);
+      const outcome = processor(
+        createJob(),
+        new AbortController().signal,
+      ).catch((error: unknown) => error);
+      await writeEntered.promise;
+      await vi.advanceTimersByTimeAsync(30);
+      await abortEntered.promise;
+      expect(child.kills).toEqual(["SIGTERM"]);
+      expect(abort).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(20);
+      const failure = await outcome;
 
-    expect(outcome).toMatchObject({
-      code: "deadline_exceeded",
-      retriable: false,
-    });
-    expect(child.kills[0]).toBe("SIGTERM");
-    expect(abort).toHaveBeenCalledTimes(1);
-    expect(abort.mock.calls[0]).toEqual([]);
-  }, 1_000);
+      expect(failure).toMatchObject({
+        code: "deadline_exceeded",
+        retriable: false,
+      });
+      expect(abort.mock.calls[0]).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("clears the cleanup grace timer when cleanup finishes early", async () => {
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
@@ -1053,7 +1199,7 @@ describe("createDownloadProcessor", () => {
         createFakeProcess({ stdout: [Buffer.alloc(4, 1)] }),
       ),
       logger: createLogger(),
-      deadlineMs: 1_000,
+      deadlineMs: 10_000,
       cleanupGraceMs: 20,
     });
     const controller = new AbortController();
@@ -1099,39 +1245,49 @@ describe("createDownloadProcessor", () => {
     expect(await retry.write(Buffer.alloc(4, 3))).toBe(true);
     await retry.abort();
     expect(await readdir(root)).toEqual([]);
-  }, 1_000);
+  });
 
   it("applies the deadline while the cancellation store ignores its signal", async () => {
-    let storeSignal: AbortSignal | undefined;
-    const spawnDownload = vi.fn(() => createFakeProcess());
-    const processor = createDownloadProcessor({
-      storage: {
-        begin: vi.fn(),
-      },
-      cancellationStore: {
-        isCanceled: vi.fn(
-          async (_jobId: string, signal: AbortSignal): Promise<boolean> => {
-            storeSignal = signal;
-            return new Promise<boolean>(() => undefined);
-          },
-        ),
-      },
-      spawnDownload,
-      logger: createLogger(),
-      deadlineMs: 30,
-    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const storeEntered = deferred<void>();
+      let storeSignal: AbortSignal | undefined;
+      const spawnDownload = vi.fn(() => createFakeProcess());
+      const processor = createDownloadProcessor({
+        storage: {
+          begin: vi.fn(),
+        },
+        cancellationStore: {
+          isCanceled: vi.fn(
+            async (_jobId: string, signal: AbortSignal): Promise<boolean> => {
+              storeSignal = signal;
+              storeEntered.resolve();
+              return new Promise<boolean>(() => undefined);
+            },
+          ),
+        },
+        spawnDownload,
+        logger: createLogger(),
+        deadlineMs: 30,
+      });
 
-    const failure = await processor(
-      createJob(),
-      new AbortController().signal,
-    ).catch((error: unknown) => error);
+      const outcome = processor(
+        createJob(),
+        new AbortController().signal,
+      ).catch((error: unknown) => error);
+      await storeEntered.promise;
+      await vi.advanceTimersByTimeAsync(30);
+      const failure = await outcome;
 
-    expect(failure).toMatchObject({
-      code: "deadline_exceeded",
-      retriable: false,
-    });
-    expect(storeSignal?.aborted).toBe(true);
-    expect(spawnDownload).not.toHaveBeenCalled();
+      expect(failure).toMatchObject({
+        code: "deadline_exceeded",
+        retriable: false,
+      });
+      expect(storeSignal?.aborted).toBe(true);
+      expect(spawnDownload).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("maps an unavailable owned root before child spawn", async () => {
@@ -1156,36 +1312,45 @@ describe("createDownloadProcessor", () => {
 
   it("applies the absolute deadline to a hung progress update", async () => {
     const { root, storage } = await createStorage();
+    const progressStarted = deferred<void>();
     const child = createFakeProcess({ holdOpen: true });
     const job = createJob();
-    job.updateProgress.mockImplementation(
-      () => new Promise<void>(() => undefined),
-    );
+    job.updateProgress.mockImplementation(() => {
+      progressStarted.resolve();
+      return new Promise<void>(() => undefined);
+    });
+    const spawnDownload = vi.fn(() => child);
     const processor = createDownloadProcessor({
       storage,
       cancellationStore: createCancellationStore(),
-      spawnDownload: vi.fn(() => child),
+      spawnDownload,
       logger: createLogger(),
-      deadlineMs: 20,
+      deadlineMs: 2_000,
       killGraceMs: 20,
     });
 
-    await expect(
-      processor(job, new AbortController().signal),
-    ).rejects.toMatchObject({
+    const pending = processor(job, new AbortController().signal);
+    await progressStarted.promise;
+    expect(spawnDownload).toHaveBeenCalledTimes(1);
+    expect(job.updateProgress.mock.calls).toEqual([[5]]);
+
+    await expect(pending).rejects.toMatchObject({
       code: "deadline_exceeded",
       retriable: false,
     });
     expect(child.kills[0]).toBe("SIGTERM");
     expect(await readdir(root)).toEqual([]);
-  }, 1_000);
+  }, 5_000);
 
   it("removes the durable result when final progress exceeds the deadline", async () => {
     const { root, storage } = await createStorage();
+    const finalProgressEntered = deferred<void>();
     const job = createJob();
-    job.updateProgress.mockImplementation((progress: number) =>
-      progress === 5 ? Promise.resolve() : new Promise<void>(() => undefined),
-    );
+    job.updateProgress.mockImplementation((progress: number) => {
+      if (progress === 5) return Promise.resolve();
+      finalProgressEntered.resolve();
+      return new Promise<void>(() => undefined);
+    });
     const processor = createDownloadProcessor({
       storage,
       cancellationStore: createCancellationStore(),
@@ -1193,17 +1358,20 @@ describe("createDownloadProcessor", () => {
         createFakeProcess({ stdout: [Buffer.from("audio")] }),
       ),
       logger: createLogger(),
-      deadlineMs: 100,
+      deadlineMs: 5_000,
     });
 
-    await expect(
-      processor(job, new AbortController().signal),
-    ).rejects.toMatchObject({
+    const pending = processor(job, new AbortController().signal);
+    await finalProgressEntered.promise;
+    expect(job.updateProgress.mock.calls).toEqual([[5], [100]]);
+    expect(await readdir(root)).toEqual([`${JOB_ID}.mp3`]);
+
+    await expect(pending).rejects.toMatchObject({
       code: "deadline_exceeded",
       retriable: false,
     });
     expect(await readdir(root)).toEqual([]);
-  }, 1_000);
+  }, 10_000);
 
   it("maps empty successful stdout to retriable download failure", async () => {
     const { root, storage } = await createStorage();
@@ -1281,25 +1449,33 @@ describe("createDownloadProcessor", () => {
     });
     const finalProgressEntered = deferred<void>();
     const releaseFinalProgress = deferred<void>();
+    let finalProgressReleased = false;
     const firstJob = createJob(validData, JOB_ID);
     firstJob.updateProgress.mockImplementation(async (progress: number) => {
       if (progress === 100) {
         finalProgressEntered.resolve();
         await releaseFinalProgress.promise;
+        finalProgressReleased = true;
       }
     });
+    const spawnDownload = vi.fn(() =>
+      createFakeProcess({ stdout: [Buffer.alloc(4, 1)] }),
+    );
     const processor = createDownloadProcessor({
       storage,
       cancellationStore: createCancellationStore(),
-      spawnDownload: vi.fn(() =>
-        createFakeProcess({ stdout: [Buffer.alloc(4, 1)] }),
-      ),
+      spawnDownload,
       logger: createLogger(),
-      deadlineMs: 1_000,
+      deadlineMs: 10_000,
       cancellationPollMs: 10,
     });
     const firstPending = processor(firstJob, new AbortController().signal);
+    void firstPending.catch(() => undefined);
     await finalProgressEntered.promise;
+    expect(finalProgressReleased).toBe(false);
+    expect(firstJob.updateProgress.mock.calls).toEqual([[5], [100]]);
+    expect(spawnDownload).toHaveBeenCalledTimes(1);
+    expect(await readdir(root)).toEqual([`${JOB_ID}.mp3`]);
 
     let blockedOutcome: DownloadJobResult | unknown;
     try {
@@ -1307,42 +1483,57 @@ describe("createDownloadProcessor", () => {
         createJob(validData, SECOND_JOB_ID),
         new AbortController().signal,
       ).catch((error: unknown) => error);
+      expect(finalProgressReleased).toBe(false);
+      expect(blockedOutcome).toMatchObject({
+        code: "storage_quota_exceeded",
+        retriable: false,
+      });
+      expect(spawnDownload).toHaveBeenCalledTimes(2);
+      expect(await readdir(root)).toEqual([`${JOB_ID}.mp3`]);
     } finally {
       releaseFinalProgress.resolve();
     }
 
-    expect(blockedOutcome).toMatchObject({
-      code: "storage_quota_exceeded",
-      retriable: false,
-    });
-    expect(await readdir(root)).toEqual([`${JOB_ID}.mp3`]);
     await expect(firstPending).resolves.toMatchObject({
       storageKey: `${JOB_ID}.mp3`,
     });
+    expect(finalProgressReleased).toBe(true);
 
     const later = await processor(
       createJob(validData, THIRD_JOB_ID),
       new AbortController().signal,
     );
     expect(later.storageKey).toBe(`${THIRD_JOB_ID}.mp3`);
+    expect(spawnDownload).toHaveBeenCalledTimes(3);
     expect(await readdir(root)).toEqual([`${THIRD_JOB_ID}.mp3`]);
-  });
+  }, 15_000);
 
   it("preserves cancellation and cleanup when SIGTERM itself throws", async () => {
     const { root, storage } = await createStorage();
+    const childSpawned = deferred<void>();
+    const firstWriteCompleted = deferred<void>();
     let checks = 0;
     const child = createFakeProcess({
       stdout: [Buffer.from("partial")],
       holdOpen: true,
       throwTerm: true,
     });
-    const processor = createDownloadProcessor({
-      storage,
-      cancellationStore: createCancellationStore(() => {
+    const cancellationStore = {
+      isCanceled: vi.fn(async (): Promise<boolean> => {
         checks += 1;
-        return checks >= 2;
+        if (checks === 1) return false;
+        await Promise.all([childSpawned.promise, firstWriteCompleted.promise]);
+        return true;
       }),
-      spawnDownload: vi.fn(() => child),
+    };
+    const spawnDownload = vi.fn(() => {
+      childSpawned.resolve();
+      return child;
+    });
+    const processor = createDownloadProcessor({
+      storage: withFirstWriteInterlock(storage, firstWriteCompleted),
+      cancellationStore,
+      spawnDownload,
       logger: createLogger(),
       cancellationPollMs: 20,
       killGraceMs: 20,
@@ -1354,6 +1545,8 @@ describe("createDownloadProcessor", () => {
       code: "download_canceled",
       retriable: false,
     });
+    expect(spawnDownload).toHaveBeenCalledTimes(1);
+    expect(cancellationStore.isCanceled).toHaveBeenCalledTimes(2);
     expect(child.kills).toEqual(["SIGTERM", "SIGKILL"]);
     expect(await readdir(root)).toEqual([]);
   });
