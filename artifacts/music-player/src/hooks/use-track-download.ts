@@ -310,6 +310,7 @@ export function useTrackDownload(): TrackDownloadController {
                 if (shouldReportCancellationError(error)) {
                   reportTfAuthError(error);
                 }
+                pollJob(jobId, cancelGeneration, false);
               }
             }
           }

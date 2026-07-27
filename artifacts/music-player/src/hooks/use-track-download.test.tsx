@@ -640,16 +640,18 @@ describe("useTrackDownload", () => {
     [401, true],
     [503, false],
   ])(
-    "restores a late-ack job after compensating DELETE %s and retries the same job",
+    "resumes exact-job polling after late-ack compensating DELETE %s fails",
     async (status, shouldReportAuth) => {
       const queued = deferred<{
         results: Array<{ trackId: string; jobId: string; position: number }>;
       }>();
       const error = { status, data: { error: "bounded_error" } };
       vi.mocked(queueTrackDownloads).mockReturnValue(queued.promise);
-      vi.mocked(cancelDownloadJob)
-        .mockRejectedValueOnce(error)
-        .mockResolvedValueOnce({ jobId: "job-late", status: "canceled" });
+      vi.mocked(cancelDownloadJob).mockRejectedValueOnce(error);
+      vi.mocked(getDownloadJobStatus).mockResolvedValue({
+        status: "completed",
+        progress: 100,
+      });
       const { result } = renderHook(() => useTrackDownload());
 
       let startPromise!: Promise<void>;
@@ -666,34 +668,36 @@ describe("useTrackDownload", () => {
         });
         await startPromise;
       });
+      await flushMicrotasks();
 
-      expect(result.current.state).toBe("waiting");
-      expect(result.current.progress).toBe(0);
+      expect(queueTrackDownloads).toHaveBeenCalledTimes(1);
+      expect(cancelDownloadJob).toHaveBeenCalledTimes(1);
+      expect(cancelDownloadJob).toHaveBeenCalledWith(
+        "job-late",
+        expect.objectContaining({ credentials: "include", method: "DELETE" }),
+      );
+      expect(getDownloadJobStatus).toHaveBeenCalledTimes(1);
+      expect(getDownloadJobStatus).toHaveBeenCalledWith(
+        "job-late",
+        expect.objectContaining({ credentials: "include", method: "GET" }),
+      );
+      expect(result.current.state).toBe("completed");
+      expect(result.current.progress).toBe(100);
       if (shouldReportAuth) {
         expect(reportTfAuthError).toHaveBeenCalledWith(error);
       } else {
         expect(reportTfAuthError).not.toHaveBeenCalled();
       }
-      expect(getDownloadJobStatus).not.toHaveBeenCalled();
       expect(window.location.assign).not.toHaveBeenCalled();
 
       await act(async () => {
-        await result.current.cancel();
+        await vi.runAllTimersAsync();
       });
 
-      expect(cancelDownloadJob).toHaveBeenCalledTimes(2);
-      expect(cancelDownloadJob).toHaveBeenNthCalledWith(
-        1,
-        "job-late",
-        expect.any(Object),
-      );
-      expect(cancelDownloadJob).toHaveBeenNthCalledWith(
-        2,
-        "job-late",
-        expect.any(Object),
-      );
-      expect(result.current.state).toBe("canceled");
-      expect(getDownloadJobStatus).not.toHaveBeenCalled();
+      expect(queueTrackDownloads).toHaveBeenCalledTimes(1);
+      expect(cancelDownloadJob).toHaveBeenCalledTimes(1);
+      expect(getDownloadJobStatus).toHaveBeenCalledTimes(1);
+      expect(result.current.state).toBe("completed");
       expect(window.location.assign).not.toHaveBeenCalled();
     },
   );
