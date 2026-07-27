@@ -72,6 +72,7 @@ const secretFileNames = Object.freeze([
   "tf_client_secret",
   "tf_migrator_database_url",
   "tf_migrator_password",
+  "tf_module_heartbeat_keys",
   "tf_pkce_verifier",
   "tf_postgres_admin_password",
   "tf_runtime_database_url",
@@ -88,6 +89,8 @@ const contractCanaries = Object.freeze({
     "postgres://apollo_tf_migrator:tf-migrator-canary@tf-postgres:5432/apollo_tf",
   tfRuntimeDatabase:
     "postgres://apollo_tf_runtime:tf-runtime-canary@tf-postgres:5432/apollo_tf",
+  tfAccountHeartbeat: randomBytes(32).toString("base64url"),
+  tfSearchHeartbeat: randomBytes(32).toString("base64url"),
 });
 
 type ComposeService = Record<string, unknown>;
@@ -109,7 +112,7 @@ type SmokeModule = {
   prepareSecretDirectory?: (
     environment: NodeJS.ProcessEnv,
     tfPublicOrigin: string,
-  ) => Promise<{ directory: string }>;
+  ) => Promise<{ directory: string; rawSecrets: string[] }>;
   projectResponseForSecretScan?: (
     response: {
       status: number;
@@ -305,6 +308,11 @@ async function withContractSecrets<T>(
           value = contractCanaries.tfRuntimeDatabase;
         } else if (name === "tf_client_secret") {
           value = contractCanaries.platformClientSecret;
+        } else if (name === "tf_module_heartbeat_keys") {
+          value = JSON.stringify({
+            "account-integrations": contractCanaries.tfAccountHeartbeat,
+            "search-media": contractCanaries.tfSearchHeartbeat,
+          });
         }
         return writeFile(join(directory, name), value, "utf8");
       }),
@@ -515,6 +523,9 @@ describe("Platform-TF bridge container contract", () => {
     const tfMigrate = service(config, "tf-migrate");
     const tfPostgres = service(config, "tf-postgres");
 
+    expect(Object.keys(config.secrets).sort()).toEqual(
+      secretFileNames.filter((name) => name !== "tf_admin_database_url"),
+    );
     expect(secretSources(platformApi)).toEqual([
       "platform_assertion_private_jwk",
       "platform_assertion_public_jwks",
@@ -527,6 +538,7 @@ describe("Platform-TF bridge container contract", () => {
     ]);
     expect(secretSources(tfApi)).toEqual([
       "tf_client_secret",
+      "tf_module_heartbeat_keys",
       "tf_pkce_verifier",
       "tf_runtime_database_url",
     ]);
@@ -543,7 +555,17 @@ describe("Platform-TF bridge container contract", () => {
     expect(tfApi.environment).not.toHaveProperty(
       "APOLLO_ASSERTION_PRIVATE_JWK",
     );
+    expect(
+      (tfApi.environment as Record<string, unknown>)
+        .APOLLO_MODULE_HEARTBEAT_KEYS_FILE,
+    ).toBe("/run/secrets/tf_module_heartbeat_keys");
     expect(tfApi.environment).not.toHaveProperty("DATABASE_URL");
+    expect(secretMount(tfApi, "tf_module_heartbeat_keys")).toMatchObject({
+      target: "tf_module_heartbeat_keys",
+      uid: "10001",
+      gid: "10001",
+      mode: "0400",
+    });
     for (const name of Object.keys(config.services).filter((name) =>
       name.startsWith("platform-"),
     )) {
@@ -784,6 +806,45 @@ describe("Platform-TF bridge container contract", () => {
     expect(service(config, "tf-postgres").image).toBe(
       "apollo-tf-postgres:bridge",
     );
+  });
+
+  test("generates distinct bounded TF heartbeat keys and includes both in canary scans", async () => {
+    const smokeModule = await loadSmokeModule();
+    expect(smokeModule.prepareSecretDirectory).toBeTypeOf("function");
+    const environment = {} as NodeJS.ProcessEnv;
+    let directory: string | undefined;
+    try {
+      const fixture = await smokeModule.prepareSecretDirectory!(
+        environment,
+        "https://127.0.0.1:18444",
+      );
+      directory = fixture.directory;
+      expect(environment.BRIDGE_SECRET_DIRECTORY).toBe(directory);
+      const heartbeat = JSON.parse(
+        await readFile(join(directory, "tf_module_heartbeat_keys"), "utf8"),
+      ) as Record<string, unknown>;
+      expect(Object.keys(heartbeat).sort()).toEqual([
+        "account-integrations",
+        "search-media",
+      ]);
+      const values = Object.values(heartbeat);
+      expect(values.every((value) => typeof value === "string")).toBe(true);
+      expect(new Set(values).size).toBe(2);
+      expect(
+        values.every(
+          (value) =>
+            Buffer.byteLength(value as string, "utf8") >= 32 &&
+            Buffer.byteLength(value as string, "utf8") <= 512,
+        ),
+      ).toBe(true);
+      expect(
+        values.every((value) => fixture.rawSecrets.includes(value as string)),
+      ).toBe(true);
+    } finally {
+      if (directory !== undefined) {
+        await rm(directory, { force: true, recursive: true });
+      }
+    }
   });
 
   test("documents creation and ownership of every required TF secret file", async () => {
@@ -1266,6 +1327,12 @@ describe("bridge smoke orchestration", () => {
         secretMount(
           service(candidate, "tf-migrate"),
           "tf_migrator_database_url",
+        ).mode = "0444";
+      },
+      (candidate) => {
+        secretMount(
+          service(candidate, "tf-api"),
+          "tf_module_heartbeat_keys",
         ).mode = "0444";
       },
       (candidate) => {
@@ -1863,10 +1930,10 @@ if (command === "config") {
       depends_on: { "tf-postgres": { condition: "service_healthy" } },
     },
     "tf-api": {
-      ...runtime(["bridge-edge","platform-tf-control","tf-data"], ["tf_client_secret","tf_pkce_verifier",{ source: "tf_runtime_database_url", target: "tf_runtime_database_url", uid: "10001", gid: "10001", mode: "0400" }]),
+      ...runtime(["bridge-edge","platform-tf-control","tf-data"], ["tf_client_secret",{ source: "tf_module_heartbeat_keys", target: "tf_module_heartbeat_keys", uid: "10001", gid: "10001", mode: "0400" },"tf_pkce_verifier",{ source: "tf_runtime_database_url", target: "tf_runtime_database_url", uid: "10001", gid: "10001", mode: "0400" }]),
       build: { context: process.cwd(), dockerfile: "artifacts/api-server/Dockerfile", target: "runner" },
       image: "apollo-tf-api:bridge",
-      environment: { DATABASE_URL_FILE: "/run/secrets/tf_runtime_database_url" },
+      environment: { APOLLO_MODULE_HEARTBEAT_KEYS_FILE: "/run/secrets/tf_module_heartbeat_keys", DATABASE_URL_FILE: "/run/secrets/tf_runtime_database_url" },
       ports: [{ host_ip: "127.0.0.1", published: value("TF_API_PORT"), target: 8080 }],
       depends_on: {
         "platform-api": { condition: "service_healthy" },
@@ -1876,7 +1943,7 @@ if (command === "config") {
       },
     },
   };
-  const names = ["platform_assertion_private_jwk","platform_assertion_public_jwks","platform_migrator_database_url","platform_migrator_password","platform_oauth_clients","platform_operator_bootstrap_token","platform_postgres_admin_password","platform_runtime_database_url","platform_runtime_password","tf_client_secret","tf_migrator_database_url","tf_migrator_password","tf_pkce_verifier","tf_postgres_admin_password","tf_runtime_database_url","tf_runtime_password"];
+  const names = ["platform_assertion_private_jwk","platform_assertion_public_jwks","platform_migrator_database_url","platform_migrator_password","platform_oauth_clients","platform_operator_bootstrap_token","platform_postgres_admin_password","platform_runtime_database_url","platform_runtime_password","tf_client_secret","tf_migrator_database_url","tf_migrator_password","tf_module_heartbeat_keys","tf_pkce_verifier","tf_postgres_admin_password","tf_runtime_database_url","tf_runtime_password"];
   process.stdout.write(JSON.stringify({
     services,
     networks: {

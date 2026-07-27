@@ -358,6 +358,7 @@ services:
     environment:
       APOLLO_PLATFORM_API_ORIGIN: http://platform-api:8080
       APOLLO_PLATFORM_ISSUER: ${PLATFORM_PUBLIC_ORIGIN:?}
+      APOLLO_MODULE_HEARTBEAT_KEYS_FILE: /run/secrets/tf_module_heartbeat_keys
       APOLLO_TF_AUTH_REDIS_URL: redis://tf-redis:6379/1
       APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP: "true"
       APOLLO_TF_BRIDGE_PKCE_VERIFIER_FILE: /run/secrets/tf_pkce_verifier
@@ -373,6 +374,11 @@ services:
       WEB_URL: ${TF_PUBLIC_ORIGIN:?}
     secrets:
       - tf_client_secret
+      - source: tf_module_heartbeat_keys
+        target: tf_module_heartbeat_keys
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
       - tf_pkce_verifier
       - source: tf_runtime_database_url
         target: tf_runtime_database_url
@@ -438,6 +444,8 @@ secrets:
     file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_migrator_database_url
   tf_migrator_password:
     file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_migrator_password
+  tf_module_heartbeat_keys:
+    file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_module_heartbeat_keys
   tf_pkce_verifier:
     file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_pkce_verifier
   tf_postgres_admin_password:

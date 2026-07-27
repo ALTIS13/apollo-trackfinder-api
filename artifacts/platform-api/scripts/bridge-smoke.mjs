@@ -640,6 +640,15 @@ export async function prepareSecretDirectory(environment, tfPublicOrigin) {
     const operatorBootstrapToken = generatedSecret();
     const oauthClientSecret = generatedSecret();
     const pkceVerifier = generatedSecret(48);
+    const searchMediaHeartbeatKey = generatedSecret();
+    let accountIntegrationsHeartbeatKey = generatedSecret();
+    while (accountIntegrationsHeartbeatKey === searchMediaHeartbeatKey) {
+      accountIntegrationsHeartbeatKey = generatedSecret();
+    }
+    const tfModuleHeartbeatKeys = {
+      "account-integrations": accountIntegrationsHeartbeatKey,
+      "search-media": searchMediaHeartbeatKey,
+    };
     const platformMigratorDatabaseUrl =
       `postgres://apollo_platform_migrator:${encodeURIComponent(platformMigratorPassword)}` +
       "@platform-postgres:5432/apollo_platform";
@@ -744,6 +753,15 @@ export async function prepareSecretDirectory(environment, tfPublicOrigin) {
         { value: tfMigratorPassword, uid: 999, gid: 999, mode: 0o400 },
       ],
       [
+        "tf_module_heartbeat_keys",
+        {
+          value: JSON.stringify(tfModuleHeartbeatKeys),
+          uid: 10001,
+          gid: 10001,
+          mode: 0o400,
+        },
+      ],
+      [
         "tf_pkce_verifier",
         { value: pkceVerifier, uid: 10001, gid: 10001, mode: 0o400 },
       ],
@@ -804,6 +822,8 @@ export async function prepareSecretDirectory(environment, tfPublicOrigin) {
         operatorBootstrapToken,
         oauthClientSecret,
         pkceVerifier,
+        accountIntegrationsHeartbeatKey,
+        searchMediaHeartbeatKey,
         platformMigratorDatabaseUrl,
         platformRuntimeDatabaseUrl,
         tfAdminDatabaseUrl,
@@ -979,6 +999,7 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     "tf_client_secret",
     "tf_migrator_database_url",
     "tf_migrator_password",
+    "tf_module_heartbeat_keys",
     "tf_pkce_verifier",
     "tf_postgres_admin_password",
     "tf_runtime_database_url",
@@ -1125,6 +1146,7 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     "tf-migrate": ["tf_migrator_database_url"],
     "tf-api": [
       "tf_client_secret",
+      "tf_module_heartbeat_keys",
       "tf_pkce_verifier",
       "tf_runtime_database_url",
     ],
@@ -1153,6 +1175,16 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     "tf_migrator_database_url",
     {
       target: "tf_migrator_database_url",
+      uid: "10001",
+      gid: "10001",
+      mode: "0400",
+    },
+  );
+  assertSecretMount(
+    configService(config, "tf-api"),
+    "tf_module_heartbeat_keys",
+    {
+      target: "tf_module_heartbeat_keys",
       uid: "10001",
       gid: "10001",
       mode: "0400",
@@ -1193,6 +1225,11 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     configService(config, "tf-migrate").environment
       ?.TF_MIGRATOR_DATABASE_URL_FILE,
     "/run/secrets/tf_migrator_database_url",
+  );
+  assert.equal(
+    configService(config, "tf-api").environment
+      ?.APOLLO_MODULE_HEARTBEAT_KEYS_FILE,
+    "/run/secrets/tf_module_heartbeat_keys",
   );
   assert.equal(
     configService(config, "tf-api").environment?.DATABASE_URL_FILE,
@@ -1741,6 +1778,7 @@ async function proveMountedSecretsReadable(environment, signal) {
   ];
   const tfFiles = [
     "tf_client_secret",
+    "tf_module_heartbeat_keys",
     "tf_pkce_verifier",
     "tf_runtime_database_url",
   ];
