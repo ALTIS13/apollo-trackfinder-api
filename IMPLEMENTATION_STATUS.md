@@ -1,6 +1,57 @@
 # Apollo TF implementation status
 
-Last updated: 2026-07-26.
+Last updated: 2026-07-27.
+
+## TF download worker release candidate
+
+Status: `RELEASE_CANDIDATE`. The reviewed runtime tip is
+`955200aec6a12776fe9ea52b26c1f3bfa16201a9`, based on
+`a6c7bca84e3334ef28022947b147d16ea3d283da`. It has not yet been deployed to
+HomeNode or Coolify. The following status update is documentation-only and does
+not claim that the runtime matrix was rerun on itself.
+
+- The public API remains the only browser authorization, CSRF, entitlement,
+  queue-admission, cancellation, and file-authorization boundary. Downloads run
+  in the dedicated non-root `tf-download-worker`; queue Redis, worker storage,
+  command authentication, heartbeat, control, and egress are isolated by
+  Compose networks, file-backed secrets, and private service origins.
+- The web client uses the queued workflow and compensates cancellation and late
+  queue acknowledgements without issuing duplicate POST or DELETE requests.
+  Unexpected terminal smoke states now fail immediately instead of being
+  hidden behind a polling deadline.
+- Queue admission is capped by 200 deterministic lifecycle-deduplication slots.
+  Slot-backed current-protocol leases recover safely, stale producers cannot
+  create job 201, unknown legacy un-slotted intent fails closed pending operator
+  reconciliation, and public waiting/delayed positions never exceed 200.
+- The streamed downloader always transcodes through FFmpeg. The disposable
+  smoke fixture emits valid WAV input from one directly signallable process;
+  HTTP bytes, exact Range, reported file size, size/quota/deadline failures, and
+  cancellation cleanup are verified. An independent `ffprobe` oracle requires
+  both MP3 container and MP3 audio codec, preventing a raw-input false positive.
+- Focused API queue suites passed `67/67`; the exact Redis 7/BullMQ integration
+  passed `4/4` in five consecutive runs; worker passed `184 passed / 2 gated
+skipped`; music-player passed `118/118`; the full API suite passed
+  `538 passed / 4 environment-gated skipped`. Worker typecheck/build, API
+  typecheck/build, workspace typecheck, frozen install, root and nested Compose
+  renders, Prettier, and diff checks passed.
+- Final disposable real-Docker validation passed `33/33` in `219.67s`,
+  including MP3/FFprobe, security negative paths, signed file access, replay and
+  owner isolation, cancellation, bounded failures, secret/canary scans, and
+  zero owned container/network/volume/temp-directory residue. One preceding
+  attempt stopped during a transient `apt-get` exit `100`; an exact Dockerfile
+  rebuild and the unchanged full rerun passed.
+- Independent admission review, migration-edge re-review, Redis-time evidence
+  review, and final media-fixture re-review report no remaining P0-P3 findings.
+  Residual release risk is native rootful-Linux secret ownership and
+  FFmpeg/libmp3lame threshold calibration after future image upgrades.
+- GitHub connectivity resolves canonically to `ALTIS13/Apollo.TF`; `origin`
+  uses `https://github.com/ALTIS13/Apollo.TF.git`, remote HEAD/default branch is
+  `main`, and fetch/`ls-remote` succeed. No remote branch or `main` push is
+  claimed by this candidate record.
+- Next rollout stage is a read-only HomeNode/Coolify/Caddy preflight, native
+  Linux secret-ownership proof, and an owner-approved Coolify deployment. No
+  HomeNode, Coolify, Caddy, UFW, DNS, or other remote infrastructure mutation
+  was performed in this stage.
 
 ## TF integrations admission/deadline hardening candidate
 
@@ -48,10 +99,11 @@ Important breakage.
   setup-timeout residue was removed by exact name, the rerun passed, and the
   image was pruned again with another 57.83 MB reclaimed.
   Unrelated anonymous volumes and build cache were not mass-pruned.
-- The next server/web feature is `tf-download-worker`. Coolify/HomeNode rollout
-  remains gated on a read-only preflight and explicit owner approval. No
-  HomeNode, Coolify, Caddy, UFW, DNS, or other remote infrastructure mutation
-  was performed in this wave.
+- The next server/web feature at this historical checkpoint was
+  `tf-download-worker`; its current release-candidate record is above.
+  Coolify/HomeNode rollout remains gated on a read-only preflight and explicit
+  owner approval. No HomeNode, Coolify, Caddy, UFW, DNS, or other remote
+  infrastructure mutation was performed in this integrations wave.
 
 ## TF integrations Task 7 historical release validation
 
