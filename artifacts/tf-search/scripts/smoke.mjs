@@ -53,6 +53,22 @@ function generatedSecret(bytes = 32) {
   return randomBytes(bytes).toString("base64url");
 }
 
+export function tfSecretSourceOwnership(name) {
+  if (name === "tf_admin_database_url") {
+    return Object.freeze({ uid: 0, gid: 10002, mode: 0o440 });
+  }
+  if (
+    [
+      "tf_postgres_admin_password",
+      "tf_migrator_password",
+      "tf_runtime_password",
+    ].includes(name)
+  ) {
+    return Object.freeze({ uid: 999, gid: 999, mode: 0o400 });
+  }
+  return Object.freeze({ uid: 10001, gid: 10001, mode: 0o400 });
+}
+
 function digest(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -876,6 +892,51 @@ async function resolveLocalDockerEnvironment(environment, docker) {
   return resolvedEnvironment;
 }
 
+async function provisionNativeSecretOwnership(
+  environment,
+  docker,
+  project,
+  prepared,
+) {
+  if (process.platform !== "linux") return;
+
+  const security = await docker(
+    ["info", "--format", "{{json .SecurityOptions}}"],
+    environment,
+  );
+  assert(
+    !security.stdout.toLowerCase().includes("rootless"),
+    "native Linux smoke requires rootful Docker UID ownership",
+  );
+  const assignments = prepared.secretNames.map((name) => {
+    const { uid, gid, mode } = tfSecretSourceOwnership(name);
+    return `${name}:${uid}:${gid}:${mode.toString(8)}`;
+  });
+  await docker(
+    [
+      "run",
+      "--rm",
+      "--name",
+      `${project}-secret-provisioner`,
+      "--label",
+      `com.docker.compose.project=${project}`,
+      "--network",
+      "none",
+      "--read-only",
+      "--mount",
+      `type=bind,source=${prepared.directory},target=/secrets`,
+      "postgres:16-bookworm",
+      "sh",
+      "-eu",
+      "-c",
+      'for assignment do name=${assignment%%:*}; rest=${assignment#*:}; uid=${rest%%:*}; rest=${rest#*:}; gid=${rest%%:*}; mode=${rest#*:}; chown "$uid:$gid" "/secrets/$name"; chmod "$mode" "/secrets/$name"; done',
+      "secret-provisioner",
+      ...assignments,
+    ],
+    environment,
+  );
+}
+
 function configuredEnvironment(environment) {
   const configured = { ...environment };
   for (const name of SENSITIVE_ENVIRONMENT) {
@@ -1005,6 +1066,12 @@ export async function runTfSearchSmoke(options) {
       repositoryRoot,
       temporaryParent: options.temporaryParent,
     });
+    await provisionNativeSecretOwnership(
+      environment,
+      docker,
+      project,
+      prepared,
+    );
     const override = await writeSmokeOverride(
       environment,
       prepared,

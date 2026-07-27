@@ -320,11 +320,15 @@ async function provisionNativeSecretOwnership(
   project: string,
   directory: string,
   owners: readonly {
+    readonly gid: 999 | 10001 | 10002;
+    readonly mode: 0o400 | 0o440;
     readonly name: string;
-    readonly uid: 999 | 10001;
+    readonly uid: 0 | 999 | 10001;
   }[],
 ): Promise<void> {
-  const assignments = owners.map(({ name, uid }) => `${name}:${uid}`);
+  const assignments = owners.map(
+    ({ gid, mode, name, uid }) => `${name}:${uid}:${gid}:${mode.toString(8)}`,
+  );
   await docker(
     [
       "run",
@@ -342,7 +346,7 @@ async function provisionNativeSecretOwnership(
       "sh",
       "-eu",
       "-c",
-      'for assignment do name=${assignment%:*}; owner=${assignment#*:}; chown "$owner:$owner" "/secrets/$name"; chmod 0400 "/secrets/$name"; done',
+      'for assignment do name=${assignment%%:*}; rest=${assignment#*:}; uid=${rest%%:*}; rest=${rest#*:}; gid=${rest%%:*}; mode=${rest#*:}; chown "$uid:$gid" "/secrets/$name"; chmod "$mode" "/secrets/$name"; done',
       "secret-provisioner",
       ...assignments,
     ],
@@ -445,12 +449,20 @@ async function prepareSecrets(
       "tf_integrations_migrator_password",
       "tf_integrations_runtime_password",
     ]);
-    const owners = secrets.map(([name]) => ({
-      name,
-      uid: postgresOwned.has(name) ? 999 : 10001,
-    })) as readonly {
+    const owners = secrets.map(([name]) =>
+      name === "tf_admin_database_url"
+        ? { gid: 10002, mode: 0o440, name, uid: 0 }
+        : {
+            gid: postgresOwned.has(name) ? 999 : 10001,
+            mode: 0o400,
+            name,
+            uid: postgresOwned.has(name) ? 999 : 10001,
+          },
+    ) as readonly {
+      readonly gid: 999 | 10001 | 10002;
+      readonly mode: 0o400 | 0o440;
       readonly name: string;
-      readonly uid: 999 | 10001;
+      readonly uid: 0 | 999 | 10001;
     }[];
     canaries = [
       marker,
@@ -478,12 +490,12 @@ async function prepareSecrets(
       expect((await stat(directory)).mode & 0o777).toBe(0o700);
     }
     if (options.nativeSecretOwnership === true) {
-      for (const { name, uid } of owners) {
+      for (const { gid, mode, name, uid } of owners) {
         const current = await stat(join(directory, name));
         if (
           current.uid !== uid ||
-          current.gid !== uid ||
-          (current.mode & 0o777) !== 0o400
+          current.gid !== gid ||
+          (current.mode & 0o777) !== mode
         ) {
           throw new Error("Native secret ownership provisioning failed");
         }

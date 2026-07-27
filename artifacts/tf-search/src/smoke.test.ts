@@ -58,6 +58,11 @@ interface SmokeObservations {
 }
 
 interface SmokeModule {
+  readonly tfSecretSourceOwnership: (name: string) => {
+    readonly gid: number;
+    readonly mode: number;
+    readonly uid: number;
+  };
   readonly observedRequestsPerMinute: (...values: readonly number[]) => number;
   readonly canonicalizeDockerSelectors: (environment: NodeJS.ProcessEnv) => {
     readonly context: string;
@@ -216,6 +221,37 @@ function successfulObservations(): SmokeObservations {
 }
 
 describe("tf-search disposable smoke contract", () => {
+  it("defines the physical source ownership for all six TF database secrets", async () => {
+    const smoke = await loadSmokeModule();
+
+    expect(smoke.tfSecretSourceOwnership("tf_admin_database_url")).toEqual({
+      uid: 0,
+      gid: 10002,
+      mode: 0o440,
+    });
+    for (const name of [
+      "tf_postgres_admin_password",
+      "tf_migrator_password",
+      "tf_runtime_password",
+    ]) {
+      expect(smoke.tfSecretSourceOwnership(name)).toEqual({
+        uid: 999,
+        gid: 999,
+        mode: 0o400,
+      });
+    }
+    for (const name of [
+      "tf_migrator_database_url",
+      "tf_runtime_database_url",
+    ]) {
+      expect(smoke.tfSecretSourceOwnership(name)).toEqual({
+        uid: 10001,
+        gid: 10001,
+        mode: 0o400,
+      });
+    }
+  });
+
   it("rejects remote and conflicting Docker selectors before invocation", async () => {
     const smoke = await loadSmokeModule();
     const docker = fakeDocker();

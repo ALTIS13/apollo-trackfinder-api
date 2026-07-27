@@ -1417,10 +1417,10 @@ async function runPreparedDisposableSmoke(
       "node:20-bookworm-slim",
       "sh",
       "-ceu",
-      "chmod 0400 /secrets/*; chown 10001:10001 /secrets/*; chown 999:999 /secrets/tf_postgres_admin_password /secrets/tf_migrator_password /secrets/tf_runtime_password /secrets/tf_download_queue_password",
+      "chmod 0400 /secrets/*; chown 10001:10001 /secrets/*; chown 999:999 /secrets/tf_postgres_admin_password /secrets/tf_migrator_password /secrets/tf_runtime_password /secrets/tf_download_queue_password; chown 0:10002 /secrets/tf_admin_database_url; chmod 0440 /secrets/tf_admin_database_url",
     ]);
 
-    const redisOwned = new Set([
+    const postgresOwned = new Set([
       "tf_postgres_admin_password",
       "tf_migrator_password",
       "tf_runtime_password",
@@ -1428,13 +1428,20 @@ async function runPreparedDisposableSmoke(
     ]);
     for (const name of Object.keys(secrets)) {
       const metadata = await stat(path.join(secretDirectory, name));
-      const expectedOwner = redisOwned.has(name) ? 999 : 10001;
+      const sharedAdminUrl = name === "tf_admin_database_url";
+      const expectedUid = sharedAdminUrl
+        ? 0
+        : postgresOwned.has(name)
+          ? 999
+          : 10001;
+      const expectedGid = sharedAdminUrl ? 10002 : expectedUid;
+      const expectedMode = sharedAdminUrl ? 0o440 : 0o400;
       assertCondition(
-        metadata.uid === expectedOwner && metadata.gid === expectedOwner,
+        metadata.uid === expectedUid && metadata.gid === expectedGid,
         "native Linux secret owner mismatch",
       );
       assertCondition(
-        (metadata.mode & 0o777) === 0o400,
+        (metadata.mode & 0o777) === expectedMode,
         "native Linux secret mode mismatch",
       );
     }

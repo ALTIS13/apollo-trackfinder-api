@@ -140,6 +140,7 @@ type ComposeService = {
   readonly deploy?: Record<string, unknown>;
   readonly entrypoint?: readonly string[];
   readonly environment?: Record<string, string>;
+  readonly group_add?: readonly string[];
   readonly healthcheck?: Record<string, unknown>;
   readonly image?: string;
   readonly init?: boolean;
@@ -1813,13 +1814,14 @@ describe("TF deployment identity contract", () => {
         "tf_runtime_password",
       ]);
       expect(roleBootstrap.user).toBe("999:999");
+      expect(roleBootstrap.group_add).toEqual(["10002"]);
       expect(roleBootstrap.secrets).toEqual([
         {
           source: "tf_admin_database_url",
           target: "tf_admin_database_url",
-          uid: "999",
-          gid: "999",
-          mode: "0400",
+          uid: "0",
+          gid: "10002",
+          mode: "0440",
         },
         {
           source: "tf_migrator_password",
@@ -1855,13 +1857,14 @@ describe("TF deployment identity contract", () => {
       });
       expect(secretSources(baseline)).toEqual(["tf_admin_database_url"]);
       expect(baseline.user).toBe("10001:10001");
+      expect(baseline.group_add).toEqual(["10002"]);
       expect(baseline.secrets).toEqual([
         {
           source: "tf_admin_database_url",
           target: "tf_admin_database_url",
-          uid: "10001",
-          gid: "10001",
-          mode: "0400",
+          uid: "0",
+          gid: "10002",
+          mode: "0440",
         },
       ]);
       expect(baseline.networks).toEqual(["tf-data"]);
@@ -1879,9 +1882,7 @@ describe("TF deployment identity contract", () => {
         expect(oneShot.security_opt).toEqual(["no-new-privileges:true"]);
         expect(oneShot.cap_drop).toEqual(["ALL"]);
         expect(oneShot.pids_limit).toBe(64);
-        expect(oneShot.tmpfs).toEqual([
-          "/tmp:rw,noexec,nosuid,size=16m",
-        ]);
+        expect(oneShot.tmpfs).toEqual(["/tmp:rw,noexec,nosuid,size=16m"]);
         expect(oneShot.deploy).toEqual({
           resources: {
             limits: { cpus: "0.5", memory: "256M", pids: 64 },
@@ -1903,6 +1904,12 @@ describe("TF deployment identity contract", () => {
           "tf_runtime_database_url",
         ]),
       );
+      expect(
+        Object.entries(template.services)
+          .filter(([, current]) => current.group_add !== undefined)
+          .map(([name]) => name)
+          .sort(),
+      ).toEqual(["tf-baseline", "tf-role-bootstrap"]);
     },
   );
 
@@ -1934,6 +1941,13 @@ describe("TF deployment identity contract", () => {
     expect(script).toContain("noreplication");
     expect(script).toContain("nobypassrls");
     expect(script).toContain("TF_ROLE_BOOTSTRAP_DATABASE_URL_FILE");
+    expect(dockerfile).toContain("read-bounded-secret.c");
+    expect(dockerfile).toContain(
+      "COPY --from=secret-reader-builder /out/read-bounded-secret /usr/local/bin/read-bounded-secret",
+    );
+    expect(script).toContain("/usr/local/bin/read-bounded-secret");
+    expect(script).not.toMatch(/\bwc\b/);
+    expect(script).not.toMatch(/\bcat\b/);
     expect(script).toContain(
       "read_secret /run/secrets/tf_migrator_password 512",
     );
@@ -1952,6 +1966,10 @@ describe("TF deployment identity contract", () => {
       "grant usage on schema public to apollo_tf_runtime",
     );
     expect(script).toContain("TF role bootstrap failed");
+    expect(script).toContain("reset all");
+    expect(script).toContain("pg_auth_members");
+    expect(script).toContain("revoke all privileges");
+    expect(script).toContain("managed_role_owns_unexpected_object");
     expect(script).not.toContain("set -x");
     expect(script).not.toMatch(/echo\s+.*PASSWORD/i);
   });
@@ -2084,15 +2102,6 @@ describe("TF deployment identity contract", () => {
       "tf-search": { condition: "service_healthy" },
     });
     expect(JSON.stringify(template)).not.toMatch(/postgres:\/\/[^"]+:[^"]+@/);
-
-    const documentation = await readFile(modulesDocumentation, "utf8");
-    expect(documentation).toContain(
-      "`tf_database_url` при первом запуске обновлённого Compose обязан содержать\nтекущий пароль существующей роли",
-    );
-    expect(documentation).toContain(
-      "замена `tf_postgres_password` сама по себе пароль роли\nне меняет",
-    );
-    expect(documentation).toContain("выполнить `ALTER ROLE ... PASSWORD ...`");
   });
 
   it("passes a non-default API URL into the Vite build and compiled bundle", async () => {

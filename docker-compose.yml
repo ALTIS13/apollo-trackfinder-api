@@ -48,6 +48,8 @@ services:
       target: postgres-role-init
     image: ${TF_POSTGRES_IMAGE:-apollo-tf-postgres:local}
     user: "999:999"
+    group_add:
+      - "10002"
     read_only: true
     init: true
     entrypoint:
@@ -57,9 +59,9 @@ services:
     secrets:
       - source: tf_admin_database_url
         target: tf_admin_database_url
-        uid: "999"
-        gid: "999"
-        mode: "0400"
+        uid: "0"
+        gid: "10002"
+        mode: "0440"
       - source: tf_migrator_password
         target: tf_migrator_password
         uid: "999"
@@ -146,6 +148,8 @@ services:
       target: runner
     image: ${TF_API_IMAGE:-apollo-tf-api:local}
     user: "10001:10001"
+    group_add:
+      - "10002"
     read_only: true
     init: true
     entrypoint:
@@ -157,9 +161,9 @@ services:
     secrets:
       - source: tf_admin_database_url
         target: tf_admin_database_url
-        uid: "10001"
-        gid: "10001"
-        mode: "0400"
+        uid: "0"
+        gid: "10002"
+        mode: "0440"
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
     networks:

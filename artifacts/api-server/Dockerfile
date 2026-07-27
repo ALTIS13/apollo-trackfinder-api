@@ -1,9 +1,26 @@
+FROM postgres:16-bookworm AS secret-reader-builder
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends gcc libc6-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY artifacts/api-server/container/read-bounded-secret.c /src/read-bounded-secret.c
+
+RUN mkdir -p /out \
+  && cc -std=c11 -O2 -D_FORTIFY_SOURCE=2 -fPIE -pie \
+    -Wall -Wextra -Werror -Wformat=2 \
+    -Wl,-z,relro,-z,now \
+    -o /out/read-bounded-secret /src/read-bounded-secret.c
+
 FROM postgres:16-bookworm AS postgres-role-init
+
+COPY --from=secret-reader-builder /out/read-bounded-secret /usr/local/bin/read-bounded-secret
 
 COPY artifacts/api-server/container/init-roles.sh /usr/local/bin/bootstrap-tf-roles.sh
 COPY artifacts/api-server/container/init-roles.sh /docker-entrypoint-initdb.d/010-tf-roles.sh
 
 RUN chmod 0555 \
+  /usr/local/bin/read-bounded-secret \
   /usr/local/bin/bootstrap-tf-roles.sh \
   /docker-entrypoint-initdb.d/010-tf-roles.sh
 
