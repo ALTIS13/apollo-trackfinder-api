@@ -1970,6 +1970,9 @@ describe("TF deployment identity contract", () => {
     expect(script).toContain("pg_auth_members");
     expect(script).toContain("revoke all privileges");
     expect(script).toContain("managed_role_owns_unexpected_object");
+    expect(script).toContain("connection limit -1");
+    expect(script).toContain("valid until ''infinity''");
+    expect(script).toContain("direct_acl_audit_failed");
     expect(script).not.toContain("set -x");
     expect(script).not.toMatch(/echo\s+.*PASSWORD/i);
   });

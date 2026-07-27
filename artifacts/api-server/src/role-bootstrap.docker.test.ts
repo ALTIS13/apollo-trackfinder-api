@@ -12,6 +12,8 @@ const network = `apollo-tf-role-bootstrap-proof-${suffix}`;
 const databaseContainer = `apollo-tf-role-bootstrap-db-${suffix}`;
 const secretVolume = `apollo-tf-role-bootstrap-secrets-${suffix}`;
 const dataVolume = `apollo-tf-role-bootstrap-data-${suffix}`;
+const cleanupProbeContainer = `apollo-tf-role-bootstrap-cleanup-${suffix}`;
+const cleanupProbeVolume = `apollo-tf-role-bootstrap-cleanup-${suffix}`;
 const databaseName = "apollo_trackfinder";
 const sharedSecretGid = "10002";
 const passwords = {
@@ -25,6 +27,50 @@ type ProcessResult = {
   readonly stderr: Buffer;
   readonly stdout: Buffer;
 };
+
+type DockerProofResource = {
+  readonly inspectArgs: readonly string[];
+  readonly label: string;
+  readonly removeArgs: readonly string[];
+};
+
+const dockerProofResources: readonly DockerProofResource[] = [
+  {
+    inspectArgs: ["container", "inspect", cleanupProbeContainer],
+    label: cleanupProbeContainer,
+    removeArgs: ["rm", "-f", cleanupProbeContainer],
+  },
+  {
+    inspectArgs: ["container", "inspect", databaseContainer],
+    label: databaseContainer,
+    removeArgs: ["rm", "-f", databaseContainer],
+  },
+  {
+    inspectArgs: ["volume", "inspect", cleanupProbeVolume],
+    label: cleanupProbeVolume,
+    removeArgs: ["volume", "rm", "-f", cleanupProbeVolume],
+  },
+  {
+    inspectArgs: ["volume", "inspect", dataVolume],
+    label: dataVolume,
+    removeArgs: ["volume", "rm", "-f", dataVolume],
+  },
+  {
+    inspectArgs: ["volume", "inspect", secretVolume],
+    label: secretVolume,
+    removeArgs: ["volume", "rm", "-f", secretVolume],
+  },
+  {
+    inspectArgs: ["network", "inspect", network],
+    label: network,
+    removeArgs: ["network", "rm", network],
+  },
+  {
+    inspectArgs: ["image", "inspect", image],
+    label: image,
+    removeArgs: ["image", "rm", "-f", image],
+  },
+];
 
 async function execute(
   command: string,
@@ -88,7 +134,52 @@ async function docker(
 }
 
 async function removeDockerResource(args: readonly string[]): Promise<void> {
-  await docker(args, { allowFailure: true, timeoutMs: 60_000 });
+  const resource = dockerProofResources.find(
+    (candidate) =>
+      candidate.removeArgs.length === args.length &&
+      candidate.removeArgs.every((part, index) => part === args[index]),
+  );
+  if (resource === undefined) {
+    throw new Error("Disposable Docker cleanup received an unknown resource");
+  }
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await docker(args, { allowFailure: true, timeoutMs: 60_000 });
+    const inspection = await docker(resource.inspectArgs, {
+      allowFailure: true,
+      timeoutMs: 10_000,
+    });
+    if (inspection.code !== 0) return;
+    if (attempt < 19) await wait(250);
+  }
+  throw new Error(`Disposable Docker cleanup failed: ${resource.label}`);
+}
+
+async function cleanupDockerProofResources(): Promise<void> {
+  const failures: string[] = [];
+  for (const resource of dockerProofResources) {
+    try {
+      await removeDockerResource(resource.removeArgs);
+    } catch {
+      failures.push(resource.label);
+    }
+  }
+
+  const residuals: string[] = [];
+  for (const resource of dockerProofResources) {
+    const inspection = await docker(resource.inspectArgs, {
+      allowFailure: true,
+      timeoutMs: 10_000,
+    });
+    if (inspection.code === 0) residuals.push(resource.label);
+  }
+  if (residuals.length > 0 || failures.length > 0) {
+    throw new Error(
+      `Disposable Docker resource cleanup audit failed: ${[
+        ...new Set([...failures, ...residuals]),
+      ].join(", ")}`,
+    );
+  }
 }
 
 async function writeSecret(
@@ -123,26 +214,35 @@ async function writeSecret(
 }
 
 async function psqlAdmin(statement: string): Promise<ProcessResult> {
-  return docker([
-    "exec",
-    databaseContainer,
-    "psql",
-    "-X",
-    "-v",
-    "ON_ERROR_STOP=1",
-    "-U",
-    "postgres",
-    "-d",
-    databaseName,
-    "-c",
-    statement,
-  ]);
+  const result = await docker(
+    [
+      "exec",
+      databaseContainer,
+      "psql",
+      "-X",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-U",
+      "postgres",
+      "-d",
+      databaseName,
+      "-c",
+      statement,
+    ],
+    { allowFailure: true },
+  );
+  if (result.code !== 0) {
+    throw new Error(
+      `Disposable PostgreSQL admin fixture failed: ${result.stderr.toString().trim()}`,
+    );
+  }
+  return result;
 }
 
 async function runManualBootstrap(
   allowFailure = false,
 ): Promise<ProcessResult> {
-  return docker(
+  const result = await docker(
     [
       "run",
       "--rm",
@@ -163,8 +263,22 @@ async function runManualBootstrap(
       "/usr/local/bin/bootstrap-tf-roles.sh",
       image,
     ],
-    { allowFailure, timeoutMs: 60_000 },
+    { allowFailure: true, timeoutMs: 60_000 },
   );
+  if (result.code !== 0 && !allowFailure) {
+    const logs = await docker(["logs", databaseContainer], {
+      allowFailure: true,
+      timeoutMs: 10_000,
+    });
+    const errors = logs.stderr
+      .toString()
+      .split(/\r?\n/)
+      .filter((line) => line.includes("ERROR:"))
+      .slice(-3)
+      .join(" | ");
+    throw new Error(`Disposable role bootstrap failed: ${errors}`);
+  }
+  return result;
 }
 
 async function waitForPostgres(): Promise<void> {
@@ -187,6 +301,10 @@ async function waitForPostgres(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   throw new Error("Disposable PostgreSQL did not become ready");
+}
+
+async function wait(milliseconds: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 describe
@@ -280,11 +398,7 @@ describe
     }, 6 * 60_000);
 
     afterAll(async () => {
-      await removeDockerResource(["rm", "-f", databaseContainer]);
-      await removeDockerResource(["volume", "rm", "-f", dataVolume]);
-      await removeDockerResource(["volume", "rm", "-f", secretVolume]);
-      await removeDockerResource(["network", "rm", network]);
-      await removeDockerResource(["image", "rm", "-f", image]);
+      await cleanupDockerProofResources();
     }, 2 * 60_000);
 
     it("allows only the two supplementary-group consumers to read the shared admin URL", async () => {
@@ -439,7 +553,38 @@ describe
       expect(race.stderr.toString()).toBe("");
     }, 120_000);
 
-    it("normalizes an overprivileged runtime and fails closed on unexpected ownership", async () => {
+    it("retries exact cleanup through a delayed Docker volume release", async () => {
+      await docker(["volume", "create", cleanupProbeVolume]);
+      await docker([
+        "run",
+        "--detach",
+        "--name",
+        cleanupProbeContainer,
+        "--network",
+        "none",
+        "--volume",
+        `${cleanupProbeVolume}:/cleanup`,
+        "--entrypoint",
+        "sh",
+        image,
+        "-ceu",
+        "sleep 30",
+      ]);
+
+      const delayedRelease = (async () => {
+        await wait(500);
+        await docker(["rm", "-f", cleanupProbeContainer]);
+      })();
+      await removeDockerResource(["volume", "rm", "-f", cleanupProbeVolume]);
+      await delayedRelease;
+
+      const residual = await docker(["volume", "inspect", cleanupProbeVolume], {
+        allowFailure: true,
+      });
+      expect(residual.code).not.toBe(0);
+    });
+
+    it("normalizes every direct ACL class, exact login attributes, and unexpected ownership", async () => {
       await psqlAdmin(`
         create role tf_bootstrap_parent nologin;
         grant tf_bootstrap_parent to apollo_tf_runtime;
@@ -462,12 +607,34 @@ describe
         alter table public.playlist_tracks owner to apollo_tf_migrator;
         create table public.runtime_canary (id integer);
         grant all privileges on database apollo_trackfinder to apollo_tf_runtime;
+        grant all privileges on database postgres to apollo_tf_runtime;
+        grant create on tablespace pg_default to apollo_tf_runtime;
         grant create on schema public to apollo_tf_runtime;
         grant all privileges on all tables in schema public, apollo_tf
           to apollo_tf_runtime;
+        grant select (id) on public.runtime_canary to apollo_tf_runtime;
+        grant select on table pg_catalog.pg_authid to apollo_tf_runtime;
         grant all privileges on all sequences in schema public
           to apollo_tf_runtime;
+        grant execute on function pg_catalog.pg_sleep(double precision)
+          to apollo_tf_runtime;
+        grant usage on type pg_catalog.int4 to apollo_tf_runtime;
+        grant usage on language plpgsql to apollo_tf_runtime;
+        select lo_create(980001);
+        grant select, update on large object 980001 to apollo_tf_runtime;
+        create foreign data wrapper tf_bootstrap_fdw no handler no validator;
+        create server tf_bootstrap_server
+          foreign data wrapper tf_bootstrap_fdw;
+        grant usage on foreign data wrapper tf_bootstrap_fdw
+          to apollo_tf_runtime;
+        grant usage on foreign server tf_bootstrap_server
+          to apollo_tf_runtime;
+        grant set on parameter log_statement to apollo_tf_runtime;
         alter role apollo_tf_runtime set search_path = pg_catalog;
+        alter role apollo_tf_runtime
+          connection limit 0 valid until '2000-01-01';
+        alter role apollo_tf_migrator
+          connection limit 0 valid until '2000-01-01';
       `);
 
       const bootstrap = await runManualBootstrap();
@@ -483,17 +650,97 @@ describe
           has_sequence_privilege('apollo_tf_runtime', 'public.track_search_cache_id_seq', 'usage'),
           has_table_privilege('apollo_tf_runtime', 'apollo_tf.schema_migrations', 'select'),
           has_table_privilege('apollo_tf_runtime', 'public.runtime_canary', 'select'),
+          has_table_privilege('apollo_tf_runtime', 'pg_catalog.pg_authid', 'select'),
+          has_column_privilege('apollo_tf_runtime', 'public.runtime_canary', 'id', 'select'),
+          (select count(*)
+            from pg_largeobject_metadata objects
+            cross join lateral aclexplode(objects.lomacl) acl
+            where objects.oid = 980001
+              and acl.grantee = (
+                select oid from pg_roles where rolname = 'apollo_tf_runtime'
+              )),
+          has_foreign_data_wrapper_privilege('apollo_tf_runtime', 'tf_bootstrap_fdw', 'usage'),
+          has_server_privilege('apollo_tf_runtime', 'tf_bootstrap_server', 'usage'),
+          has_parameter_privilege('apollo_tf_runtime', 'log_statement', 'set'),
           (select count(*) from pg_auth_members memberships
             join pg_roles members on members.oid = memberships.member
             where members.rolname = 'apollo_tf_runtime'),
           (select count(*) from pg_db_role_setting settings
             join pg_roles roles on roles.oid = settings.setrole
-            where roles.rolname = 'apollo_tf_runtime')
+            where roles.rolname = 'apollo_tf_runtime'),
+          (select count(*)
+            from pg_database databases
+            cross join lateral aclexplode(databases.datacl) acl
+            where databases.datname = 'postgres'
+              and acl.grantee = (
+                select oid from pg_roles where rolname = 'apollo_tf_runtime'
+              )),
+          (select count(*)
+            from pg_tablespace tablespaces
+            cross join lateral aclexplode(tablespaces.spcacl) acl
+            where tablespaces.spcname = 'pg_default'
+              and acl.grantee = (
+                select oid from pg_roles where rolname = 'apollo_tf_runtime'
+              )),
+          (select count(*)
+            from pg_language languages
+            cross join lateral aclexplode(languages.lanacl) acl
+            where languages.lanname = 'plpgsql'
+              and acl.grantee = (
+                select oid from pg_roles where rolname = 'apollo_tf_runtime'
+              )),
+          (select count(*)
+            from pg_proc routines
+            cross join lateral aclexplode(routines.proacl) acl
+            where routines.oid =
+              'pg_catalog.pg_sleep(double precision)'::regprocedure
+              and acl.grantee = (
+                select oid from pg_roles where rolname = 'apollo_tf_runtime'
+              )),
+          (select count(*)
+            from pg_type types
+            cross join lateral aclexplode(types.typacl) acl
+            where types.oid = 'pg_catalog.int4'::regtype
+              and acl.grantee = (
+                select oid from pg_roles where rolname = 'apollo_tf_runtime'
+              )),
+          (select rolconnlimit = -1
+              and rolvaliduntil = 'infinity'::timestamptz
+            from pg_roles where rolname = 'apollo_tf_runtime'),
+          (select rolconnlimit = -1
+              and rolvaliduntil = 'infinity'::timestamptz
+            from pg_roles where rolname = 'apollo_tf_migrator')
         );
       `);
       expect(projection.stdout.toString().trim()).toContain(
-        "f|f|f|t|t|t|f|0|0",
+        "f|f|f|t|t|t|f|f|f|0|f|f|f|0|0|0|0|0|0|0|t|t",
       );
+
+      for (const [secretName, expectedRole] of [
+        ["tf_migrator_database_url", "apollo_tf_migrator"],
+        ["tf_runtime_database_url", "apollo_tf_runtime"],
+      ] as const) {
+        const login = await docker([
+          "run",
+          "--rm",
+          "--network",
+          network,
+          "--user",
+          "10001:10001",
+          "--read-only",
+          "--volume",
+          `${secretVolume}:/run/secrets:ro`,
+          "--entrypoint",
+          "sh",
+          image,
+          "-ceu",
+          'url=$(/usr/local/bin/read-bounded-secret "$1" 4096); exec psql -X -A -t "$url" -v ON_ERROR_STOP=1 -c "select current_user"',
+          "login-proof",
+          `/run/secrets/${secretName}`,
+        ]);
+        expect(login.stdout.toString().trim()).toBe(expectedRole);
+        expect(login.stderr.toString()).toBe("");
+      }
 
       const setRole = await docker(
         [

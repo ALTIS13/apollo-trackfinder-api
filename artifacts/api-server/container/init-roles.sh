@@ -47,7 +47,7 @@ run_bootstrap() {
 begin;
 
 select format(
-  'create role apollo_tf_migrator login password %L nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls',
+  'create role apollo_tf_migrator login password %L nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls connection limit -1 valid until ''infinity''',
   :'migrator_password'
 )
 where not exists (
@@ -55,12 +55,12 @@ where not exists (
 ) \gexec
 
 select format(
-  'alter role apollo_tf_migrator login password %L nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls',
+  'alter role apollo_tf_migrator login password %L nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls connection limit -1 valid until ''infinity''',
   :'migrator_password'
 ) \gexec
 
 select format(
-  'create role apollo_tf_runtime login password %L nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls',
+  'create role apollo_tf_runtime login password %L nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls connection limit -1 valid until ''infinity''',
   :'runtime_password'
 )
 where not exists (
@@ -68,7 +68,7 @@ where not exists (
 ) \gexec
 
 select format(
-  'alter role apollo_tf_runtime login password %L nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls',
+  'alter role apollo_tf_runtime login password %L nosuperuser nocreatedb nocreaterole noinherit noreplication nobypassrls connection limit -1 valid until ''infinity''',
   :'runtime_password'
 ) \gexec
 
@@ -226,7 +226,7 @@ end
 $ownership$;
 
 select format(
-  'revoke %I from %I',
+  'revoke %I from %I cascade',
   granted_roles.rolname,
   member_roles.rolname
 )
@@ -251,81 +251,216 @@ select format(
   'revoke all on database %I from public',
   current_database()
 ) \gexec
-select format(
-  'revoke all privileges on database %I from apollo_tf_migrator',
-  current_database()
-) \gexec
-select format(
-  'revoke all privileges on database %I from apollo_tf_runtime',
-  current_database()
-) \gexec
 
 select format(
-  'revoke all privileges on schema %I from apollo_tf_migrator, apollo_tf_runtime',
-  schemas.nspname
+  'revoke all privileges on database %I from apollo_tf_migrator, apollo_tf_runtime cascade',
+  databases.datname
 )
-from pg_namespace schemas
-where schemas.nspname <> 'information_schema'
-  and schemas.nspname !~ '^pg_'
+from pg_database databases
+where exists (
+  select 1
+  from aclexplode(databases.datacl) acl
+  where acl.grantee in (
+    select oid
+    from pg_roles
+    where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
+  )
+)
 \gexec
 
 select format(
-  'revoke all privileges on all tables in schema %I from apollo_tf_migrator, apollo_tf_runtime',
-  schemas.nspname
+  'revoke all privileges on tablespace %I from apollo_tf_migrator, apollo_tf_runtime cascade',
+  tablespaces.spcname
 )
-from pg_namespace schemas
-where schemas.nspname <> 'information_schema'
-  and schemas.nspname !~ '^pg_'
+from pg_tablespace tablespaces
+where exists (
+  select 1
+  from aclexplode(tablespaces.spcacl) acl
+  where acl.grantee in (
+    select oid
+    from pg_roles
+    where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
+  )
+)
 \gexec
 
 select format(
-  'revoke all privileges on all sequences in schema %I from apollo_tf_migrator, apollo_tf_runtime',
+  'revoke all privileges on schema %I from apollo_tf_migrator, apollo_tf_runtime cascade',
   schemas.nspname
 )
 from pg_namespace schemas
-where schemas.nspname <> 'information_schema'
-  and schemas.nspname !~ '^pg_'
-\gexec
-
-select format(
-  'revoke all privileges on all functions in schema %I from apollo_tf_migrator, apollo_tf_runtime',
-  schemas.nspname
+where exists (
+  select 1
+  from aclexplode(schemas.nspacl) acl
+  where acl.grantee in (
+    select oid
+    from pg_roles
+    where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
+  )
 )
-from pg_namespace schemas
-where schemas.nspname <> 'information_schema'
-  and schemas.nspname !~ '^pg_'
 \gexec
 
 select format(
-  'revoke all privileges on all procedures in schema %I from apollo_tf_migrator, apollo_tf_runtime',
-  schemas.nspname
+  'revoke all privileges on %s %I.%I from apollo_tf_migrator, apollo_tf_runtime cascade',
+  case
+    when relations.relkind = 'S' then 'sequence'
+    else 'table'
+  end,
+  schemas.nspname,
+  relations.relname
 )
-from pg_namespace schemas
-where schemas.nspname <> 'information_schema'
-  and schemas.nspname !~ '^pg_'
+from pg_class relations
+join pg_namespace schemas on schemas.oid = relations.relnamespace
+where exists (
+  select 1
+  from aclexplode(relations.relacl) acl
+  where acl.grantee in (
+    select oid
+    from pg_roles
+    where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
+  )
+)
 \gexec
 
 select format(
-  'revoke all privileges on type %I.%I from apollo_tf_migrator, apollo_tf_runtime',
+  'revoke all privileges (%I) on table %I.%I from apollo_tf_migrator, apollo_tf_runtime cascade',
+  attributes.attname,
+  schemas.nspname,
+  relations.relname
+)
+from pg_attribute attributes
+join pg_class relations on relations.oid = attributes.attrelid
+join pg_namespace schemas on schemas.oid = relations.relnamespace
+where exists (
+  select 1
+  from aclexplode(attributes.attacl) acl
+  where acl.grantee in (
+    select oid
+    from pg_roles
+    where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
+  )
+)
+\gexec
+
+select format(
+  'revoke all privileges on routine %I.%I(%s) from apollo_tf_migrator, apollo_tf_runtime cascade',
+  schemas.nspname,
+  routines.proname,
+  pg_get_function_identity_arguments(routines.oid)
+)
+from pg_proc routines
+join pg_namespace schemas on schemas.oid = routines.pronamespace
+where exists (
+  select 1
+  from aclexplode(routines.proacl) acl
+  where acl.grantee in (
+    select oid
+    from pg_roles
+    where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
+  )
+)
+\gexec
+
+select format(
+  'revoke all privileges on type %I.%I from apollo_tf_migrator, apollo_tf_runtime cascade',
   schemas.nspname,
   types.typname
 )
 from pg_type types
 join pg_namespace schemas on schemas.oid = types.typnamespace
-left join pg_class relations on relations.oid = types.typrelid
-where schemas.nspname <> 'information_schema'
-  and schemas.nspname !~ '^pg_'
-  and (
-    types.typtype in ('d', 'e', 'r', 'm')
-    or (
-      types.typtype = 'c'
-      and relations.relkind = 'c'
-    )
+where exists (
+  select 1
+  from aclexplode(types.typacl) acl
+  where acl.grantee in (
+    select oid
+    from pg_roles
+    where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
   )
+)
 \gexec
 
 select format(
-  'alter default privileges for role %I%s revoke all privileges on %s from %I',
+  'revoke all privileges on large object %s from apollo_tf_migrator, apollo_tf_runtime cascade',
+  objects.oid
+)
+from pg_largeobject_metadata objects
+where exists (
+  select 1
+  from aclexplode(objects.lomacl) acl
+  where acl.grantee in (
+    select oid
+    from pg_roles
+    where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
+  )
+)
+\gexec
+
+select format(
+  'revoke all privileges on language %I from apollo_tf_migrator, apollo_tf_runtime cascade',
+  languages.lanname
+)
+from pg_language languages
+where exists (
+  select 1
+  from aclexplode(languages.lanacl) acl
+  where acl.grantee in (
+    select oid
+    from pg_roles
+    where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
+  )
+)
+\gexec
+
+select format(
+  'revoke all privileges on foreign data wrapper %I from apollo_tf_migrator, apollo_tf_runtime cascade',
+  wrappers.fdwname
+)
+from pg_foreign_data_wrapper wrappers
+where exists (
+  select 1
+  from aclexplode(wrappers.fdwacl) acl
+  where acl.grantee in (
+    select oid
+    from pg_roles
+    where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
+  )
+)
+\gexec
+
+select format(
+  'revoke all privileges on foreign server %I from apollo_tf_migrator, apollo_tf_runtime cascade',
+  servers.srvname
+)
+from pg_foreign_server servers
+where exists (
+  select 1
+  from aclexplode(servers.srvacl) acl
+  where acl.grantee in (
+    select oid
+    from pg_roles
+    where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
+  )
+)
+\gexec
+
+select format(
+  'revoke all privileges on parameter %I from apollo_tf_migrator, apollo_tf_runtime cascade',
+  parameters.parname
+)
+from pg_parameter_acl parameters
+where exists (
+  select 1
+  from aclexplode(parameters.paracl) acl
+  where acl.grantee in (
+    select oid
+    from pg_roles
+    where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
+  )
+)
+\gexec
+
+select format(
+  'alter default privileges for role %I%s revoke all privileges on %s from %I cascade',
   owners.rolname,
   case
     when schemas.nspname is null then ''
@@ -423,7 +558,353 @@ where to_regclass('apollo_tf.schema_migrations') is not null
 \gexec
 
 alter default privileges for role apollo_tf_migrator
-  revoke execute on functions from public;
+  revoke execute on functions from public cascade;
+
+do $audit$
+declare
+  migrator_oid oid := (
+    select oid from pg_roles where rolname = 'apollo_tf_migrator'
+  );
+  runtime_oid oid := (
+    select oid from pg_roles where rolname = 'apollo_tf_runtime'
+  );
+begin
+  if exists (
+    select 1
+    from pg_roles roles
+    where roles.rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
+      and not coalesce(
+        (
+          roles.rolcanlogin
+          and not roles.rolsuper
+          and not roles.rolcreatedb
+          and not roles.rolcreaterole
+          and not roles.rolinherit
+          and not roles.rolreplication
+          and not roles.rolbypassrls
+          and roles.rolconnlimit = -1
+          and roles.rolvaliduntil = 'infinity'::timestamptz
+          and roles.rolconfig is null
+        ),
+        false
+      )
+  )
+  or exists (
+    select 1
+    from pg_auth_members memberships
+    where memberships.roleid in (migrator_oid, runtime_oid)
+      or memberships.member in (migrator_oid, runtime_oid)
+  )
+  or exists (
+    select 1
+    from pg_db_role_setting settings
+    where settings.setrole in (migrator_oid, runtime_oid)
+  ) then
+    raise exception 'role_state_audit_failed';
+  end if;
+
+  if exists (
+    with direct_acl as (
+      select
+        'database'::text as acl_class,
+        databases.oid as object_oid,
+        null::text as schema_name,
+        databases.datname::text as object_name,
+        null::text as sub_name,
+        null::text as object_kind,
+        databases.datdba as owner_oid,
+        acl.grantee,
+        acl.privilege_type,
+        acl.is_grantable
+      from pg_database databases
+      cross join lateral aclexplode(databases.datacl) acl
+
+      union all
+
+      select
+        'tablespace',
+        tablespaces.oid,
+        null,
+        tablespaces.spcname,
+        null,
+        null,
+        tablespaces.spcowner,
+        acl.grantee,
+        acl.privilege_type,
+        acl.is_grantable
+      from pg_tablespace tablespaces
+      cross join lateral aclexplode(tablespaces.spcacl) acl
+
+      union all
+
+      select
+        'schema',
+        schemas.oid,
+        null,
+        schemas.nspname,
+        null,
+        null,
+        schemas.nspowner,
+        acl.grantee,
+        acl.privilege_type,
+        acl.is_grantable
+      from pg_namespace schemas
+      cross join lateral aclexplode(schemas.nspacl) acl
+
+      union all
+
+      select
+        'relation',
+        relations.oid,
+        schemas.nspname,
+        relations.relname,
+        null,
+        relations.relkind::text,
+        relations.relowner,
+        acl.grantee,
+        acl.privilege_type,
+        acl.is_grantable
+      from pg_class relations
+      join pg_namespace schemas on schemas.oid = relations.relnamespace
+      cross join lateral aclexplode(relations.relacl) acl
+
+      union all
+
+      select
+        'column',
+        relations.oid,
+        schemas.nspname,
+        relations.relname,
+        attributes.attname,
+        relations.relkind::text,
+        relations.relowner,
+        acl.grantee,
+        acl.privilege_type,
+        acl.is_grantable
+      from pg_attribute attributes
+      join pg_class relations on relations.oid = attributes.attrelid
+      join pg_namespace schemas on schemas.oid = relations.relnamespace
+      cross join lateral aclexplode(attributes.attacl) acl
+
+      union all
+
+      select
+        'routine',
+        routines.oid,
+        schemas.nspname,
+        routines.proname,
+        pg_get_function_identity_arguments(routines.oid),
+        routines.prokind::text,
+        routines.proowner,
+        acl.grantee,
+        acl.privilege_type,
+        acl.is_grantable
+      from pg_proc routines
+      join pg_namespace schemas on schemas.oid = routines.pronamespace
+      cross join lateral aclexplode(routines.proacl) acl
+
+      union all
+
+      select
+        'type',
+        types.oid,
+        schemas.nspname,
+        types.typname,
+        null,
+        types.typtype::text,
+        types.typowner,
+        acl.grantee,
+        acl.privilege_type,
+        acl.is_grantable
+      from pg_type types
+      join pg_namespace schemas on schemas.oid = types.typnamespace
+      cross join lateral aclexplode(types.typacl) acl
+
+      union all
+
+      select
+        'large_object',
+        objects.oid,
+        null,
+        objects.oid::text,
+        null,
+        null,
+        objects.lomowner,
+        acl.grantee,
+        acl.privilege_type,
+        acl.is_grantable
+      from pg_largeobject_metadata objects
+      cross join lateral aclexplode(objects.lomacl) acl
+
+      union all
+
+      select
+        'language',
+        languages.oid,
+        null,
+        languages.lanname,
+        null,
+        null,
+        languages.lanowner,
+        acl.grantee,
+        acl.privilege_type,
+        acl.is_grantable
+      from pg_language languages
+      cross join lateral aclexplode(languages.lanacl) acl
+
+      union all
+
+      select
+        'foreign_data_wrapper',
+        wrappers.oid,
+        null,
+        wrappers.fdwname,
+        null,
+        null,
+        wrappers.fdwowner,
+        acl.grantee,
+        acl.privilege_type,
+        acl.is_grantable
+      from pg_foreign_data_wrapper wrappers
+      cross join lateral aclexplode(wrappers.fdwacl) acl
+
+      union all
+
+      select
+        'foreign_server',
+        servers.oid,
+        null,
+        servers.srvname,
+        null,
+        null,
+        servers.srvowner,
+        acl.grantee,
+        acl.privilege_type,
+        acl.is_grantable
+      from pg_foreign_server servers
+      cross join lateral aclexplode(servers.srvacl) acl
+
+      union all
+
+      select
+        'parameter',
+        parameters.oid,
+        null,
+        parameters.parname,
+        null,
+        null,
+        null::oid,
+        acl.grantee,
+        acl.privilege_type,
+        acl.is_grantable
+      from pg_parameter_acl parameters
+      cross join lateral aclexplode(parameters.paracl) acl
+    )
+    select 1
+    from direct_acl
+    where direct_acl.grantee in (migrator_oid, runtime_oid)
+      and not coalesce(
+        (
+          not direct_acl.is_grantable
+          and (
+            (
+              direct_acl.grantee = migrator_oid
+              and (
+                direct_acl.owner_oid = migrator_oid
+                or (
+                  direct_acl.acl_class = 'database'
+                  and direct_acl.object_name = current_database()
+                  and direct_acl.privilege_type in ('CONNECT', 'CREATE')
+                )
+                or (
+                  direct_acl.acl_class = 'schema'
+                  and direct_acl.object_name = 'public'
+                  and direct_acl.privilege_type in ('USAGE', 'CREATE')
+                )
+              )
+            )
+            or (
+              direct_acl.grantee = runtime_oid
+              and (
+                (
+                  direct_acl.acl_class = 'database'
+                  and direct_acl.object_name = current_database()
+                  and direct_acl.privilege_type = 'CONNECT'
+                )
+                or (
+                  direct_acl.acl_class = 'schema'
+                  and direct_acl.object_name in ('public', 'apollo_tf')
+                  and direct_acl.privilege_type = 'USAGE'
+                )
+                or (
+                  direct_acl.acl_class = 'relation'
+                  and direct_acl.schema_name = 'public'
+                  and direct_acl.object_kind in ('r', 'p')
+                  and direct_acl.object_name in (
+                    'track_search_cache',
+                    'play_history',
+                    'liked_tracks',
+                    'playlists',
+                    'playlist_tracks'
+                  )
+                  and direct_acl.privilege_type in (
+                    'SELECT',
+                    'INSERT',
+                    'UPDATE',
+                    'DELETE'
+                  )
+                )
+                or (
+                  direct_acl.acl_class = 'relation'
+                  and direct_acl.schema_name = 'public'
+                  and direct_acl.object_kind = 'S'
+                  and direct_acl.object_name in (
+                    'track_search_cache_id_seq',
+                    'play_history_id_seq',
+                    'liked_tracks_id_seq',
+                    'playlists_id_seq',
+                    'playlist_tracks_id_seq'
+                  )
+                  and direct_acl.privilege_type = 'USAGE'
+                )
+                or (
+                  direct_acl.acl_class = 'relation'
+                  and direct_acl.schema_name = 'apollo_tf'
+                  and direct_acl.object_kind in ('r', 'p')
+                  and direct_acl.object_name = 'schema_migrations'
+                  and direct_acl.privilege_type = 'SELECT'
+                )
+              )
+            )
+          )
+        ),
+        false
+      )
+  ) then
+    raise exception 'direct_acl_audit_failed';
+  end if;
+
+  if exists (
+    select 1
+    from pg_default_acl defaults
+    cross join lateral aclexplode(defaults.defaclacl) acl
+    where (
+      defaults.defaclrole in (migrator_oid, runtime_oid)
+      or acl.grantee in (migrator_oid, runtime_oid)
+    )
+      and not (
+        defaults.defaclrole = migrator_oid
+        and defaults.defaclnamespace = 0
+        and defaults.defaclobjtype = 'f'
+        and acl.grantee = migrator_oid
+        and acl.privilege_type = 'EXECUTE'
+        and not acl.is_grantable
+      )
+  ) then
+    raise exception 'default_acl_audit_failed';
+  end if;
+end
+$audit$;
 
 commit;
 SQL
