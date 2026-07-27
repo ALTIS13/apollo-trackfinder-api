@@ -11,13 +11,13 @@ and a least-privilege migrator role.
 
 **Architecture:** `@workspace/db` owns numbered SQL, an exact checksum manifest,
 a fail-closed migration runner, runtime migration-readiness, and separate pool
-profiles. The API image contains both API and migrator entrypoints; Compose
-creates admin/migrator/runtime database roles on a fresh volume, runs
-`tf-migrate` once, and starts API only after successful completion. Normal
-migration deliberately rejects unmanaged tables. Separate manual role-bootstrap
-and baseline services, both disabled by default, can adopt only the exact legacy
-startup schema after backup, complete catalog validation, and explicit ownership
-transfer.
+profiles. The API image contains both API and migrator entrypoints; Compose uses
+a dedicated TF PostgreSQL cluster, creates admin/migrator/runtime database roles
+on a fresh volume, runs `tf-migrate` once, and starts API only after successful
+completion. Normal migration deliberately rejects unmanaged tables. Separate
+manual role-bootstrap and baseline services, both disabled by default, can adopt
+only the exact legacy startup schema after backup, complete catalog validation,
+and explicit ownership transfer.
 
 **Tech Stack:** TypeScript, Node.js 20, PostgreSQL 16, `pg`, Vitest, esbuild,
 Docker Compose, pnpm 10.33.2.
@@ -49,7 +49,14 @@ Docker Compose, pnpm 10.33.2.
   idle-in-transaction `30s`, idle pool `30s`, maximum `2`.
 - PostgreSQL roles are exactly `apollo_tf_migrator` and `apollo_tf_runtime`;
   both are login, non-superuser, no-createdb, no-createrole, noinherit,
-  noreplication, and nobypassrls.
+  noreplication, nobypassrls, connection limit `-1`, and valid until
+  `infinity`.
+- Role bootstrap is supported only on a dedicated TF PostgreSQL cluster. It
+  revokes `PUBLIC` and both managed roles from every database, restores access
+  only to the current TF database, removes stale direct/default ACLs,
+  memberships, role settings, and managed-role ownership across PostgreSQL 16
+  catalog classes, then fails closed unless a final exact catalog audit passes.
+  Foreign object ACLs or foreign runtime-owned default ACLs are rejected.
 - Runtime receives DML only for the five active TF tables, sequence USAGE only,
   and SELECT-only access to `apollo_tf.schema_migrations`. Runtime cannot
   CREATE, ALTER, DROP, TRUNCATE, call `setval`, or mutate migration history.
@@ -418,6 +425,8 @@ git commit -m "feat(api): separate TF migration runtime"
 **Files:**
 
 - Create: `artifacts/api-server/container/init-roles.sh`
+- Create: `artifacts/api-server/container/read-bounded-secret.c`
+- Create: `artifacts/api-server/src/role-bootstrap.docker.test.ts`
 - Modify: `artifacts/api-server/Dockerfile`
 - Modify: `docker-compose.yml`
 - Modify: `artifacts/api-server/docker-compose.yml`
@@ -440,6 +449,9 @@ git commit -m "feat(api): separate TF migration runtime"
   profile `baseline`.
 - PostgreSQL target: `postgres-role-init`.
 - API image variable: `TF_API_IMAGE`.
+- Physical `tf_admin_database_url` source contract: owner/group
+  `root:10002`, mode `0440`; only `tf-role-bootstrap` and `tf-baseline` receive
+  supplemental group `10002`.
 
 - [ ] **Step 1: Write RED deployment contracts**
 
@@ -488,14 +500,19 @@ absent.
 Add a `postgres:16-bookworm` Docker target that installs the same executable
 script at `/usr/local/bin/bootstrap-tf-roles.sh` and
 `/docker-entrypoint-initdb.d/010-tf-roles.sh`. The script reads each password
-from `/run/secrets`, rejects byte length outside `1..512`, creates or alters the
-two exact roles with the Global Constraints attributes, revokes public database
-and schema creation, grants database CONNECT/CREATE plus public schema
-USAGE/CREATE only to migrator, and grants database CONNECT plus schema USAGE
-only to runtime. Admin bootstrap, not migration `0002`, grants runtime `USAGE` on
-the admin-owned `public` schema. It must use `psql -X`, `ON_ERROR_STOP=1`,
-`\getenv`, and `%L` formatting; never interpolate a password into shell-generated
-SQL.
+from `/run/secrets` through a compiled bounded reader that single-opens a regular
+file, reads at most `max + 1` bytes, preserves exact bytes including a trailing
+newline, and rejects empty, oversized, NUL-containing, replaced, or mutated
+sources. It creates or alters the two exact roles with the Global Constraints
+attributes and transactionally normalizes database, tablespace, schema,
+relation, column, sequence, routine, type, large-object, language, foreign-data,
+parameter, membership, default-ACL, ownership, and role-setting state. It
+revokes public and managed-role access from every database, grants access only
+to the current TF database, restores the exact migrator/runtime contract, and
+runs a final fail-closed catalog audit. Admin bootstrap, not migration `0002`,
+grants runtime `USAGE` on the admin-owned `public` schema. It must use
+`psql -X`, `ON_ERROR_STOP=1`, `\getenv`, and `%L` formatting; never interpolate
+a password into shell-generated SQL.
 
 Fresh-volume initialization is invoked by the official PostgreSQL entrypoint.
 Manual mode requires `TF_ROLE_BOOTSTRAP_DATABASE_URL_FILE` pointing to
@@ -539,14 +556,15 @@ profile services manually in the documented order.
 
 - [ ] **Step 5: Update disposable smoke fixtures**
 
-Every fixture that renders/starts root or nested Compose must create all six
-new secret files, assign the database admin/migrator/runtime password files to
-UID/GID `999:999` with bounded read access, assign runtime/migrator/admin URL
-files to `10001:10001`, and use distinct admin, migrator, and runtime passwords.
-The manual bootstrap must run with an explicit UID/GID combination that can read
-only its three mounted secrets; the baseline runs as the API UID and can read
-only its admin URL. Update expected service/profile/secret-scope maps without
-weakening canary scans or cleanup assertions.
+Every fixture that renders/starts root or nested Compose must create all six new
+secret files, assign the database admin/migrator/runtime password files to
+UID/GID `999:999` with mode `0400`, assign runtime/migrator URL files to
+`10001:10001` with mode `0400`, and assign the shared admin URL source to
+`root:10002` with mode `0440`. Use distinct admin, migrator, and runtime
+passwords. Only the two disabled manual services receive supplemental group
+`10002`; normal services cannot read the admin URL. Update expected
+service/profile/secret-scope maps without weakening canary scans or cleanup
+assertions.
 
 - [ ] **Step 6: Verify GREEN**
 
@@ -557,11 +575,17 @@ pnpm --filter @workspace/api-server test -- src/deployment-contract.test.ts
 pnpm --filter @workspace/tf-search test -- src/deployment-contract.test.ts
 pnpm --filter @workspace/tf-download-worker test -- src/deployment-contract.test.ts
 pnpm --filter @workspace/tf-integrations test -- src/smoke.test.ts
+$env:TF_RUN_ROLE_BOOTSTRAP_DOCKER="1"
+pnpm --filter @workspace/api-server test -- src/role-bootstrap.docker.test.ts
 docker compose -f docker-compose.yml config --quiet
 docker compose -f artifacts/api-server/docker-compose.yml config --quiet
 ```
 
-Expected: all pass with disposable canary secret setup where required.
+Expected: all pass with disposable canary secret setup where required. The
+Docker proof covers fresh bootstrap, repeat normalization after migrations,
+managed-role login boundaries, cross-database isolation, and rejection with
+rollback for foreign ACL/default-ACL ownership. It removes only exact resources
+created by the proof and confirms none remain; it never performs a broad prune.
 
 - [ ] **Step 7: Commit**
 
@@ -686,6 +710,10 @@ Replace old `tf_postgres_password`/`tf_database_url` instructions with the six
 new secret files. State:
 
 - role init runs only on a fresh database volume;
+- the PostgreSQL instance is dedicated to Apollo TF; role bootstrap must not run
+  against a shared cluster;
+- the physical `tf_admin_database_url` file is `root:10002` mode `0440`, and
+  only the two profiled manual services receive supplemental group `10002`;
 - this project has no remote TF volume to adopt;
 - an old local volume must be backed up and inspected, then upgraded in exact
   order: configure `tf_admin_database_url` for its PostgreSQL superuser, run
