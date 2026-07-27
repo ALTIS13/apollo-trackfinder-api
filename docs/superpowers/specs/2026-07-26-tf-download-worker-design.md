@@ -7,6 +7,10 @@ the next logical server stage. This design resolves implementation details from
 the existing Apollo TF isolation, entitlement, Coolify, and web-first
 requirements without reopening previously approved choices.
 
+Amended: 2026-07-27 after release review to record the verified non-destructive
+BullMQ cancellation protocol, crash-recoverable admission lease, and explicit
+streaming `yt-dlp -> ffmpeg` conversion pipeline.
+
 ## Goal
 
 Move queued audio downloads out of the public API process into a dedicated,
@@ -118,13 +122,25 @@ browser installation IDs are forbidden in the contract.
 - there is no production in-memory worker or silent fallback;
 - queue unavailability is an explicit sanitized `503`;
 - global waiting plus active capacity is `200`;
+- admission is reserved in a same-slot exact-owner ledger; pending reservations
+  have a `30s` Redis-time lease so a crash before BullMQ job creation cannot
+  consume capacity permanently;
 - one enqueue request accepts at most `50` tracks;
 - jobs are retained for at most 24 hours, with bounded completed/failed counts;
 - job ownership uses only exact canonical account IDs;
 - status never exposes source URL, Redis failure details, absolute paths, or raw
   worker errors;
-- cancel is idempotent for already canceled jobs, removes waiting jobs, and
-  marks active jobs through a bounded cancellation key.
+- cancel is worker-mediated and non-destructive: waiting and active jobs stay
+  under BullMQ ownership, and an exact namespaced marker is stored in the
+  retained job hash;
+- an active cancellation is accepted only while the worker has atomically armed
+  that job hash; before returning success the worker atomically removes the
+  armed marker, while an already-requested cancellation wins the same
+  compare-and-set and rolls back committed output;
+- DELETE returns the factual BullMQ state until
+  `failedReason=download_canceled` confirms `canceled`; job retention owns
+  cancellation-marker cleanup, with no separate TTL key or event-stream
+  receipt.
 
 The API does not create a BullMQ `Worker` and does not execute background
 `yt-dlp`.
@@ -165,12 +181,16 @@ waiting -> active -> completed
 1. API validates entitlement, CSRF, batch size, quality, track ID, and source
    URL. It writes strict job data with the canonical account ID.
 2. Worker revalidates the strict job and source host before spawning anything.
-3. Output is written to an exclusive `.part` file under the owned storage
-   directory.
+3. `yt-dlp` streams the selected source container to an explicit `ffmpeg`
+   process. `ffmpeg` maps the first audio stream, removes video and metadata,
+   and emits the requested MP3 or FLAC bytes into an exclusive `.part` file
+   under the owned storage directory.
 4. The worker enforces a 30-minute job deadline and a hard 1 GiB output limit.
-5. Cancellation is checked before spawn and at most every 250 ms while active.
-   Cancellation terminates the child, removes partial output, and becomes a
-   non-retriable `canceled` result.
+5. Cancellation is armed before spawn and checked at most every 250 ms while
+   active. Cancellation terminates both downloader and transcoder, removes
+   partial or not-yet-finalized output, and becomes a non-retriable `canceled`
+   result. A same-hash completion fence decides the final DELETE/completion
+   race atomically.
 6. On success the worker fsyncs/closes the file, atomically renames it to an
    opaque job-based storage key, records strict result metadata, and reports
    100 percent progress.
@@ -308,6 +328,9 @@ Required evidence:
   signed-stream proxy tests;
 - worker job validation, process cancellation, timeout, size, atomic storage,
   cleanup, quota, and log-redaction tests;
+- a gated production-image media probe that generates an offline AAC source,
+  executes the real pinned `yt-dlp -> ffmpeg` adapter, and verifies MP3/FLAC
+  codecs plus absence of video with `ffprobe`;
 - internal HMAC raw-byte, target, timestamp, nonce, replay, partition, and
   capacity tests;
 - file ownership, symlink/path substitution, metadata, range, abort, and
