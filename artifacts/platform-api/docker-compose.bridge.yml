@@ -344,6 +344,52 @@ services:
       retries: 30
       start_period: 3s
 
+  tf-download-redis:
+    build:
+      context: .
+      dockerfile: artifacts/tf-download-worker/Dockerfile
+      target: queue-redis
+    image: apollo-tf-download-redis:bridge
+    restart: unless-stopped
+    user: "999:999"
+    read_only: true
+    init: true
+    environment:
+      TF_DOWNLOAD_QUEUE_PASSWORD_FILE: /run/secrets/tf_download_queue_password
+    secrets:
+      - source: tf_download_queue_password
+        target: tf_download_queue_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+    volumes:
+      - tf-download-redis-data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-download-queue
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    stop_grace_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+          pids: 128
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/queue-redis-health.sh"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
   tf-api:
     build:
       context: .
@@ -371,11 +417,42 @@ services:
       PORT: "8080"
       REDIS_URL: redis://tf-redis:6379/0
       SERVER_URL: ${TF_PUBLIC_ORIGIN:?}
+      TF_INTEGRATIONS_ALLOW_INSECURE_HTTP: "true"
+      TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_integrations_internal_auth_secret
+      TF_INTEGRATIONS_ORIGIN: http://tf-integrations:8080
+      TF_SEARCH_ALLOW_INSECURE_HTTP: "true"
+      TF_SEARCH_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_search_internal_auth_secret
+      TF_SEARCH_ORIGIN: http://tf-search:8080
+      TF_DOWNLOAD_WORKER_ALLOW_INSECURE_HTTP: "true"
+      TF_DOWNLOAD_WORKER_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_download_internal_auth_secret
+      TF_DOWNLOAD_WORKER_ORIGIN: http://tf-download-worker:8080
+      TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true"
+      TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: /run/secrets/tf_download_queue_redis_url
       WEB_URL: ${TF_PUBLIC_ORIGIN:?}
     secrets:
       - tf_client_secret
+      - source: tf_download_internal_auth_secret
+        target: tf_download_internal_auth_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_download_queue_redis_url
+        target: tf_download_queue_redis_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_integrations_internal_auth_secret
+        target: tf_integrations_internal_auth_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
       - source: tf_module_heartbeat_keys
         target: tf_module_heartbeat_keys
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_search_internal_auth_secret
+        target: tf_search_internal_auth_secret
         uid: "10001"
         gid: "10001"
         mode: "0400"
@@ -392,12 +469,15 @@ services:
       - bridge-edge
       - tf-data
       - platform-tf-control
+      - tf-download-queue
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     depends_on:
       platform-api:
+        condition: service_healthy
+      tf-download-redis:
         condition: service_healthy
       tf-migrate:
         condition: service_completed_successfully
@@ -440,6 +520,14 @@ secrets:
     file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_admin_database_url
   tf_client_secret:
     file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_client_secret
+  tf_download_internal_auth_secret:
+    file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_download_internal_auth_secret
+  tf_download_queue_password:
+    file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_download_queue_password
+  tf_download_queue_redis_url:
+    file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_download_queue_redis_url
+  tf_integrations_internal_auth_secret:
+    file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_integrations_internal_auth_secret
   tf_migrator_database_url:
     file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_migrator_database_url
   tf_migrator_password:
@@ -454,10 +542,13 @@ secrets:
     file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_runtime_database_url
   tf_runtime_password:
     file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_runtime_password
+  tf_search_internal_auth_secret:
+    file: ${BRIDGE_SECRET_DIRECTORY:?}/tf_search_internal_auth_secret
 
 volumes:
   platform-postgres-data:
   platform-redis-data:
+  tf-download-redis-data:
   tf-postgres-data:
   tf-redis-data:
 
@@ -466,6 +557,8 @@ networks:
   platform-data:
     internal: true
   tf-data:
+    internal: true
+  tf-download-queue:
     internal: true
   platform-tf-control:
     internal: true

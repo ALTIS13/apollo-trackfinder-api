@@ -11,6 +11,7 @@ import {
   readFile,
   readdir,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -45,12 +46,16 @@ const platformDockerfile = fileURLToPath(
 const tfDockerfile = fileURLToPath(
   new URL("../../api-server/Dockerfile", import.meta.url),
 );
+const tfDownloadWorkerDockerfile = fileURLToPath(
+  new URL("../../tf-download-worker/Dockerfile", import.meta.url),
+);
 const expectedServices = Object.freeze([
   "platform-api",
   "platform-migrate",
   "platform-postgres",
   "platform-redis",
   "tf-api",
+  "tf-download-redis",
   "tf-migrate",
   "tf-postgres",
   "tf-redis",
@@ -70,6 +75,10 @@ const secretFileNames = Object.freeze([
   "platform_runtime_password",
   "tf_admin_database_url",
   "tf_client_secret",
+  "tf_download_internal_auth_secret",
+  "tf_download_queue_password",
+  "tf_download_queue_redis_url",
+  "tf_integrations_internal_auth_secret",
   "tf_migrator_database_url",
   "tf_migrator_password",
   "tf_module_heartbeat_keys",
@@ -77,6 +86,7 @@ const secretFileNames = Object.freeze([
   "tf_postgres_admin_password",
   "tf_runtime_database_url",
   "tf_runtime_password",
+  "tf_search_internal_auth_secret",
 ]);
 const contractCanaries = Object.freeze({
   platformDatabase:
@@ -90,7 +100,12 @@ const contractCanaries = Object.freeze({
   tfRuntimeDatabase:
     "postgres://apollo_tf_runtime:tf-runtime-canary@tf-postgres:5432/apollo_tf",
   tfAccountHeartbeat: randomBytes(32).toString("base64url"),
+  tfDownloadHeartbeat: randomBytes(32).toString("base64url"),
   tfSearchHeartbeat: randomBytes(32).toString("base64url"),
+  tfDownloadInternalAuth: randomBytes(32).toString("base64url"),
+  tfDownloadQueuePassword: randomBytes(32).toString("base64url"),
+  tfIntegrationsInternalAuth: randomBytes(32).toString("base64url"),
+  tfSearchInternalAuth: randomBytes(32).toString("base64url"),
 });
 
 type ComposeService = Record<string, unknown>;
@@ -199,6 +214,17 @@ type SmokeModule = {
       };
     },
   ) => Promise<void>;
+  createSmokeDownloadFixture?: () => {
+    trackId: string;
+    request: {
+      tracks: Array<{
+        trackId: string;
+        artist: string;
+        title: string;
+        quality: "320";
+      }>;
+    };
+  };
   retainSocket?: <
     Socket extends { once(event: "close", listener: () => void): unknown },
   >(
@@ -224,6 +250,7 @@ type SmokeModule = {
     dependencies: LifecycleDependencies,
     options?: { signal?: AbortSignal },
   ) => Promise<void>;
+  sanitizedDiagnostic?: (error: unknown, secrets: string[]) => string;
   runWithLifecycleDeadline?: (
     operation: (signal: AbortSignal) => Promise<void>,
     timeoutMs: number,
@@ -308,11 +335,24 @@ async function withContractSecrets<T>(
           value = contractCanaries.tfRuntimeDatabase;
         } else if (name === "tf_client_secret") {
           value = contractCanaries.platformClientSecret;
+        } else if (name === "tf_download_internal_auth_secret") {
+          value = contractCanaries.tfDownloadInternalAuth;
+        } else if (name === "tf_download_queue_password") {
+          value = contractCanaries.tfDownloadQueuePassword;
+        } else if (name === "tf_download_queue_redis_url") {
+          value =
+            `redis://default:${encodeURIComponent(contractCanaries.tfDownloadQueuePassword)}` +
+            "@tf-download-redis:6379/0";
+        } else if (name === "tf_integrations_internal_auth_secret") {
+          value = contractCanaries.tfIntegrationsInternalAuth;
         } else if (name === "tf_module_heartbeat_keys") {
           value = JSON.stringify({
             "account-integrations": contractCanaries.tfAccountHeartbeat,
+            "download-worker": contractCanaries.tfDownloadHeartbeat,
             "search-media": contractCanaries.tfSearchHeartbeat,
           });
+        } else if (name === "tf_search_internal_auth_secret") {
+          value = contractCanaries.tfSearchInternalAuth;
         }
         return writeFile(join(directory, name), value, "utf8");
       }),
@@ -425,6 +465,7 @@ describe("Platform-TF bridge container contract", () => {
       "platform-api",
       "platform-migrate",
       "tf-api",
+      "tf-download-redis",
       "tf-migrate",
     ]) {
       expect(
@@ -439,6 +480,7 @@ describe("Platform-TF bridge container contract", () => {
       "platform-postgres",
       "platform-redis",
       "platform-migrate",
+      "tf-download-redis",
       "tf-postgres",
       "tf-redis",
     ]) {
@@ -455,6 +497,7 @@ describe("Platform-TF bridge container contract", () => {
     });
     expect(service(config, "tf-api").depends_on).toMatchObject({
       "platform-api": { condition: "service_healthy" },
+      "tf-download-redis": { condition: "service_healthy" },
       "tf-migrate": { condition: "service_completed_successfully" },
       "tf-redis": { condition: "service_healthy" },
     });
@@ -479,6 +522,7 @@ describe("Platform-TF bridge container contract", () => {
       "platform-data",
       "platform-tf-control",
       "tf-data",
+      "tf-download-queue",
     ]);
     expect(attachedNetworks(service(config, "platform-postgres"))).toEqual([
       "platform-data",
@@ -490,6 +534,9 @@ describe("Platform-TF bridge container contract", () => {
       "tf-data",
     ]);
     expect(attachedNetworks(service(config, "tf-redis"))).toEqual(["tf-data"]);
+    expect(attachedNetworks(service(config, "tf-download-redis"))).toEqual([
+      "tf-download-queue",
+    ]);
     expect(attachedNetworks(service(config, "tf-migrate"))).toEqual([
       "tf-data",
     ]);
@@ -502,14 +549,17 @@ describe("Platform-TF bridge container contract", () => {
       "bridge-edge",
       "platform-tf-control",
       "tf-data",
+      "tf-download-queue",
     ]);
     expect(config.networks["bridge-edge"]?.internal).not.toBe(true);
     expect(config.networks["platform-data"]?.internal).toBe(true);
     expect(config.networks["platform-tf-control"]?.internal).toBe(true);
     expect(config.networks["tf-data"]?.internal).toBe(true);
+    expect(config.networks["tf-download-queue"]?.internal).toBe(true);
     expect(Object.keys(config.volumes).sort()).toEqual([
       "platform-postgres-data",
       "platform-redis-data",
+      "tf-download-redis-data",
       "tf-postgres-data",
       "tf-redis-data",
     ]);
@@ -520,6 +570,7 @@ describe("Platform-TF bridge container contract", () => {
     const platformApi = service(config, "platform-api");
     const platformMigrate = service(config, "platform-migrate");
     const tfApi = service(config, "tf-api");
+    const tfDownloadRedis = service(config, "tf-download-redis");
     const tfMigrate = service(config, "tf-migrate");
     const tfPostgres = service(config, "tf-postgres");
 
@@ -538,9 +589,16 @@ describe("Platform-TF bridge container contract", () => {
     ]);
     expect(secretSources(tfApi)).toEqual([
       "tf_client_secret",
+      "tf_download_internal_auth_secret",
+      "tf_download_queue_redis_url",
+      "tf_integrations_internal_auth_secret",
       "tf_module_heartbeat_keys",
       "tf_pkce_verifier",
       "tf_runtime_database_url",
+      "tf_search_internal_auth_secret",
+    ]);
+    expect(secretSources(tfDownloadRedis)).toEqual([
+      "tf_download_queue_password",
     ]);
     expect(secretSources(tfMigrate)).toEqual(["tf_migrator_database_url"]);
     expect(secretSources(tfPostgres)).toEqual([
@@ -563,17 +621,71 @@ describe("Platform-TF bridge container contract", () => {
       (name) => name !== "tf-api",
     )) {
       expect(
-        (service(config, name).environment as Record<string, unknown> | undefined) ??
-          {},
+        (service(config, name).environment as
+          | Record<string, unknown>
+          | undefined) ?? {},
       ).not.toHaveProperty("APOLLO_MODULE_HEARTBEAT_KEYS_FILE");
     }
     expect(tfApi.environment).not.toHaveProperty("DATABASE_URL");
-    expect(secretMount(tfApi, "tf_module_heartbeat_keys")).toMatchObject({
-      target: "tf_module_heartbeat_keys",
-      uid: "10001",
-      gid: "10001",
+    const tfApiSecretFiles = [
+      "tf_download_internal_auth_secret",
+      "tf_download_queue_redis_url",
+      "tf_integrations_internal_auth_secret",
+      "tf_module_heartbeat_keys",
+      "tf_search_internal_auth_secret",
+    ];
+    for (const name of tfApiSecretFiles) {
+      expect(secretMount(tfApi, name)).toMatchObject({
+        target: name,
+        uid: "10001",
+        gid: "10001",
+        mode: "0400",
+      });
+    }
+    expect(
+      secretMount(tfDownloadRedis, "tf_download_queue_password"),
+    ).toMatchObject({
+      target: "tf_download_queue_password",
+      uid: "999",
+      gid: "999",
       mode: "0400",
     });
+    const tfApiEnvironment = tfApi.environment as Record<string, unknown>;
+    expect(tfApiEnvironment).toMatchObject({
+      TF_INTEGRATIONS_ALLOW_INSECURE_HTTP: "true",
+      TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE:
+        "/run/secrets/tf_integrations_internal_auth_secret",
+      TF_INTEGRATIONS_ORIGIN: "http://tf-integrations:8080",
+      TF_SEARCH_ALLOW_INSECURE_HTTP: "true",
+      TF_SEARCH_INTERNAL_AUTH_SECRET_FILE:
+        "/run/secrets/tf_search_internal_auth_secret",
+      TF_SEARCH_ORIGIN: "http://tf-search:8080",
+      TF_DOWNLOAD_WORKER_ALLOW_INSECURE_HTTP: "true",
+      TF_DOWNLOAD_WORKER_INTERNAL_AUTH_SECRET_FILE:
+        "/run/secrets/tf_download_internal_auth_secret",
+      TF_DOWNLOAD_WORKER_ORIGIN: "http://tf-download-worker:8080",
+      TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+      TF_DOWNLOAD_QUEUE_REDIS_URL_FILE:
+        "/run/secrets/tf_download_queue_redis_url",
+    });
+    expect(tfDownloadRedis.environment).toEqual({
+      TF_DOWNLOAD_QUEUE_PASSWORD_FILE:
+        "/run/secrets/tf_download_queue_password",
+    });
+    const tfOnlyEnvironment = Object.keys(tfApiEnvironment).filter((name) =>
+      name.startsWith("TF_"),
+    );
+    for (const name of Object.keys(config.services).filter(
+      (name) => name !== "tf-api",
+    )) {
+      const environment =
+        (service(config, name).environment as
+          | Record<string, unknown>
+          | undefined) ?? {};
+      for (const variable of tfOnlyEnvironment) {
+        expect(environment).not.toHaveProperty(variable);
+      }
+    }
     for (const name of Object.keys(config.services).filter((name) =>
       name.startsWith("platform-"),
     )) {
@@ -583,6 +695,10 @@ describe("Platform-TF bridge container contract", () => {
     }
     expect(JSON.stringify(tfApi)).not.toContain(
       "platform_runtime_database_url",
+    );
+    expect(JSON.stringify(tfApi)).not.toContain("tf_download_queue_password");
+    expect(JSON.stringify(tfDownloadRedis)).not.toMatch(
+      /tf_(?:admin|client|download_internal_auth|download_queue_redis_url|integrations_internal_auth|migrator|module_heartbeat|pkce|postgres|runtime|search_internal_auth)/,
     );
     expect(JSON.stringify(service(config, "platform-postgres"))).not.toContain(
       "tf_postgres_admin_password",
@@ -702,6 +818,56 @@ describe("Platform-TF bridge container contract", () => {
         expect(current.cap_drop).toContain("ALL");
       }
     }
+    const queueRedis = service(config, "tf-download-redis");
+
+    expect(queueRedis.build).toMatchObject({
+      dockerfile: "artifacts/tf-download-worker/Dockerfile",
+      target: "queue-redis",
+    });
+    expect(
+      resolve(
+        (queueRedis.build as { context?: string } | undefined)?.context ?? "",
+      ),
+    ).toBe(resolve(repositoryRoot));
+    expect(queueRedis.image).toBe("apollo-tf-download-redis:bridge");
+    expect(queueRedis.user).toBe("999:999");
+    expect(queueRedis.read_only).toBe(true);
+    expect(queueRedis.init).toBe(true);
+    expect(queueRedis.tmpfs).toEqual(["/tmp:rw,noexec,nosuid,size=16m"]);
+    expect(queueRedis.networks).toEqual({
+      "tf-download-queue": null,
+    });
+    expect(queueRedis.security_opt).toEqual(["no-new-privileges:true"]);
+    expect(queueRedis.cap_drop).toEqual(["ALL"]);
+    expect(queueRedis.pids_limit).toBe(128);
+    expect(queueRedis.stop_grace_period).toBe("20s");
+    expect(queueRedis.deploy).toEqual({
+      placement: {},
+      resources: {
+        limits: { cpus: 0.5, memory: "268435456", pids: 128 },
+        reservations: { cpus: 0.1, memory: "67108864" },
+      },
+    });
+    expect(queueRedis.healthcheck).toEqual({
+      test: ["CMD", "/usr/local/bin/queue-redis-health.sh"],
+      interval: "5s",
+      timeout: "3s",
+      retries: 20,
+      start_period: "5s",
+    });
+    expect(queueRedis.ports).toBeUndefined();
+    expect(queueRedis.volumes).toEqual([
+      {
+        type: "volume",
+        source: "tf-download-redis-data",
+        target: "/data",
+        volume: {},
+      },
+    ]);
+
+    const dockerfile = await readFile(tfDownloadWorkerDockerfile, "utf8");
+    expect(dockerfile).toContain("AS queue-redis");
+    expect(dockerfile).toContain("/usr/local/bin/queue-redis-health.sh");
   }, 20_000);
 
   test("builds immutable non-root API images without copying secrets", async () => {
@@ -772,6 +938,24 @@ describe("Platform-TF bridge container contract", () => {
       1,
     );
     expect(smoke.match(/\.\.\.protectedTfHeaders\(state\)/g)).toHaveLength(1);
+
+    const smokeModule = await loadSmokeModule();
+    expect(smokeModule.createSmokeDownloadFixture).toBeTypeOf("function");
+    const sourceUrl = "https://www.youtube.com/watch?v=apollo_bridge_download";
+    const trackId = `yt_${Buffer.from(sourceUrl, "utf8").toString("base64url")}`;
+    expect(smokeModule.createSmokeDownloadFixture!()).toEqual({
+      trackId,
+      request: {
+        tracks: [
+          {
+            trackId,
+            artist: "Bridge Artist",
+            title: "Bridge Track",
+            quality: "320",
+          },
+        ],
+      },
+    });
   });
 
   test("keeps root and TF deployment templates loopback-bound and secret-backed", async () => {
@@ -798,6 +982,7 @@ describe("Platform-TF bridge container contract", () => {
     expect(source).not.toContain("${PLATFORM_POSTGRES_IMAGE");
     expect(source).not.toContain("${PLATFORM_API_IMAGE");
     expect(source).not.toContain("${TF_API_IMAGE");
+    expect(source).not.toContain("${TF_DOWNLOAD_REDIS_IMAGE");
 
     const { config } = await renderedBridgeCompose();
     expect(service(config, "platform-postgres").image).toBe(
@@ -810,13 +995,16 @@ describe("Platform-TF bridge container contract", () => {
       "apollo-platform-api:bridge",
     );
     expect(service(config, "tf-api").image).toBe("apollo-tf-api:bridge");
+    expect(service(config, "tf-download-redis").image).toBe(
+      "apollo-tf-download-redis:bridge",
+    );
     expect(service(config, "tf-migrate").image).toBe("apollo-tf-api:bridge");
     expect(service(config, "tf-postgres").image).toBe(
       "apollo-tf-postgres:bridge",
     );
   });
 
-  test("generates distinct bounded TF heartbeat keys and includes both in canary scans", async () => {
+  test("binds distinct generated TF command and queue secrets into raw canary scans", async () => {
     const smokeModule = await loadSmokeModule();
     expect(smokeModule.prepareSecretDirectory).toBeTypeOf("function");
     const environment = {} as NodeJS.ProcessEnv;
@@ -833,11 +1021,12 @@ describe("Platform-TF bridge container contract", () => {
       ) as Record<string, unknown>;
       expect(Object.keys(heartbeat).sort()).toEqual([
         "account-integrations",
+        "download-worker",
         "search-media",
       ]);
       const values = Object.values(heartbeat);
       expect(values.every((value) => typeof value === "string")).toBe(true);
-      expect(new Set(values).size).toBe(2);
+      expect(new Set(values).size).toBe(3);
       expect(
         values.every(
           (value) =>
@@ -848,6 +1037,82 @@ describe("Platform-TF bridge container contract", () => {
       expect(
         values.every((value) => fixture.rawSecrets.includes(value as string)),
       ).toBe(true);
+      const commandSecretNames = [
+        "tf_integrations_internal_auth_secret",
+        "tf_search_internal_auth_secret",
+        "tf_download_internal_auth_secret",
+      ];
+      const commandSecrets = await Promise.all(
+        commandSecretNames.map((name) =>
+          readFile(join(directory!, name), "utf8"),
+        ),
+      );
+      const queuePassword = await readFile(
+        join(directory, "tf_download_queue_password"),
+        "utf8",
+      );
+      const queueUrl = await readFile(
+        join(directory, "tf_download_queue_redis_url"),
+        "utf8",
+      );
+      const oauthClientSecret = await readFile(
+        join(directory, "tf_client_secret"),
+        "utf8",
+      );
+      const pkceVerifier = await readFile(
+        join(directory, "tf_pkce_verifier"),
+        "utf8",
+      );
+      const generatedCommandAndAuthValues = [
+        ...commandSecrets,
+        queuePassword,
+        oauthClientSecret,
+        pkceVerifier,
+        ...values.map(String),
+      ];
+      expect(new Set(generatedCommandAndAuthValues).size).toBe(
+        generatedCommandAndAuthValues.length,
+      );
+      for (const value of [...commandSecrets, queuePassword]) {
+        expect(Buffer.byteLength(value, "utf8")).toBeGreaterThanOrEqual(32);
+        expect(Buffer.byteLength(value, "utf8")).toBeLessThanOrEqual(512);
+        expect(fixture.rawSecrets).toContain(value);
+      }
+      expect(queueUrl).toBe(
+        `redis://default:${encodeURIComponent(queuePassword)}` +
+          "@tf-download-redis:6379/0",
+      );
+      expect(fixture.rawSecrets).toContain(queueUrl);
+      for (const name of commandSecretNames) {
+        const metadata = await stat(join(directory, name));
+        if (process.platform === "win32") {
+          expect(metadata.mode & 0o777).toBe(0o444);
+        } else {
+          expect(metadata.mode & 0o777).toBe(0o400);
+          expect(metadata.uid).toBe(10001);
+          expect(metadata.gid).toBe(10001);
+        }
+      }
+      const queuePasswordMetadata = await stat(
+        join(directory, "tf_download_queue_password"),
+      );
+      if (process.platform === "win32") {
+        expect(queuePasswordMetadata.mode & 0o777).toBe(0o444);
+      } else {
+        expect(queuePasswordMetadata.mode & 0o777).toBe(0o400);
+        expect(queuePasswordMetadata.uid).toBe(999);
+        expect(queuePasswordMetadata.gid).toBe(999);
+      }
+      const queueUrlMetadata = await stat(
+        join(directory, "tf_download_queue_redis_url"),
+      );
+      if (process.platform === "win32") {
+        expect(queueUrlMetadata.mode & 0o777).toBe(0o444);
+      } else {
+        expect(queueUrlMetadata.mode & 0o777).toBe(0o400);
+        expect(queueUrlMetadata.uid).toBe(10001);
+        expect(queueUrlMetadata.gid).toBe(10001);
+      }
     } finally {
       if (directory !== undefined) {
         await rm(directory, { force: true, recursive: true });
@@ -929,6 +1194,7 @@ describe("bridge smoke orchestration", () => {
       runBridgeLifecycle?: (
         dependencies: LifecycleDependencies,
       ) => Promise<void>;
+      sanitizedDiagnostic?: (error: unknown, secrets: string[]) => string;
     };
     expect(smokeModule.runBridgeLifecycle).toBeTypeOf("function");
     const order: string[] = [];
@@ -964,6 +1230,20 @@ describe("bridge smoke orchestration", () => {
       "log-scan",
       "down",
     ]);
+
+    expect(smokeModule.sanitizedDiagnostic).toBeTypeOf("function");
+    const diagnosticSecret = randomBytes(32).toString("base64url");
+    const diagnostic = smokeModule.sanitizedDiagnostic!(
+      new Error(
+        `${"compose progress\n".repeat(1_000)}` +
+          `tf-api-1 | TF API startup failed ${diagnosticSecret}`,
+      ),
+      [diagnosticSecret],
+    );
+    expect(diagnostic).toContain("tf-api-1 | TF API startup failed");
+    expect(diagnostic).not.toContain(diagnosticSecret);
+    expect(diagnostic).toContain("<redacted>");
+    expect(Buffer.byteLength(diagnostic, "utf8")).toBeLessThanOrEqual(8_192);
   });
 
   test("unwinds lifecycle and caller cleanup after the in-process deadline", async () => {
@@ -1351,6 +1631,54 @@ describe("bridge smoke orchestration", () => {
           >
         ).APOLLO_MODULE_HEARTBEAT_KEYS_FILE =
           "/run/secrets/tf_module_heartbeat_keys";
+      },
+      (candidate) => {
+        (
+          service(candidate, "platform-api").environment as Record<
+            string,
+            unknown
+          >
+        ).TF_SEARCH_ORIGIN = "http://tf-search:8080";
+      },
+      (candidate) => {
+        (
+          service(candidate, "platform-api").secrets as Array<
+            Record<string, unknown>
+          >
+        ).push({
+          source: "tf_search_internal_auth_secret",
+          target: "tf_search_internal_auth_secret",
+        });
+      },
+      (candidate) => {
+        (
+          service(candidate, "tf-api").secrets as Array<Record<string, unknown>>
+        ).push({
+          source: "tf_download_queue_password",
+          target: "tf_download_queue_password",
+        });
+      },
+      (candidate) => {
+        (
+          service(candidate, "tf-download-redis").secrets as Array<
+            Record<string, unknown>
+          >
+        ).push({
+          source: "tf_download_queue_redis_url",
+          target: "tf_download_queue_redis_url",
+        });
+      },
+      (candidate) => {
+        service(candidate, "tf-download-redis").networks = [
+          "tf-download-queue",
+          "tf-data",
+        ];
+      },
+      (candidate) => {
+        service(candidate, "tf-redis").networks = [
+          "tf-data",
+          "tf-download-queue",
+        ];
       },
       (candidate) => {
         service(candidate, "tf-api").cap_drop = [];
@@ -1938,6 +2266,36 @@ if (command === "config") {
       networks: ["tf-data"],
       volumes: [{ type: "volume", source: "tf-redis-data", target: "/data" }],
     },
+    "tf-download-redis": {
+      build: { context: process.cwd(), dockerfile: "artifacts/tf-download-worker/Dockerfile", target: "queue-redis" },
+      image: "apollo-tf-download-redis:bridge",
+      user: "999:999",
+      read_only: true,
+      init: true,
+      environment: { TF_DOWNLOAD_QUEUE_PASSWORD_FILE: "/run/secrets/tf_download_queue_password" },
+      secrets: [{ source: "tf_download_queue_password", target: "tf_download_queue_password", uid: "999", gid: "999", mode: "0400" }],
+      volumes: [{ type: "volume", source: "tf-download-redis-data", target: "/data" }],
+      tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"],
+      networks: ["tf-download-queue"],
+      security_opt: ["no-new-privileges:true"],
+      cap_drop: ["ALL"],
+      pids_limit: 128,
+      stop_grace_period: "20s",
+      deploy: {
+        placement: {},
+        resources: {
+          limits: { cpus: 0.5, memory: "268435456", pids: 128 },
+          reservations: { cpus: 0.1, memory: "67108864" },
+        },
+      },
+      healthcheck: {
+        test: ["CMD", "/usr/local/bin/queue-redis-health.sh"],
+        interval: "5s",
+        timeout: "3s",
+        retries: 20,
+        start_period: "5s",
+      },
+    },
     "tf-migrate": {
       ...runtime(["tf-data"], [{ source: "tf_migrator_database_url", target: "tf_migrator_database_url", uid: "10001", gid: "10001", mode: "0400" }]),
       build: { context: process.cwd(), dockerfile: "artifacts/api-server/Dockerfile", target: "runner" },
@@ -1947,20 +2305,35 @@ if (command === "config") {
       depends_on: { "tf-postgres": { condition: "service_healthy" } },
     },
     "tf-api": {
-      ...runtime(["bridge-edge","platform-tf-control","tf-data"], ["tf_client_secret",{ source: "tf_module_heartbeat_keys", target: "tf_module_heartbeat_keys", uid: "10001", gid: "10001", mode: "0400" },"tf_pkce_verifier",{ source: "tf_runtime_database_url", target: "tf_runtime_database_url", uid: "10001", gid: "10001", mode: "0400" }]),
+      ...runtime(["bridge-edge","platform-tf-control","tf-data","tf-download-queue"], ["tf_client_secret",{ source: "tf_download_internal_auth_secret", target: "tf_download_internal_auth_secret", uid: "10001", gid: "10001", mode: "0400" },{ source: "tf_download_queue_redis_url", target: "tf_download_queue_redis_url", uid: "10001", gid: "10001", mode: "0400" },{ source: "tf_integrations_internal_auth_secret", target: "tf_integrations_internal_auth_secret", uid: "10001", gid: "10001", mode: "0400" },{ source: "tf_module_heartbeat_keys", target: "tf_module_heartbeat_keys", uid: "10001", gid: "10001", mode: "0400" },"tf_pkce_verifier",{ source: "tf_runtime_database_url", target: "tf_runtime_database_url", uid: "10001", gid: "10001", mode: "0400" },{ source: "tf_search_internal_auth_secret", target: "tf_search_internal_auth_secret", uid: "10001", gid: "10001", mode: "0400" }]),
       build: { context: process.cwd(), dockerfile: "artifacts/api-server/Dockerfile", target: "runner" },
       image: "apollo-tf-api:bridge",
-      environment: { APOLLO_MODULE_HEARTBEAT_KEYS_FILE: "/run/secrets/tf_module_heartbeat_keys", DATABASE_URL_FILE: "/run/secrets/tf_runtime_database_url" },
+      environment: {
+        APOLLO_MODULE_HEARTBEAT_KEYS_FILE: "/run/secrets/tf_module_heartbeat_keys",
+        DATABASE_URL_FILE: "/run/secrets/tf_runtime_database_url",
+        TF_INTEGRATIONS_ALLOW_INSECURE_HTTP: "true",
+        TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE: "/run/secrets/tf_integrations_internal_auth_secret",
+        TF_INTEGRATIONS_ORIGIN: "http://tf-integrations:8080",
+        TF_SEARCH_ALLOW_INSECURE_HTTP: "true",
+        TF_SEARCH_INTERNAL_AUTH_SECRET_FILE: "/run/secrets/tf_search_internal_auth_secret",
+        TF_SEARCH_ORIGIN: "http://tf-search:8080",
+        TF_DOWNLOAD_WORKER_ALLOW_INSECURE_HTTP: "true",
+        TF_DOWNLOAD_WORKER_INTERNAL_AUTH_SECRET_FILE: "/run/secrets/tf_download_internal_auth_secret",
+        TF_DOWNLOAD_WORKER_ORIGIN: "http://tf-download-worker:8080",
+        TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+        TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: "/run/secrets/tf_download_queue_redis_url",
+      },
       ports: [{ host_ip: "127.0.0.1", published: value("TF_API_PORT"), target: 8080 }],
       depends_on: {
         "platform-api": { condition: "service_healthy" },
+        "tf-download-redis": { condition: "service_healthy" },
         "tf-migrate": { condition: "service_completed_successfully" },
         "tf-postgres": { condition: "service_healthy" },
         "tf-redis": { condition: "service_healthy" },
       },
     },
   };
-  const names = ["platform_assertion_private_jwk","platform_assertion_public_jwks","platform_migrator_database_url","platform_migrator_password","platform_oauth_clients","platform_operator_bootstrap_token","platform_postgres_admin_password","platform_runtime_database_url","platform_runtime_password","tf_client_secret","tf_migrator_database_url","tf_migrator_password","tf_module_heartbeat_keys","tf_pkce_verifier","tf_postgres_admin_password","tf_runtime_database_url","tf_runtime_password"];
+  const names = ["platform_assertion_private_jwk","platform_assertion_public_jwks","platform_migrator_database_url","platform_migrator_password","platform_oauth_clients","platform_operator_bootstrap_token","platform_postgres_admin_password","platform_runtime_database_url","platform_runtime_password","tf_client_secret","tf_download_internal_auth_secret","tf_download_queue_password","tf_download_queue_redis_url","tf_integrations_internal_auth_secret","tf_migrator_database_url","tf_migrator_password","tf_module_heartbeat_keys","tf_pkce_verifier","tf_postgres_admin_password","tf_runtime_database_url","tf_runtime_password","tf_search_internal_auth_secret"];
   process.stdout.write(JSON.stringify({
     services,
     networks: {
@@ -1968,10 +2341,12 @@ if (command === "config") {
       "platform-data": { internal: true },
       "platform-tf-control": { internal: true },
       "tf-data": { internal: true },
+      "tf-download-queue": { internal: true },
     },
     volumes: {
       "platform-postgres-data": {},
       "platform-redis-data": {},
+      "tf-download-redis-data": {},
       "tf-postgres-data": {},
       "tf-redis-data": {},
     },

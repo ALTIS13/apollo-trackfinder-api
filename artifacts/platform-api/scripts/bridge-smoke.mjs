@@ -37,6 +37,7 @@ const EXPECTED_SERVICES = Object.freeze([
   "platform-postgres",
   "platform-redis",
   "tf-api",
+  "tf-download-redis",
   "tf-migrate",
   "tf-postgres",
   "tf-redis",
@@ -318,7 +319,7 @@ function assertSecretFree(text, secrets, label) {
   }
 }
 
-function sanitizedDiagnostic(error, secrets) {
+export function sanitizedDiagnostic(error, secrets) {
   const candidates = [
     error instanceof Error ? error.message : "",
     typeof error?.stdout === "string" ? error.stdout : "",
@@ -329,7 +330,7 @@ function sanitizedDiagnostic(error, secrets) {
     output = output.replaceAll(secret, "<redacted>");
     output = output.replaceAll(digest(secret), "<redacted-digest>");
   }
-  return output.slice(0, 8_192);
+  return output.slice(-8_192);
 }
 
 async function assertTrackedFilesSecretFree(secrets) {
@@ -645,8 +646,36 @@ export async function prepareSecretDirectory(environment, tfPublicOrigin) {
     while (accountIntegrationsHeartbeatKey === searchMediaHeartbeatKey) {
       accountIntegrationsHeartbeatKey = generatedSecret();
     }
+    let downloadWorkerHeartbeatKey = generatedSecret();
+    while (
+      downloadWorkerHeartbeatKey === searchMediaHeartbeatKey ||
+      downloadWorkerHeartbeatKey === accountIntegrationsHeartbeatKey
+    ) {
+      downloadWorkerHeartbeatKey = generatedSecret();
+    }
+    const generatedAuthSecrets = new Set([
+      oauthClientSecret,
+      pkceVerifier,
+      searchMediaHeartbeatKey,
+      accountIntegrationsHeartbeatKey,
+      downloadWorkerHeartbeatKey,
+    ]);
+    const independentAuthSecret = () => {
+      let value = generatedSecret();
+      while (generatedAuthSecrets.has(value)) value = generatedSecret();
+      generatedAuthSecrets.add(value);
+      return value;
+    };
+    const tfIntegrationsInternalAuthSecret = independentAuthSecret();
+    const tfSearchInternalAuthSecret = independentAuthSecret();
+    const tfDownloadInternalAuthSecret = independentAuthSecret();
+    const tfDownloadQueuePassword = independentAuthSecret();
+    const tfDownloadQueueRedisUrl =
+      `redis://default:${encodeURIComponent(tfDownloadQueuePassword)}` +
+      "@tf-download-redis:6379/0";
     const tfModuleHeartbeatKeys = {
       "account-integrations": accountIntegrationsHeartbeatKey,
+      "download-worker": downloadWorkerHeartbeatKey,
       "search-media": searchMediaHeartbeatKey,
     };
     const platformMigratorDatabaseUrl =
@@ -740,6 +769,42 @@ export async function prepareSecretDirectory(environment, tfPublicOrigin) {
         { value: oauthClientSecret, uid: 10001, gid: 10001, mode: 0o400 },
       ],
       [
+        "tf_download_internal_auth_secret",
+        {
+          value: tfDownloadInternalAuthSecret,
+          uid: 10001,
+          gid: 10001,
+          mode: 0o400,
+        },
+      ],
+      [
+        "tf_download_queue_password",
+        {
+          value: tfDownloadQueuePassword,
+          uid: 999,
+          gid: 999,
+          mode: 0o400,
+        },
+      ],
+      [
+        "tf_download_queue_redis_url",
+        {
+          value: tfDownloadQueueRedisUrl,
+          uid: 10001,
+          gid: 10001,
+          mode: 0o400,
+        },
+      ],
+      [
+        "tf_integrations_internal_auth_secret",
+        {
+          value: tfIntegrationsInternalAuthSecret,
+          uid: 10001,
+          gid: 10001,
+          mode: 0o400,
+        },
+      ],
+      [
         "tf_migrator_database_url",
         {
           value: tfMigratorDatabaseUrl,
@@ -782,6 +847,15 @@ export async function prepareSecretDirectory(environment, tfPublicOrigin) {
         "tf_runtime_password",
         { value: tfRuntimePassword, uid: 999, gid: 999, mode: 0o400 },
       ],
+      [
+        "tf_search_internal_auth_secret",
+        {
+          value: tfSearchInternalAuthSecret,
+          uid: 10001,
+          gid: 10001,
+          mode: 0o400,
+        },
+      ],
     ]);
     await Promise.all(
       [...files].map(async ([name, metadata]) => {
@@ -823,7 +897,13 @@ export async function prepareSecretDirectory(environment, tfPublicOrigin) {
         oauthClientSecret,
         pkceVerifier,
         accountIntegrationsHeartbeatKey,
+        downloadWorkerHeartbeatKey,
         searchMediaHeartbeatKey,
+        tfIntegrationsInternalAuthSecret,
+        tfSearchInternalAuthSecret,
+        tfDownloadInternalAuthSecret,
+        tfDownloadQueuePassword,
+        tfDownloadQueueRedisUrl,
         platformMigratorDatabaseUrl,
         platformRuntimeDatabaseUrl,
         tfAdminDatabaseUrl,
@@ -971,9 +1051,15 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     "platform-data",
     "platform-tf-control",
     "tf-data",
+    "tf-download-queue",
   ]);
   assert.notEqual(config.networks["bridge-edge"]?.internal, true);
-  for (const name of ["platform-data", "platform-tf-control", "tf-data"]) {
+  for (const name of [
+    "platform-data",
+    "platform-tf-control",
+    "tf-data",
+    "tf-download-queue",
+  ]) {
     assert.equal(
       config.networks[name]?.internal,
       true,
@@ -983,6 +1069,7 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
   assert.deepEqual(Object.keys(config.volumes ?? {}).sort(), [
     "platform-postgres-data",
     "platform-redis-data",
+    "tf-download-redis-data",
     "tf-postgres-data",
     "tf-redis-data",
   ]);
@@ -997,6 +1084,10 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     "platform_runtime_database_url",
     "platform_runtime_password",
     "tf_client_secret",
+    "tf_download_internal_auth_secret",
+    "tf_download_queue_password",
+    "tf_download_queue_redis_url",
+    "tf_integrations_internal_auth_secret",
     "tf_migrator_database_url",
     "tf_migrator_password",
     "tf_module_heartbeat_keys",
@@ -1004,6 +1095,7 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     "tf_postgres_admin_password",
     "tf_runtime_database_url",
     "tf_runtime_password",
+    "tf_search_internal_auth_secret",
   ]);
   for (const name of Object.keys(config.secrets)) {
     assert.equal(
@@ -1020,8 +1112,14 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     "platform-api": ["bridge-edge", "platform-data", "platform-tf-control"],
     "tf-postgres": ["tf-data"],
     "tf-redis": ["tf-data"],
+    "tf-download-redis": ["tf-download-queue"],
     "tf-migrate": ["tf-data"],
-    "tf-api": ["bridge-edge", "platform-tf-control", "tf-data"],
+    "tf-api": [
+      "bridge-edge",
+      "platform-tf-control",
+      "tf-data",
+      "tf-download-queue",
+    ],
   };
   for (const [name, networks] of Object.entries(expectedNetworks)) {
     assert.deepEqual(
@@ -1037,6 +1135,7 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     "platform-migrate",
     "tf-postgres",
     "tf-redis",
+    "tf-download-redis",
     "tf-migrate",
   ]) {
     assert.equal(configService(config, name).ports, undefined);
@@ -1054,6 +1153,7 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     "platform-postgres": "apollo-platform-postgres:bridge",
     "platform-redis": "redis:7-bookworm",
     "tf-api": "apollo-tf-api:bridge",
+    "tf-download-redis": "apollo-tf-download-redis:bridge",
     "tf-migrate": "apollo-tf-api:bridge",
     "tf-postgres": "apollo-tf-postgres:bridge",
     "tf-redis": "redis:7-bookworm",
@@ -1082,6 +1182,10 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     "tf-postgres": {
       dockerfile: "artifacts/api-server/Dockerfile",
       target: "postgres-role-init",
+    },
+    "tf-download-redis": {
+      dockerfile: "artifacts/tf-download-worker/Dockerfile",
+      target: "queue-redis",
     },
     "tf-migrate": {
       dockerfile: "artifacts/api-server/Dockerfile",
@@ -1114,6 +1218,7 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
   });
   assertDependencies(configService(config, "tf-api"), {
     "platform-api": "service_healthy",
+    "tf-download-redis": "service_healthy",
     "tf-postgres": "service_healthy",
     "tf-migrate": "service_completed_successfully",
     "tf-redis": "service_healthy",
@@ -1143,12 +1248,17 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
       "tf_runtime_password",
     ],
     "tf-redis": [],
+    "tf-download-redis": ["tf_download_queue_password"],
     "tf-migrate": ["tf_migrator_database_url"],
     "tf-api": [
       "tf_client_secret",
+      "tf_download_internal_auth_secret",
+      "tf_download_queue_redis_url",
+      "tf_integrations_internal_auth_secret",
       "tf_module_heartbeat_keys",
       "tf_pkce_verifier",
       "tf_runtime_database_url",
+      "tf_search_internal_auth_secret",
     ],
   };
   for (const [name, expected] of Object.entries(expectedSecrets)) {
@@ -1181,15 +1291,29 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     },
   );
   assertSecretMount(
-    configService(config, "tf-api"),
-    "tf_module_heartbeat_keys",
+    configService(config, "tf-download-redis"),
+    "tf_download_queue_password",
     {
-      target: "tf_module_heartbeat_keys",
-      uid: "10001",
-      gid: "10001",
+      target: "tf_download_queue_password",
+      uid: "999",
+      gid: "999",
       mode: "0400",
     },
   );
+  for (const source of [
+    "tf_download_internal_auth_secret",
+    "tf_download_queue_redis_url",
+    "tf_integrations_internal_auth_secret",
+    "tf_module_heartbeat_keys",
+    "tf_search_internal_auth_secret",
+  ]) {
+    assertSecretMount(configService(config, "tf-api"), source, {
+      target: source,
+      uid: "10001",
+      gid: "10001",
+      mode: "0400",
+    });
+  }
   assertSecretMount(
     configService(config, "tf-api"),
     "tf_runtime_database_url",
@@ -1209,6 +1333,32 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
   ]) {
     assertHardenedRuntime(configService(config, name), name);
   }
+  const tfDownloadRedis = configService(config, "tf-download-redis");
+  assert.equal(tfDownloadRedis.user, "999:999");
+  assert.equal(tfDownloadRedis.read_only, true);
+  assert.equal(tfDownloadRedis.init, true);
+  assert.deepEqual(tfDownloadRedis.tmpfs, ["/tmp:rw,noexec,nosuid,size=16m"]);
+  assert.deepEqual(tfDownloadRedis.security_opt, ["no-new-privileges:true"]);
+  assert.deepEqual(tfDownloadRedis.cap_drop, ["ALL"]);
+  assert.equal(tfDownloadRedis.pids_limit, 128);
+  assert.equal(tfDownloadRedis.stop_grace_period, "20s");
+  assert.deepEqual(tfDownloadRedis.deploy, {
+    placement: {},
+    resources: {
+      limits: { cpus: 0.5, memory: "268435456", pids: 128 },
+      reservations: { cpus: 0.1, memory: "67108864" },
+    },
+  });
+  assert.deepEqual(tfDownloadRedis.healthcheck, {
+    test: ["CMD", "/usr/local/bin/queue-redis-health.sh"],
+    interval: "5s",
+    timeout: "3s",
+    retries: 20,
+    start_period: "5s",
+  });
+  assert.deepEqual(tfDownloadRedis.environment, {
+    TF_DOWNLOAD_QUEUE_PASSWORD_FILE: "/run/secrets/tf_download_queue_password",
+  });
   assert.equal(
     configService(config, "platform-postgres").environment?.POSTGRES_USER,
     "postgres",
@@ -1245,6 +1395,60 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
     configService(config, "tf-api").environment?.DATABASE_URL_FILE,
     "/run/secrets/tf_runtime_database_url",
   );
+  const tfApiEnvironment = configService(config, "tf-api").environment;
+  assert.deepEqual(
+    {
+      TF_INTEGRATIONS_ALLOW_INSECURE_HTTP:
+        tfApiEnvironment?.TF_INTEGRATIONS_ALLOW_INSECURE_HTTP,
+      TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE:
+        tfApiEnvironment?.TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE,
+      TF_INTEGRATIONS_ORIGIN: tfApiEnvironment?.TF_INTEGRATIONS_ORIGIN,
+      TF_SEARCH_ALLOW_INSECURE_HTTP:
+        tfApiEnvironment?.TF_SEARCH_ALLOW_INSECURE_HTTP,
+      TF_SEARCH_INTERNAL_AUTH_SECRET_FILE:
+        tfApiEnvironment?.TF_SEARCH_INTERNAL_AUTH_SECRET_FILE,
+      TF_SEARCH_ORIGIN: tfApiEnvironment?.TF_SEARCH_ORIGIN,
+      TF_DOWNLOAD_WORKER_ALLOW_INSECURE_HTTP:
+        tfApiEnvironment?.TF_DOWNLOAD_WORKER_ALLOW_INSECURE_HTTP,
+      TF_DOWNLOAD_WORKER_INTERNAL_AUTH_SECRET_FILE:
+        tfApiEnvironment?.TF_DOWNLOAD_WORKER_INTERNAL_AUTH_SECRET_FILE,
+      TF_DOWNLOAD_WORKER_ORIGIN: tfApiEnvironment?.TF_DOWNLOAD_WORKER_ORIGIN,
+      TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS:
+        tfApiEnvironment?.TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS,
+      TF_DOWNLOAD_QUEUE_REDIS_URL_FILE:
+        tfApiEnvironment?.TF_DOWNLOAD_QUEUE_REDIS_URL_FILE,
+    },
+    {
+      TF_INTEGRATIONS_ALLOW_INSECURE_HTTP: "true",
+      TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE:
+        "/run/secrets/tf_integrations_internal_auth_secret",
+      TF_INTEGRATIONS_ORIGIN: "http://tf-integrations:8080",
+      TF_SEARCH_ALLOW_INSECURE_HTTP: "true",
+      TF_SEARCH_INTERNAL_AUTH_SECRET_FILE:
+        "/run/secrets/tf_search_internal_auth_secret",
+      TF_SEARCH_ORIGIN: "http://tf-search:8080",
+      TF_DOWNLOAD_WORKER_ALLOW_INSECURE_HTTP: "true",
+      TF_DOWNLOAD_WORKER_INTERNAL_AUTH_SECRET_FILE:
+        "/run/secrets/tf_download_internal_auth_secret",
+      TF_DOWNLOAD_WORKER_ORIGIN: "http://tf-download-worker:8080",
+      TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+      TF_DOWNLOAD_QUEUE_REDIS_URL_FILE:
+        "/run/secrets/tf_download_queue_redis_url",
+    },
+  );
+  const tfApiOnlyEnvironmentNames = Object.keys(tfApiEnvironment ?? {}).filter(
+    (name) => name.startsWith("TF_"),
+  );
+  for (const name of EXPECTED_SERVICES.filter((name) => name !== "tf-api")) {
+    const environment = configService(config, name).environment ?? {};
+    for (const variable of tfApiOnlyEnvironmentNames) {
+      assert.equal(
+        Object.hasOwn(environment, variable),
+        false,
+        `${name} must not receive ${variable}`,
+      );
+    }
+  }
 
   const serialized = JSON.stringify(config);
   for (const forbidden of [
@@ -1291,6 +1495,13 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
         ],
         "tf-redis": [
           { source: "tf-redis-data", target: "/data", type: "volume" },
+        ],
+        "tf-download-redis": [
+          {
+            source: "tf-download-redis-data",
+            target: "/data",
+            type: "volume",
+          },
         ],
         "tf-api": [],
       }[name],
@@ -1731,6 +1942,24 @@ function protectedTfHeaders(state) {
   };
 }
 
+export function createSmokeDownloadFixture() {
+  const sourceUrl = "https://www.youtube.com/watch?v=apollo_bridge_download";
+  const trackId = `yt_${Buffer.from(sourceUrl, "utf8").toString("base64url")}`;
+  return {
+    trackId,
+    request: {
+      tracks: [
+        {
+          trackId,
+          artist: "Bridge Artist",
+          title: "Bridge Track",
+          quality: "320",
+        },
+      ],
+    },
+  };
+}
+
 async function mutateEntitlement(state, accountId, moduleKey, method) {
   return jsonCall(
     state,
@@ -1788,13 +2017,18 @@ async function proveMountedSecretsReadable(environment, signal) {
   ];
   const tfFiles = [
     "tf_client_secret",
+    "tf_download_internal_auth_secret",
+    "tf_download_queue_redis_url",
+    "tf_integrations_internal_auth_secret",
     "tf_module_heartbeat_keys",
     "tf_pkce_verifier",
     "tf_runtime_database_url",
+    "tf_search_internal_auth_secret",
   ];
-  for (const [service, files] of [
-    ["platform-api", platformFiles],
-    ["tf-api", tfFiles],
+  for (const [service, user, files] of [
+    ["platform-api", "10001:10001", platformFiles],
+    ["tf-api", "10001:10001", tfFiles],
+    ["tf-download-redis", "999:999", ["tf_download_queue_password"]],
   ]) {
     await compose(
       environment,
@@ -1802,7 +2036,7 @@ async function proveMountedSecretsReadable(environment, signal) {
         "exec",
         "-T",
         "--user",
-        "10001:10001",
+        user,
         service,
         "sh",
         "-c",
@@ -2305,9 +2539,7 @@ async function runFlow(state, fixture, signal) {
   state.tfCsrf = tfCsrfToken;
   state.rawSecrets.push(tfCsrfToken);
 
-  const downloadBody = {
-    tracks: [{ trackId: "smoke-invalid-track" }],
-  };
+  const downloadFixture = createSmokeDownloadFixture();
   const downloadRequest = async (status, label) =>
     jsonCall(state, state.tfOrigin, "/api/tracks/download/queue", {
       method: "POST",
@@ -2315,7 +2547,7 @@ async function runFlow(state, fixture, signal) {
       jar: state.tfCookies,
       origin: state.tfOrigin,
       headers: protectedTfHeaders(state),
-      body: downloadBody,
+      body: downloadFixture.request,
       label,
     });
 
@@ -2326,14 +2558,19 @@ async function runFlow(state, fixture, signal) {
   smokeStage = "download-grant";
   await mutateEntitlement(state, accountId, "tf.downloads", "PUT");
   const allowed = await downloadRequest(200, "download-allowed");
-  assert.deepEqual(allowed.json, {
-    results: [
-      {
-        trackId: "smoke-invalid-track",
-        error: "Could not resolve a trusted source URL for this track",
-      },
-    ],
-  });
+  assert(Array.isArray(allowed.json?.results));
+  assert.equal(allowed.json.results.length, 1);
+  const admitted = allowed.json.results[0];
+  assert.equal(admitted?.trackId, downloadFixture.trackId);
+  assert.match(
+    admitted?.jobId ?? "",
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
+  assert(
+    Number.isInteger(admitted?.position) &&
+      admitted.position >= 1 &&
+      admitted.position <= 200,
+  );
 
   smokeStage = "download-revoke";
   await mutateEntitlement(state, accountId, "tf.downloads", "DELETE");

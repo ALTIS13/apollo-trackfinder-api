@@ -29,10 +29,15 @@ Redis 7, pnpm 10.33.2.
   `platform-postgres -> platform-migrate -> platform-api` ordering unchanged.
 - `tf-role-bootstrap` and `tf-baseline` remain disabled under profile
   `baseline`; normal live startup never invokes them.
-- Platform services receive no TF database, password, heartbeat, OAuth, or
-  runtime secret.
-- `tf-api` receives only its runtime DB URL, OAuth bridge files, and its own
-  module-heartbeat file. No admin/migrator/password secret may reach it.
+- Platform services receive no TF database, password, heartbeat, OAuth,
+  gateway-command, or queue secret.
+- `tf-api` receives only its runtime DB URL, OAuth bridge files, module
+  heartbeat file, three internal gateway-command files, and the authenticated
+  download-queue Redis URL file. It receives no admin, migrator, PostgreSQL
+  password, or download-queue password file.
+- The private `tf-download-redis` service receives only its generated queue
+  password file, joins only the internal `tf-download-queue` network, stores
+  data only in `tf-download-redis-data`, and publishes no host port.
 - All secrets are unique, file-backed, bounded, owner-scoped, included in raw
   canary scans, excluded from logs/rendered config/tracked files, and removed
   after the run.
@@ -42,8 +47,9 @@ Redis 7, pnpm 10.33.2.
   project's containers, networks, and volumes. Never run broad prune.
 - Final controller cleanup may remove only exact disposable image tags
   `apollo-platform-api:bridge`, `apollo-platform-postgres:bridge`,
-  `apollo-tf-api:bridge`, and `apollo-tf-postgres:bridge` after verifying no
-  container references them.
+  `apollo-tf-api:bridge`, `apollo-tf-postgres:bridge`, and
+  `apollo-tf-download-redis:bridge` after verifying no container references
+  them.
 
 ---
 
@@ -192,6 +198,12 @@ git commit -m "fix(platform): provide TF heartbeat bridge secret"
   -> OAuth PKCE/replay -> TF session -> WebSocket ticket/replay -> suspension.
 - `APOLLO_BRIDGE_SMOKE_DIAGNOSTICS=true` may expose only sanitized stage/service
   diagnostics and never raw secret values or their digests.
+- `tf-api` receives the exact internal gateway-command and authenticated
+  download-queue Redis URL files required by the current image startup
+  contract.
+- A hardened private `tf-download-redis` service receives only its independent
+  queue password, joins only `tf-download-queue`, has no host publication, and
+  becomes healthy before `tf-api` starts.
 
 - [ ] **Step 1: Record the first post-startup RED**
 
@@ -222,8 +234,8 @@ $env:APOLLO_BRIDGE_LIVE="true"
 pnpm --filter @workspace/platform-api test -- src/bridge-e2e.test.ts
 ```
 
-Expected: `422` non-skipped tests pass, including the live flow, with the exact
-success output and no stderr.
+Expected: `423 passed`, `20 skipped` from `443` collected tests, including the
+live flow, with the exact success output and no stderr.
 
 - [ ] **Step 4: Run release validation**
 
@@ -250,9 +262,12 @@ the reviewed PostgreSQL 16 `34/34` proof.
 - [ ] **Step 5: Audit and clean exact local resources**
 
 Require zero containers, networks, and volumes with the live Compose project
-label. Verify no container references the four exact bridge image tags, then
-remove only those tags and verify they are absent. Do not remove Redis/Postgres
-base images or unrelated dangling images/volumes.
+label. Verify no container references the five exact bridge image tags
+(`apollo-platform-api:bridge`, `apollo-platform-postgres:bridge`,
+`apollo-tf-api:bridge`, `apollo-tf-postgres:bridge`, and
+`apollo-tf-download-redis:bridge`), then remove only those tags and verify they
+are absent. Do not remove Redis/Postgres base images or unrelated dangling
+images/volumes.
 
 - [ ] **Step 6: Update status and commit**
 
@@ -262,7 +277,8 @@ remote deployment. Status may move from
 HomeNode/Coolify deployment.
 
 ```powershell
-git add IMPLEMENTATION_STATUS.md artifacts/platform-api artifacts/api-server
+git add IMPLEMENTATION_STATUS.md artifacts/platform-api `
+  docs/superpowers/plans/2026-07-27-tf-live-bridge-release.md
 git commit -m "test(platform): prove live TF bridge release"
 ```
 

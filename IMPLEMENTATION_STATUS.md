@@ -4,9 +4,9 @@ Last updated: 2026-07-27.
 
 ## TF immutable migrations release candidate
 
-Status: `LOCAL_VALIDATED_WITH_RESIDUAL`. The active branch is
+Status: `LOCAL_RELEASE_VALIDATED`. The active branch is
 `codex/feat/tf-immutable-migrations`; no remote mutation or push is part of
-Task 5.
+Task 2.
 
 - Apollo TF uses immutable, checksummed migrations `0001` and `0002`, exact
   prefix/full-history validation, a bounded advisory lock, separate
@@ -61,10 +61,15 @@ Task 5.
   and Platform test suites; root typecheck; API and Platform production builds;
   all three Compose config renders; formatting and diff checks. The separate
   role-bootstrap Docker proof passed 4/4 and its exact cleanup audit was zero.
+- The live Platform/TF bridge passed `423/443` collected tests with `20`
+  explicit skips and exact success output for the closed-registration, portal,
+  PKCE, replay, entitlement grant/revoke, download admission, and WebSocket
+  flow. Its private authenticated `tf-download-redis` queue remained isolated,
+  and exact project cleanup left zero containers, networks, and volumes.
 - Ordinary package suites retain documented opt-in skips. The factual database
-  suite was run separately against PostgreSQL 16; the opt-in live Platform/TF
-  bridge startup is not claimed by this validation and remains a separate
-  runtime-contract stage before release.
+  suite was run separately against PostgreSQL 16; the complete local bridge
+  runtime contract is now release-validated without claiming remote
+  deployment.
 - No remote TF data volume is currently known to this project. Legacy adoption
   is manual-only after verified backup and restore evidence, with exact order
   `tf-role-bootstrap -> tf-baseline -> tf-migrate`; production execution also
@@ -73,7 +78,7 @@ Task 5.
 - API liveness may pass while readiness remains unavailable until exact full
   migration history exists. Container modules remain portable across Coolify
   nodes through private same-node DNS or separately approved cross-node TLS.
-- Task 5 did not mutate HomeNode, Coolify, Caddy, UFW, DNS, domains, GitHub, or
+- Task 2 did not mutate HomeNode, Coolify, Caddy, UFW, DNS, domains, GitHub, or
   Android.
 
 ## HomeNode/Coolify read-only release preflight
