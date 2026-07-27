@@ -213,7 +213,10 @@ async function writeSecret(
   expect(result.stderr.toString()).toBe("");
 }
 
-async function psqlAdmin(statement: string): Promise<ProcessResult> {
+async function psqlAdmin(
+  statement: string,
+  targetDatabase = databaseName,
+): Promise<ProcessResult> {
   const result = await docker(
     [
       "exec",
@@ -225,7 +228,7 @@ async function psqlAdmin(statement: string): Promise<ProcessResult> {
       "-U",
       "postgres",
       "-d",
-      databaseName,
+      targetDatabase,
       "-c",
       statement,
     ],
@@ -446,7 +449,7 @@ describe
       );
       expect(denied.code).not.toBe(0);
       expect(denied.stdout.toString()).toBe("");
-    });
+    }, 30_000);
 
     it("reads exact bounded bytes once and rejects unsafe secret sources generically", async () => {
       const cases = [
@@ -582,7 +585,7 @@ describe
         allowFailure: true,
       });
       expect(residual.code).not.toBe(0);
-    });
+    }, 30_000);
 
     it("normalizes every direct ACL class, exact login attributes, and unexpected ownership", async () => {
       await psqlAdmin(`
@@ -636,6 +639,29 @@ describe
         alter role apollo_tf_migrator
           connection limit 0 valid until '2000-01-01';
       `);
+
+      await psqlAdmin(
+        `
+          create table public.tf_cross_database_acl (id integer);
+          grant select on table public.tf_cross_database_acl
+            to apollo_tf_runtime;
+        `,
+        "postgres",
+      );
+      const crossDatabaseFailure = await runManualBootstrap(true);
+      expect(crossDatabaseFailure.code).not.toBe(0);
+      expect(crossDatabaseFailure.stdout.toString()).toBe("");
+      expect(crossDatabaseFailure.stderr.toString()).toBe(
+        "TF role bootstrap failed\n",
+      );
+      await psqlAdmin(
+        `
+          revoke all privileges on table public.tf_cross_database_acl
+            from apollo_tf_runtime cascade;
+          drop table public.tf_cross_database_acl;
+        `,
+        "postgres",
+      );
 
       const bootstrap = await runManualBootstrap();
       expect(bootstrap.stdout.toString()).toBe("");
@@ -741,6 +767,30 @@ describe
         expect(login.stdout.toString().trim()).toBe(expectedRole);
         expect(login.stderr.toString()).toBe("");
       }
+
+      const postgresLogin = await docker(
+        [
+          "run",
+          "--rm",
+          "--network",
+          network,
+          "--user",
+          "10001:10001",
+          "--read-only",
+          "--volume",
+          `${secretVolume}:/run/secrets:ro`,
+          "--entrypoint",
+          "sh",
+          image,
+          "-ceu",
+          'url=$(/usr/local/bin/read-bounded-secret "$1" 4096); postgres_url=${url%/*}/postgres; exec psql -X -A -t "$postgres_url" -v ON_ERROR_STOP=1 -c "select current_user"',
+          "postgres-login-proof",
+          "/run/secrets/tf_runtime_database_url",
+        ],
+        { allowFailure: true },
+      );
+      expect(postgresLogin.code).not.toBe(0);
+      expect(postgresLogin.stdout.toString()).toBe("");
 
       const setRole = await docker(
         [

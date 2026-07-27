@@ -1973,6 +1973,10 @@ describe("TF deployment identity contract", () => {
     expect(script).toContain("connection limit -1");
     expect(script).toContain("valid until ''infinity''");
     expect(script).toContain("direct_acl_audit_failed");
+    expect(script).toContain("cross_database_acl_dependency");
+    expect(script).toContain(
+      "from public, apollo_tf_migrator, apollo_tf_runtime cascade",
+    );
     expect(script).not.toContain("set -x");
     expect(script).not.toMatch(/echo\s+.*PASSWORD/i);
   });

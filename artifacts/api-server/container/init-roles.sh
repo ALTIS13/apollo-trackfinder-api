@@ -248,24 +248,10 @@ alter role apollo_tf_migrator reset all;
 alter role apollo_tf_runtime reset all;
 
 select format(
-  'revoke all on database %I from public',
-  current_database()
-) \gexec
-
-select format(
-  'revoke all privileges on database %I from apollo_tf_migrator, apollo_tf_runtime cascade',
+  'revoke all privileges on database %I from public, apollo_tf_migrator, apollo_tf_runtime cascade',
   databases.datname
 )
 from pg_database databases
-where exists (
-  select 1
-  from aclexplode(databases.datacl) acl
-  where acl.grantee in (
-    select oid
-    from pg_roles
-    where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
-  )
-)
 \gexec
 
 select format(
@@ -601,6 +587,20 @@ begin
     where settings.setrole in (migrator_oid, runtime_oid)
   ) then
     raise exception 'role_state_audit_failed';
+  end if;
+
+  if exists (
+    select 1
+    from pg_shdepend dependencies
+    where dependencies.refclassid = 'pg_authid'::regclass
+      and dependencies.refobjid in (migrator_oid, runtime_oid)
+      and dependencies.deptype = 'a'
+      and dependencies.dbid <> 0
+      and dependencies.dbid <> (
+        select oid from pg_database where datname = current_database()
+      )
+  ) then
+    raise exception 'cross_database_acl_dependency';
   end if;
 
   if exists (
