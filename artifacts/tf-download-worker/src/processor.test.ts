@@ -1433,14 +1433,15 @@ describe("createDownloadProcessor", () => {
     });
     const job = createJob({
       ...validData,
-      artist: `A/${"x".repeat(298)}`,
-      title: `B\\\r\n\0${"y".repeat(490)}`,
+      artist: `../A/${"x".repeat(295)}`,
+      title: `..\\B\\\r\n\0${"y".repeat(487)}`,
     });
 
     const result = await processor(job, new AbortController().signal);
 
     expect(result.filename.length).toBeLessThanOrEqual(255);
     expect(result.filename).not.toMatch(/[\r\n/\\\0]/);
+    expect(result.filename).not.toContain("..");
     expect(() => downloadJobResultSchema.parse(result)).not.toThrow();
   });
 });

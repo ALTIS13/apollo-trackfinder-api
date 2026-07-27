@@ -748,7 +748,7 @@ host bind ownership. Docker Desktop сохраняет функциональн�
 
 На одной ноде API использует private origin
 `http://tf-download-worker:8080`, worker использует `http://api:8080`, а
-queue clients используют authenticated `redis://tf-download-redis:6379/0`.
+queue clients используют authenticated `redis://default:<queue-secret>@tf-download-redis:6379/0`.
 Plain HTTP/Redis допустимы только с явными same-node insecure flags.
 Cross-node размещение требует отдельно одобренных HTTPS/TLS ingress и
 защищённого Redis transport с обычной проверкой сертификата и hostname;
