@@ -27,30 +27,65 @@ export interface TfMigratorDependencies {
   readonly writeStdout: (message: string) => void;
 }
 
-async function readBoundedUtf8File(
+interface SecretFileHandle {
+  stat(): Promise<{ isFile(): boolean; size: number }>;
+  read(
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number | null,
+  ): Promise<{ bytesRead: number }>;
+  close(): Promise<void>;
+}
+
+type OpenSecretFile = (path: string, flags: "r") => Promise<SecretFileHandle>;
+
+export async function readMigratorSecretFile(
   path: string,
   maxBytes: number,
+  openFile: OpenSecretFile = open,
 ): Promise<string> {
-  const handle = await open(path, "r");
   try {
-    const metadata = await handle.stat();
-    if (!metadata.isFile() || metadata.size < 1 || metadata.size > maxBytes) {
-      throw new Error(GENERIC_FAILURE);
-    }
+    const handle = await openFile(path, "r");
+    try {
+      const metadata = await handle.stat();
+      if (!metadata.isFile()) {
+        throw new Error(GENERIC_FAILURE);
+      }
 
-    const buffer = Buffer.alloc(metadata.size);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    if (bytesRead !== buffer.length) {
-      throw new Error(GENERIC_FAILURE);
+      const buffer = Buffer.alloc(maxBytes + 1);
+      let totalBytes = 0;
+      while (totalBytes < buffer.length) {
+        const remaining = buffer.length - totalBytes;
+        const { bytesRead } = await handle.read(
+          buffer,
+          totalBytes,
+          remaining,
+          null,
+        );
+        if (bytesRead === 0) break;
+        if (bytesRead < 0 || bytesRead > remaining) {
+          throw new Error(GENERIC_FAILURE);
+        }
+        totalBytes += bytesRead;
+      }
+
+      if (totalBytes < 1 || totalBytes > maxBytes) {
+        throw new Error(GENERIC_FAILURE);
+      }
+      return new TextDecoder("utf-8", { fatal: true }).decode(
+        buffer.subarray(0, totalBytes),
+      );
+    } finally {
+      await handle.close();
     }
-    return new TextDecoder("utf-8", { fatal: true }).decode(buffer);
-  } finally {
-    await handle.close();
+  } catch {
+    throw new Error(GENERIC_FAILURE);
   }
 }
 
 const defaultDependencies: TfMigratorDependencies = {
-  readFile: readBoundedUtf8File,
+  readFile: readMigratorSecretFile,
   createPool: createTfPool,
   runMigrations: runTfMigrations,
   baselineSchema: baselineTfStartupSchema,

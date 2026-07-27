@@ -1,10 +1,41 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
-import { runTfMigrator, type TfMigratorDependencies } from "./tf-migrator.js";
+import {
+  readMigratorSecretFile,
+  runTfMigrator,
+  type TfMigratorDependencies,
+} from "./tf-migrator.js";
 
 const MIGRATOR_FILE = "/run/secrets/tf_migrator_database_url";
 const BASELINE_FILE = "/run/secrets/tf_admin_database_url";
 const DATABASE_URL = "postgres://migrator:private@db:5432/apollo_tf";
+const temporaryRoots: string[] = [];
+
+async function createTemporaryPath(
+  name: string,
+  contents?: string | Buffer,
+): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "apollo-tf-migrator-"));
+  temporaryRoots.push(root);
+  const target = path.join(root, name);
+  if (contents === undefined) {
+    await mkdir(target);
+  } else {
+    await writeFile(target, contents);
+  }
+  return target;
+}
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true })),
+  );
+});
 
 function dependencies(
   overrides: Partial<TfMigratorDependencies> = {},
@@ -31,6 +62,75 @@ function dependencies(
 }
 
 describe("TF dedicated migrator", () => {
+  it("reads a regular, nonempty UTF-8 secret through the real reader", async () => {
+    const secret = await createTemporaryPath("database-url", DATABASE_URL);
+
+    await expect(readMigratorSecretFile(secret, 4096)).resolves.toBe(
+      DATABASE_URL,
+    );
+  });
+
+  it("accepts exactly 4096 UTF-8 bytes", async () => {
+    const contents = "x".repeat(4096);
+    const secret = await createTemporaryPath("database-url", contents);
+
+    await expect(readMigratorSecretFile(secret, 4096)).resolves.toBe(contents);
+  });
+
+  it.each([
+    { label: "empty", contents: Buffer.alloc(0) },
+    { label: "over 4096 bytes", contents: Buffer.alloc(4097, 120) },
+    { label: "invalid UTF-8", contents: Buffer.from([0xc3, 0x28]) },
+  ])("rejects a real $label secret generically", async ({ contents }) => {
+    const secret = await createTemporaryPath("database-url", contents);
+
+    await expect(readMigratorSecretFile(secret, 4096)).rejects.toThrow(
+      "TF migration failed",
+    );
+  });
+
+  it("rejects a non-regular secret path generically", async () => {
+    const secretDirectory = await createTemporaryPath("database-url");
+
+    await expect(readMigratorSecretFile(secretDirectory, 4096)).rejects.toThrow(
+      "TF migration failed",
+    );
+  });
+
+  it("reads through EOF and rejects growth after the metadata check", async () => {
+    const prefix = Buffer.from(DATABASE_URL);
+    const contents = Buffer.concat([prefix, Buffer.alloc(4096, 120)]);
+    let position = 0;
+    let readCount = 0;
+    const close = vi.fn().mockResolvedValue(undefined);
+    const openFile = vi.fn().mockResolvedValue({
+      stat: vi.fn().mockResolvedValue({
+        isFile: () => true,
+        size: prefix.length,
+      }),
+      read: vi.fn(async (buffer: Buffer, offset: number, length: number) => {
+        readCount += 1;
+        const available =
+          readCount === 1 ? prefix.length : contents.length - position;
+        const bytesRead = Math.min(length, available);
+        contents.copy(
+          buffer,
+          offset,
+          position,
+          position + Math.max(bytesRead, 0),
+        );
+        position += Math.max(bytesRead, 0);
+        return { buffer, bytesRead: Math.max(bytesRead, 0) };
+      }),
+      close,
+    });
+
+    await expect(
+      readMigratorSecretFile("controlled-secret", 4096, openFile),
+    ).rejects.toThrow("TF migration failed");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it("runs normal migrations with only the migrator secret", async () => {
     const current = dependencies();
 
