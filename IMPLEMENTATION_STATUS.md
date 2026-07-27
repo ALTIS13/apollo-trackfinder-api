@@ -4,7 +4,7 @@ Last updated: 2026-07-27.
 
 ## TF immutable migrations release candidate
 
-Status: `LOCAL_VALIDATION_IN_PROGRESS`. The active branch is
+Status: `LOCAL_VALIDATED_WITH_RESIDUAL`. The active branch is
 `codex/feat/tf-immutable-migrations`; no remote mutation or push is part of
 Task 5.
 
@@ -35,6 +35,14 @@ Task 5.
   and labels, bounded readiness, failure cleanup, and a zero-resource audit.
   No production migration or role implementation change was required by the
   real database proof.
+- The full local matrix passed: DB, API, search, integrations, download-worker,
+  and Platform test suites; root typecheck; API and Platform production builds;
+  all three Compose config renders; formatting and diff checks. The separate
+  role-bootstrap Docker proof passed 4/4 and its exact cleanup audit was zero.
+- Ordinary package suites retain documented opt-in skips. The factual database
+  suite was run separately against PostgreSQL 16; the opt-in live Platform/TF
+  bridge startup is not claimed by this validation and remains a separate
+  runtime-contract stage before release.
 - No remote TF data volume is currently known to this project. Legacy adoption
   is manual-only after verified backup and restore evidence, with exact order
   `tf-role-bootstrap -> tf-baseline -> tf-migrate`; production execution also
