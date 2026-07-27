@@ -2518,8 +2518,8 @@ describe("live disposable Platform-TF bridge", () => {
         },
       );
       expect(stderr).toBe("");
-      expect(stdout).toMatch(
-        /Bridge smoke passed: closed, portal, PKCE, replay, grant, revoke, WebSocket/,
+      expect(stdout).toBe(
+        "Bridge smoke passed: closed, portal, PKCE, replay, grant, revoke, WebSocket\n",
       );
     },
     BRIDGE_SMOKE_TIMEOUTS.parentMs,

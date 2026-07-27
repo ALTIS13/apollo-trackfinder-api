@@ -2753,7 +2753,6 @@ async function auditDockerCleanup(environment) {
 }
 
 async function main() {
-  const startedAt = Date.now();
   smokeStage = "docker-context";
   const environment = await resolveLocalDockerEnvironment(
     configuredEnvironment(),
@@ -2891,9 +2890,6 @@ async function main() {
   if (failure !== undefined) throw failure;
   process.stdout.write(
     "Bridge smoke passed: closed, portal, PKCE, replay, grant, revoke, WebSocket\n",
-  );
-  process.stdout.write(
-    `Bridge smoke time: ${((Date.now() - startedAt) / 1000).toFixed(1)}s\n`,
   );
 }
 

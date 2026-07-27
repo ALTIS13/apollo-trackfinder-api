@@ -9,11 +9,14 @@
 pass its complete PKCE, entitlement, revocation, and WebSocket flow without
 leaking secrets or leaving Docker resources.
 
-**Architecture:** Preserve the reviewed bridge topology and add the one runtime
-secret already required by the TF image entrypoint. The existing live smoke
-remains the release oracle: it creates file-backed canaries, builds the images,
-starts the isolated Compose project, runs the user/auth flow, scans outputs, and
-removes only its exact resources.
+**Architecture:** Preserve the reviewed bridge topology and supply the current
+TF image startup contract through three independent internal command secrets
+plus a separate authenticated download queue: a private queue Redis receives
+only its generated password, while `tf-api` receives only the derived
+file-backed Redis URL. The existing live smoke remains the release oracle: it
+creates file-backed canaries, builds the images, starts the isolated Compose
+project, runs the user/auth flow, scans outputs, and removes only its exact
+resources.
 
 **Tech Stack:** TypeScript, Node.js 20, Vitest, Docker Compose, PostgreSQL 16,
 Redis 7, pnpm 10.33.2.
