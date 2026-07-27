@@ -56,9 +56,9 @@ Docker Compose, pnpm 10.33.2.
 - An unmanaged database containing any of the five active TF tables but no
   migration history fails normal migration. Baseline exists only as explicit
   `--baseline-existing-startup-schema`; it requires an admin URL for the current
-  superuser/owner, exact catalog validation, and empty/no history. Compose exposes
-  it only through the disabled-by-default `baseline` profile and never invokes it
-  during normal startup.
+  PostgreSQL superuser, exact catalog validation, and empty/no history. Compose
+  exposes it only through the disabled-by-default `baseline` profile and never
+  invokes it during normal startup.
 - Database, Redis, worker, search, integrations, and migration ports are never
   published. Existing web/API/admin publications remain loopback-only in local
   Compose and are not changed to public interfaces.
@@ -217,27 +217,31 @@ Readiness queries the full history and returns false on any exception or
 mismatch.
 
 Implement `baselineTfStartupSchema` under the same manifest and lock contract.
-It accepts only the exact two-entry manifest above, requires the connection's
-current role to be the legacy database superuser/owner, requires history to be
-absent or empty, and queries PostgreSQL catalogs to compare exact managed
-tables:
+It accepts only full name/checksum equality with the canonical two-entry
+manifest above, requires the connection's current role to be a PostgreSQL
+superuser, requires history to be absent or empty, and queries PostgreSQL
+catalogs to compare exact managed tables:
 
 - column name, ordinal, PostgreSQL type, nullability, and normalized default;
-- primary and unique constraints with ordered columns;
-- non-constraint index name, uniqueness, method, and ordered expressions.
+- every constraint name, type, and normalized full definition, with no extra
+  CHECK, foreign-key, exclusion, or other constraint;
+- every non-constraint index name and normalized full definition, including
+  uniqueness, method, keys/expressions, predicate, INCLUDE columns, collation,
+  and opclass.
 
 All five managed tables must match `0001` exactly; missing/extra managed columns,
 constraints, or indexes fail with `migration_baseline_mismatch`. Extra unrelated
-tables are ignored and receive no grants. Only after exact validation may one
-transaction:
+tables are ignored and receive no grants. One transaction must:
 
-1. create `apollo_tf` and `apollo_tf.schema_migrations`;
-2. transfer ownership of all five managed tables and their owned sequences to
+1. lock all five managed tables in `ACCESS EXCLUSIVE` mode;
+2. validate the catalog while those locks are held;
+3. create `apollo_tf` and `apollo_tf.schema_migrations`;
+4. transfer ownership of all five managed tables and their owned sequences to
    `apollo_tf_migrator`;
-3. transfer ownership of the `apollo_tf` schema and history table to
+5. transfer ownership of the `apollo_tf` schema and history table to
    `apollo_tf_migrator`;
-4. insert the exact `0001` checksum without running `0001` DDL;
-5. commit.
+6. insert the exact `0001` checksum without running `0001` DDL;
+7. commit.
 
 The baseline runner then applies `0002` in its own transaction and records its
 checksum. A failure while applying `0002` leaves the exact `0001` prefix so the
@@ -655,10 +659,10 @@ Against disposable PostgreSQL with the exact two roles, prove:
 5. extra/checksum-drifted history fails;
 6. normal migration against pre-existing managed tables with no history fails
    and inserts no history row;
-7. manual baseline through the admin/legacy-owner URL accepts the exact old
-   startup schema, transfers all managed table/sequence/history ownership to
+7. manual baseline through the PostgreSQL superuser admin URL accepts the exact
+   old startup schema, transfers all managed table/sequence/history ownership to
    `apollo_tf_migrator`, and normal migration then reports both migrations
-   already applied;
+   already applied; an owner-only non-superuser connection is rejected;
 8. forced `0002` failure during manual baseline leaves exact `0001` history and
    transferred ownership, after which normal migrator applies `0002`;
 9. manual baseline rejects missing/extra/changed managed columns, defaults,
@@ -684,7 +688,7 @@ new secret files. State:
 - role init runs only on a fresh database volume;
 - this project has no remote TF volume to adopt;
 - an old local volume must be backed up and inspected, then upgraded in exact
-  order: configure `tf_admin_database_url` for its current superuser/owner, run
+  order: configure `tf_admin_database_url` for its PostgreSQL superuser, run
   the profiled `tf-role-bootstrap`, run the profiled `tf-baseline`, and run
   normal `tf-migrate`; it is never silently reused or automatically deleted;
 - production migration requires backup/restore evidence and owner approval;
