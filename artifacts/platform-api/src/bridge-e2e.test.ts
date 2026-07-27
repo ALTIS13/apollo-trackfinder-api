@@ -559,6 +559,14 @@ describe("Platform-TF bridge container contract", () => {
       (tfApi.environment as Record<string, unknown>)
         .APOLLO_MODULE_HEARTBEAT_KEYS_FILE,
     ).toBe("/run/secrets/tf_module_heartbeat_keys");
+    for (const name of Object.keys(config.services).filter(
+      (name) => name !== "tf-api",
+    )) {
+      expect(
+        (service(config, name).environment as Record<string, unknown> | undefined) ??
+          {},
+      ).not.toHaveProperty("APOLLO_MODULE_HEARTBEAT_KEYS_FILE");
+    }
     expect(tfApi.environment).not.toHaveProperty("DATABASE_URL");
     expect(secretMount(tfApi, "tf_module_heartbeat_keys")).toMatchObject({
       target: "tf_module_heartbeat_keys",
@@ -1334,6 +1342,15 @@ describe("bridge smoke orchestration", () => {
           service(candidate, "tf-api"),
           "tf_module_heartbeat_keys",
         ).mode = "0444";
+      },
+      (candidate) => {
+        (
+          service(candidate, "platform-api").environment as Record<
+            string,
+            unknown
+          >
+        ).APOLLO_MODULE_HEARTBEAT_KEYS_FILE =
+          "/run/secrets/tf_module_heartbeat_keys";
       },
       (candidate) => {
         service(candidate, "tf-api").cap_drop = [];

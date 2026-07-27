@@ -1231,6 +1231,16 @@ export function validateRenderedBridgeConfig(output, secrets, secretDirectory) {
       ?.APOLLO_MODULE_HEARTBEAT_KEYS_FILE,
     "/run/secrets/tf_module_heartbeat_keys",
   );
+  for (const name of EXPECTED_SERVICES.filter((name) => name !== "tf-api")) {
+    assert.equal(
+      Object.hasOwn(
+        configService(config, name).environment ?? {},
+        "APOLLO_MODULE_HEARTBEAT_KEYS_FILE",
+      ),
+      false,
+      `${name} must not receive APOLLO_MODULE_HEARTBEAT_KEYS_FILE`,
+    );
+  }
   assert.equal(
     configService(config, "tf-api").environment?.DATABASE_URL_FILE,
     "/run/secrets/tf_runtime_database_url",
