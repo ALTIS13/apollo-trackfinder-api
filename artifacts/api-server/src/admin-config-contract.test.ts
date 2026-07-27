@@ -131,7 +131,7 @@ describe("admin telemetry container contract", () => {
       "Сеть `tf-integrations-control` является internal и содержит только `api` и\n`tf-integrations`. Internal `tf-integrations-data` содержит только module,\nmigrator и dedicated PostgreSQL. Только module подключён к\n`tf-integrations-egress`; у module, migrator и database нет host ports.",
     );
     expect(modulesDocumentation).toContain(
-      "Без override оба Compose templates используют безопасный non-secret default\n`/var/lib/apollo-tf/secrets`; production startup требует шесть базовых TF/search\nfiles и десять `tf_integrations_*` files.",
+      "Без override оба Compose templates используют безопасный non-secret default\n`/var/lib/apollo-tf/secrets`; production startup требует шесть database\nsecret-файлов, базовые TF/search files и десять `tf_integrations_*` files.",
     );
   });
 
@@ -349,9 +349,7 @@ describe("admin telemetry container contract", () => {
   });
 
   it("separates producer, telemetry, and cancellation clients without embedding a worker", () => {
-    expect(backgroundQueueSource).toContain(
-      'import { Queue } from "bullmq";',
-    );
+    expect(backgroundQueueSource).toContain('import { Queue } from "bullmq";');
     expect(backgroundQueueSource).not.toMatch(
       /import\s*{[^}]*\bWorker\b[^}]*}\s*from\s*"bullmq"/,
     );

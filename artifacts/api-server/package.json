@@ -8,7 +8,7 @@
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --maxWorkers=8"
+    "test": "vitest run --maxWorkers=2"
   },
   "dependencies": {
     "@workspace/admin-dashboard-contract": "workspace:*",
