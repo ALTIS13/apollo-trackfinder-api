@@ -173,6 +173,14 @@ export function createDownloadProcessor(
       }
       throwSignalReason(controller.signal);
 
+      if (
+        await raceWithAbort(
+          options.cancellationStore.arm(jobId, controller.signal),
+          controller.signal,
+        )
+      ) {
+        throw canceledError();
+      }
       cancellationMonitor = startCancellationMonitor({
         store: options.cancellationStore,
         jobId,
@@ -257,6 +265,14 @@ export function createDownloadProcessor(
         Promise.resolve(job.updateProgress(100)),
         controller.signal,
       );
+      if (
+        await raceWithAbort(
+          options.cancellationStore.finish(jobId, controller.signal),
+          controller.signal,
+        )
+      ) {
+        throw canceledError();
+      }
       cancellationMonitor.stop();
       throwSignalReason(controller.signal);
       output.finalize();

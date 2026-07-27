@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  DOWNLOAD_JOB_CANCELLATION_ARMED_SENTINEL,
   DOWNLOAD_JOB_CANCELLATION_FIELD,
   DOWNLOAD_JOB_CANCELLATION_SENTINEL,
   DOWNLOAD_QUEUE_NAME,
@@ -53,6 +54,7 @@ interface RuntimeRedis {
   connect(): Promise<unknown>;
   ping(): Promise<string>;
   hget(key: string, field: string): Promise<string | null>;
+  eval(script: string, keys: number, ...args: string[]): Promise<unknown>;
   quit(): Promise<unknown>;
   disconnect(): void;
 }
@@ -156,6 +158,25 @@ export interface TfDownloadWorkerRuntime {
 }
 
 type TfDownloadWorkerRedisRole = "worker" | "lookup" | "cancellation";
+
+const ARM_CANCELLATION_SCRIPT = `
+local marker = redis.call("HGET", KEYS[1], ARGV[1])
+if marker == ARGV[2] then return 1 end
+if not marker then
+  redis.call("HSET", KEYS[1], ARGV[1], ARGV[3])
+  return 0
+end
+if marker == ARGV[3] then return 0 end
+return 2
+`;
+
+const FINISH_CANCELLATION_SCRIPT = `
+local marker = redis.call("HGET", KEYS[1], ARGV[1])
+if marker == ARGV[2] then return 1 end
+if marker ~= ARGV[3] then return 2 end
+redis.call("HDEL", KEYS[1], ARGV[1])
+return 0
+`;
 
 export function createTfDownloadWorkerRedisOptions(
   role: TfDownloadWorkerRedisRole,
@@ -414,10 +435,36 @@ export async function startTfDownloadWorkerRuntime(
 
     const queueClient = queue;
     const cancellationClient = cancellationRedis;
+    const cancellationTransition = async (
+      script: string,
+      jobId: string,
+      signal: AbortSignal,
+    ): Promise<boolean> => {
+      if (signal.aborted) throw signal.reason;
+      const result = Number(
+        await cancellationClient.eval(
+          script,
+          1,
+          getDownloadQueueJobHashKey(
+            (suffix) => queueClient.toKey(suffix),
+            jobId,
+          ),
+          DOWNLOAD_JOB_CANCELLATION_FIELD,
+          DOWNLOAD_JOB_CANCELLATION_SENTINEL,
+          DOWNLOAD_JOB_CANCELLATION_ARMED_SENTINEL,
+        ),
+      );
+      if (signal.aborted) throw signal.reason;
+      if (result === 0) return false;
+      if (result === 1) return true;
+      throw new Error("cancellation transition failed");
+    };
     const processor = dependencies.createProcessor({
       storage,
       downloaderExecutable: config.downloaderExecutable,
       cancellationStore: {
+        arm: (jobId, signal) =>
+          cancellationTransition(ARM_CANCELLATION_SCRIPT, jobId, signal),
         async isCanceled(jobId, signal) {
           if (signal.aborted) throw signal.reason;
           return (
@@ -430,6 +477,8 @@ export async function startTfDownloadWorkerRuntime(
             )) === DOWNLOAD_JOB_CANCELLATION_SENTINEL
           );
         },
+        finish: (jobId, signal) =>
+          cancellationTransition(FINISH_CANCELLATION_SCRIPT, jobId, signal),
       },
     });
     const processJob = async (job: unknown): Promise<unknown> => {

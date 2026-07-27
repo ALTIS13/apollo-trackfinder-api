@@ -69,12 +69,16 @@ function createJob(
 function createCancellationStore(
   implementation: () => boolean | Promise<boolean> = () => false,
 ) {
+  const arm = vi.fn(async (): Promise<boolean> => false);
   const isCanceled = vi.fn(
     async (_jobId: string, _signal: AbortSignal): Promise<boolean> =>
       implementation(),
   );
+  const finish = vi.fn(async (): Promise<boolean> => false);
   return {
+    arm,
     isCanceled,
+    finish,
   };
 }
 
@@ -714,6 +718,7 @@ describe("createDownloadProcessor", () => {
       const firstWriteCompleted = deferred<void>();
       let checks = 0;
       const cancellationStore = {
+        arm: vi.fn(async (): Promise<boolean> => false),
         isCanceled: vi.fn(async (): Promise<boolean> => {
           checks += 1;
           if (checks === 1) return false;
@@ -723,6 +728,7 @@ describe("createDownloadProcessor", () => {
           ]);
           return true;
         }),
+        finish: vi.fn(async (): Promise<boolean> => false),
       };
       const child = createFakeProcess({
         stdout: [Buffer.from("partial")],
@@ -770,10 +776,12 @@ describe("createDownloadProcessor", () => {
       const initialProgressEntered = deferred<void>();
       let checks = 0;
       const cancellationStore = {
+        arm: vi.fn(async (): Promise<boolean> => false),
         isCanceled: vi.fn(async (): Promise<boolean> => {
           checks += 1;
           return checks >= 2;
         }),
+        finish: vi.fn(async (): Promise<boolean> => false),
       };
       const child = createFakeProcess({
         stdout: [Buffer.from("partial")],
@@ -823,12 +831,14 @@ describe("createDownloadProcessor", () => {
     const finalProgressStarted = deferred<void>();
     let cancellationChecks = 0;
     const cancellationStore = {
+      arm: vi.fn(async (): Promise<boolean> => false),
       isCanceled: vi.fn(async (): Promise<boolean> => {
         cancellationChecks += 1;
         if (cancellationChecks === 1) return false;
         await finalProgressStarted.promise;
         return true;
       }),
+      finish: vi.fn(async (): Promise<boolean> => false),
     };
     const job = createJob();
     job.updateProgress.mockImplementation((progress: number) => {
@@ -867,6 +877,7 @@ describe("createDownloadProcessor", () => {
     let calls = 0;
     let hungSignal: AbortSignal | undefined;
     const cancellationStore = {
+      arm: vi.fn(async (): Promise<boolean> => false),
       isCanceled: vi.fn(
         async (_jobId: string, signal: AbortSignal): Promise<boolean> => {
           calls += 1;
@@ -877,6 +888,7 @@ describe("createDownloadProcessor", () => {
           return new Promise<boolean>(() => undefined);
         },
       ),
+      finish: vi.fn(async (): Promise<boolean> => false),
     };
     const job = createJob();
     job.updateProgress.mockImplementation(async (progress: number) => {
@@ -1374,6 +1386,7 @@ describe("createDownloadProcessor", () => {
           begin: vi.fn(),
         },
         cancellationStore: {
+          arm: vi.fn(async (): Promise<boolean> => false),
           isCanceled: vi.fn(
             async (_jobId: string, signal: AbortSignal): Promise<boolean> => {
               storeSignal = signal;
@@ -1381,6 +1394,7 @@ describe("createDownloadProcessor", () => {
               return new Promise<boolean>(() => undefined);
             },
           ),
+          finish: vi.fn(async (): Promise<boolean> => false),
         },
         spawnDownload,
         logger: createLogger(),
@@ -1558,6 +1572,39 @@ describe("createDownloadProcessor", () => {
     expect(await readdir(root)).toEqual([]);
   });
 
+  it("rolls back a committed file when cancellation wins the completion fence", async () => {
+    const { root, storage } = await createStorage();
+    const cancellationStore = {
+      arm: vi.fn(async (): Promise<boolean> => false),
+      isCanceled: vi.fn(async (): Promise<boolean> => false),
+      finish: vi.fn(async (): Promise<boolean> => true),
+    };
+    const processor = createDownloadProcessor({
+      storage,
+      cancellationStore,
+      spawnDownload: vi.fn(() =>
+        createFakeProcess({ stdout: [Buffer.from("audio")] }),
+      ),
+      logger: createLogger(),
+    });
+
+    await expect(
+      processor(createJob(), new AbortController().signal),
+    ).rejects.toMatchObject({
+      code: "download_canceled",
+      retriable: false,
+    });
+    expect(cancellationStore.arm).toHaveBeenCalledWith(
+      JOB_ID,
+      expect.any(AbortSignal),
+    );
+    expect(cancellationStore.finish).toHaveBeenCalledWith(
+      JOB_ID,
+      expect.any(AbortSignal),
+    );
+    expect(await readdir(root)).toEqual([]);
+  });
+
   it("pins a committed final across final progress before allowing quota eviction", async () => {
     const { root, storage } = await createStorage({
       maxFileBytes: 4,
@@ -1635,12 +1682,14 @@ describe("createDownloadProcessor", () => {
       throwTerm: true,
     });
     const cancellationStore = {
+      arm: vi.fn(async (): Promise<boolean> => false),
       isCanceled: vi.fn(async (): Promise<boolean> => {
         checks += 1;
         if (checks === 1) return false;
         await Promise.all([childSpawned.promise, firstWriteCompleted.promise]);
         return true;
       }),
+      finish: vi.fn(async (): Promise<boolean> => false),
     };
     const spawnDownload = vi.fn(() => {
       childSpawned.resolve();
