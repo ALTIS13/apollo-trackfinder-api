@@ -1,0 +1,680 @@
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import type { Pool, QueryResult } from "pg";
+import { afterEach, describe, expect, test } from "vitest";
+
+import {
+  baselineTfStartupSchema,
+  createTfMigrationReadinessProbe,
+  runTfMigrations,
+} from "./migrations.js";
+import type {
+  MigrationManifestEntry,
+  MigrationRunnerOptions,
+} from "./migrations.js";
+import { createTfPool } from "./pool.js";
+
+type RecordedQuery = {
+  text: string;
+  values?: readonly unknown[];
+};
+
+type CatalogFixture = {
+  columns: unknown[];
+  constraints: unknown[];
+  indexes: unknown[];
+  ownership: unknown[];
+};
+
+const exactCatalog: CatalogFixture = {
+  columns: [
+    [
+      "track_search_cache",
+      "id",
+      1,
+      "integer",
+      false,
+      "nextval('public.track_search_cache_id_seq'::regclass)",
+    ],
+    ["track_search_cache", "cache_key", 2, "text", false, null],
+    ["track_search_cache", "results", 3, "jsonb", false, null],
+    [
+      "track_search_cache",
+      "expires_at",
+      4,
+      "timestamp with time zone",
+      false,
+      null,
+    ],
+    [
+      "track_search_cache",
+      "created_at",
+      5,
+      "timestamp with time zone",
+      false,
+      "now()",
+    ],
+    [
+      "play_history",
+      "id",
+      1,
+      "integer",
+      false,
+      "nextval('public.play_history_id_seq'::regclass)",
+    ],
+    ["play_history", "session_id", 2, "text", false, null],
+    ["play_history", "track_id", 3, "text", false, null],
+    ["play_history", "artist", 4, "text", true, null],
+    ["play_history", "title", 5, "text", true, null],
+    [
+      "play_history",
+      "played_at",
+      6,
+      "timestamp with time zone",
+      false,
+      "now()",
+    ],
+    [
+      "liked_tracks",
+      "id",
+      1,
+      "integer",
+      false,
+      "nextval('public.liked_tracks_id_seq'::regclass)",
+    ],
+    ["liked_tracks", "session_id", 2, "text", false, null],
+    ["liked_tracks", "track_id", 3, "text", false, null],
+    ["liked_tracks", "artist", 4, "text", true, null],
+    ["liked_tracks", "title", 5, "text", true, null],
+    ["liked_tracks", "thumbnail_url", 6, "text", true, null],
+    ["liked_tracks", "duration", 7, "text", true, null],
+    ["liked_tracks", "liked_at", 8, "timestamp with time zone", false, "now()"],
+    [
+      "playlists",
+      "id",
+      1,
+      "integer",
+      false,
+      "nextval('public.playlists_id_seq'::regclass)",
+    ],
+    ["playlists", "session_id", 2, "text", false, null],
+    ["playlists", "name", 3, "text", false, null],
+    ["playlists", "description", 4, "text", true, null],
+    ["playlists", "created_at", 5, "timestamp with time zone", false, "now()"],
+    ["playlists", "updated_at", 6, "timestamp with time zone", false, "now()"],
+    [
+      "playlist_tracks",
+      "id",
+      1,
+      "integer",
+      false,
+      "nextval('public.playlist_tracks_id_seq'::regclass)",
+    ],
+    ["playlist_tracks", "playlist_id", 2, "integer", false, null],
+    ["playlist_tracks", "track_id", 3, "text", false, null],
+    ["playlist_tracks", "artist", 4, "text", true, null],
+    ["playlist_tracks", "title", 5, "text", true, null],
+    ["playlist_tracks", "thumbnail_url", 6, "text", true, null],
+    ["playlist_tracks", "duration", 7, "text", true, null],
+    ["playlist_tracks", "position", 8, "integer", false, "0"],
+    [
+      "playlist_tracks",
+      "added_at",
+      9,
+      "timestamp with time zone",
+      false,
+      "now()",
+    ],
+  ],
+  constraints: [
+    ["liked_tracks", "liked_tracks_pkey", "p", ["id"]],
+    [
+      "liked_tracks",
+      "liked_tracks_session_id_track_id_key",
+      "u",
+      ["session_id", "track_id"],
+    ],
+    ["play_history", "play_history_pkey", "p", ["id"]],
+    ["playlist_tracks", "playlist_tracks_pkey", "p", ["id"]],
+    ["playlists", "playlists_pkey", "p", ["id"]],
+    [
+      "track_search_cache",
+      "track_search_cache_cache_key_key",
+      "u",
+      ["cache_key"],
+    ],
+    ["track_search_cache", "track_search_cache_pkey", "p", ["id"]],
+  ],
+  indexes: [
+    [
+      "liked_tracks",
+      "liked_tracks_session_idx",
+      false,
+      "btree",
+      ["session_id"],
+    ],
+    [
+      "play_history",
+      "play_history_played_at_idx",
+      false,
+      "btree",
+      ["played_at"],
+    ],
+    [
+      "play_history",
+      "play_history_session_idx",
+      false,
+      "btree",
+      ["session_id"],
+    ],
+    [
+      "playlist_tracks",
+      "playlist_tracks_playlist_idx",
+      false,
+      "btree",
+      ["playlist_id"],
+    ],
+    ["playlists", "playlists_session_idx", false, "btree", ["session_id"]],
+  ],
+  ownership: [
+    ["liked_tracks", "legacy_owner"],
+    ["play_history", "legacy_owner"],
+    ["playlist_tracks", "legacy_owner"],
+    ["playlists", "legacy_owner"],
+    ["track_search_cache", "legacy_owner"],
+  ],
+};
+
+class MigrationClientDouble {
+  readonly events: string[] = [];
+  readonly history = new Map<string, string>();
+  readonly queries: RecordedQuery[] = [];
+  readonly failures = new Map<string, Error>();
+  lockAnswers: (boolean | Error)[] = [true];
+  catalog: CatalogFixture = structuredClone(exactCatalog);
+  historyTableExists = false;
+  managedTables: string[] = [];
+  releaseError?: Error;
+  readonly releaseArguments: (Error | boolean | undefined)[] = [];
+
+  async query(text: string, values?: readonly unknown[]): Promise<QueryResult> {
+    this.events.push(text);
+    this.queries.push({ text, values });
+    const exactFailure = this.failures.get(text);
+    if (exactFailure) throw exactFailure;
+
+    if (text.includes("pg_try_advisory_lock")) {
+      const answer = this.lockAnswers.shift() ?? false;
+      if (answer instanceof Error) throw answer;
+      return result([{ acquired: answer }]);
+    }
+    if (text.includes("pg_advisory_unlock"))
+      return result([{ unlocked: true }]);
+    if (text.includes("select name, checksum")) {
+      return result(
+        [...this.history].map(([name, checksum]) => ({ name, checksum })),
+      );
+    }
+    if (text.includes("insert into apollo_tf.schema_migrations")) {
+      const [name, checksum] = values ?? [];
+      this.history.set(String(name), String(checksum));
+      this.historyTableExists = true;
+    }
+    if (text.includes("tf_catalog_columns")) {
+      return result(
+        this.catalog.columns.map(
+          ([
+            table_name,
+            column_name,
+            ordinal_position,
+            data_type,
+            is_nullable,
+            column_default,
+          ]) => ({
+            table_name,
+            column_name,
+            ordinal_position,
+            data_type,
+            is_nullable,
+            column_default,
+          }),
+        ),
+      );
+    }
+    if (text.includes("tf_catalog_constraints")) {
+      return result(
+        this.catalog.constraints.map(
+          ([table_name, constraint_name, constraint_type, columns]) => ({
+            table_name,
+            constraint_name,
+            constraint_type,
+            columns,
+          }),
+        ),
+      );
+    }
+    if (text.includes("tf_catalog_indexes")) {
+      return result(
+        this.catalog.indexes.map(
+          ([table_name, index_name, is_unique, method, expressions]) => ({
+            table_name,
+            index_name,
+            is_unique,
+            method,
+            expressions,
+          }),
+        ),
+      );
+    }
+    if (text.includes("tf_catalog_ownership")) {
+      return result(
+        this.catalog.ownership.map(([table_name, owner]) => ({
+          table_name,
+          owner,
+        })),
+      );
+    }
+    if (text.includes("current_database_role")) {
+      return result([
+        {
+          current_role: "legacy_owner",
+          is_superuser: true,
+          is_database_owner: true,
+        },
+      ]);
+    }
+    if (text.includes("tf_history_exists")) {
+      return result([{ exists: this.historyTableExists }]);
+    }
+    if (text.includes("tf_managed_tables")) {
+      return result(this.managedTables.map((table_name) => ({ table_name })));
+    }
+    return result([]);
+  }
+
+  release(error?: Error | boolean): void {
+    this.events.push("release");
+    this.releaseArguments.push(error);
+    if (this.releaseError) throw this.releaseError;
+  }
+}
+
+class MigrationPoolDouble {
+  readonly client = new MigrationClientDouble();
+  async connect(): Promise<MigrationClientDouble> {
+    return this.client;
+  }
+}
+
+function result(rows: unknown[]): QueryResult {
+  return { rows, rowCount: rows.length } as QueryResult;
+}
+
+function asPool(pool: MigrationPoolDouble): Pool {
+  return pool as unknown as Pool;
+}
+
+const temporaryDirectories: string[] = [];
+
+async function fixtureDirectory(
+  files: Record<string, string>,
+): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "apollo-tf-migrations-"));
+  temporaryDirectories.push(directory);
+  await Promise.all(
+    Object.entries(files).map(([name, sql]) =>
+      writeFile(join(directory, name), sql, "utf8"),
+    ),
+  );
+  return directory;
+}
+
+async function fixtureManifest(
+  directory: string,
+  names: readonly string[],
+): Promise<readonly MigrationManifestEntry[]> {
+  return Promise.all(
+    names.map(async (name) => ({
+      name,
+      checksum: createHash("sha256")
+        .update(await readFile(join(directory, name)))
+        .digest("hex"),
+    })),
+  );
+}
+
+function zeroDelayOptions(): MigrationRunnerOptions {
+  let clock = 0;
+  return {
+    now: () => clock,
+    sleep: async (milliseconds) => {
+      clock += milliseconds;
+    },
+  };
+}
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
+  );
+});
+
+describe("TF migration pool profiles", () => {
+  test("uses exact bounded runtime and migration settings", async () => {
+    const runtime = createTfPool("postgres://runtime:secret@db/tf", "runtime");
+    const migration = createTfPool(
+      "postgres://migrator:secret@db/tf",
+      "migration",
+    );
+
+    expect(runtime.options).toMatchObject({
+      connectionTimeoutMillis: 5_000,
+      query_timeout: 10_000,
+      statement_timeout: 10_000,
+      lock_timeout: 3_000,
+      idle_in_transaction_session_timeout: 10_000,
+      idleTimeoutMillis: 30_000,
+      max: 10,
+    });
+    expect(migration.options).toMatchObject({
+      connectionTimeoutMillis: 10_000,
+      query_timeout: 120_000,
+      statement_timeout: 120_000,
+      lock_timeout: 10_000,
+      idle_in_transaction_session_timeout: 30_000,
+      idleTimeoutMillis: 30_000,
+      max: 2,
+    });
+    await Promise.all([runtime.end(), migration.end()]);
+  });
+});
+
+describe("runTfMigrations", () => {
+  test("rejects filesystem or checksum drift before connecting", async () => {
+    const directory = await fixtureDirectory({
+      "0001_first.sql": "select 1;",
+      "0002_extra.sql": "select 2;",
+    });
+    const manifest = await fixtureManifest(directory, ["0001_first.sql"]);
+    const pool = new MigrationPoolDouble();
+
+    await expect(
+      runTfMigrations(asPool(pool), directory, manifest),
+    ).rejects.toMatchObject({ code: "migration_manifest_mismatch" });
+    expect(pool.client.queries).toEqual([]);
+  });
+
+  test("polls the advisory lock every 250ms and times out at 10s", async () => {
+    const directory = await fixtureDirectory({ "0001_first.sql": "select 1;" });
+    const manifest = await fixtureManifest(directory, ["0001_first.sql"]);
+    const pool = new MigrationPoolDouble();
+    pool.client.lockAnswers = Array.from({ length: 41 }, () => false);
+    const sleeps: number[] = [];
+    let clock = 0;
+
+    await expect(
+      runTfMigrations(asPool(pool), directory, manifest, {
+        now: () => clock,
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds);
+          clock += milliseconds;
+        },
+      }),
+    ).rejects.toMatchObject({ code: "migration_lock_timeout" });
+    expect(sleeps).toEqual(Array.from({ length: 40 }, () => 250));
+    expect(
+      pool.client.queries.filter(({ text }) =>
+        text.includes("pg_try_advisory_lock"),
+      ),
+    ).toHaveLength(41);
+  });
+
+  test("requires persisted history to be an exact manifest prefix", async () => {
+    const directory = await fixtureDirectory({
+      "0001_first.sql": "select 1;",
+      "0002_second.sql": "select 2;",
+    });
+    const manifest = await fixtureManifest(directory, [
+      "0001_first.sql",
+      "0002_second.sql",
+    ]);
+
+    for (const history of [
+      [["9999_unknown.sql", "x"]],
+      [["0002_second.sql", manifest[1]!.checksum]],
+      [["0001_first.sql", "drift"]],
+    ] as const) {
+      const pool = new MigrationPoolDouble();
+      for (const [name, checksum] of history) {
+        pool.client.history.set(name, checksum);
+      }
+      await expect(
+        runTfMigrations(asPool(pool), directory, manifest, zeroDelayOptions()),
+      ).rejects.toMatchObject({ code: "migration_history_mismatch" });
+    }
+  });
+
+  test("applies each migration transactionally and is idempotent", async () => {
+    const directory = await fixtureDirectory({
+      "0001_first.sql": "select 1;",
+      "0002_second.sql": "select 2;",
+    });
+    const manifest = await fixtureManifest(directory, [
+      "0001_first.sql",
+      "0002_second.sql",
+    ]);
+    const pool = new MigrationPoolDouble();
+
+    await expect(
+      runTfMigrations(asPool(pool), directory, manifest, zeroDelayOptions()),
+    ).resolves.toEqual({
+      applied: ["0001_first.sql", "0002_second.sql"],
+      alreadyApplied: [],
+    });
+    pool.client.queries.length = 0;
+    pool.client.lockAnswers = [true];
+    await expect(
+      runTfMigrations(asPool(pool), directory, manifest, zeroDelayOptions()),
+    ).resolves.toEqual({
+      applied: [],
+      alreadyApplied: ["0001_first.sql", "0002_second.sql"],
+    });
+    expect(
+      pool.client.queries.filter(({ text }) => /^BEGIN$/i.test(text)),
+    ).toHaveLength(1);
+  });
+
+  test("rejects unmanaged managed tables before applying migration SQL", async () => {
+    const directory = await fixtureDirectory({ "0001_first.sql": "select 1;" });
+    const manifest = await fixtureManifest(directory, ["0001_first.sql"]);
+    const pool = new MigrationPoolDouble();
+    pool.client.managedTables = ["playlists"];
+
+    await expect(
+      runTfMigrations(asPool(pool), directory, manifest, zeroDelayOptions()),
+    ).rejects.toMatchObject({ code: "migration_history_mismatch" });
+    expect(pool.client.queries.some(({ text }) => text === "select 1;")).toBe(
+      false,
+    );
+  });
+
+  test("preserves a SQL failure and destroys the client after rollback failure", async () => {
+    const sql = "select broken;";
+    const directory = await fixtureDirectory({ "0001_broken.sql": sql });
+    const manifest = await fixtureManifest(directory, ["0001_broken.sql"]);
+    const pool = new MigrationPoolDouble();
+    const primary = new Error("primary");
+    const rollback = new Error("rollback");
+    pool.client.failures.set(sql, primary);
+    pool.client.failures.set("ROLLBACK", rollback);
+
+    await expect(
+      runTfMigrations(asPool(pool), directory, manifest, zeroDelayOptions()),
+    ).rejects.toBe(primary);
+    expect(pool.client.releaseArguments).toEqual([rollback]);
+  });
+
+  test("preserves primary failures across unlock and release failures", async () => {
+    const sql = "select broken;";
+    const directory = await fixtureDirectory({ "0001_broken.sql": sql });
+    const manifest = await fixtureManifest(directory, ["0001_broken.sql"]);
+    const pool = new MigrationPoolDouble();
+    const primary = new Error("primary");
+    const unlock = new Error("unlock");
+    pool.client.failures.set(sql, primary);
+    pool.client.failures.set(
+      "select pg_advisory_unlock(hashtext($1)) as unlocked",
+      unlock,
+    );
+    pool.client.releaseError = new Error("release");
+
+    await expect(
+      runTfMigrations(asPool(pool), directory, manifest, zeroDelayOptions()),
+    ).rejects.toBe(primary);
+    expect(pool.client.releaseArguments).toEqual([unlock]);
+  });
+
+  test("destroys a client when lock state becomes uncertain", async () => {
+    const directory = await fixtureDirectory({ "0001_first.sql": "select 1;" });
+    const manifest = await fixtureManifest(directory, ["0001_first.sql"]);
+    const pool = new MigrationPoolDouble();
+    const failure = new Error("lock query failed");
+    pool.client.lockAnswers = [failure];
+
+    await expect(
+      runTfMigrations(asPool(pool), directory, manifest, zeroDelayOptions()),
+    ).rejects.toBe(failure);
+    expect(pool.client.releaseArguments).toEqual([failure]);
+  });
+});
+
+describe("baselineTfStartupSchema", () => {
+  test("rejects catalog drift without changing ownership or history", async () => {
+    const directory = await fixtureDirectory({
+      "0001_tf_core_collections.sql": "select 1;",
+      "0002_tf_runtime_privileges.sql": "select 2;",
+    });
+    const manifest = await fixtureManifest(directory, [
+      "0001_tf_core_collections.sql",
+      "0002_tf_runtime_privileges.sql",
+    ]);
+    const pool = new MigrationPoolDouble();
+    pool.client.catalog.columns = pool.client.catalog.columns.slice(1);
+
+    await expect(
+      baselineTfStartupSchema(
+        asPool(pool),
+        directory,
+        manifest,
+        zeroDelayOptions(),
+      ),
+    ).rejects.toMatchObject({ code: "migration_baseline_mismatch" });
+    expect(pool.client.history).toEqual(new Map());
+    expect(pool.client.queries.some(({ text }) => /owner to/i.test(text))).toBe(
+      false,
+    );
+    expect(
+      pool.client.queries.some(({ text }) =>
+        text.includes("tf_catalog_columns"),
+      ),
+    ).toBe(true);
+  });
+
+  test("adopts exact legacy objects then applies the privilege migration", async () => {
+    const first = "select 'not executed first';";
+    const second = "select 'runtime grants';";
+    const directory = await fixtureDirectory({
+      "0001_tf_core_collections.sql": first,
+      "0002_tf_runtime_privileges.sql": second,
+    });
+    const manifest = await fixtureManifest(directory, [
+      "0001_tf_core_collections.sql",
+      "0002_tf_runtime_privileges.sql",
+    ]);
+    const pool = new MigrationPoolDouble();
+
+    await expect(
+      baselineTfStartupSchema(
+        asPool(pool),
+        directory,
+        manifest,
+        zeroDelayOptions(),
+      ),
+    ).resolves.toEqual({
+      applied: [
+        "0001_tf_core_collections.sql",
+        "0002_tf_runtime_privileges.sql",
+      ],
+      alreadyApplied: [],
+    });
+    expect(pool.client.queries.some(({ text }) => text === first)).toBe(false);
+    expect(pool.client.queries.some(({ text }) => text === second)).toBe(true);
+    expect(
+      pool.client.queries.filter(({ text }) => /owner to/i.test(text)),
+    ).toHaveLength(12);
+  });
+
+  test("leaves an exact 0001 prefix when the privilege migration fails", async () => {
+    const second = "select 'broken grants';";
+    const directory = await fixtureDirectory({
+      "0001_tf_core_collections.sql": "select 'first';",
+      "0002_tf_runtime_privileges.sql": second,
+    });
+    const manifest = await fixtureManifest(directory, [
+      "0001_tf_core_collections.sql",
+      "0002_tf_runtime_privileges.sql",
+    ]);
+    const pool = new MigrationPoolDouble();
+    const failure = new Error("grant failed");
+    pool.client.failures.set(second, failure);
+
+    await expect(
+      baselineTfStartupSchema(
+        asPool(pool),
+        directory,
+        manifest,
+        zeroDelayOptions(),
+      ),
+    ).rejects.toBe(failure);
+    expect([...pool.client.history]).toEqual([
+      ["0001_tf_core_collections.sql", manifest[0]!.checksum],
+    ]);
+  });
+});
+
+describe("TF migration readiness", () => {
+  test("requires the exact complete history and returns false on errors", async () => {
+    const manifest: readonly MigrationManifestEntry[] = [
+      { name: "0001_first.sql", checksum: "a" },
+      { name: "0002_second.sql", checksum: "b" },
+    ];
+    const query = async () =>
+      result([
+        { name: "0001_first.sql", checksum: "a" },
+        { name: "0002_second.sql", checksum: "b" },
+      ]);
+    await expect(
+      createTfMigrationReadinessProbe({ query }, manifest)(),
+    ).resolves.toBe(true);
+    await expect(
+      createTfMigrationReadinessProbe(
+        {
+          query: async () =>
+            result([{ name: "0002_second.sql", checksum: "b" }]),
+        },
+        manifest,
+      )(),
+    ).resolves.toBe(false);
+    await expect(
+      createTfMigrationReadinessProbe(
+        { query: async () => Promise.reject(new Error("offline")) },
+        manifest,
+      )(),
+    ).resolves.toBe(false);
+  });
+});

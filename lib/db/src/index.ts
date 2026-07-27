@@ -1,8 +1,9 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
+import { createTfPool } from "./pool.js";
 import * as schema from "./schema";
 
-const { Client, Pool } = pg;
+const { Client } = pg;
 
 const databaseUrl = process.env.DATABASE_URL;
 
@@ -12,12 +13,7 @@ if (!databaseUrl) {
   );
 }
 
-export const pool = new Pool({
-  connectionString: databaseUrl,
-  connectionTimeoutMillis: 5_000,
-  query_timeout: 10_000,
-  statement_timeout: 10_000,
-});
+export const pool = createTfPool(databaseUrl, "runtime");
 export const db = drizzle(pool, { schema });
 
 interface DatabaseHealthProbeOptions {
@@ -48,3 +44,4 @@ export async function probeDatabaseHealth(
 }
 
 export * from "./schema";
+export { createTfPool } from "./pool.js";
