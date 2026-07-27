@@ -19,6 +19,7 @@ describe("tf-integrations typecheck contract", () => {
       "tsc -p tsconfig.json --noEmit",
     );
     expect(packageJson.scripts?.typecheck).not.toMatch(/--build|-b\b/);
+    expect(packageJson.scripts?.test).toBe("vitest run src");
     expect(tsconfig.references).toBeUndefined();
   });
 });
