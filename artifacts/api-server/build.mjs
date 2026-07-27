@@ -33,10 +33,9 @@ const apiDatabaseSchemaPlugin = {
       { filter: /^@workspace\/db\/schema$/ },
       () => virtualSchema,
     );
-    build.onResolve(
-      { filter: /^@workspace\/tf-download-contract$/ },
-      () => ({ path: downloadContractIndex }),
-    );
+    build.onResolve({ filter: /^@workspace\/tf-download-contract$/ }, () => ({
+      path: downloadContractIndex,
+    }));
     build.onResolve({ filter: /^\.\/schema$/ }, (args) =>
       path.resolve(args.importer) === databaseIndex ? virtualSchema : undefined,
     );
@@ -58,7 +57,10 @@ async function buildAll() {
   await rm(distDir, { recursive: true, force: true });
 
   await esbuild({
-    entryPoints: [path.resolve(artifactDir, "src/index.ts")],
+    entryPoints: {
+      index: path.resolve(artifactDir, "src/index.ts"),
+      migrate: path.resolve(artifactDir, "src/migrate.ts"),
+    },
     platform: "node",
     bundle: true,
     format: "esm",
@@ -148,7 +150,7 @@ async function buildAll() {
     plugins: [
       apiDatabaseSchemaPlugin,
       // pino relies on workers to handle logging, instead of externalizing it we use a plugin to handle it
-      esbuildPluginPino({ transports: ["pino-pretty"] })
+      esbuildPluginPino({ transports: ["pino-pretty"] }),
     ],
     // Make sure packages that are cjs only (e.g. express) but are bundled continue to work in our esm output file
     banner: {

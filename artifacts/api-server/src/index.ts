@@ -1,5 +1,6 @@
 import Redis from "ioredis";
-import { probeDatabaseHealth } from "@workspace/db";
+import { pool } from "@workspace/db";
+import { createTfMigrationReadinessProbe } from "@workspace/db/migrations";
 
 import { createApiApp } from "./app.js";
 import {
@@ -7,7 +8,6 @@ import {
   shutdownBackgroundQueues,
 } from "./lib/background-queue.js";
 import { logger } from "./lib/logger.js";
-import { runMigrations } from "./lib/migrate.js";
 import {
   assertRequiredModuleHeartbeatKeys,
   parseModuleHeartbeatKeys,
@@ -22,9 +22,7 @@ import {
   TfSessionStore,
   createStrictRedisClient,
 } from "./lib/tf-session-store.js";
-import {
-  createApiGatewayRuntime,
-} from "./lib/api-gateway-runtime.js";
+import { createApiGatewayRuntime } from "./lib/api-gateway-runtime.js";
 import {
   initializeApiRuntime,
   startApiListener,
@@ -32,11 +30,11 @@ import {
 import { attachWebSocketServer } from "./ws.js";
 import type { WebSocketServerHandle } from "./ws.js";
 
+const probeTfMigrationReadiness = createTfMigrationReadinessProbe(pool);
+
 async function start(): Promise<void> {
   assertRequiredModuleHeartbeatKeys(
-    parseModuleHeartbeatKeys(
-      process.env["APOLLO_MODULE_HEARTBEAT_KEYS"],
-    ),
+    parseModuleHeartbeatKeys(process.env["APOLLO_MODULE_HEARTBEAT_KEYS"]),
   );
   const [authConfig, gatewayRuntime] = await Promise.all([
     parseTfAuthRuntimeConfig(process.env),
@@ -93,7 +91,7 @@ async function start(): Promise<void> {
         try {
           const [redisReady, databaseReady] = await Promise.all([
             probeRedisHealth(authConfig.authRedisUrl, { timeoutMs: 1_200 }),
-            probeDatabaseHealth({ timeoutMs: 1_200 }),
+            probeTfMigrationReadiness(),
           ]);
           return redisReady && databaseReady;
         } catch {
@@ -113,7 +111,6 @@ async function start(): Promise<void> {
     });
 
     cacheRedis = getRedis();
-    await runMigrations();
     const server = await startApiListener({
       listen: () => app.listen(port),
       initialize: async (listeningServer) => {

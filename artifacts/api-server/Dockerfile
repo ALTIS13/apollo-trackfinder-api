@@ -56,6 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY --from=builder /app/artifacts/api-server/dist ./artifacts/api-server/dist
+COPY lib/db/migrations /app/migrations
 COPY artifacts/api-server/container/start-tf.sh ./bin/start-tf.sh
 
 RUN chmod 0555 /app/bin/start-tf.sh \
