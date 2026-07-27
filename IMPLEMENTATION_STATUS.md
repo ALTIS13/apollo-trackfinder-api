@@ -14,40 +14,35 @@ Status: `READ_ONLY_COMPLETE`. The active branch is
 - The completed `tf-download-worker` worktree and its local merged branch were
   removed. Its remote feature ref remains as an audit trail. The unrelated
   `tf-integrations-container` worktree was not changed.
-- Windows OpenSSH initially rejected the ignored HomeNode key because its ACL
-  was inherited too broadly. The key ACL is now owner-only; key contents were
-  not read, copied, logged, or committed. Read-only SSH then passed.
-- HomeNode preflight confirmed Docker `28.2.2`, Compose `5.0.2`, Caddy `2.10.2`,
-  synchronized UTC time, active Docker/Caddy/UFW, nearly 15 weeks uptime,
-  approximately 15 GiB available memory, and approximately 112 GiB available
-  disk.
-- Caddy, not Coolify Traefik, owns public host TCP `80/443`. Coolify `4.1.2`
-  reports one reachable/usable server, one existing project, three existing
-  applications, and no Apollo resource. No active `coolify-proxy` container was
-  present.
-- Existing listeners conflict with development defaults `3000`, `3001`, and
-  `8081`. Candidate loopback range `18200-18220` was unused during inspection
-  and is documented for mandatory recheck immediately before deployment.
-- `api.apollot.ru` currently returns `502` from an unused loopback upstream.
-  Other owner-created Apollo application hostnames resolve and redirect HTTP to
-  HTTPS but do not yet have complete Caddy TLS/application bindings.
-- UFW remains default-deny for incoming/routed traffic. External read-only
-  probes could not reach denied control/application ports. No new firewall rule
-  is required because every Apollo host publication must bind to loopback.
-- Rootful Docker reports AppArmor, built-in seccomp, and cgroup namespaces
-  without user-namespace remapping. Native-Linux secret readability for
-  `10001:10001` and `999:999` remains a release blocker.
-- No dedicated Apollo backup destination is provisioned. Remote Docker reports
-  reclaimable build cache and unused volume capacity, but nothing was pruned
-  because ownership proof and explicit mutation approval are still required.
+- Read-only SSH and Coolify access passed using ignored private connection
+  metadata. No key material or connection inventory was read into tracked
+  project files.
+- HomeNode service health, capacity, time synchronization, ingress ownership,
+  listeners, firewall posture, Docker security mode, backup path, and current
+  resources were inspected read-only. Exact versions, counts, capacity,
+  addresses, routes, and candidate ports remain only in ignored
+  `.ops-private/`.
+- Development port defaults conflict with the current host. Production
+  manifests must require explicit loopback publications, and every candidate
+  must be rechecked immediately before container creation.
+- No new firewall rule is required because every Apollo host publication must
+  bind to loopback behind the existing ingress.
+- Native-Linux secret readability for runtime/database UIDs remains a release
+  blocker. A dedicated encrypted Apollo backup destination and restore proof
+  are also not yet available.
+- Remote Docker has reclaimable resources, but nothing was pruned because exact
+  ownership proof and explicit mutation approval are required.
 - Independent Compose audit found production blockers: conflicting optional
   port defaults, TF migrations coupled to API startup, missing Platform
   portal/operator UI, environment-delivered admin credentials, mutable
   build/`:local` images, missing resource limits, and no versioned Caddy
   cutover/rollback artifact.
-- Sanitized evidence and the two-stack rollout order are documented in
+- Public release constraints and the two-stack rollout order are documented in
   `docs/operations/homenode-coolify-preflight.md`. Exact private inventory and
   candidate upstream notes remain only in ignored `.ops-private/`.
+- `admin.apollot.ru` cutover is blocked until its owning UI (Platform operator
+  UI or TF topology UI) and complete operator-authentication policy are
+  explicitly selected.
 - Next implementation stage is local Coolify release hardening: immutable TF
   migrations, production-only Platform/TF Compose manifests, file-secret/native
   ownership proof, immutable images, resource limits, Caddy rollout artifact,

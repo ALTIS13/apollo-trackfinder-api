@@ -4,76 +4,59 @@ Date: 2026-07-27
 
 Status: `READ_ONLY_COMPLETE`
 
-This document records the non-sensitive release constraints proven before the
-first Apollo Platform and Apollo TF deployment. It is not a deployment record
-and does not authorize a remote change.
+This document records the public release constraints proven before the first
+Apollo Platform and Apollo TF deployment. Exact host inventory, capacity,
+listeners, versions, routes, and candidate upstreams remain in the ignored
+private operator record. This is not a deployment record and does not authorize
+a remote change.
 
 ## Proven boundary
 
-- Caddy is the active public ingress and owns host TCP `80/443`; it also serves
-  HTTP/3 on UDP `443`.
-- Coolify `4.1.2` is reachable and usable, but its stored server configuration
-  describes a Traefik proxy that is not the active host ingress. Apollo must not
-  assign Coolify domains or start a competing proxy on `80/443`.
-- Docker, Caddy, and UFW are active. UFW keeps default incoming and routed
-  traffic denied; no Apollo-specific firewall rule is required.
+- The existing public ingress, container control plane, and firewall are active.
+  Apollo must use the already selected ingress boundary and must not start a
+  competing proxy.
+- No Apollo-specific public firewall rule is required. Application publications
+  use operator-selected loopback listeners behind the existing ingress.
 - Existing data services and application containers remain isolated from this
   rollout. No running container, network, volume, route, service, or firewall
   rule was changed during preflight.
-- The host has sufficient initial headroom for a staged beta deployment:
-  approximately `15 GiB` memory available and `112 GiB` disk available at the
-  time of inspection. Capacity must be checked again immediately before deploy.
+- Initial capacity was checked and must be checked again immediately before
+  deploy. Exact evidence is private operator data.
 
 ## Listener and route findings
 
-The development defaults are not production-safe on this host:
+The development port defaults are not production-safe on this host. Production
+manifests must require explicit operator-selected loopback ports and must fail
+when they are omitted; they must never fall back to development values.
 
-| Default          | Conflict         |
-| ---------------- | ---------------- |
-| `127.0.0.1:3000` | Existing service |
-| `127.0.0.1:3001` | Existing service |
-| `127.0.0.1:8081` | Existing service |
-
-`api.apollot.ru` currently routes to an unused loopback listener and returns
-`502`. The other new Apollo application hostnames resolve publicly but do not
-yet have complete Caddy TLS/application bindings. This is expected before
-cutover and must not be treated as a successful deployment.
-
-The host range `127.0.0.1:18200-18220` was unused during preflight. It is a
-candidate range, not a permanent reservation:
-
-| Candidate port | Intended upstream                                    |
-| -------------- | ---------------------------------------------------- |
-| `18200`        | Apollo Platform API (`api.apollot.ru`)               |
-| `18201`        | Apollo TF API (`api.tf.apollot.ru`)                  |
-| `18202`        | Apollo TF web (`tf.apollot.ru`)                      |
-| `18203`        | Apollo Admin (`admin.apollot.ru`)                    |
-| `18204`        | Reserved for the future Apollo portal (`apollot.ru`) |
-
-Every candidate must be checked again with `ss` immediately before container
-creation. All published application ports must bind to `127.0.0.1`, never
+The private runbook records a candidate loopback allocation and current route
+state. Every candidate must be checked again immediately before container
+creation. All published application ports bind to `127.0.0.1`, never
 `0.0.0.0` or `[::]`.
 
 ## Coolify deployment shape
 
-Use two independently rollbackable Docker Compose resources:
+The intended deployment shape uses two independently versioned Docker Compose
+resources. Independent rollback is a release blocker and is not yet proven:
 
 1. `apollo-platform`
    - Platform PostgreSQL
    - Platform Redis
    - one-shot Platform migration
-   - Platform API on candidate loopback port `18200`
+   - Platform API on an explicit operator-selected loopback port
 2. `apollo-tf`
    - TF PostgreSQL and Redis
    - integrations PostgreSQL and one-shot migration
    - download queue Redis
-   - TF API, search, integrations, download worker, web, and admin
-   - only API, web, and admin receive candidate loopback publications
+   - TF API, search, integrations, download worker, and web
+   - only API and web receive candidate loopback publications
+   - the existing TF topology dashboard remains deployment-optional and private
+     until the admin hostname/authentication decision is approved
 
-Run these as Raw Docker Compose resources without Coolify domains or Traefik
-router labels. Caddy remains the only public ingress. Database, Redis, search,
-integrations, worker, and control-plane ports remain private to their Compose
-networks.
+Run these as Raw Docker Compose resources without control-plane domains or proxy
+router labels. The existing ingress remains the only public boundary. Database,
+Redis, search, integrations, worker, and control-plane ports remain private to
+their Compose networks.
 
 Cross-node module placement remains supported by the signed command and
 heartbeat contracts, but it is not part of the first HomeNode rollout. A remote
@@ -89,9 +72,9 @@ The following are required before any owner-approved remote mutation:
    `tf-migrate` service with immutable migration history. The current
    `CREATE TABLE IF NOT EXISTS` startup routine is not a production migration
    or rollback contract.
-2. Produce Coolify-specific Compose manifests with mandatory `182xx` loopback
-   ports, no development defaults, no `build` entries, and only immutable image
-   references.
+2. Produce Coolify-specific Compose manifests with mandatory operator-selected
+   loopback ports, no development defaults, no `build` entries, and only
+   immutable image references.
 3. Remove operator/admin credentials from container environment and deliver all
    runtime credentials through the existing `/run/secrets/*` boundary.
 4. Prove the selected Coolify secret-to-file mechanism on rootful native Linux
@@ -113,10 +96,15 @@ The following are required before any owner-approved remote mutation:
    image availability immediately before approval.
 
 The Apollo portal and Platform operator UI declared by the release architecture
-are not present in the current Platform Compose stack. Port `18204` and the apex
-route stay reserved until the portal is implemented and validated. The existing
-TF topology dashboard does not replace the Platform registration, invitation,
+are not present in the current Platform Compose stack. The apex route stays
+reserved until the portal is implemented and validated. The existing TF
+topology dashboard does not replace the Platform registration, invitation,
 account, and entitlement administration UI.
+
+`admin.apollot.ru` has no approved owning UI yet. Its cutover remains blocked
+until the owner explicitly assigns the hostname to either the Platform operator
+UI or the TF topology UI and the selected application has a complete
+operator-authentication policy.
 
 ## Approval and rollout order
 
@@ -126,12 +114,12 @@ Remote mutation remains split into explicit checkpoints:
 2. Deploy Platform data services, migration, and API without Caddy cutover.
 3. Validate Platform health, readiness, registration modes, invitation flow,
    policy decisions, audit, backup, and rollback.
-4. Owner approves the `api.apollot.ru` Caddy cutover.
+4. Owner approves the Platform API ingress cutover.
 5. Deploy the TF stack without Caddy cutover.
 6. Validate entitlement denial/grant, search, provider degradation, queued
    download, cancellation, signed heartbeats, admin auth, and stale states.
-7. Owner approves `api.tf.apollot.ru`, `tf.apollot.ru`, and
-   `admin.apollot.ru` Caddy cutovers one hostname at a time.
+7. Owner approves the TF API and TF web ingress cutovers one hostname at a time.
+   Admin remains blocked until its owning UI/auth boundary is approved.
 8. Verify all pre-existing services after each cutover.
 
 No Caddy reload, Coolify resource change, migration, UFW change, Docker cleanup,
