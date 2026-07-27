@@ -560,6 +560,7 @@ interface SmokeResult {
     readonly heartbeatRecovered: boolean;
     readonly completedOwnedFixture: boolean;
     readonly authenticatedBytes: boolean;
+    readonly transcodedMp3: boolean;
     readonly statusAndProgress: boolean;
     readonly fullFile: boolean;
     readonly exactRange: boolean;
@@ -1079,6 +1080,38 @@ async function waitFor<T>(
     probeTimeoutMs: 5_000,
     timeoutMs,
   });
+}
+
+function matchExpectedJobStatus<
+  T extends Record<string, unknown> & { readonly status: string },
+>(mode: string, current: T, expected: readonly string[]): T | false {
+  if (expected.includes(current.status)) return current;
+  if (["completed", "failed", "canceled"].includes(current.status)) {
+    throw new Error(
+      `${mode} job reached unexpected terminal status ${current.status}`,
+    );
+  }
+  return false;
+}
+
+function isMp3Probe(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  const format = record["format"];
+  const streams = record["streams"];
+  if (typeof format !== "object" || format === null || !Array.isArray(streams))
+    return false;
+  const formatName = (format as Record<string, unknown>)["format_name"];
+  return (
+    typeof formatName === "string" &&
+    formatName.split(",").includes("mp3") &&
+    streams.some(
+      (stream) =>
+        typeof stream === "object" &&
+        stream !== null &&
+        (stream as Record<string, unknown>)["codec_name"] === "mp3",
+    )
+  );
 }
 
 async function fetchJson(
@@ -1665,8 +1698,8 @@ async function runPreparedDisposableSmoke(
         "    environment:",
         "      NODE_ENV: test",
         '      TF_DOWNLOAD_SMOKE_FIXTURES: "true"',
-        '      TF_DOWNLOAD_MAX_FILE_BYTES: "1024"',
-        '      TF_DOWNLOAD_STORAGE_QUOTA_BYTES: "1536"',
+        '      TF_DOWNLOAD_MAX_FILE_BYTES: "65536"',
+        '      TF_DOWNLOAD_STORAGE_QUOTA_BYTES: "98304"',
         '      TF_DOWNLOAD_SWEEP_INTERVAL_MS: "1000"',
         "",
       ].join("\n"),
@@ -1915,7 +1948,11 @@ async function runPreparedDisposableSmoke(
           `${jobModes.get(jobId) ?? "unknown"} job ${expected.join("/")}`,
           async () => {
             const current = await status(jobId);
-            return expected.includes(current.status) ? current : false;
+            return matchExpectedJobStatus(
+              jobModes.get(jobId) ?? "unknown",
+              current,
+              expected,
+            );
           },
           60_000,
         );
@@ -1965,13 +2002,33 @@ async function runPreparedDisposableSmoke(
       responseSurfaces.push(rangedBytes.toString("base64"));
       const authenticatedBytes =
         full.status === 200 &&
-        fullBytes.length === 600 &&
-        fullBytes.every((value) => value === 65);
+        fullBytes.length > 20 &&
+        completed["fileSize"] === fullBytes.length;
+      const mediaProbe = await compose([
+        "exec",
+        "-T",
+        "tf-download-worker",
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=codec_name",
+        "-show_entries",
+        "format=format_name",
+        "-of",
+        "json",
+        `/var/lib/apollo-tf/downloads/${completedJob}.mp3`,
+      ]);
+      responseSurfaces.push(mediaProbe.stdout, mediaProbe.stderr);
+      const transcodedMp3 = isMp3Probe(JSON.parse(mediaProbe.stdout));
       const exactRange =
         ranged.status === 206 &&
-        ranged.headers.get("content-range") === "bytes 10-19/600" &&
+        ranged.headers.get("content-range") ===
+          `bytes 10-19/${fullBytes.length}` &&
         rangedBytes.length === 10 &&
-        rangedBytes.every((value) => value === 65);
+        rangedBytes.equals(fullBytes.subarray(10, 20));
       const pathJob = await enqueue("normal", owner, {
         artist: pathCanary,
         title: pathCanary,
@@ -2117,7 +2174,12 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
           "-e",
           "const{statSync}=require('node:fs');const p=process.env.TF_DOWNLOAD_STORAGE_ROOT+'/'+process.env.HOLD_JOB_ID+'.mp3.part';try{process.stdout.write(String(statSync(p).size))}catch{process.stdout.write('0')}",
         ]);
-        return Number(output.stdout.trim()) === 900;
+        const partialBytes = Number(output.stdout.trim());
+        return (
+          Number.isSafeInteger(partialBytes) &&
+          partialBytes >= 40_000 &&
+          partialBytes <= 65_536
+        );
       });
       const quotaJob = await enqueue("quota");
       await waitForStatus(quotaJob, ["failed"]);
@@ -2264,8 +2326,10 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
           heartbeatRecovered: recovered["status"] === "healthy",
           completedOwnedFixture: completed.status === "completed",
           authenticatedBytes,
+          transcodedMp3,
           statusAndProgress:
-            completed["progress"] === 100 && completed["fileSize"] === 600,
+            completed["progress"] === 100 &&
+            completed["fileSize"] === fullBytes.length,
           fullFile: full.status === 200,
           exactRange,
           replayRejected:
@@ -2568,6 +2632,41 @@ describe("TF download bounded smoke orchestration", () => {
       ),
     ).rejects.toThrow("probe deadline exceeded");
     expect(probes).toBeGreaterThan(0);
+  });
+
+  it("fails status polling immediately on an unexpected terminal state", () => {
+    expect(
+      matchExpectedJobStatus("normal", { status: "waiting" }, ["completed"]),
+    ).toBe(false);
+    expect(
+      matchExpectedJobStatus("normal", { status: "completed", progress: 100 }, [
+        "completed",
+      ]),
+    ).toEqual({ status: "completed", progress: 100 });
+    expect(() =>
+      matchExpectedJobStatus("normal", { status: "failed" }, ["completed"]),
+    ).toThrow("normal job reached unexpected terminal status failed");
+  });
+
+  it("accepts only an ffprobe-confirmed MP3 container and codec", () => {
+    expect(
+      isMp3Probe({
+        format: { format_name: "mp3" },
+        streams: [{ codec_name: "mp3" }],
+      }),
+    ).toBe(true);
+    expect(
+      isMp3Probe({
+        format: { format_name: "wav" },
+        streams: [{ codec_name: "pcm_s16le" }],
+      }),
+    ).toBe(false);
+    expect(
+      isMp3Probe({
+        format: { format_name: "mp3" },
+        streams: [{ codec_name: "aac" }],
+      }),
+    ).toBe(false);
   });
 
   it("keeps secret values out of Redis and tracked-file command argv", async () => {
@@ -3335,6 +3434,7 @@ describe.skipIf(!realDockerEnabled)(
           heartbeatRecovered: true,
           completedOwnedFixture: true,
           authenticatedBytes: true,
+          transcodedMp3: true,
           statusAndProgress: true,
           fullFile: true,
           exactRange: true,
