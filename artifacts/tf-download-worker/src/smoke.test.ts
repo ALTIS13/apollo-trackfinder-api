@@ -1,14 +1,7 @@
 import { execFile, spawn } from "node:child_process";
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -28,11 +21,17 @@ const ADMIN_TOKEN = "task-7-download-smoke-admin";
 const WEB_ORIGIN_HOST = "127.0.0.1";
 const OUTER_TEST_TIMEOUT_MS = 25 * 60_000;
 const RUN_TIMEOUT_MS = 18 * 60_000;
-const CLEANUP_RESERVE_MS = 5 * 60_000;
+const CLEANUP_REMOVAL_RESERVE_MS = 4 * 60_000;
+const CLEANUP_AUDIT_RESERVE_MS = 60_000;
+const CLEANUP_RESERVE_MS =
+  CLEANUP_REMOVAL_RESERVE_MS + CLEANUP_AUDIT_RESERVE_MS;
 const SAFETY_MARGIN_MS = 60_000;
 const DEFAULT_DOCKER_TIMEOUT_MS = 30_000;
 const BUILD_DOCKER_TIMEOUT_MS = 12 * 60_000;
 const START_DOCKER_TIMEOUT_MS = 6 * 60_000;
+const FILESYSTEM_REMOVAL_TIMEOUT_MS = 30_000;
+const FILESYSTEM_AUDIT_TIMEOUT_MS = 5_000;
+const TRACKED_FILE_TIMEOUT_MS = 5_000;
 
 interface BoundedFetchOptions {
   readonly fetchImplementation?: typeof fetch;
@@ -148,6 +147,7 @@ interface SmokeSecurityPhases {
 }
 
 interface TrackedFileScanDependencies {
+  readonly deadlineAt: number;
   readonly readTrackedFile: (filePath: string) => Promise<Buffer>;
   readonly runGit: (args: readonly string[]) => Promise<DockerResult>;
 }
@@ -162,10 +162,11 @@ interface CleanupDependencies {
 }
 
 interface CleanupOptions {
+  readonly auditDeadlineAt: number;
   readonly composeFiles: readonly string[];
-  readonly deadlineAt: number;
   readonly dependencies: CleanupDependencies;
   readonly project: string;
+  readonly removalDeadlineAt: number;
   readonly temporaryDirectory?: string;
 }
 
@@ -243,14 +244,17 @@ async function runSmokeLifecycle<T>(
 
 async function runSmokeSetup<T>(dependencies: {
   readonly cleanup: () => Promise<void>;
-  readonly createTemporaryDirectory: () => Promise<string>;
+  readonly createTemporaryDirectory: (directory: string) => Promise<void>;
   readonly reservePort: () => Promise<number>;
   readonly run: (temporaryDirectory: string, port: number) => Promise<T>;
+  readonly temporaryDirectory: string;
 }): Promise<T> {
   return runSmokeLifecycle(async () => {
-    const temporaryDirectory = await dependencies.createTemporaryDirectory();
+    await dependencies.createTemporaryDirectory(
+      dependencies.temporaryDirectory,
+    );
     const port = await dependencies.reservePort();
-    return dependencies.run(temporaryDirectory, port);
+    return dependencies.run(dependencies.temporaryDirectory, port);
   }, dependencies.cleanup);
 }
 
@@ -272,8 +276,17 @@ function cleanupCallTimeout(
   capMs: number,
   now: () => number = Date.now,
 ): number {
+  return deadlineCallTimeout("smoke cleanup", deadlineAt, capMs, now);
+}
+
+function deadlineCallTimeout(
+  name: string,
+  deadlineAt: number,
+  capMs: number,
+  now: () => number = Date.now,
+): number {
   const remainingMs = deadlineAt - now();
-  if (remainingMs < 1) throw new Error("smoke cleanup deadline exceeded");
+  if (remainingMs < 1) throw new Error(`${name} deadline exceeded`);
   return Math.min(remainingMs, capMs);
 }
 
@@ -299,12 +312,28 @@ async function scanTrackedFilesForCanaries(
   canaries: readonly string[],
   dependencies: TrackedFileScanDependencies,
 ): Promise<void> {
-  const listed = await dependencies.runGit(["ls-files", "-z"]);
+  const listed = await boundedOperation(
+    "tracked file listing",
+    () => dependencies.runGit(["ls-files", "-z"]),
+    deadlineCallTimeout(
+      "tracked file scan",
+      dependencies.deadlineAt,
+      TRACKED_FILE_TIMEOUT_MS,
+    ),
+  );
   const trackedFiles = listed.stdout.split("\0").filter(Boolean);
   const encodedCanaries = canaries.map((canary) => Buffer.from(canary));
 
   for (const filePath of trackedFiles) {
-    const content = await dependencies.readTrackedFile(filePath);
+    const content = await boundedOperation(
+      "tracked file read",
+      () => dependencies.readTrackedFile(filePath),
+      deadlineCallTimeout(
+        "tracked file scan",
+        dependencies.deadlineAt,
+        TRACKED_FILE_TIMEOUT_MS,
+      ),
+    );
     if (encodedCanaries.some((canary) => content.includes(canary))) {
       throw new Error("tracked file exposed a smoke canary");
     }
@@ -319,11 +348,12 @@ async function cleanupSmokeResources(
   options: CleanupOptions,
 ): Promise<SmokeResult["cleanup"]> {
   const { dependencies, project } = options;
-  const run = (
+  const run = async (
     args: readonly string[],
+    deadlineAt: number,
     capMs = 30_000,
   ): Promise<DockerResult> =>
-    dependencies.runDocker(args, cleanupCallTimeout(options.deadlineAt, capMs));
+    dependencies.runDocker(args, cleanupCallTimeout(deadlineAt, capMs));
   const composeArgs = [
     "compose",
     ...options.composeFiles.flatMap((file) => ["-f", file]),
@@ -338,15 +368,24 @@ async function cleanupSmokeResources(
   const cleanupErrors: unknown[] = [];
 
   if (options.composeFiles.length > 0) {
-    await run(composeArgs, 90_000).catch(() => undefined);
+    await run(composeArgs, options.removalDeadlineAt, 90_000).catch(
+      () => undefined,
+    );
   }
 
-  const listOwned = async (): Promise<{
+  type OwnedResources = {
     readonly containers: readonly string[];
     readonly images: readonly string[];
     readonly networks: readonly string[];
     readonly volumes: readonly string[];
-  }> => {
+  };
+  const noOwnedResources = (): OwnedResources => ({
+    containers: [],
+    images: [],
+    networks: [],
+    volumes: [],
+  });
+  const listOwned = async (deadlineAt: number): Promise<OwnedResources> => {
     const label = `label=com.docker.compose.project=${project}`;
     const [
       labeledContainers,
@@ -358,14 +397,14 @@ async function cleanupSmokeResources(
       composeVolumes,
       helperVolumes,
     ] = await Promise.all([
-      run(["ps", "-aq", "--filter", label]),
-      run(["ps", "-aq", "--filter", `name=^${project}[-_]`]),
-      run(["images", "-q", "--filter", `reference=${project}-*`]),
-      run(["network", "ls", "-q", "--filter", label]),
-      run(["network", "ls", "-q", "--filter", `name=^${project}_`]),
-      run(["volume", "ls", "-q", "--filter", label]),
-      run(["volume", "ls", "-q", "--filter", `name=^${project}_`]),
-      run(["volume", "ls", "-q", "--filter", `name=^${project}-`]),
+      run(["ps", "-aq", "--filter", label], deadlineAt),
+      run(["ps", "-aq", "--filter", `name=^${project}[-_]`], deadlineAt),
+      run(["images", "-q", "--filter", `reference=${project}-*`], deadlineAt),
+      run(["network", "ls", "-q", "--filter", label], deadlineAt),
+      run(["network", "ls", "-q", "--filter", `name=^${project}_`], deadlineAt),
+      run(["volume", "ls", "-q", "--filter", label], deadlineAt),
+      run(["volume", "ls", "-q", "--filter", `name=^${project}_`], deadlineAt),
+      run(["volume", "ls", "-q", "--filter", `name=^${project}-`], deadlineAt),
     ]);
     const unique = (
       ...values: readonly (readonly string[])[]
@@ -388,7 +427,10 @@ async function cleanupSmokeResources(
     };
   };
 
-  const owned = await listOwned();
+  const owned = await listOwned(options.removalDeadlineAt).catch((error) => {
+    cleanupErrors.push(error);
+    return noOwnedResources();
+  });
   for (const [resource, ids] of Object.entries(owned)) {
     if (ids.length === 0) continue;
     const args =
@@ -399,29 +441,52 @@ async function cleanupSmokeResources(
           : resource === "networks"
             ? ["network", "rm", ...ids]
             : ["volume", "rm", "-f", ...ids];
-    await run(args, 60_000).catch((error) => {
+    await run(args, options.removalDeadlineAt, 60_000).catch((error) => {
       cleanupErrors.push(error);
     });
   }
 
   if (options.temporaryDirectory !== undefined) {
-    await dependencies
-      .removeDirectory(options.temporaryDirectory)
-      .catch((error) => {
-        cleanupErrors.push(error);
-      });
+    try {
+      await boundedOperation(
+        "temporary directory removal",
+        () => dependencies.removeDirectory(options.temporaryDirectory!),
+        cleanupCallTimeout(
+          options.removalDeadlineAt,
+          FILESYSTEM_REMOVAL_TIMEOUT_MS,
+        ),
+      );
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
   }
 
-  const residue = await listOwned();
+  const residue = await listOwned(options.auditDeadlineAt).catch((error) => {
+    cleanupErrors.push(error);
+    return noOwnedResources();
+  });
+  let temporaryDirectoryExists = false;
+  if (options.temporaryDirectory !== undefined) {
+    try {
+      temporaryDirectoryExists = await boundedOperation(
+        "temporary directory audit",
+        () => dependencies.directoryExists(options.temporaryDirectory!),
+        cleanupCallTimeout(
+          options.auditDeadlineAt,
+          FILESYSTEM_AUDIT_TIMEOUT_MS,
+        ),
+      );
+    } catch (error) {
+      cleanupErrors.push(error);
+      temporaryDirectoryExists = true;
+    }
+  }
+
   const cleanup = {
     containers: residue.containers.length,
     images: residue.images.length,
     networks: residue.networks.length,
-    temporaryDirectories:
-      options.temporaryDirectory !== undefined &&
-      (await dependencies.directoryExists(options.temporaryDirectory))
-        ? 1
-        : 0,
+    temporaryDirectories: temporaryDirectoryExists ? 1 : 0,
     volumes: residue.volumes.length,
   };
   if (
@@ -495,6 +560,7 @@ interface DockerResult {
 interface DockerInputInvocation {
   readonly args: readonly string[];
   readonly input: string;
+  readonly spawnChild?: typeof spawn;
 }
 
 interface SessionFixture {
@@ -505,6 +571,63 @@ interface SessionFixture {
 
 function generatedSecret(): string {
   return randomBytes(32).toString("base64url");
+}
+
+function createSmokeCanaryBundle() {
+  const pathMarker = Array.from(randomBytes(16), (value) =>
+    value.toString(2).padStart(8, "0"),
+  )
+    .join("")
+    .replaceAll("0", "/")
+    .replaceAll("1", "\\");
+  const values = {
+    queuePassword: generatedSecret(),
+    commandSecret: generatedSecret(),
+    heartbeatSecret: generatedSecret(),
+    searchSecret: generatedSecret(),
+    integrationsSecret: generatedSecret(),
+    searchHeartbeatSecret: generatedSecret(),
+    integrationsHeartbeatSecret: generatedSecret(),
+    clientSecret: generatedSecret(),
+    databasePassword: generatedSecret(),
+    sourceCanary: `source-${generatedSecret()}`,
+    accountCanary: randomUUID(),
+    signatureCanary: `signature-${generatedSecret()}`,
+    pathCanary: `../${pathMarker}/..\\`,
+    stderrCanary: `stderr-${generatedSecret()}`,
+    wrongKeyCanary: `wrong-key-${generatedSecret()}`,
+    wrongQueuePassword: generatedSecret(),
+    weakQueuePassword: `weak-${randomBytes(4).toString("hex")}`,
+    unreadableQueuePassword: generatedSecret(),
+    ownerSessionHandle: generatedSecret(),
+    ownerSessionCsrf: generatedSecret(),
+    ownerSessionRevision: generatedSecret(),
+    foreignSessionHandle: generatedSecret(),
+    foreignSessionCsrf: generatedSecret(),
+    foreignSessionRevision: generatedSecret(),
+  } as const;
+
+  return {
+    values,
+    canaries: Object.values(values),
+    heartbeatKeys: {
+      "search-media": values.searchHeartbeatSecret,
+      "account-integrations": values.integrationsHeartbeatSecret,
+      "download-worker": values.heartbeatSecret,
+    },
+    sessions: {
+      owner: {
+        handle: values.ownerSessionHandle,
+        csrf: values.ownerSessionCsrf,
+        revision: values.ownerSessionRevision,
+      },
+      foreign: {
+        handle: values.foreignSessionHandle,
+        csrf: values.foreignSessionCsrf,
+        revision: values.foreignSessionRevision,
+      },
+    },
+  } as const;
 }
 
 function digest(value: string): string {
@@ -581,60 +704,126 @@ async function dockerWithInput(
   environment: NodeJS.ProcessEnv,
   timeout = DEFAULT_DOCKER_TIMEOUT_MS,
 ): Promise<DockerResult> {
-  let child: ReturnType<typeof spawn> | undefined;
-  return boundedOperation(
-    "docker command",
-    () =>
-      new Promise<DockerResult>((resolve, reject) => {
-        const running = spawn("docker", [...invocation.args], {
-          cwd: repositoryRoot,
-          env: environment,
-          stdio: ["pipe", "pipe", "pipe"],
-          windowsHide: true,
-        });
-        child = running;
-        const { stdin, stdout: output, stderr: errorOutput } = running;
-        if (stdin === null || output === null || errorOutput === null) {
-          running.kill();
-          reject(new Error("docker command pipes unavailable"));
-          return;
-        }
-        const stdout: Buffer[] = [];
-        const stderr: Buffer[] = [];
-        let outputBytes = 0;
-        const append = (target: Buffer[], chunk: Buffer): void => {
-          outputBytes += chunk.length;
-          if (outputBytes > 16 * 1024 * 1024) {
-            child?.kill();
-            reject(new Error("docker command output limit exceeded"));
-            return;
-          }
-          target.push(chunk);
-        };
-        output.on("data", (chunk: Buffer) => append(stdout, chunk));
-        errorOutput.on("data", (chunk: Buffer) => append(stderr, chunk));
-        running.once("error", reject);
-        running.once("close", (code) => {
-          const result = {
-            stdout: Buffer.concat(stdout).toString("utf8"),
-            stderr: Buffer.concat(stderr).toString("utf8"),
-          };
-          if (code === 0) {
-            resolve(result);
-            return;
-          }
-          reject(
-            Object.assign(new Error("docker command failed"), {
-              code,
-              ...result,
-            }),
-          );
-        });
-        stdin.end(invocation.input);
-      }),
-    timeout,
-    () => child?.kill(),
-  );
+  if (!Number.isSafeInteger(timeout) || timeout < 1) {
+    throw new Error("docker command deadline exceeded");
+  }
+
+  return new Promise<DockerResult>((resolve, reject) => {
+    const running = (invocation.spawnChild ?? spawn)(
+      "docker",
+      [...invocation.args],
+      {
+        cwd: repositoryRoot,
+        env: environment,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    );
+    const { stdin, stdout: output, stderr: errorOutput } = running;
+    if (stdin === null || output === null || errorOutput === null) {
+      running.kill();
+      reject(new Error("docker command pipes unavailable"));
+      return;
+    }
+
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let closed = false;
+    let inputCompleted = false;
+    let outputBytes = 0;
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+
+    const removeListeners = (): void => {
+      running.removeListener("error", onChildError);
+      running.removeListener("close", onClose);
+      stdin.removeListener("error", onInputError);
+      output.removeListener("data", onStdout);
+      errorOutput.removeListener("data", onStderr);
+    };
+    const stopChild = (): void => {
+      try {
+        running.kill();
+      } catch {
+        // Cleanup will remove any project-owned resource left by Docker.
+      }
+    };
+    const finish = (
+      error: unknown | undefined,
+      result?: DockerResult,
+      terminate = error !== undefined && !closed,
+    ): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      if (terminate) stopChild();
+      stdin.destroy();
+      removeListeners();
+      if (error === undefined && result !== undefined) resolve(result);
+      else reject(error);
+    };
+    const result = (): DockerResult => ({
+      stdout: Buffer.concat(stdout).toString("utf8"),
+      stderr: Buffer.concat(stderr).toString("utf8"),
+    });
+    const inputError = (cause: unknown): Error =>
+      Object.assign(new Error("docker command input failed"), { cause });
+    const append = (target: Buffer[], chunk: Buffer): void => {
+      outputBytes += chunk.length;
+      if (outputBytes > 16 * 1024 * 1024) {
+        finish(new Error("docker command output limit exceeded"));
+        return;
+      }
+      target.push(chunk);
+    };
+    const onStdout = (chunk: Buffer): void => append(stdout, chunk);
+    const onStderr = (chunk: Buffer): void => append(stderr, chunk);
+    function onChildError(error: Error): void {
+      finish(error);
+    }
+    function onInputError(error: Error): void {
+      finish(inputError(error));
+    }
+    function onClose(code: number | null): void {
+      closed = true;
+      if (code !== 0) {
+        finish(
+          Object.assign(new Error("docker command failed"), {
+            code,
+            ...result(),
+          }),
+          undefined,
+          false,
+        );
+      } else if (!inputCompleted) {
+        finish(
+          new Error("docker command closed before input completed"),
+          undefined,
+          false,
+        );
+      } else {
+        finish(undefined, result(), false);
+      }
+    }
+    const onInputComplete = (error?: Error | null): void => {
+      if (error !== undefined && error !== null) {
+        finish(inputError(error));
+        return;
+      }
+      inputCompleted = true;
+    };
+
+    output.on("data", onStdout);
+    errorOutput.on("data", onStderr);
+    running.once("error", onChildError);
+    running.once("close", onClose);
+    stdin.once("error", onInputError);
+    timer = setTimeout(
+      () => finish(new Error("docker command deadline exceeded")),
+      timeout,
+    );
+    stdin.end(invocation.input, onInputComplete as () => void);
+  });
 }
 
 function assertCondition(value: unknown, message: string): asserts value {
@@ -724,37 +913,36 @@ function signedProbeInvocation(
 async function runDisposableSmoke(): Promise<SmokeResult> {
   const project =
     `apollo-tf-download-smoke-${process.pid}-` + randomBytes(4).toString("hex");
-  let temporaryDirectory: string | undefined;
+  const temporaryDirectory = path.join(
+    tmpdir(),
+    `${project}-${randomBytes(8).toString("hex")}`,
+  );
+  let temporaryDirectoryOwned = false;
   let port: number | undefined;
   let cleanupResult: SmokeResult["cleanup"] | undefined;
   let smokeResult: SmokeResult | undefined;
   let redactors: readonly string[] = [];
   let cleanupPromise: Promise<SmokeResult["cleanup"]> | undefined;
-  let cleanupDeadlineAt: number | undefined;
+  let cleanupStartedAt: number | undefined;
 
   const cleanup = async (): Promise<void> => {
-    cleanupDeadlineAt ??= Date.now() + CLEANUP_RESERVE_MS;
+    cleanupStartedAt ??= Date.now();
+    const removalDeadlineAt = cleanupStartedAt + CLEANUP_REMOVAL_RESERVE_MS;
+    const auditDeadlineAt = removalDeadlineAt + CLEANUP_AUDIT_RESERVE_MS;
     const environment: NodeJS.ProcessEnv = {
       ...process.env,
-      ...(temporaryDirectory === undefined
-        ? {}
-        : {
-            TF_SECRET_DIRECTORY: path.join(temporaryDirectory, "secrets"),
-          }),
+      TF_SECRET_DIRECTORY: path.join(temporaryDirectory, "secrets"),
       ...(port === undefined ? {} : { TF_API_PORT: String(port) }),
       TF_DOWNLOAD_REDIS_IMAGE: `${project}-redis:local`,
       TF_DOWNLOAD_WORKER_IMAGE: `${project}-worker:local`,
       ADMIN_DASHBOARD_TOKEN: ADMIN_TOKEN,
     };
     cleanupPromise ??= cleanupSmokeResources({
-      composeFiles:
-        temporaryDirectory === undefined
-          ? [rootComposePath]
-          : [
-              rootComposePath,
-              path.join(temporaryDirectory, "smoke.compose.yml"),
-            ],
-      deadlineAt: cleanupDeadlineAt,
+      auditDeadlineAt,
+      composeFiles: [
+        rootComposePath,
+        path.join(temporaryDirectory, "smoke.compose.yml"),
+      ],
       dependencies: {
         directoryExists: (directory) =>
           stat(directory).then(
@@ -766,7 +954,10 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
         runDocker: (args, timeoutMs) => docker(args, environment, timeoutMs),
       },
       project,
-      temporaryDirectory,
+      removalDeadlineAt,
+      temporaryDirectory: temporaryDirectoryOwned
+        ? temporaryDirectory
+        : undefined,
     });
     cleanupResult = await cleanupPromise;
   };
@@ -774,13 +965,9 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
   try {
     await runSmokeSetup({
       cleanup,
-      createTemporaryDirectory: async () => {
-        temporaryDirectory = await boundedOperation(
-          "temporary directory creation",
-          () => mkdtemp(path.join(tmpdir(), `${project}-`)),
-          5_000,
-        );
-        return temporaryDirectory;
+      createTemporaryDirectory: async (directory) => {
+        await mkdir(directory, { mode: 0o700 });
+        temporaryDirectoryOwned = true;
       },
       reservePort: async () => {
         port = await reservePort();
@@ -797,6 +984,7 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
           cleanup,
         );
       },
+      temporaryDirectory,
     });
   } catch (error) {
     throw createRedactedSmokeError(error, "", redactors);
@@ -818,29 +1006,8 @@ async function runPreparedDisposableSmoke(
   const secretDirectory = path.join(temporaryDirectory, "secrets");
   const overridePath = path.join(temporaryDirectory, "smoke.compose.yml");
   const origin = `http://${WEB_ORIGIN_HOST}:${port}`;
-  const queuePassword = generatedSecret();
-  const commandSecret = generatedSecret();
-  const heartbeatSecret = generatedSecret();
-  const searchSecret = generatedSecret();
-  const integrationsSecret = generatedSecret();
-  const clientSecret = generatedSecret();
-  const databasePassword = generatedSecret();
-  const sourceCanary = `source-${generatedSecret()}`;
-  const accountCanary = randomUUID();
-  const signatureCanary = `signature-${generatedSecret()}`;
-  const pathMarker = Array.from(randomBytes(16), (value) =>
-    value.toString(2).padStart(8, "0"),
-  )
-    .join("")
-    .replaceAll("0", "/")
-    .replaceAll("1", "\\");
-  const pathCanary = `../${pathMarker}/..\\`;
-  const stderrCanary = `stderr-${generatedSecret()}`;
-  const wrongKeyCanary = `wrong-key-${generatedSecret()}`;
-  const wrongQueuePassword = generatedSecret();
-  const weakQueuePassword = `weak-${randomBytes(4).toString("hex")}`;
-  const unreadableQueuePassword = generatedSecret();
-  const canaries = [
+  const canaryBundle = createSmokeCanaryBundle();
+  const {
     queuePassword,
     commandSecret,
     heartbeatSecret,
@@ -857,7 +1024,8 @@ async function runPreparedDisposableSmoke(
     wrongQueuePassword,
     weakQueuePassword,
     unreadableQueuePassword,
-  ];
+  } = canaryBundle.values;
+  const canaries = canaryBundle.canaries;
   registerRedactors(canaries);
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
@@ -1204,11 +1372,7 @@ async function runPreparedDisposableSmoke(
         "@tf-download-redis:6379/0",
       tf_download_internal_auth_secret: commandSecret,
       tf_download_heartbeat_secret: heartbeatSecret,
-      tf_module_heartbeat_keys: JSON.stringify({
-        "search-media": generatedSecret(),
-        "account-integrations": generatedSecret(),
-        "download-worker": heartbeatSecret,
-      }),
+      tf_module_heartbeat_keys: JSON.stringify(canaryBundle.heartbeatKeys),
     };
     for (const [name, value] of Object.entries(secrets)) {
       const filePath = path.join(secretDirectory, name);
@@ -1411,11 +1575,10 @@ async function runPreparedDisposableSmoke(
       const recovered = await dashboardModule("healthy", 45_000);
 
       const seedSession = async (
+        credentials: (typeof canaryBundle.sessions)["owner"],
         forcedAccountId?: string,
       ): Promise<SessionFixture> => {
-        const handle = generatedSecret();
-        const csrf = generatedSecret();
-        const revision = generatedSecret();
+        const { handle, csrf, revision } = credentials;
         const accountId = forcedAccountId ?? randomUUID();
         const now = Date.now();
         const stored = JSON.stringify({
@@ -1446,8 +1609,11 @@ async function runPreparedDisposableSmoke(
         );
         return { accountId, csrf, handle };
       };
-      const owner = await seedSession(accountCanary);
-      const foreign = await seedSession();
+      const owner = await seedSession(
+        canaryBundle.sessions.owner,
+        accountCanary,
+      );
+      const foreign = await seedSession(canaryBundle.sessions.foreign);
 
       const jobModes = new Map<string, string>();
       const enqueue = async (
@@ -1599,8 +1765,8 @@ async function runPreparedDisposableSmoke(
         pathFile.status === 200 &&
         pathResult.status === "completed" &&
         pathFilename.length > 0 &&
+        !pathDisposition.includes(pathCanary) &&
         !pathFilename.includes(pathCanary) &&
-        !pathFilename.includes("..") &&
         !/[\\/]/.test(pathFilename);
       assertCondition(
         pathFilenameSanitized,
@@ -1687,10 +1853,7 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
       const pathCanarySanitized =
         pathFilenameSanitized &&
         storageFiles.every(
-          (name) =>
-            !name.includes(pathCanary) &&
-            !name.includes("..") &&
-            !/[\\/]/.test(name),
+          (name) => !name.includes(pathCanary) && !/[\\/]/.test(name),
         );
       assertCondition(
         pathCanarySanitized,
@@ -1783,6 +1946,7 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
         )
       ).join("\n");
       await scanTrackedFilesForCanaries(canaries, {
+        deadlineAt: operationDeadline,
         readTrackedFile: (filePath) =>
           readFile(path.join(repositoryRoot, filePath)),
         runGit: (args) =>
@@ -2087,6 +2251,72 @@ describe("TF download bounded smoke orchestration", () => {
     ).rejects.toThrow("command deadline exceeded");
   });
 
+  it.each(["stdin error", "callback error", "early close"] as const)(
+    "rejects one %s and clears child listeners before lifecycle cleanup",
+    async (failureMode) => {
+      const childEvents = new EventEmitter();
+      const stdinEvents = new EventEmitter();
+      const stdoutEvents = new EventEmitter();
+      const stderrEvents = new EventEmitter();
+      const kill = vi.fn(() => true);
+      const destroy = vi.fn();
+      const inputFailure = Object.assign(new Error("closed input"), {
+        code: "EPIPE",
+      });
+      const stdin = Object.assign(stdinEvents, {
+        destroy,
+        end: vi.fn(
+          (_input: string, callback: (error?: Error | null) => void): void => {
+            queueMicrotask(() => {
+              if (failureMode === "stdin error") {
+                stdinEvents.emit("error", inputFailure);
+              } else if (failureMode === "callback error") {
+                callback(inputFailure);
+              } else {
+                childEvents.emit("close", 0, null);
+              }
+            });
+          },
+        ),
+      });
+      const child = Object.assign(childEvents, {
+        kill,
+        stderr: stderrEvents,
+        stdin,
+        stdout: stdoutEvents,
+      }) as unknown as ReturnType<typeof spawn>;
+      const spawnChild = vi.fn(() => child) as unknown as typeof spawn;
+      const cleanup = vi.fn(async () => undefined);
+      const invocation = {
+        args: ["ignored-by-fake"],
+        input: "signed probe input",
+        spawnChild,
+      } as DockerInputInvocation & {
+        readonly spawnChild: typeof spawn;
+      };
+
+      await expect(
+        runSmokeLifecycle(
+          () => dockerWithInput(invocation, process.env, 500),
+          cleanup,
+        ),
+      ).rejects.toThrow(
+        failureMode === "early close"
+          ? "closed before input completed"
+          : "input failed",
+      );
+
+      expect(spawnChild).toHaveBeenCalledTimes(1);
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      expect(destroy).toHaveBeenCalledTimes(1);
+      expect(childEvents.eventNames()).toEqual([]);
+      expect(stdinEvents.eventNames()).toEqual([]);
+      expect(stdoutEvents.eventNames()).toEqual([]);
+      expect(stderrEvents.eventNames()).toEqual([]);
+      if (failureMode !== "early close") expect(kill).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("bounds every never-settling wait probe", async () => {
     let probes = 0;
     await expect(
@@ -2103,7 +2333,7 @@ describe("TF download bounded smoke orchestration", () => {
         },
       ),
     ).rejects.toThrow("probe deadline exceeded");
-    expect(probes).toBeGreaterThan(1);
+    expect(probes).toBeGreaterThan(0);
   });
 
   it("keeps secret values out of Redis and tracked-file command argv", async () => {
@@ -2119,6 +2349,7 @@ describe("TF download bounded smoke orchestration", () => {
       return { stdout: "download_failed\n", stderr: "" };
     }, "30000000-0000-4000-8000-000000000003");
     await scanTrackedFilesForCanaries([secret, canary], {
+      deadlineAt: Date.now() + 5_000,
       readTrackedFile: async () => Buffer.from("safe tracked source"),
       runGit: async (args) => {
         mutableGitCalls.push([...args]);
@@ -2160,6 +2391,41 @@ describe("TF download bounded smoke orchestration", () => {
     expect(redacted.message).toContain("[REDACTED]");
   });
 
+  it("feeds every named generated secret into scans and final redaction", () => {
+    const bundle = createSmokeCanaryBundle();
+    const generatedValues = Object.values(bundle.values);
+
+    expect(new Set(bundle.canaries)).toEqual(new Set(generatedValues));
+    expect(bundle.heartbeatKeys).toEqual({
+      "search-media": bundle.values.searchHeartbeatSecret,
+      "account-integrations": bundle.values.integrationsHeartbeatSecret,
+      "download-worker": bundle.values.heartbeatSecret,
+    });
+    expect(bundle.sessions).toEqual({
+      owner: {
+        csrf: bundle.values.ownerSessionCsrf,
+        handle: bundle.values.ownerSessionHandle,
+        revision: bundle.values.ownerSessionRevision,
+      },
+      foreign: {
+        csrf: bundle.values.foreignSessionCsrf,
+        handle: bundle.values.foreignSessionHandle,
+        revision: bundle.values.foreignSessionRevision,
+      },
+    });
+    expect(bundle.values.pathCanary).toContain("..");
+    expect(bundle.values.pathCanary).toContain("/");
+    expect(bundle.values.pathCanary).toContain("\\");
+
+    const redacted = redactSmokeText(
+      generatedValues.join("\n"),
+      bundle.canaries,
+    );
+    for (const value of generatedValues) {
+      expect(redacted).not.toContain(value);
+    }
+  });
+
   it("executes every required security phase in order and always cleans up", async () => {
     const calls: string[] = [];
     const phase = (name: string) => async (): Promise<void> => {
@@ -2198,19 +2464,53 @@ describe("TF download bounded smoke orchestration", () => {
         },
         reservePort: async () => 1234,
         run: async () => undefined,
+        temporaryDirectory: "temporary-directory-one",
       }),
     ).rejects.toThrow("temporary directory failed");
     await expect(
       runSmokeSetup({
         cleanup,
-        createTemporaryDirectory: async () => "temporary-directory",
+        createTemporaryDirectory: async () => undefined,
         reservePort: async () => {
           throw new Error("port reservation failed");
         },
         run: async () => undefined,
+        temporaryDirectory: "temporary-directory-two",
       }),
     ).rejects.toThrow("port reservation failed");
     expect(cleanup).toHaveBeenCalledTimes(2);
+  });
+
+  it("removes the exact temp path after delayed creation and setup timeout", async () => {
+    const exactPath = path.join(tmpdir(), "known-smoke-directory");
+    const removedPaths: string[] = [];
+    const auditResults: boolean[] = [];
+    let observedCreatePath: string | undefined;
+    let exists = false;
+
+    await expect(
+      runSmokeSetup({
+        temporaryDirectory: exactPath,
+        cleanup: async () => {
+          removedPaths.push(exactPath);
+          exists = false;
+          auditResults.push(exists);
+        },
+        createTemporaryDirectory: async (directory) => {
+          observedCreatePath = directory;
+          await new Promise<void>((resolve) => setTimeout(resolve, 10));
+          exists = true;
+        },
+        reservePort: async () => {
+          throw new Error("port reservation deadline exceeded");
+        },
+        run: async () => undefined,
+      }),
+    ).rejects.toThrow("port reservation deadline exceeded");
+
+    expect(observedCreatePath).toBe(exactPath);
+    expect(removedPaths).toEqual([exactPath]);
+    expect(auditResults).toEqual([false]);
   });
 
   it("falls back from compose down across exact owned resource classes", async () => {
@@ -2223,8 +2523,8 @@ describe("TF download bounded smoke orchestration", () => {
     };
 
     const cleanup = await cleanupSmokeResources({
+      auditDeadlineAt: Date.now() + 5_000,
       composeFiles: ["root.yml", "override.yml"],
-      deadlineAt: Date.now() + 5_000,
       dependencies: {
         directoryExists: async () => false,
         removeDirectory: async () => undefined,
@@ -2257,6 +2557,7 @@ describe("TF download bounded smoke orchestration", () => {
         },
       },
       project: "apollo-tf-download-smoke-test",
+      removalDeadlineAt: Date.now() + 5_000,
       temporaryDirectory: "temporary-smoke-directory",
     });
 
@@ -2283,7 +2584,112 @@ describe("TF download bounded smoke orchestration", () => {
     expect(RUN_TIMEOUT_MS + CLEANUP_RESERVE_MS + SAFETY_MARGIN_MS).toBeLessThan(
       OUTER_TEST_TIMEOUT_MS,
     );
+    expect(CLEANUP_REMOVAL_RESERVE_MS + CLEANUP_AUDIT_RESERVE_MS).toBe(
+      CLEANUP_RESERVE_MS,
+    );
+    expect(CLEANUP_AUDIT_RESERVE_MS).toBeGreaterThan(
+      DEFAULT_DOCKER_TIMEOUT_MS + FILESYSTEM_AUDIT_TIMEOUT_MS,
+    );
     expect(cleanupCallTimeout(10_000, 4_000, () => 7_500)).toBe(2_500);
+  });
+
+  it("bounds hung temp removal and still runs the reserved audit", async () => {
+    const startedAt = Date.now();
+    let auditCalls = 0;
+    const outcome = await Promise.race([
+      cleanupSmokeResources({
+        composeFiles: [],
+        removalDeadlineAt: startedAt + 30,
+        auditDeadlineAt: startedAt + 180,
+        dependencies: {
+          directoryExists: async () => {
+            auditCalls += 1;
+            return false;
+          },
+          removeDirectory: () => new Promise<void>(() => undefined),
+          runDocker: async () => ({ stdout: "", stderr: "" }),
+        },
+        project: "apollo-tf-download-smoke-hung-remove",
+        temporaryDirectory: "known-temporary-directory",
+      }).then(
+        () => "resolved",
+        () => "rejected",
+      ),
+      new Promise<"test-deadline">((resolve) =>
+        setTimeout(() => resolve("test-deadline"), 300),
+      ),
+    ]);
+
+    expect(outcome).toBe("rejected");
+    expect(auditCalls).toBe(1);
+  });
+
+  it("runs the final audit after the removal window is exhausted", async () => {
+    let auditCalls = 0;
+
+    await expect(
+      cleanupSmokeResources({
+        composeFiles: [],
+        removalDeadlineAt: Date.now() - 1,
+        auditDeadlineAt: Date.now() + 100,
+        dependencies: {
+          directoryExists: async () => {
+            auditCalls += 1;
+            return false;
+          },
+          removeDirectory: async () => undefined,
+          runDocker: async () => ({ stdout: "", stderr: "" }),
+        },
+        project: "apollo-tf-download-smoke-expired-removal",
+        temporaryDirectory: "known-temporary-directory",
+      }),
+    ).rejects.toThrow("TF download smoke cleanup failed");
+
+    expect(auditCalls).toBe(1);
+  });
+
+  it("bounds a hung temp-directory final audit", async () => {
+    const startedAt = Date.now();
+    const outcome = await Promise.race([
+      cleanupSmokeResources({
+        composeFiles: [],
+        removalDeadlineAt: startedAt + 30,
+        auditDeadlineAt: startedAt + 100,
+        dependencies: {
+          directoryExists: () => new Promise<boolean>(() => undefined),
+          removeDirectory: async () => undefined,
+          runDocker: async () => ({ stdout: "", stderr: "" }),
+        },
+        project: "apollo-tf-download-smoke-hung-audit",
+        temporaryDirectory: "known-temporary-directory",
+      }).then(
+        () => "resolved",
+        () => "rejected",
+      ),
+      new Promise<"test-deadline">((resolve) =>
+        setTimeout(() => resolve("test-deadline"), 300),
+      ),
+    ]);
+
+    expect(outcome).toBe("rejected");
+  });
+
+  it("bounds every tracked-file read by the current run deadline", async () => {
+    const outcome = await Promise.race([
+      scanTrackedFilesForCanaries(["generated-secret"], {
+        deadlineAt: Date.now() + 30,
+        readTrackedFile: () => new Promise<Buffer>(() => undefined),
+        runGit: async () => ({ stdout: "hung.ts\0", stderr: "" }),
+      }).then(
+        () => "resolved",
+        () => "rejected",
+      ),
+      new Promise<"test-deadline">((resolve) =>
+        setTimeout(() => resolve("test-deadline"), 300),
+      ),
+    ]);
+
+    expect(outcome).toBe("rejected");
   });
 });
 

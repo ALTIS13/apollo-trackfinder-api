@@ -1441,7 +1441,29 @@ describe("createDownloadProcessor", () => {
 
     expect(result.filename.length).toBeLessThanOrEqual(255);
     expect(result.filename).not.toMatch(/[\r\n/\\\0]/);
-    expect(result.filename).not.toContain("..");
     expect(() => downloadJobResultSchema.parse(result)).not.toThrow();
+  });
+
+  it("preserves valid repeated dots in artist and title names", async () => {
+    const { storage } = await createStorage();
+    const processor = createDownloadProcessor({
+      storage,
+      cancellationStore: createCancellationStore(),
+      spawnDownload: vi.fn(() =>
+        createFakeProcess({ stdout: [Buffer.from("audio")] }),
+      ),
+      logger: createLogger(),
+    });
+
+    const result = await processor(
+      createJob({
+        ...validData,
+        artist: "AC..DC...",
+        title: "Version 1..2",
+      }),
+      new AbortController().signal,
+    );
+
+    expect(result.filename).toBe("AC..DC... - Version 1..2.mp3");
   });
 });

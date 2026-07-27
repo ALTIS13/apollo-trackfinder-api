@@ -501,10 +501,8 @@ function createFilename(
 ): string {
   const suffix = `.${extension}`;
   const cleaned =
-    `${artist} - ${title}`
-      .replace(FORBIDDEN_FILENAME_CHARACTERS, "_")
-      .replace(/\.{2,}/g, "_")
-      .trim() || "download";
+    `${artist} - ${title}`.replace(FORBIDDEN_FILENAME_CHARACTERS, "_").trim() ||
+    "download";
   return `${cleaned.slice(0, MAX_FILENAME_LENGTH - suffix.length)}${suffix}`;
 }
 
