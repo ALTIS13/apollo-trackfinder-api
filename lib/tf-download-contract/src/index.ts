@@ -5,6 +5,8 @@ export const DOWNLOAD_QUEUE_NAME = "apollo-tf-downloads-v1";
 export const DOWNLOAD_QUEUE_PREFIX = "{apollo-tf-downloads}";
 export const DOWNLOAD_JOB_CANCELLATION_FIELD =
   "__apollo_tf_download_cancellation_v1";
+export const DOWNLOAD_JOB_CANCELLATION_ARMED_SENTINEL =
+  "apollo:tf-downloads:cancel-armed:v1";
 export const DOWNLOAD_JOB_CANCELLATION_SENTINEL =
   "apollo:tf-downloads:cancel-requested:v1";
 export const DOWNLOAD_MAX_FILE_BYTES = 1_073_741_824;

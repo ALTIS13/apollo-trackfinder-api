@@ -3,6 +3,7 @@ import { open } from "node:fs/promises";
 import { TextDecoder } from "node:util";
 
 import {
+  DOWNLOAD_JOB_CANCELLATION_ARMED_SENTINEL,
   DOWNLOAD_JOB_CANCELLATION_FIELD,
   DOWNLOAD_JOB_CANCELLATION_SENTINEL,
   DOWNLOAD_QUEUE_NAME,
@@ -20,6 +21,7 @@ import { Queue } from "bullmq";
 import Redis, { type RedisOptions } from "ioredis";
 
 const QUEUE_CAPACITY = 200;
+const ADMISSION_INTENT_LEASE_MS = 30_000;
 const MAX_QUEUE_FILE_BYTES = 2_048;
 const JOB_RETENTION_SECONDS = 86_400;
 const PRODUCER_COMMAND_TIMEOUT_MS = 5_000;
@@ -38,6 +40,10 @@ local function listCount(key)
   return rcall("LLEN", key)
 end
 local ledger = KEYS[7]
+local leases = KEYS[8]
+local redisTime = rcall("TIME")
+local nowMs = (tonumber(redisTime[1]) * 1000) + math.floor(tonumber(redisTime[2]) / 1000)
+local leaseMs = tonumber(ARGV[5])
 local entries = rcall("HGETALL", ledger)
 for index = 1, #entries, 2 do
   local jobId = entries[index]
@@ -45,21 +51,37 @@ for index = 1, #entries, 2 do
   if string.sub(intent, 1, 10) == "confirmed:" or
     rcall("EXISTS", ARGV[4] .. jobId) == 1 then
     rcall("HDEL", ledger, jobId)
+    rcall("ZREM", leases, jobId)
+  elseif string.sub(intent, 1, 8) == "pending:" then
+    local leaseExpiresAt = rcall("ZSCORE", leases, jobId)
+    if not leaseExpiresAt then
+      rcall("ZADD", leases, nowMs + leaseMs, jobId)
+    elseif tonumber(leaseExpiresAt) <= nowMs then
+      rcall("HDEL", ledger, jobId)
+      rcall("ZREM", leases, jobId)
+    end
   end
 end
 local total = listCount(KEYS[1]) + rcall("LLEN", KEYS[2]) + rcall("ZCARD", KEYS[3]) + rcall("ZCARD", KEYS[4]) + rcall("ZCARD", KEYS[5]) + listCount(KEYS[6]) + rcall("HLEN", ledger)
 if total >= tonumber(ARGV[3]) then return 0 end
 rcall("HSET", ledger, ARGV[1], ARGV[2])
+rcall("ZADD", leases, nowMs + leaseMs, ARGV[1])
 return total + 1
 `;
 const RELEASE_ADMISSION_INTENT_SCRIPT = `
 local stored = redis.call("HGET", KEYS[1], ARGV[1])
-if not stored then return 1 end
+if not stored then
+  redis.call("ZREM", KEYS[2], ARGV[1])
+  return 1
+end
 if stored ~= ARGV[2] then return 0 end
-return redis.call("HDEL", KEYS[1], ARGV[1])
+redis.call("HDEL", KEYS[1], ARGV[1])
+redis.call("ZREM", KEYS[2], ARGV[1])
+return 1
 `;
 const REQUEST_DOWNLOAD_CANCELLATION_SCRIPT = `
 -- worker-mediated-download-cancellation
+-- cancellation-armed-handshake
 local rcall = redis.call
 local jobId = ARGV[1]
 local rawData = rcall("HGET", KEYS[9], "data")
@@ -107,8 +129,17 @@ local terminal = state == "completed" or state == "failed" or state == "canceled
 if not pending and not terminal then return state end
 local intent = rcall("HGET", KEYS[10], jobId)
 if intent and intent ~= ARGV[5] then return "ledger_mismatch" end
-if pending then rcall("HSET", KEYS[9], ARGV[3], ARGV[4]) end
-if intent == ARGV[5] then rcall("HDEL", KEYS[10], jobId) end
+if pending then
+  local marker = rcall("HGET", KEYS[9], ARGV[3])
+  if state == "active" and marker ~= ARGV[6] and marker ~= ARGV[4] then
+    return "not_cancellable"
+  end
+  rcall("HSET", KEYS[9], ARGV[3], ARGV[4])
+end
+if intent == ARGV[5] then
+  rcall("HDEL", KEYS[10], jobId)
+  rcall("ZREM", KEYS[11], jobId)
+end
 return state
 `;
 
@@ -324,11 +355,21 @@ function mapState(state: string, failedReason?: string): JobStatus["status"] {
     return state as JobStatus["status"];
   return "unknown";
 }
+const CANONICAL_JOB_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+function publicProgress(value: unknown): number {
+  return typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= 100
+    ? value
+    : 0;
+}
 function statusOf(job: Job, raw: string, position?: number): JobStatus {
   const result = downloadJobResultSchema.safeParse(job.returnvalue);
   return {
     status: mapState(raw, job.failedReason),
-    progress: typeof job.progress === "number" ? job.progress : 0,
+    progress: publicProgress(job.progress),
     ...(position === undefined ? {} : { position }),
     ...(result.success ? { fileSize: result.data.fileSize } : {}),
   };
@@ -377,8 +418,9 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
     const released = Number(
       await cancellation.eval(
         RELEASE_ADMISSION_INTENT_SCRIPT,
-        1,
+        2,
         getDownloadQueueAdmissionLedgerKey((suffix) => producer.toKey(suffix)),
+        producer.toKey("admission-intent-leases"),
         jobId,
         encodeDownloadAdmissionIntent("pending", accountId),
       ),
@@ -394,7 +436,7 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
     const position = Number(
       await cancellation.eval(
         RESERVE_ADMISSION_INTENT_SCRIPT,
-        7,
+        8,
         producer.toKey("wait"),
         producer.toKey("active"),
         producer.toKey("delayed"),
@@ -402,10 +444,12 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
         producer.toKey("waiting-children"),
         producer.toKey("paused"),
         getDownloadQueueAdmissionLedgerKey((suffix) => producer.toKey(suffix)),
+        producer.toKey("admission-intent-leases"),
         jobId,
         encodeDownloadAdmissionIntent("pending", accountId),
         String(QUEUE_CAPACITY),
         producer.toKey(""),
+        String(ADMISSION_INTENT_LEASE_MS),
       ),
     );
     if (
@@ -424,7 +468,7 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
   ): Promise<{ status: JobStatus["status"] }> => {
     const status = await cancellation.eval(
       REQUEST_DOWNLOAD_CANCELLATION_SCRIPT,
-      10,
+      11,
       producer.toKey("completed"),
       producer.toKey("failed"),
       producer.toKey("delayed"),
@@ -435,11 +479,13 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
       producer.toKey("waiting-children"),
       getDownloadQueueJobHashKey((suffix) => producer.toKey(suffix), jobId),
       getDownloadQueueAdmissionLedgerKey((suffix) => producer.toKey(suffix)),
+      producer.toKey("admission-intent-leases"),
       jobId,
       accountId,
       DOWNLOAD_JOB_CANCELLATION_FIELD,
       DOWNLOAD_JOB_CANCELLATION_SENTINEL,
       encodeDownloadAdmissionIntent("pending", accountId),
+      DOWNLOAD_JOB_CANCELLATION_ARMED_SENTINEL,
     );
     if (
       status !== "waiting" &&
@@ -638,7 +684,12 @@ export function createDownloadQueueAdapter(options: AdapterOptions = {}) {
         const result: Array<JobStatus & { jobId: string }> = [];
         collections.forEach((jobs, collection) =>
           jobs.forEach((job, index) => {
-            if (job.id && !seen.has(job.id) && owned(job.data, accountId)) {
+            if (
+              job.id !== undefined &&
+              CANONICAL_JOB_ID.test(job.id) &&
+              !seen.has(job.id) &&
+              owned(job.data, accountId)
+            ) {
               seen.add(job.id);
               result.push({
                 jobId: job.id,

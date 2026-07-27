@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import * as downloadContract from "./index";
 import {
   DOWNLOAD_JOB_CANCELLATION_FIELD,
   DOWNLOAD_JOB_CANCELLATION_SENTINEL,
@@ -70,6 +71,10 @@ describe("tf download contract", () => {
     );
     expect(DOWNLOAD_JOB_CANCELLATION_SENTINEL).toBe(
       "apollo:tf-downloads:cancel-requested:v1",
+    );
+    expect(downloadContract).toHaveProperty(
+      "DOWNLOAD_JOB_CANCELLATION_ARMED_SENTINEL",
+      "apollo:tf-downloads:cancel-armed:v1",
     );
   });
 

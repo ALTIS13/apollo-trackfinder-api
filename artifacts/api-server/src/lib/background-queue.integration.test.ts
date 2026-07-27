@@ -1,4 +1,5 @@
 import {
+  DOWNLOAD_JOB_CANCELLATION_ARMED_SENTINEL,
   DOWNLOAD_JOB_CANCELLATION_FIELD,
   DOWNLOAD_JOB_CANCELLATION_SENTINEL,
   DOWNLOAD_QUEUE_NAME,
@@ -18,6 +19,7 @@ const WAIT_JOB_ID = "31000000-0000-4000-8000-000000000001";
 const DELAYED_JOB_ID = "31000000-0000-4000-8000-000000000002";
 const ACTIVE_JOB_ID = "31000000-0000-4000-8000-000000000003";
 const FAILED_JOB_ID = "31000000-0000-4000-8000-000000000004";
+const COMPLETION_WINDOW_JOB_ID = "31000000-0000-4000-8000-000000000005";
 const INTEGRATION_REDIS_URL = process.env.TF_DOWNLOAD_REDIS_INTEGRATION_URL;
 const integrationIt = INTEGRATION_REDIS_URL === undefined ? it.skip : it;
 
@@ -78,6 +80,26 @@ async function waitForState(
   );
 }
 
+async function waitForSignal(
+  signal: Promise<void>,
+  label: string,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      signal,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`timed out waiting for ${label}`)),
+          10_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 describe("download cancellation with Redis 7 and BullMQ", () => {
   integrationIt(
     "keeps jobs until worker terminal state and releases capacity before retention",
@@ -124,6 +146,8 @@ describe("download cancellation with Redis 7 and BullMQ", () => {
       let worker: Worker | undefined;
       let workerRun: Promise<void> | undefined;
       let releaseActive: (() => void) | undefined;
+      let releaseCompletion: (() => void) | undefined;
+      let releaseCompletedMove: (() => void) | undefined;
 
       try {
         await inspection.flushdb();
@@ -133,6 +157,7 @@ describe("download cancellation with Redis 7 and BullMQ", () => {
         const ledgerKey = getDownloadQueueAdmissionLedgerKey((suffix) =>
           queue.toKey(suffix),
         );
+        const leaseKey = queue.toKey("admission-intent-leases");
         const waitKey = getDownloadQueueJobHashKey(
           queue.toKey.bind(queue),
           WAIT_JOB_ID,
@@ -156,8 +181,39 @@ describe("download cancellation with Redis 7 and BullMQ", () => {
           queue.toKey("waiting-children"),
           waitKey,
           ledgerKey,
+          leaseKey,
         ];
         expect(new Set(stateKeys.map(redisSlot)).size).toBe(1);
+
+        const leaseExpiresAt = Date.now() + 60_000;
+        const phantomIntents = Array.from(
+          { length: 200 },
+          (_, index) =>
+            [
+              `phantom-${index}`,
+              encodeDownloadAdmissionIntent("pending", ACCOUNT_ID),
+            ] as const,
+        );
+        const leasePipeline = inspection.pipeline();
+        for (const [jobId, intent] of phantomIntents) {
+          leasePipeline.hset(ledgerKey, jobId, intent);
+          leasePipeline.zadd(leaseKey, leaseExpiresAt, jobId);
+        }
+        await leasePipeline.exec();
+        await expect(adapter.enqueue(jobData)).rejects.toMatchObject({
+          code: "download_queue_full",
+        });
+        await inspection.zadd(leaseKey, Date.now() - 1, "phantom-0");
+        const recovered = await adapter.enqueue(jobData);
+        expect(recovered.position).toBe(200);
+        await expect(inspection.hget(ledgerKey, "phantom-0")).resolves.toBe(
+          null,
+        );
+        await expect(inspection.zscore(leaseKey, "phantom-0")).resolves.toBe(
+          null,
+        );
+        await (await queue.getJob(recovered.jobId))?.remove();
+        await inspection.del(ledgerKey, leaseKey);
 
         await queue.add("download", jobData, {
           jobId: WAIT_JOB_ID,
@@ -202,6 +258,39 @@ describe("download cancellation with Redis 7 and BullMQ", () => {
         const activeGate = new Promise<void>((resolve) => {
           releaseActive = resolve;
         });
+        let completionStarted!: () => void;
+        const completionStartedPromise = new Promise<void>((resolve) => {
+          completionStarted = resolve;
+        });
+        const completionGate = new Promise<void>((resolve) => {
+          releaseCompletion = resolve;
+        });
+        let completionDisarmed!: () => void;
+        const completionDisarmedPromise = new Promise<void>((resolve) => {
+          completionDisarmed = resolve;
+        });
+        const completedMoveGate = new Promise<void>((resolve) => {
+          releaseCompletedMove = resolve;
+        });
+        const closeCancellationWindow = async (
+          jobId: string,
+        ): Promise<boolean> =>
+          Number(
+            await inspection.eval(
+              `
+local marker = redis.call("HGET", KEYS[1], ARGV[1])
+if marker == ARGV[2] then return 0 end
+if marker ~= ARGV[3] then return -1 end
+redis.call("HDEL", KEYS[1], ARGV[1])
+return 1
+`,
+              1,
+              getDownloadQueueJobHashKey(queue.toKey.bind(queue), jobId),
+              DOWNLOAD_JOB_CANCELLATION_FIELD,
+              DOWNLOAD_JOB_CANCELLATION_SENTINEL,
+              DOWNLOAD_JOB_CANCELLATION_ARMED_SENTINEL,
+            ),
+          ) === 1;
         worker = new Worker(
           DOWNLOAD_QUEUE_NAME,
           async (current) => {
@@ -212,14 +301,33 @@ describe("download cancellation with Redis 7 and BullMQ", () => {
             if (marker === DOWNLOAD_JOB_CANCELLATION_SENTINEL) {
               throw new UnrecoverableError("download_canceled");
             }
+            await inspection.hset(
+              getDownloadQueueJobHashKey(queue.toKey.bind(queue), current.id!),
+              DOWNLOAD_JOB_CANCELLATION_FIELD,
+              DOWNLOAD_JOB_CANCELLATION_ARMED_SENTINEL,
+            );
             if (current.id === ACTIVE_JOB_ID) {
               activeStarted();
               await activeGate;
+              if (!(await closeCancellationWindow(current.id))) {
+                throw new UnrecoverableError("download_canceled");
+              }
+              return { completed: true };
+            }
+            if (current.id === COMPLETION_WINDOW_JOB_ID) {
+              completionStarted();
+              await completionGate;
+              if (!(await closeCancellationWindow(current.id))) {
+                throw new UnrecoverableError("download_canceled");
+              }
+              completionDisarmed();
+              await completedMoveGate;
               return { completed: true };
             }
             if (current.id === FAILED_JOB_ID) {
               throw new Error("upstream_failed");
             }
+            await closeCancellationWindow(current.id!);
             return { completed: true };
           },
           {
@@ -234,7 +342,7 @@ describe("download cancellation with Redis 7 and BullMQ", () => {
         void workerRun.catch(() => undefined);
 
         await queue.add("download", jobData, { jobId: ACTIVE_JOB_ID });
-        await activeStartedPromise;
+        await waitForSignal(activeStartedPromise, "active worker");
         await expect(
           adapter.cancel(ACTIVE_JOB_ID, ACCOUNT_ID),
         ).resolves.toEqual({ status: "active" });
@@ -242,10 +350,31 @@ describe("download cancellation with Redis 7 and BullMQ", () => {
           inspection.hget(activeKey, DOWNLOAD_JOB_CANCELLATION_FIELD),
         ).resolves.toBe(DOWNLOAD_JOB_CANCELLATION_SENTINEL);
         releaseActive?.();
-        await waitForState(queue, ACTIVE_JOB_ID, "completed");
+        await waitForState(queue, ACTIVE_JOB_ID, "failed");
         await expect(
           adapter.cancel(ACTIVE_JOB_ID, ACCOUNT_ID),
-        ).resolves.toEqual({ status: "completed" });
+        ).resolves.toEqual({ status: "canceled" });
+
+        await queue.add("download", jobData, {
+          jobId: COMPLETION_WINDOW_JOB_ID,
+        });
+        await waitForSignal(completionStartedPromise, "completion worker");
+        releaseCompletion?.();
+        await waitForSignal(completionDisarmedPromise, "completion disarm");
+        await expect(
+          adapter.cancel(COMPLETION_WINDOW_JOB_ID, ACCOUNT_ID),
+        ).rejects.toMatchObject({ code: "download_queue_unavailable" });
+        await expect(
+          inspection.hget(
+            getDownloadQueueJobHashKey(
+              queue.toKey.bind(queue),
+              COMPLETION_WINDOW_JOB_ID,
+            ),
+            DOWNLOAD_JOB_CANCELLATION_FIELD,
+          ),
+        ).resolves.toBe(null);
+        releaseCompletedMove?.();
+        await waitForState(queue, COMPLETION_WINDOW_JOB_ID, "completed");
 
         await waitForState(queue, WAIT_JOB_ID, "failed");
         await expect(adapter.cancel(WAIT_JOB_ID, ACCOUNT_ID)).resolves.toEqual({
@@ -304,6 +433,8 @@ describe("download cancellation with Redis 7 and BullMQ", () => {
         });
       } finally {
         releaseActive?.();
+        releaseCompletion?.();
+        releaseCompletedMove?.();
         await worker?.close(true).catch(() => undefined);
         await workerRun?.catch(() => undefined);
         await adapter.shutdown().catch(() => undefined);

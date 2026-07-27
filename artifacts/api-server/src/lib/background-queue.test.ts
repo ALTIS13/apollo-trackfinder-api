@@ -30,8 +30,10 @@ class FakeRedis {
   readonly calls: unknown[][] = [];
   readonly events = new Map<string, () => void>();
   readonly ledgers = new Map<string, Map<string, string>>();
+  readonly leases = new Map<string, Map<string, number>>();
   readonly values = new Map<string, string>();
   readonly queuesByWaitKey = new Map<string, FakeQueue>();
+  nowMs = 1_000_000;
   reserveResult: unknown | undefined;
   closed = false;
 
@@ -82,6 +84,16 @@ class FakeRedis {
     return ledger;
   }
 
+  leasesFor(queue: FakeQueue): Map<string, number> {
+    const key = queue.toKey("admission-intent-leases");
+    let leases = this.leases.get(key);
+    if (leases === undefined) {
+      leases = new Map<string, number>();
+      this.leases.set(key, leases);
+    }
+    return leases;
+  }
+
   async eval(
     script: string,
     keyCount: number,
@@ -95,9 +107,20 @@ class FakeRedis {
       const queue = this.queuesByWaitKey.get(keys[0]!);
       if (queue === undefined) throw new Error("unknown queue");
       const ledger = this.ledgerFor(queue);
+      const leases = this.leasesFor(queue);
+      const leaseMs = Number(args[4]);
       for (const [jobId, intent] of ledger) {
         if (intent.startsWith("confirmed:") || queue.jobs.has(jobId)) {
           ledger.delete(jobId);
+          leases.delete(jobId);
+        } else if (Number.isFinite(leaseMs)) {
+          const leaseExpiresAt = leases.get(jobId);
+          if (leaseExpiresAt !== undefined && leaseExpiresAt <= this.nowMs) {
+            ledger.delete(jobId);
+            leases.delete(jobId);
+          } else if (leaseExpiresAt === undefined) {
+            leases.set(jobId, this.nowMs + leaseMs);
+          }
         }
       }
       const total =
@@ -110,6 +133,9 @@ class FakeRedis {
         ledger.size;
       if (total >= Number(args[2])) return 0;
       ledger.set(args[0]!, args[1]!);
+      if (Number.isFinite(leaseMs)) {
+        leases.set(args[0]!, this.nowMs + leaseMs);
+      }
       return total + 1;
     }
     if (script.includes('redis.call("SET"')) {
@@ -127,6 +153,9 @@ class FakeRedis {
       if (stored === undefined) return 1;
       if (stored !== args[1]) return 0;
       ledger.delete(args[0]!);
+      if (keys[1] !== undefined) {
+        this.leases.get(keys[1])?.delete(args[0]!);
+      }
       return 1;
     }
     if (this.lock !== args[0]) return 0;
@@ -572,10 +601,10 @@ describe("download queue producer boundary", () => {
       (call) => typeof call[0] === "string" && call[0].includes("HSET"),
     );
     expect(admissionCall).toBeDefined();
-    const keys = [...admissionCall!.slice(2, 9), admissionCall!.at(-1)].map(
-      String,
-    );
+    const keyCount = Number(admissionCall![1]);
+    const keys = admissionCall!.slice(2, 2 + keyCount).map(String);
     expect(keys).toHaveLength(8);
+    expect(keys).toContain(producer.toKey("admission-intent-leases"));
     expect(
       keys.every((key) => key.startsWith(`${DOWNLOAD_QUEUE_PREFIX}:`)),
     ).toBe(true);
@@ -696,7 +725,7 @@ describe("download queue producer boundary", () => {
     });
   });
 
-  it("retains an unresolved intent and blocks the final slot", async () => {
+  it("leases an unresolved intent, blocks while live, and recovers the final slot after expiry", async () => {
     const redis = new FakeRedis();
     const first = new FakeQueue();
     const second = new FakeQueue();
@@ -712,9 +741,36 @@ describe("download queue producer boundary", () => {
       queueModule.DownloadQueueUnavailableError,
     );
     expect(redis.ledgerFor(first)).toHaveLength(1);
+    expect(redis.leasesFor(first)).toHaveLength(1);
     await expect(b.enqueue(validJob)).rejects.toBeInstanceOf(
       queueModule.DownloadQueueCapacityError,
     );
+
+    redis.nowMs = Math.max(...redis.leasesFor(first).values()) + 1;
+    second.counts.waiting = 199;
+    await expect(b.enqueue(validJob)).resolves.toMatchObject({
+      position: 200,
+    });
+    expect(redis.ledgerFor(first)).toEqual(new Map());
+    expect(redis.leasesFor(first)).toEqual(new Map());
+  });
+
+  it("adopts a legacy unleased pending intent before allowing recovery", async () => {
+    const { adapter, producer, redis } = createAdapter();
+    producer.counts.waiting = 199;
+    await adapter.init();
+    redis.ledgerFor(producer).set("legacy-crash", intentFor(validJob));
+
+    await expect(adapter.enqueue(validJob)).rejects.toBeInstanceOf(
+      queueModule.DownloadQueueCapacityError,
+    );
+    const expiresAt = redis.leasesFor(producer).get("legacy-crash");
+    expect(expiresAt).toBeGreaterThan(redis.nowMs);
+
+    redis.nowMs = expiresAt! + 1;
+    await expect(adapter.enqueue(validJob)).resolves.toMatchObject({
+      position: 200,
+    });
   });
 
   it("prunes an existing job's redundant intent before counting capacity", async () => {

@@ -24,6 +24,8 @@ const JOB_DATA = {
 const QUEUE_URL = `redis://default:${encodeURIComponent(
   `p@ss${"q".repeat(28)}`,
 )}@tf-download-redis:6379/0`;
+const CANCELLATION_ARMED_SENTINEL = "apollo:tf-downloads:cancel-armed:v1";
+const VALID_JOB_ID = "30000000-0000-4000-8000-000000000001";
 
 const queueModule = await import("./background-queue.js");
 
@@ -134,7 +136,18 @@ class CancellationRedis {
       if (storedIntent !== undefined && storedIntent !== expectedIntent) {
         return "ledger_mismatch";
       }
-      if (pending) this.hash(jobKey!).set(markerField!, markerSentinel!);
+      if (pending) {
+        const currentMarker = this.hash(jobKey!).get(markerField!);
+        if (
+          state === "active" &&
+          script.includes("cancellation-armed-handshake") &&
+          currentMarker !== CANCELLATION_ARMED_SENTINEL &&
+          currentMarker !== markerSentinel
+        ) {
+          return "not_cancellable";
+        }
+        this.hash(jobKey!).set(markerField!, markerSentinel!);
+      }
       if (storedIntent === expectedIntent) ledger.delete(jobId!);
       return state;
     },
@@ -306,6 +319,54 @@ describe("download queue ownership, states, and cancellation", () => {
     await expect(adapter.list(ACCOUNT_ID)).resolves.toEqual([]);
   });
 
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 101])(
+    "normalizes untrusted BullMQ progress %s in status and list projections",
+    async (progress) => {
+      const current = {
+        ...job(VALID_JOB_ID, JOB_DATA, "active"),
+        progress,
+      };
+      const { adapter } = createAdapter(new Map([[current.id, current]]), {
+        waiting: [],
+        active: [current],
+      });
+      await adapter.init();
+
+      await expect(adapter.status(current.id, ACCOUNT_ID)).resolves.toEqual({
+        status: "active",
+        progress: 0,
+      });
+      await expect(adapter.list(ACCOUNT_ID)).resolves.toEqual([
+        {
+          jobId: VALID_JOB_ID,
+          status: "active",
+          progress: 0,
+        },
+      ]);
+    },
+  );
+
+  it("omits BullMQ list entries whose IDs are not UUIDs", async () => {
+    const invalid = job("not-a-uuid", JOB_DATA, "active");
+    const valid = job(VALID_JOB_ID, JOB_DATA, "active");
+    const { adapter } = createAdapter(
+      new Map([
+        [invalid.id, invalid],
+        [valid.id, valid],
+      ]),
+      { waiting: [], active: [invalid, valid] },
+    );
+    await adapter.init();
+
+    await expect(adapter.list(ACCOUNT_ID)).resolves.toEqual([
+      {
+        jobId: VALID_JOB_ID,
+        status: "active",
+        progress: 42,
+      },
+    ]);
+  });
+
   it("maps delayed and other pending BullMQ states to waiting", async () => {
     for (const state of [
       "waiting",
@@ -342,6 +403,11 @@ describe("download queue ownership, states, and cancellation", () => {
     async (state, expected, failedReason) => {
       const { adapter, producer, redis } = createAdapter();
       seedState(redis, producer, state, state, { failedReason });
+      if (state === "active") {
+        redis
+          .hash(getDownloadQueueJobHashKey(producer.toKey, state))
+          .set(DOWNLOAD_JOB_CANCELLATION_FIELD, CANCELLATION_ARMED_SENTINEL);
+      }
       await adapter.init();
 
       await expect(adapter.cancel(state, ACCOUNT_ID)).resolves.toEqual({
@@ -354,6 +420,18 @@ describe("download queue ownership, states, and cancellation", () => {
       );
     },
   );
+
+  it("fails closed when active work has disarmed cancellation before completion", async () => {
+    const { adapter, producer, redis } = createAdapter();
+    const jobId = "active-completion-window";
+    seedState(redis, producer, jobId, "active");
+    await adapter.init();
+
+    await expect(adapter.cancel(jobId, ACCOUNT_ID)).rejects.toBeInstanceOf(
+      queueModule.DownloadQueueUnavailableError,
+    );
+    expect(marker(redis, producer, jobId)).toBeUndefined();
+  });
 
   it.each([
     ["completed", "completed", undefined],
@@ -463,6 +541,9 @@ describe("download queue ownership, states, and cancellation", () => {
     const { adapter, producer, redis } = createAdapter();
     const jobId = "no-ledger";
     seedState(redis, producer, jobId, "active");
+    redis
+      .hash(getDownloadQueueJobHashKey(producer.toKey, jobId))
+      .set(DOWNLOAD_JOB_CANCELLATION_FIELD, CANCELLATION_ARMED_SENTINEL);
     await adapter.init();
 
     await expect(adapter.cancel(jobId, ACCOUNT_ID)).resolves.toEqual({
@@ -530,6 +611,9 @@ describe("download queue ownership, states, and cancellation", () => {
         redis.list(producer.toKey("wait")).filter((id) => id !== jobId),
       );
       redis.list(producer.toKey("active")).push(jobId);
+      redis
+        .hash(getDownloadQueueJobHashKey(producer.toKey, jobId))
+        .set(DOWNLOAD_JOB_CANCELLATION_FIELD, CANCELLATION_ARMED_SENTINEL);
     };
     await adapter.init();
 
@@ -576,11 +660,12 @@ describe("download queue ownership, states, and cancellation", () => {
     expect(redis.del).not.toHaveBeenCalled();
     const [, keyCount, ...arguments_] = redis.eval.mock.calls[0]!;
     const keys = arguments_.slice(0, keyCount as number).map(String);
-    expect(keys).toHaveLength(10);
+    expect(keys).toHaveLength(11);
     expect(keys).toContain(getDownloadQueueJobHashKey(producer.toKey, jobId));
     expect(keys).toContain(
       getDownloadQueueAdmissionLedgerKey((suffix) => producer.toKey(suffix)),
     );
+    expect(keys).toContain(producer.toKey("admission-intent-leases"));
     expect(new Set(keys.map((key) => key.match(/\{[^{}]+\}/)?.[0]))).toEqual(
       new Set(["{apollo-tf-downloads}"]),
     );
