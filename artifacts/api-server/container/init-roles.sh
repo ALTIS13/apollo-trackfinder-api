@@ -258,6 +258,19 @@ alter role apollo_tf_migrator reset all;
 alter role apollo_tf_runtime reset all;
 
 select format(
+  'alter role %I in database %I reset all',
+  roles.rolname,
+  databases.datname
+)
+from pg_db_role_setting settings
+join pg_roles roles on roles.oid = settings.setrole
+join pg_database databases on databases.oid = settings.setdatabase
+where settings.setdatabase <> 0
+  and roles.rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
+order by roles.rolname, databases.datname
+\gexec
+
+select format(
   'revoke all privileges on database %I from public, apollo_tf_migrator, apollo_tf_runtime cascade',
   databases.datname
 )
@@ -297,6 +310,28 @@ where exists (
 \gexec
 
 select format(
+  'revoke all privileges on schema %I from public cascade',
+  schemas.nspname
+)
+from pg_namespace schemas
+where schemas.nspname <> 'information_schema'
+  and schemas.nspname !~ '^pg_'
+  and not exists (
+    select 1
+    from pg_depend dependencies
+    where dependencies.classid = 'pg_namespace'::regclass
+      and dependencies.objid = schemas.oid
+      and dependencies.objsubid = 0
+      and dependencies.refclassid = 'pg_extension'::regclass
+      and dependencies.deptype = 'e'
+  )
+  and (
+    has_schema_privilege('public', schemas.oid, 'USAGE')
+    or has_schema_privilege('public', schemas.oid, 'CREATE')
+  )
+\gexec
+
+select format(
   'revoke all privileges on %s %I.%I from apollo_tf_migrator, apollo_tf_runtime cascade',
   case
     when relations.relkind = 'S' then 'sequence'
@@ -316,6 +351,49 @@ where exists (
     where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
   )
 )
+\gexec
+
+select format(
+  'revoke all privileges on %s %I.%I from public cascade',
+  case
+    when relations.relkind = 'S' then 'sequence'
+    else 'table'
+  end,
+  schemas.nspname,
+  relations.relname
+)
+from pg_class relations
+join pg_namespace schemas on schemas.oid = relations.relnamespace
+where schemas.nspname <> 'information_schema'
+  and schemas.nspname !~ '^pg_'
+  and relations.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
+  and not exists (
+    select 1
+    from pg_depend dependencies
+    where dependencies.classid = 'pg_class'::regclass
+      and dependencies.objid = relations.oid
+      and dependencies.objsubid = 0
+      and dependencies.refclassid = 'pg_extension'::regclass
+      and dependencies.deptype = 'e'
+  )
+  and (
+    (
+      relations.relkind = 'S'
+      and has_sequence_privilege(
+        'public',
+        relations.oid,
+        'USAGE,SELECT,UPDATE'
+      )
+    )
+    or (
+      relations.relkind <> 'S'
+      and has_table_privilege(
+        'public',
+        relations.oid,
+        'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+      )
+    )
+  )
 \gexec
 
 select format(
@@ -339,6 +417,37 @@ where exists (
 \gexec
 
 select format(
+  'revoke all privileges (%I) on table %I.%I from public cascade',
+  attributes.attname,
+  schemas.nspname,
+  relations.relname
+)
+from pg_attribute attributes
+join pg_class relations on relations.oid = attributes.attrelid
+join pg_namespace schemas on schemas.oid = relations.relnamespace
+where schemas.nspname <> 'information_schema'
+  and schemas.nspname !~ '^pg_'
+  and relations.relkind in ('r', 'p', 'v', 'm', 'f')
+  and attributes.attnum > 0
+  and not attributes.attisdropped
+  and not exists (
+    select 1
+    from pg_depend dependencies
+    where dependencies.classid = 'pg_class'::regclass
+      and dependencies.objid = relations.oid
+      and dependencies.objsubid = 0
+      and dependencies.refclassid = 'pg_extension'::regclass
+      and dependencies.deptype = 'e'
+  )
+  and has_column_privilege(
+    'public',
+    relations.oid,
+    attributes.attnum,
+    'SELECT,INSERT,UPDATE,REFERENCES'
+  )
+\gexec
+
+select format(
   'revoke all privileges on routine %I.%I(%s) from apollo_tf_migrator, apollo_tf_runtime cascade',
   schemas.nspname,
   routines.proname,
@@ -355,6 +464,28 @@ where exists (
     where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
   )
 )
+\gexec
+
+select format(
+  'revoke all privileges on routine %I.%I(%s) from public cascade',
+  schemas.nspname,
+  routines.proname,
+  pg_get_function_identity_arguments(routines.oid)
+)
+from pg_proc routines
+join pg_namespace schemas on schemas.oid = routines.pronamespace
+where schemas.nspname <> 'information_schema'
+  and schemas.nspname !~ '^pg_'
+  and not exists (
+    select 1
+    from pg_depend dependencies
+    where dependencies.classid = 'pg_proc'::regclass
+      and dependencies.objid = routines.oid
+      and dependencies.objsubid = 0
+      and dependencies.refclassid = 'pg_extension'::regclass
+      and dependencies.deptype = 'e'
+  )
+  and has_function_privilege('public', routines.oid, 'EXECUTE')
 \gexec
 
 select format(
@@ -376,6 +507,34 @@ where exists (
 \gexec
 
 select format(
+  'revoke all privileges on type %I.%I from public cascade',
+  schemas.nspname,
+  types.typname
+)
+from pg_type types
+join pg_namespace schemas on schemas.oid = types.typnamespace
+left join pg_class type_relations on type_relations.oid = types.typrelid
+where schemas.nspname <> 'information_schema'
+  and schemas.nspname !~ '^pg_'
+  and types.typisdefined
+  and types.typelem = 0
+  and (
+    types.typrelid = 0
+    or type_relations.relkind = 'c'
+  )
+  and not exists (
+    select 1
+    from pg_depend dependencies
+    where dependencies.classid = 'pg_type'::regclass
+      and dependencies.objid = types.oid
+      and dependencies.objsubid = 0
+      and dependencies.refclassid = 'pg_extension'::regclass
+      and dependencies.deptype = 'e'
+  )
+  and has_type_privilege('public', types.oid, 'USAGE')
+\gexec
+
+select format(
   'revoke all privileges on large object %s from apollo_tf_migrator, apollo_tf_runtime cascade',
   objects.oid
 )
@@ -388,6 +547,18 @@ where exists (
     from pg_roles
     where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
   )
+)
+\gexec
+
+select format(
+  'revoke all privileges on large object %s from public cascade',
+  objects.oid
+)
+from pg_largeobject_metadata objects
+where exists (
+  select 1
+  from aclexplode(objects.lomacl) acl
+  where acl.grantee = 0
 )
 \gexec
 
@@ -424,6 +595,27 @@ where exists (
 \gexec
 
 select format(
+  'revoke all privileges on foreign data wrapper %I from public cascade',
+  wrappers.fdwname
+)
+from pg_foreign_data_wrapper wrappers
+where not exists (
+  select 1
+  from pg_depend dependencies
+  where dependencies.classid = 'pg_foreign_data_wrapper'::regclass
+    and dependencies.objid = wrappers.oid
+    and dependencies.objsubid = 0
+    and dependencies.refclassid = 'pg_extension'::regclass
+    and dependencies.deptype = 'e'
+)
+  and has_foreign_data_wrapper_privilege(
+    'public',
+    wrappers.oid,
+    'USAGE'
+  )
+\gexec
+
+select format(
   'revoke all privileges on foreign server %I from apollo_tf_migrator, apollo_tf_runtime cascade',
   servers.srvname
 )
@@ -437,6 +629,23 @@ where exists (
     where rolname in ('apollo_tf_migrator', 'apollo_tf_runtime')
   )
 )
+\gexec
+
+select format(
+  'revoke all privileges on foreign server %I from public cascade',
+  servers.srvname
+)
+from pg_foreign_server servers
+where not exists (
+  select 1
+  from pg_depend dependencies
+  where dependencies.classid = 'pg_foreign_server'::regclass
+    and dependencies.objid = servers.oid
+    and dependencies.objsubid = 0
+    and dependencies.refclassid = 'pg_extension'::regclass
+    and dependencies.deptype = 'e'
+)
+  and has_server_privilege('public', servers.oid, 'USAGE')
 \gexec
 
 select format(
@@ -892,6 +1101,222 @@ begin
       )
   ) then
     raise exception 'direct_acl_audit_failed';
+  end if;
+
+  if exists (
+    select 1
+    from pg_namespace schemas
+    where schemas.nspname <> 'information_schema'
+      and schemas.nspname !~ '^pg_'
+      and (
+        has_schema_privilege(runtime_oid, schemas.oid, 'CREATE')
+        or has_schema_privilege(runtime_oid, schemas.oid, 'USAGE') <>
+          (schemas.nspname in ('public', 'apollo_tf'))
+      )
+  )
+  or exists (
+    select 1
+    from pg_class relations
+    join pg_namespace schemas on schemas.oid = relations.relnamespace
+    where schemas.nspname <> 'information_schema'
+      and schemas.nspname !~ '^pg_'
+      and relations.relkind in ('r', 'p', 'v', 'm', 'f')
+      and (
+        has_table_privilege(runtime_oid, relations.oid, 'SELECT') <>
+          (
+            (
+              schemas.nspname = 'public'
+              and relations.relname in (
+                'track_search_cache',
+                'play_history',
+                'liked_tracks',
+                'playlists',
+                'playlist_tracks'
+              )
+            )
+            or (
+              schemas.nspname = 'apollo_tf'
+              and relations.relname = 'schema_migrations'
+            )
+          )
+        or has_table_privilege(runtime_oid, relations.oid, 'INSERT') <>
+          (
+            schemas.nspname = 'public'
+            and relations.relname in (
+              'track_search_cache',
+              'play_history',
+              'liked_tracks',
+              'playlists',
+              'playlist_tracks'
+            )
+          )
+        or has_table_privilege(runtime_oid, relations.oid, 'UPDATE') <>
+          (
+            schemas.nspname = 'public'
+            and relations.relname in (
+              'track_search_cache',
+              'play_history',
+              'liked_tracks',
+              'playlists',
+              'playlist_tracks'
+            )
+          )
+        or has_table_privilege(runtime_oid, relations.oid, 'DELETE') <>
+          (
+            schemas.nspname = 'public'
+            and relations.relname in (
+              'track_search_cache',
+              'play_history',
+              'liked_tracks',
+              'playlists',
+              'playlist_tracks'
+            )
+          )
+        or has_table_privilege(runtime_oid, relations.oid, 'TRUNCATE')
+        or has_table_privilege(runtime_oid, relations.oid, 'REFERENCES')
+        or has_table_privilege(runtime_oid, relations.oid, 'TRIGGER')
+      )
+  )
+  or exists (
+    select 1
+    from pg_class relations
+    join pg_namespace schemas on schemas.oid = relations.relnamespace
+    where schemas.nspname <> 'information_schema'
+      and schemas.nspname !~ '^pg_'
+      and relations.relkind = 'S'
+      and (
+        has_sequence_privilege(runtime_oid, relations.oid, 'USAGE') <>
+          (
+            schemas.nspname = 'public'
+            and relations.relname in (
+              'track_search_cache_id_seq',
+              'play_history_id_seq',
+              'liked_tracks_id_seq',
+              'playlists_id_seq',
+              'playlist_tracks_id_seq'
+            )
+          )
+        or has_sequence_privilege(runtime_oid, relations.oid, 'SELECT')
+        or has_sequence_privilege(runtime_oid, relations.oid, 'UPDATE')
+      )
+  )
+  or exists (
+    select 1
+    from pg_attribute attributes
+    join pg_class relations on relations.oid = attributes.attrelid
+    join pg_namespace schemas on schemas.oid = relations.relnamespace
+    where schemas.nspname <> 'information_schema'
+      and schemas.nspname !~ '^pg_'
+      and relations.relkind in ('r', 'p', 'v', 'm', 'f')
+      and attributes.attnum > 0
+      and not attributes.attisdropped
+      and (
+        has_column_privilege(
+          runtime_oid,
+          relations.oid,
+          attributes.attnum,
+          'SELECT'
+        ) <>
+          (
+            (
+              schemas.nspname = 'public'
+              and relations.relname in (
+                'track_search_cache',
+                'play_history',
+                'liked_tracks',
+                'playlists',
+                'playlist_tracks'
+              )
+            )
+            or (
+              schemas.nspname = 'apollo_tf'
+              and relations.relname = 'schema_migrations'
+            )
+          )
+        or has_column_privilege(
+          runtime_oid,
+          relations.oid,
+          attributes.attnum,
+          'INSERT'
+        ) <>
+          (
+            schemas.nspname = 'public'
+            and relations.relname in (
+              'track_search_cache',
+              'play_history',
+              'liked_tracks',
+              'playlists',
+              'playlist_tracks'
+            )
+          )
+        or has_column_privilege(
+          runtime_oid,
+          relations.oid,
+          attributes.attnum,
+          'UPDATE'
+        ) <>
+          (
+            schemas.nspname = 'public'
+            and relations.relname in (
+              'track_search_cache',
+              'play_history',
+              'liked_tracks',
+              'playlists',
+              'playlist_tracks'
+            )
+          )
+        or has_column_privilege(
+          runtime_oid,
+          relations.oid,
+          attributes.attnum,
+          'REFERENCES'
+        )
+      )
+  )
+  or exists (
+    select 1
+    from pg_proc routines
+    join pg_namespace schemas on schemas.oid = routines.pronamespace
+    where schemas.nspname <> 'information_schema'
+      and schemas.nspname !~ '^pg_'
+      and has_function_privilege(runtime_oid, routines.oid, 'EXECUTE')
+  )
+  or exists (
+    select 1
+    from pg_type types
+    join pg_namespace schemas on schemas.oid = types.typnamespace
+    left join pg_class type_relations on type_relations.oid = types.typrelid
+    where schemas.nspname <> 'information_schema'
+      and schemas.nspname !~ '^pg_'
+      and types.typisdefined
+      and types.typelem = 0
+      and (
+        types.typrelid = 0
+        or type_relations.relkind = 'c'
+      )
+      and has_type_privilege(runtime_oid, types.oid, 'USAGE')
+  )
+  or exists (
+    select 1
+    from pg_largeobject_metadata objects
+    cross join lateral aclexplode(objects.lomacl) acl
+    where acl.grantee = 0
+  )
+  or exists (
+    select 1
+    from pg_foreign_data_wrapper wrappers
+    where has_foreign_data_wrapper_privilege(
+        runtime_oid,
+        wrappers.oid,
+        'USAGE'
+      )
+  )
+  or exists (
+    select 1
+    from pg_foreign_server servers
+    where has_server_privilege(runtime_oid, servers.oid, 'USAGE')
+  ) then
+    raise exception 'effective_runtime_acl_audit_failed';
   end if;
 
   if exists (

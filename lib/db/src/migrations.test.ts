@@ -21,8 +21,17 @@ import { createTfPool } from "./pool.js";
 
 type RecordedQuery = {
   text: string;
+  queryTimeout?: number;
   values?: readonly unknown[];
 };
+
+type QueryInput =
+  | string
+  | {
+      readonly query_timeout?: number;
+      readonly text: string;
+      readonly values?: readonly unknown[];
+    };
 
 type CatalogFixture = {
   columns: unknown[];
@@ -225,6 +234,9 @@ class MigrationClientDouble {
   readonly queries: RecordedQuery[] = [];
   readonly failures = new Map<string, Error>();
   lockAnswers: (boolean | Error)[] = [true];
+  lockProbe?: (
+    query: RecordedQuery,
+  ) => boolean | Error | Promise<boolean | Error>;
   catalog: CatalogFixture = structuredClone(exactCatalog);
   historyTableExists = false;
   managedTables: string[] = [];
@@ -237,14 +249,27 @@ class MigrationClientDouble {
   releaseError?: Error;
   readonly releaseArguments: (Error | boolean | undefined)[] = [];
 
-  async query(text: string, values?: readonly unknown[]): Promise<QueryResult> {
+  async query(
+    input: QueryInput,
+    values?: readonly unknown[],
+  ): Promise<QueryResult> {
+    const text = typeof input === "string" ? input : input.text;
+    const queryValues = typeof input === "string" ? values : input.values;
+    const query: RecordedQuery = {
+      text,
+      ...(typeof input === "string" || input.query_timeout === undefined
+        ? {}
+        : { queryTimeout: input.query_timeout }),
+      ...(queryValues === undefined ? {} : { values: queryValues }),
+    };
     this.events.push(text);
-    this.queries.push({ text, values });
+    this.queries.push(query);
     const exactFailure = this.failures.get(text);
     if (exactFailure) throw exactFailure;
 
     if (text.includes("pg_try_advisory_lock")) {
-      const answer = this.lockAnswers.shift() ?? false;
+      const answer =
+        (await this.lockProbe?.(query)) ?? this.lockAnswers.shift() ?? false;
       if (answer instanceof Error) throw answer;
       return result([{ acquired: answer }]);
     }
@@ -262,7 +287,7 @@ class MigrationClientDouble {
       );
     }
     if (text.includes("insert into apollo_tf.schema_migrations")) {
-      const [name, checksum] = values ?? [];
+      const [name, checksum] = queryValues ?? [];
       this.history.set(String(name), String(checksum));
       this.historyTableExists = true;
     }
@@ -488,7 +513,118 @@ describe("runTfMigrations", () => {
       pool.client.queries.filter(({ text }) =>
         text.includes("pg_try_advisory_lock"),
       ),
-    ).toHaveLength(41);
+    ).toHaveLength(40);
+    expect(
+      pool.client.queries
+        .filter(({ text }) => text.includes("pg_try_advisory_lock"))
+        .map(({ queryTimeout }) => queryTimeout),
+    ).toEqual(Array.from({ length: 40 }, (_, index) => 10_000 - index * 250));
+  });
+
+  test("rejects a lock acquired only after its probe consumes the remaining budget", async () => {
+    const directory = await fixtureDirectory({ "0001_first.sql": "select 1;" });
+    const manifest = await fixtureManifest(directory, ["0001_first.sql"]);
+    const pool = new MigrationPoolDouble();
+    const sleeps: number[] = [];
+    let clock = 0;
+    pool.client.lockProbe = ({ queryTimeout }) => {
+      clock += queryTimeout ?? 0;
+      return true;
+    };
+
+    await expect(
+      runTfMigrations(asPool(pool), directory, manifest, {
+        now: () => clock,
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds);
+          clock += milliseconds;
+        },
+      }),
+    ).rejects.toMatchObject({ code: "migration_lock_timeout" });
+    expect(
+      pool.client.queries.filter(({ text }) =>
+        text.includes("pg_try_advisory_lock"),
+      ),
+    ).toEqual([
+      {
+        queryTimeout: 10_000,
+        text: "select pg_try_advisory_lock(hashtext($1)) as acquired",
+        values: ["apollo_tf_migrations"],
+      },
+    ]);
+    expect(sleeps).toEqual([]);
+    expect(pool.client.events).toContain(
+      "select pg_advisory_unlock(hashtext($1)) as unlocked",
+    );
+    expect(pool.client.releaseArguments).toEqual([undefined]);
+  });
+
+  test("caps retry sleep at the remaining lock budget", async () => {
+    const directory = await fixtureDirectory({ "0001_first.sql": "select 1;" });
+    const manifest = await fixtureManifest(directory, ["0001_first.sql"]);
+    const pool = new MigrationPoolDouble();
+    const sleeps: number[] = [];
+    let clock = 0;
+    pool.client.lockProbe = () => {
+      clock += 9_900;
+      return false;
+    };
+
+    await expect(
+      runTfMigrations(asPool(pool), directory, manifest, {
+        now: () => clock,
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds);
+          clock += milliseconds;
+        },
+      }),
+    ).rejects.toMatchObject({ code: "migration_lock_timeout" });
+    expect(sleeps).toEqual([100]);
+    expect(
+      pool.client.queries.filter(({ text }) =>
+        text.includes("pg_try_advisory_lock"),
+      ),
+    ).toEqual([
+      {
+        queryTimeout: 10_000,
+        text: "select pg_try_advisory_lock(hashtext($1)) as acquired",
+        values: ["apollo_tf_migrations"],
+      },
+    ]);
+    expect(pool.client.releaseArguments).toEqual([undefined]);
+  });
+
+  test("preserves lock timeout and poisons the client after a probe read timeout", async () => {
+    const directory = await fixtureDirectory({ "0001_first.sql": "select 1;" });
+    const manifest = await fixtureManifest(directory, ["0001_first.sql"]);
+    const pool = new MigrationPoolDouble();
+    const readTimeout = new Error("Query read timeout");
+    const sleeps: number[] = [];
+    let clock = 0;
+    pool.client.lockProbe = ({ queryTimeout }) => {
+      clock += queryTimeout ?? 0;
+      return readTimeout;
+    };
+
+    await expect(
+      runTfMigrations(asPool(pool), directory, manifest, {
+        now: () => clock,
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds);
+          clock += milliseconds;
+        },
+      }),
+    ).rejects.toMatchObject({ code: "migration_lock_timeout" });
+    expect(sleeps).toEqual([]);
+    expect(
+      pool.client.queries.filter(({ text }) =>
+        text.includes("pg_try_advisory_lock"),
+      )[0],
+    ).toMatchObject({ queryTimeout: 10_000 });
+    expect(pool.client.events).not.toContain(
+      "select pg_advisory_unlock(hashtext($1)) as unlocked",
+    );
+    expect(pool.client.releaseArguments).toEqual([readTimeout]);
   });
 
   test("requires persisted history to be an exact manifest prefix", async () => {

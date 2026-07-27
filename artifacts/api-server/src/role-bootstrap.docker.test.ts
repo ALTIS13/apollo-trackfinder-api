@@ -284,6 +284,34 @@ async function runManualBootstrap(
   return result;
 }
 
+async function psqlWithSecret(
+  secretName: string,
+  statement: string,
+): Promise<ProcessResult> {
+  return docker(
+    [
+      "run",
+      "--rm",
+      "--network",
+      network,
+      "--user",
+      "10001:10001",
+      "--read-only",
+      "--volume",
+      `${secretVolume}:/run/secrets:ro`,
+      "--entrypoint",
+      "sh",
+      image,
+      "-ceu",
+      'url=$(/usr/local/bin/read-bounded-secret "$1" 4096); exec psql -X "$url" -v ON_ERROR_STOP=1 -c "$2"',
+      "role-query",
+      `/run/secrets/${secretName}`,
+      statement,
+    ],
+    { allowFailure: true },
+  );
+}
+
 async function waitForPostgres(): Promise<void> {
   for (let attempt = 0; attempt < 120; attempt += 1) {
     const result = await docker(
@@ -587,7 +615,7 @@ describe
       expect(residual.code).not.toBe(0);
     }, 30_000);
 
-    it("normalizes every direct ACL class, exact login attributes, and unexpected ownership", async () => {
+    it("normalizes direct and PUBLIC ACLs, role settings, attributes, and ownership", async () => {
       await psqlAdmin(`
         create role tf_bootstrap_parent nologin;
         grant tf_bootstrap_parent to apollo_tf_runtime;
@@ -609,6 +637,16 @@ describe
         alter table public.playlists owner to apollo_tf_migrator;
         alter table public.playlist_tracks owner to apollo_tf_migrator;
         create table public.runtime_canary (id integer);
+        create type public.runtime_public_type as enum ('canary');
+        grant truncate on table public.play_history to public;
+        grant update on sequence public.play_history_id_seq to public;
+        grant select on table public.runtime_canary to public;
+        create function public.runtime_security_definer_canary()
+          returns integer
+          language sql
+          security definer
+          set search_path = pg_catalog
+          as 'select 1';
         grant all privileges on database apollo_trackfinder to apollo_tf_runtime;
         grant all privileges on database postgres to apollo_tf_runtime;
         grant create on tablespace pg_default to apollo_tf_runtime;
@@ -625,6 +663,7 @@ describe
         grant usage on language plpgsql to apollo_tf_runtime;
         select lo_create(980001);
         grant select, update on large object 980001 to apollo_tf_runtime;
+        grant select, update on large object 980001 to public;
         create foreign data wrapper tf_bootstrap_fdw no handler no validator;
         create server tf_bootstrap_server
           foreign data wrapper tf_bootstrap_fdw;
@@ -632,13 +671,177 @@ describe
           to apollo_tf_runtime;
         grant usage on foreign server tf_bootstrap_server
           to apollo_tf_runtime;
+        grant usage on foreign data wrapper tf_bootstrap_fdw to public;
+        grant usage on foreign server tf_bootstrap_server to public;
         grant set on parameter log_statement to apollo_tf_runtime;
-        alter role apollo_tf_runtime set search_path = pg_catalog;
+        alter role apollo_tf_migrator
+          set application_name = 'polluted-migrator-global';
+        alter role apollo_tf_migrator in database apollo_trackfinder
+          set search_path = pg_catalog;
+        alter role apollo_tf_migrator in database postgres
+          set statement_timeout = '1s';
+        alter role apollo_tf_runtime
+          set application_name = 'polluted-runtime-global';
+        alter role apollo_tf_runtime in database apollo_trackfinder
+          set search_path = pg_catalog;
+        alter role apollo_tf_runtime in database postgres
+          set statement_timeout = '1s';
         alter role apollo_tf_runtime
           connection limit 0 valid until '2000-01-01';
         alter role apollo_tf_migrator
           connection limit 0 valid until '2000-01-01';
       `);
+
+      const publicCanaries = await psqlAdmin(`
+        select concat_ws('|',
+          has_table_privilege(
+            'apollo_tf_runtime',
+            'public.play_history',
+            'truncate'
+          ),
+          has_sequence_privilege(
+            'apollo_tf_runtime',
+            'public.play_history_id_seq',
+            'update'
+          ),
+          has_table_privilege(
+            'apollo_tf_runtime',
+            'public.runtime_canary',
+            'select'
+          ),
+          has_function_privilege(
+            'apollo_tf_runtime',
+            'public.runtime_security_definer_canary()',
+            'execute'
+          ),
+          (
+            select routines.proacl is null
+            from pg_proc routines
+            where routines.oid =
+              'public.runtime_security_definer_canary()'::regprocedure
+          )
+        );
+      `);
+      expect(publicCanaries.stdout.toString()).toContain("t|t|t|t|t");
+
+      await psqlAdmin(`
+        create function public.extension_public_canary()
+          returns integer
+          language sql
+          as 'select 1';
+        alter extension plpgsql
+          add function public.extension_public_canary();
+      `);
+      const extensionPublicBefore = await psqlAdmin(`
+        select concat_ws('|',
+          has_function_privilege(
+            'public',
+            'public.extension_public_canary()',
+            'execute'
+          ),
+          exists (
+            select 1
+            from pg_depend dependencies
+            where dependencies.classid = 'pg_proc'::regclass
+              and dependencies.objid =
+                'public.extension_public_canary()'::regprocedure
+              and dependencies.refclassid = 'pg_extension'::regclass
+              and dependencies.deptype = 'e'
+          )
+        );
+      `);
+      expect(extensionPublicBefore.stdout.toString()).toContain("t|t");
+
+      const extensionPublicFailure = await runManualBootstrap(true);
+      expect(extensionPublicFailure.code).not.toBe(0);
+      expect(extensionPublicFailure.stdout.toString()).toBe("");
+      expect(extensionPublicFailure.stderr.toString()).toBe(
+        "TF role bootstrap failed\n",
+      );
+      const extensionPublicRollback = await psqlAdmin(`
+        select concat_ws('|',
+          has_function_privilege(
+            'public',
+            'public.extension_public_canary()',
+            'execute'
+          ),
+          (
+            select rolconnlimit
+            from pg_roles
+            where rolname = 'apollo_tf_runtime'
+          )
+        );
+      `);
+      expect(extensionPublicRollback.stdout.toString()).toContain("t|0");
+      await psqlAdmin(`
+        alter extension plpgsql
+          drop function public.extension_public_canary();
+        drop function public.extension_public_canary();
+      `);
+
+      const roleSettingsBefore = await psqlAdmin(`
+        select 'managed_role_settings=' || string_agg(
+          concat_ws(
+            ':',
+            role_name,
+            global_rows,
+            current_database_rows,
+            foreign_database_rows
+          ),
+          '|' order by role_name
+        )
+        from (
+          select
+            roles.rolname as role_name,
+            count(*) filter (where settings.setdatabase = 0) as global_rows,
+            count(*) filter (
+              where settings.setdatabase = (
+                select oid
+                from pg_database
+                where datname = current_database()
+              )
+            ) as current_database_rows,
+            count(*) filter (
+              where settings.setdatabase = (
+                select oid
+                from pg_database
+                where datname = 'postgres'
+              )
+            ) as foreign_database_rows
+          from pg_db_role_setting settings
+          join pg_roles roles on roles.oid = settings.setrole
+          where roles.rolname in (
+            'apollo_tf_migrator',
+            'apollo_tf_runtime'
+          )
+          group by roles.rolname
+        ) managed_settings;
+      `);
+      expect(roleSettingsBefore.stdout.toString()).toContain(
+        "managed_role_settings=apollo_tf_migrator:1:1:1|apollo_tf_runtime:1:1:1",
+      );
+
+      const roleSettingsBootstrap = await runManualBootstrap(true);
+      expect(roleSettingsBootstrap.code).toBe(0);
+      expect(roleSettingsBootstrap.stdout.toString()).toBe("");
+      expect(roleSettingsBootstrap.stderr.toString()).toBe("");
+      const roleSettingsAfter = await psqlAdmin(`
+        select 'managed_role_settings=' || count(*)
+        from pg_db_role_setting settings
+        join pg_roles roles on roles.oid = settings.setrole
+        where roles.rolname in (
+          'apollo_tf_migrator',
+          'apollo_tf_runtime'
+        );
+      `);
+      expect(roleSettingsAfter.stdout.toString()).toContain(
+        "managed_role_settings=0",
+      );
+
+      const idempotentRoleSettingsBootstrap = await runManualBootstrap(true);
+      expect(idempotentRoleSettingsBootstrap.code).toBe(0);
+      expect(idempotentRoleSettingsBootstrap.stdout.toString()).toBe("");
+      expect(idempotentRoleSettingsBootstrap.stderr.toString()).toBe("");
 
       await psqlAdmin(
         `
@@ -697,7 +900,7 @@ describe
           )
         );
       `);
-      expect(rollback.stdout.toString()).toContain("0|t");
+      expect(rollback.stdout.toString()).toContain("-1|t");
 
       await psqlAdmin(
         `
@@ -733,10 +936,17 @@ describe
           has_database_privilege('apollo_tf_runtime', current_database(), 'create'),
           has_schema_privilege('apollo_tf_runtime', 'public', 'create'),
           has_table_privilege('apollo_tf_runtime', 'public.track_search_cache', 'truncate'),
+          has_table_privilege('apollo_tf_runtime', 'public.play_history', 'truncate'),
+          has_sequence_privilege('apollo_tf_runtime', 'public.play_history_id_seq', 'update'),
           has_table_privilege('apollo_tf_runtime', 'public.track_search_cache', 'select,insert,update,delete'),
           has_sequence_privilege('apollo_tf_runtime', 'public.track_search_cache_id_seq', 'usage'),
           has_table_privilege('apollo_tf_runtime', 'apollo_tf.schema_migrations', 'select'),
           has_table_privilege('apollo_tf_runtime', 'public.runtime_canary', 'select'),
+          has_function_privilege(
+            'apollo_tf_runtime',
+            'public.runtime_security_definer_canary()',
+            'execute'
+          ),
           has_table_privilege('apollo_tf_runtime', 'pg_catalog.pg_authid', 'select'),
           has_column_privilege('apollo_tf_runtime', 'public.runtime_canary', 'id', 'select'),
           (select count(*)
@@ -746,6 +956,16 @@ describe
               and acl.grantee = (
                 select oid from pg_roles where rolname = 'apollo_tf_runtime'
               )),
+          (select count(*)
+            from pg_largeobject_metadata objects
+            cross join lateral aclexplode(objects.lomacl) acl
+            where objects.oid = 980001
+              and acl.grantee = 0),
+          has_type_privilege(
+            'apollo_tf_runtime',
+            'public.runtime_public_type',
+            'usage'
+          ),
           has_foreign_data_wrapper_privilege('apollo_tf_runtime', 'tf_bootstrap_fdw', 'usage'),
           has_server_privilege('apollo_tf_runtime', 'tf_bootstrap_server', 'usage'),
           has_parameter_privilege('apollo_tf_runtime', 'log_statement', 'set'),
@@ -800,8 +1020,24 @@ describe
         );
       `);
       expect(projection.stdout.toString().trim()).toContain(
-        "f|f|f|t|t|t|f|f|f|0|f|f|f|0|0|0|0|0|0|0|t|t",
+        "f|f|f|f|f|t|t|t|f|f|f|f|0|0|f|f|f|f|0|0|0|0|0|0|0|t|t",
       );
+
+      for (const statement of [
+        "truncate table public.play_history",
+        "select setval('public.play_history_id_seq', 1, false)",
+        "select * from public.runtime_canary",
+        "select public.runtime_security_definer_canary()",
+        "select lo_get(980001)",
+        "select lo_put(980001, 0, decode('00', 'hex'))",
+      ]) {
+        const denied = await psqlWithSecret(
+          "tf_runtime_database_url",
+          statement,
+        );
+        expect(denied.code).not.toBe(0);
+        expect(denied.stdout.toString()).toBe("");
+      }
 
       for (const [secretName, expectedRole] of [
         ["tf_migrator_database_url", "apollo_tf_migrator"],

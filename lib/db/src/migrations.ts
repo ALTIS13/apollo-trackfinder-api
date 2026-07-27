@@ -3,7 +3,13 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
+import type {
+  Pool,
+  PoolClient,
+  QueryConfig,
+  QueryResult,
+  QueryResultRow,
+} from "pg";
 
 const MIGRATION_NAME = /^\d{4}_[a-z0-9_]+\.sql$/;
 const SHA_256 = /^[0-9a-f]{64}$/;
@@ -52,6 +58,15 @@ interface Queryable {
   ): Promise<QueryResult<T>>;
 }
 
+type LockProbeQueryConfig = QueryConfig<[string]> & {
+  readonly query_timeout: number;
+};
+
+interface LockAcquisition {
+  readonly acquired: true;
+  readonly timedOut: boolean;
+}
+
 class OperationFailure {
   readonly primary: unknown;
   readonly cleanup: Error;
@@ -84,6 +99,13 @@ export const TF_MIGRATION_MANIFEST: readonly MigrationManifestEntry[] =
 
 function contractError(code: MigrationErrorCode, message: string): Error {
   return Object.assign(new Error(message), { code });
+}
+
+function migrationLockTimeout(): Error {
+  return contractError(
+    "migration_lock_timeout",
+    "Timed out waiting for the TF migration advisory lock",
+  );
 }
 
 function asError(error: unknown, fallback: string): Error {
@@ -161,24 +183,41 @@ function requireHistoryPrefix(
 async function acquireLock(
   client: PoolClient,
   options: MigrationRunnerOptions,
-): Promise<void> {
+): Promise<LockAcquisition> {
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? defaultSleep;
   const deadline = now() + LOCK_TIMEOUT_MS;
 
   while (true) {
-    const lock = await client.query<{ acquired: boolean }>(
-      "select pg_try_advisory_lock(hashtext($1)) as acquired",
-      [MIGRATION_LOCK],
-    );
-    if (lock.rows[0]?.acquired === true) return;
-    if (now() >= deadline) {
-      throw contractError(
-        "migration_lock_timeout",
-        "Timed out waiting for the TF migration advisory lock",
-      );
+    const remaining = deadline - now();
+    if (remaining <= 0) throw migrationLockTimeout();
+
+    const probe: LockProbeQueryConfig = {
+      text: "select pg_try_advisory_lock(hashtext($1)) as acquired",
+      values: [MIGRATION_LOCK],
+      query_timeout: remaining,
+    };
+    let lock: QueryResult<{ acquired: boolean }>;
+    try {
+      lock = await client.query<{ acquired: boolean }, [string]>(probe);
+    } catch (error) {
+      if (now() >= deadline) {
+        throw new OperationFailure(
+          migrationLockTimeout(),
+          asError(error, "TF migration lock probe state is uncertain"),
+        );
+      }
+      throw error;
     }
-    await sleep(LOCK_RETRY_MS);
+
+    const acquired = lock.rows[0]?.acquired === true;
+    const remainingAfterProbe = deadline - now();
+    if (remainingAfterProbe <= 0) {
+      if (acquired) return { acquired: true, timedOut: true };
+      throw migrationLockTimeout();
+    }
+    if (acquired) return { acquired: true, timedOut: false };
+    await sleep(Math.min(LOCK_RETRY_MS, remainingAfterProbe));
   }
 }
 
@@ -289,9 +328,11 @@ async function executeWithLock(
 
   try {
     try {
-      await acquireLock(client, options);
-      lockAcquired = true;
+      const acquisition = await acquireLock(client, options);
+      lockAcquired = acquisition.acquired;
+      if (acquisition.timedOut) throw migrationLockTimeout();
     } catch (error) {
+      if (error instanceof OperationFailure) throw error;
       if (
         !(error instanceof Error) ||
         (error as Error & { code?: string }).code !== "migration_lock_timeout"

@@ -38,8 +38,11 @@ Docker Compose, pnpm 10.33.2.
   full manifest during runtime readiness. Extra, missing-middle, reordered, or
   checksum-drifted history fails closed.
 - Lock acquisition polls `pg_try_advisory_lock(hashtext($1))` every `250ms` for
-  at most `10s` and fails with `migration_lock_timeout`; no deployment may hang
-  on a blocking advisory lock.
+  at most `10s` and fails with `migration_lock_timeout`. Every probe uses the
+  remaining aggregate budget as its node-postgres `query_timeout`; the clock is
+  checked again before accepting acquisition, retry sleep is capped to the
+  remaining budget, and a probe timeout poison-releases the uncertain physical
+  client without replacing the primary contract error.
 - The migrator preserves the primary error. Any uncertain lock, rollback,
   unlock, or release state destroys the pooled client by passing an error to
   `client.release(error)`.
@@ -54,9 +57,14 @@ Docker Compose, pnpm 10.33.2.
 - Role bootstrap is supported only on a dedicated TF PostgreSQL cluster. It
   revokes `PUBLIC` and both managed roles from every database, restores access
   only to the current TF database, removes stale direct/default ACLs,
-  memberships, role settings, and managed-role ownership across PostgreSQL 16
-  catalog classes, then fails closed unless a final exact catalog audit passes.
-  Foreign object ACLs or foreign runtime-owned default ACLs are rejected.
+  memberships, every global/current/foreign-database managed-role setting, and
+  managed-role ownership across PostgreSQL 16 catalog classes. Unsafe `PUBLIC`
+  privileges are removed from current-database non-system/non-extension
+  schemas, relations, columns, sequences, routines, types, large objects,
+  foreign-data wrappers, and foreign servers; extension-owned pollution fails
+  closed without mutation. Final direct and effective-runtime catalog audits
+  must both pass. Foreign object ACLs or foreign runtime-owned default ACLs are
+  rejected.
 - Runtime receives DML only for the five active TF tables, sequence USAGE only,
   and SELECT-only access to `apollo_tf.schema_migrations`. Runtime cannot
   CREATE, ALTER, DROP, TRUNCATE, call `setval`, or mutate migration history.

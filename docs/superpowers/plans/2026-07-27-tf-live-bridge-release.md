@@ -69,7 +69,9 @@ Redis 7, pnpm 10.33.2.
 - Secret name: `tf_module_heartbeat_keys`.
 - Environment:
   `APOLLO_MODULE_HEARTBEAT_KEYS_FILE=/run/secrets/tf_module_heartbeat_keys`.
-- Exact JSON object keys: `search-media`, `account-integrations`.
+- Task 2 factual-RED amendment: the running TF image also requires
+  `download-worker`; the exact JSON object keys are `account-integrations`,
+  `search-media`, and `download-worker`.
 - Each value is a separately generated random string in the existing accepted
   `32..512` byte range.
 - Mount target: `tf_module_heartbeat_keys`, UID/GID `10001:10001`, mode `0400`.
@@ -99,7 +101,8 @@ expect(secretMount(tfApi, "tf_module_heartbeat_keys")).toMatchObject({
 Also require `tf_module_heartbeat_keys` in the exact top-level secret list,
 mount-readability probe, generated fixture map, path containment checks,
 fake-Docker fixture, and raw-secret canary set. Parse the generated JSON and
-require exactly the two allowed module IDs, distinct values, and bounded
+require exactly the three allowed module IDs (`account-integrations`,
+`search-media`, and `download-worker`), distinct values, and bounded
 lengths.
 
 - [ ] **Step 2: Verify RED**
@@ -117,18 +120,20 @@ separately: `APOLLO_BRIDGE_LIVE=true` fails at `compose-up` with unhealthy
 
 - [ ] **Step 3: Implement the minimal secret parity**
 
-Generate two independent heartbeat values:
+Generate three independent heartbeat values:
 
 ```js
 const tfModuleHeartbeatKeys = {
   "account-integrations": generatedSecret(),
   "search-media": generatedSecret(),
+  "download-worker": generatedSecret(),
 };
 ```
 
 Write `JSON.stringify(tfModuleHeartbeatKeys)` as
-`tf_module_heartbeat_keys`, owned by `10001:10001` and mode `0400`. Add both
-values to `rawSecrets`; never add the serialized object or values to output.
+`tf_module_heartbeat_keys`, owned by `10001:10001` and mode `0400`. Add all
+three values (`account-integrations`, `search-media`, and `download-worker`) to
+`rawSecrets`; never add the serialized object or values to output.
 
 Add the exact Compose environment and long-syntax mount:
 
