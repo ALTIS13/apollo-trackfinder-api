@@ -430,7 +430,7 @@ describe("useTrackDownload", () => {
       });
       expect(result.current.state).toBe("active");
       expect(result.current.progress).toBe(64);
-      expect(vi.getTimerCount()).toBe(0);
+      expect(vi.getTimerCount()).toBe(1);
 
       await act(async () => {
         await result.current.cancel();
@@ -449,6 +449,46 @@ describe("useTrackDownload", () => {
     } finally {
       window.removeEventListener("unhandledrejection", onUnhandledRejection);
     }
+  });
+
+  it("resumes polling the exact job after a failed DELETE without issuing another DELETE", async () => {
+    const resumedPoll = deferred<DownloadJobStatus>();
+    const error = { status: 503, data: { error: "bounded_error" } };
+    vi.mocked(queueTrackDownloads).mockResolvedValue({
+      results: [{ trackId: track.id, jobId: "job-1", position: 1 }],
+    });
+    vi.mocked(getDownloadJobStatus)
+      .mockResolvedValueOnce(active)
+      .mockReturnValueOnce(resumedPoll.promise);
+    vi.mocked(cancelDownloadJob).mockRejectedValue(error);
+    const { result } = renderHook(() => useTrackDownload());
+
+    await act(async () => {
+      await result.current.start(track);
+    });
+    await flushMicrotasks();
+    expect(result.current.state).toBe("active");
+    expect(result.current.progress).toBe(64);
+
+    await act(async () => {
+      await result.current.cancel();
+    });
+
+    expect(getDownloadJobStatus).toHaveBeenCalledTimes(2);
+    expect(getDownloadJobStatus).toHaveBeenLastCalledWith(
+      "job-1",
+      expect.objectContaining({ credentials: "include", method: "GET" }),
+    );
+    expect(cancelDownloadJob).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resumedPoll.resolve({ status: "completed", progress: 100 });
+    });
+    await flushMicrotasks();
+
+    expect(result.current.state).toBe("completed");
+    expect(result.current.progress).toBe(100);
+    expect(cancelDownloadJob).toHaveBeenCalledTimes(1);
   });
 
   it.each([

@@ -384,6 +384,7 @@ export function useTrackDownload(): TrackDownloadController {
           if (shouldReportCancellationError(error)) {
             reportTfAuthError(error);
           }
+          pollJob(jobId, generation, true);
         }
         return;
       }
@@ -396,7 +397,7 @@ export function useTrackDownload(): TrackDownloadController {
         knownCancelPromiseRef.current = null;
       }
     }
-  }, [applyCancelResponse, cancelJob, commit, isCurrent, stopPolling]);
+  }, [applyCancelResponse, cancelJob, commit, isCurrent, pollJob, stopPolling]);
 
   useEffect(
     () => () => {
