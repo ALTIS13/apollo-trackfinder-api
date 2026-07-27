@@ -25,14 +25,16 @@ Task 5.
   mode `0400`, and the shared admin URL is `root:10002` mode `0440`.
   Supplemental group `10002` is granted only to the two profiled manual
   services.
-- A fresh PostgreSQL 16 integration proof passed `27/27`: ten live migration
-  cases, one factual live target-mutation case, and sixteen pure guard/cleanup
+- A fresh PostgreSQL 16 integration proof passed `34/34`: ten live migration
+  cases, one factual live target-mutation case, and twenty-three pure
+  guard/cleanup
   contracts. It covers clean/repeat migration, exact readiness/history, runtime
   CRUD and full canary privilege denials, drift/unmanaged rejection, exact
   manual baseline, ownership transfer, partial `0002` rollback/recovery without
   renaming a cluster role, malformed-catalog rejection, and absence of
   provider-token tables/grants. Without the integration environment the DB
-  file passes sixteen pure contracts and skips eleven live tests.
+  file passes twenty-three pure contracts and skips eleven live tests; the full
+  ordinary DB package passes forty-six tests and skips the same eleven.
 - The disposable runner creates `apollo_tf_test_<run_id>`, an alternate
   database, and an external sentinel outside the managed/reset object list. It
   sets the target marker and exact sentinel content derived from the run ID;
@@ -44,9 +46,13 @@ Task 5.
   validated backend. Wrong run ID, expected marker, database, cross-target
   session, and role all fail before the destructive callback while preserving
   the external sentinel.
-- Final reset failure cannot bypass physical client release or pool closure,
-  and the primary reset failure is preserved. Target-validation error output
-  excludes URLs, passwords, raw run IDs, markers, hosts, and database names.
+- A logical `release(error)` poisons its pinned resource, preserves the first
+  error object, blocks later use, and forwards that exact error once during
+  physical release. Every physical release and pool end remains single-attempt
+  even after synchronous close failures. Operation, validation, and final reset
+  errors remain primary; cleanup-only failures are generic. Target-validation
+  error output excludes URLs, passwords, raw run IDs, markers, hosts, and
+  database names.
 - The proof used exact per-run image/container/network/volume names and labels,
   bounded readiness, failure cleanup, and a zero-resource audit. No production
   migration or role implementation change was required by the real database

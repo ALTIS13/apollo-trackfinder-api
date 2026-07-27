@@ -20,6 +20,7 @@ import { createTfPool } from "./pool.js";
 
 const TARGET_VALIDATION_ERROR =
   "TF PostgreSQL integration target validation failed";
+const INTEGRATION_CLEANUP_ERROR = "TF PostgreSQL integration cleanup failed";
 const TEST_DATABASE_PREFIX = "apollo_tf_test_";
 const TEST_MARKER_PREFIX = "apollo.tf.integration-run:";
 const TEST_RUN_ID = /^[a-z0-9](?:[a-z0-9_]{6,30}[a-z0-9])$/;
@@ -54,6 +55,10 @@ interface IntegrationTargetIdentity {
 
 function targetValidationError(): Error {
   return new Error(TARGET_VALIDATION_ERROR);
+}
+
+function integrationCleanupError(): Error {
+  return new Error(INTEGRATION_CLEANUP_ERROR);
 }
 
 function createIntegrationTargetConfiguration(
@@ -148,9 +153,25 @@ type IntegrationPoolFactory = (
   profile: "migration" | "runtime",
 ) => Pool;
 
-interface PinnedIntegrationResource {
-  readonly client: PoolClient;
+interface IntegrationResourceState {
+  physicalReleaseAttempted: boolean;
+  physicalReleaseOccurred: boolean;
+  poolEndAttempted: boolean;
+  releaseError: Error | boolean | undefined;
+}
+
+interface IntegrationPoolResource {
   readonly pool: Pool;
+  readonly state: IntegrationResourceState;
+}
+
+interface PinnedIntegrationResource extends IntegrationPoolResource {
+  readonly client: PoolClient;
+}
+
+interface IntegrationCleanupResult {
+  readonly failed: boolean;
+  readonly reason?: unknown;
 }
 
 interface VerifiedIntegrationSessions {
@@ -164,74 +185,182 @@ interface VerifiedIntegrationSessions {
   readonly runtime: Pool;
 }
 
-function createPinnedClient(client: PoolClient): PoolClient {
-  return new Proxy(client, {
+function pinnedUseError(state: IntegrationResourceState): unknown {
+  return state.releaseError instanceof Error
+    ? state.releaseError
+    : integrationCleanupError();
+}
+
+function assertPinnedResourceUsable(state: IntegrationResourceState): void {
+  if (
+    state.releaseError !== undefined ||
+    state.physicalReleaseAttempted ||
+    state.poolEndAttempted
+  ) {
+    throw pinnedUseError(state);
+  }
+}
+
+function createPinnedClient(resource: PinnedIntegrationResource): PoolClient {
+  return new Proxy(resource.client, {
     get(target, property, receiver) {
-      if (property === "release") return () => undefined;
+      if (property === "release") {
+        return (error?: Error | boolean) => {
+          if (
+            error !== undefined &&
+            error !== false &&
+            resource.state.releaseError === undefined
+          ) {
+            resource.state.releaseError = error;
+          }
+        };
+      }
       const value = Reflect.get(target, property, receiver);
-      return typeof value === "function" ? value.bind(target) : value;
+      if (typeof value !== "function") return value;
+      if (property === "query") {
+        return (...args: unknown[]) => {
+          try {
+            assertPinnedResourceUsable(resource.state);
+          } catch (error) {
+            return Promise.reject(error);
+          }
+          return Reflect.apply(value, target, args);
+        };
+      }
+      return (...args: unknown[]) => {
+        assertPinnedResourceUsable(resource.state);
+        return Reflect.apply(value, target, args);
+      };
     },
   });
 }
 
-function createPinnedPool(client: PoolClient): Pool {
-  const pinnedClient = createPinnedClient(client);
+function createPinnedPool(resource: PinnedIntegrationResource): Pool {
+  const pinnedClient = createPinnedClient(resource);
   return {
-    connect: async () => pinnedClient,
+    connect: async () => {
+      assertPinnedResourceUsable(resource.state);
+      return pinnedClient;
+    },
     query: ((...args: unknown[]) =>
       Reflect.apply(pinnedClient.query, pinnedClient, args)) as Pool["query"],
   } as Pool;
 }
 
+async function settleCleanupActions(
+  actions: readonly (() => void | Promise<void>)[],
+): Promise<PromiseSettledResult<void>[]> {
+  return Promise.allSettled(
+    actions.map((action) =>
+      (async () => {
+        await action();
+      })(),
+    ),
+  );
+}
+
+async function closeIntegrationResources(
+  pinnedResources: readonly PinnedIntegrationResource[],
+  poolResources: readonly IntegrationPoolResource[],
+): Promise<IntegrationCleanupResult> {
+  const releases = await settleCleanupActions(
+    pinnedResources.map((resource) => () => {
+      if (resource.state.physicalReleaseAttempted) return;
+      resource.state.physicalReleaseAttempted = true;
+      if (resource.state.releaseError === undefined) {
+        resource.client.release();
+      } else {
+        resource.client.release(resource.state.releaseError);
+      }
+      resource.state.physicalReleaseOccurred = true;
+    }),
+  );
+  const endings = await settleCleanupActions(
+    poolResources.map((resource) => async () => {
+      if (resource.state.poolEndAttempted) return;
+      resource.state.poolEndAttempted = true;
+      await resource.pool.end();
+    }),
+  );
+  const rejection = [...releases, ...endings].find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  return rejection
+    ? { failed: true, reason: rejection.reason }
+    : { failed: false };
+}
+
 async function closePinnedResources(
   resources: readonly PinnedIntegrationResource[],
-): Promise<unknown | undefined> {
-  const releases = await Promise.allSettled(
-    resources.map(async ({ client }) => client.release()),
-  );
-  const endings = await Promise.allSettled(
-    resources.map(({ pool }) => pool.end()),
-  );
-  return [...releases, ...endings].find(
-    (result): result is PromiseRejectedResult => result.status === "rejected",
-  )?.reason;
+): Promise<IntegrationCleanupResult> {
+  return closeIntegrationResources(resources, resources);
 }
 
 async function closeVerifiedIntegrationSessions(
   sessions: VerifiedIntegrationSessions,
   finalReset?: () => Promise<void>,
 ): Promise<void> {
+  let hasPrimaryError = false;
   let primaryError: unknown;
-  let closeError: unknown;
   try {
     await finalReset?.();
   } catch (error) {
+    hasPrimaryError = true;
     primaryError = error;
-  } finally {
-    closeError = await closePinnedResources(sessions.resources);
   }
-  if (primaryError !== undefined) throw primaryError;
-  if (closeError !== undefined) throw closeError;
+  const cleanup = await closePinnedResources(sessions.resources);
+  if (hasPrimaryError) throw primaryError;
+  if (cleanup.failed) throw integrationCleanupError();
 }
 
 async function openVerifiedIntegrationSessions(
   configuration: IntegrationTargetConfiguration,
   createPool: IntegrationPoolFactory = createTfPool,
 ): Promise<VerifiedIntegrationSessions> {
-  const pools = {
-    admin: createPool(configuration.urls.admin, "migration"),
-    migrator: createPool(configuration.urls.migrator, "migration"),
-    runtime: createPool(configuration.urls.runtime, "runtime"),
-  };
+  const created: IntegrationPoolResource[] = [];
   const acquired: PinnedIntegrationResource[] = [];
+  const createResource = (
+    connectionString: string,
+    profile: "migration" | "runtime",
+  ): IntegrationPoolResource => {
+    const resource = {
+      pool: createPool(connectionString, profile),
+      state: {
+        physicalReleaseAttempted: false,
+        physicalReleaseOccurred: false,
+        poolEndAttempted: false,
+        releaseError: undefined,
+      },
+    };
+    created.push(resource);
+    return resource;
+  };
 
   try {
-    const adminClient = await pools.admin.connect();
-    acquired.push({ client: adminClient, pool: pools.admin });
-    const migratorClient = await pools.migrator.connect();
-    acquired.push({ client: migratorClient, pool: pools.migrator });
-    const runtimeClient = await pools.runtime.connect();
-    acquired.push({ client: runtimeClient, pool: pools.runtime });
+    const adminResource = createResource(configuration.urls.admin, "migration");
+    const migratorResource = createResource(
+      configuration.urls.migrator,
+      "migration",
+    );
+    const runtimeResource = createResource(
+      configuration.urls.runtime,
+      "runtime",
+    );
+    const admin = {
+      ...adminResource,
+      client: await adminResource.pool.connect(),
+    };
+    acquired.push(admin);
+    const migrator = {
+      ...migratorResource,
+      client: await migratorResource.pool.connect(),
+    };
+    acquired.push(migrator);
+    const runtime = {
+      ...runtimeResource,
+      client: await runtimeResource.pool.connect(),
+    };
+    acquired.push(runtime);
     const identities = await Promise.all(
       acquired.map(({ client }) => loadIntegrationTargetIdentity(client)),
     );
@@ -242,17 +371,13 @@ async function openVerifiedIntegrationSessions(
       PinnedIntegrationResource,
     ];
     return {
-      admin: createPinnedPool(adminClient),
-      migrator: createPinnedPool(migratorClient),
+      admin: createPinnedPool(resources[0]),
+      migrator: createPinnedPool(resources[1]),
       resources,
-      runtime: createPinnedPool(runtimeClient),
+      runtime: createPinnedPool(resources[2]),
     };
   } catch {
-    await closePinnedResources(acquired);
-    const unacquiredPools = [pools.admin, pools.migrator, pools.runtime].filter(
-      (pool) => !acquired.some((resource) => resource.pool === pool),
-    );
-    await Promise.allSettled(unacquiredPools.map((pool) => pool.end()));
+    await closeIntegrationResources(acquired, created);
     throw targetValidationError();
   }
 }
@@ -266,11 +391,24 @@ async function withVerifiedIntegrationSessions<T>(
     configuration,
     createPool,
   );
+  let operationFailed = false;
+  let operationError: unknown;
+  let result: T | undefined;
   try {
-    return await operation(sessions);
-  } finally {
-    await closeVerifiedIntegrationSessions(sessions);
+    result = await operation(sessions);
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
   }
+  let closeError: unknown;
+  try {
+    await closeVerifiedIntegrationSessions(sessions);
+  } catch (error) {
+    closeError = error;
+  }
+  if (operationFailed) throw operationError;
+  if (closeError !== undefined) throw closeError;
+  return result as T;
 }
 
 const integrationTarget = createIntegrationTargetConfiguration({
@@ -315,15 +453,24 @@ interface RecordingPool {
   readonly physicalReleaseCount: () => number;
   readonly pool: Pool;
   readonly queries: readonly string[];
+  readonly releaseArguments: readonly (Error | boolean | undefined)[];
+}
+
+interface RecordingPoolFailures {
+  readonly connect?: unknown;
+  readonly end?: unknown;
+  readonly release?: unknown;
 }
 
 function createRecordingPool(
   identity: IntegrationTargetIdentity,
+  failures: RecordingPoolFailures = {},
 ): RecordingPool {
   let connects = 0;
   let ends = 0;
   let physicalReleases = 0;
   const queries: string[] = [];
+  const releaseArguments: (Error | boolean | undefined)[] = [];
   const client = {
     query: async (sql: string) => {
       queries.push(sql);
@@ -331,17 +478,22 @@ function createRecordingPool(
         ? { rows: [identity] }
         : { rows: [] };
     },
-    release: () => {
+    release: (error?: Error | boolean) => {
       physicalReleases += 1;
+      releaseArguments.push(error);
+      if (failures.release !== undefined) throw failures.release;
     },
   } as unknown as PoolClient;
   const pool = {
-    connect: async () => {
+    connect: () => {
       connects += 1;
-      return client;
+      if (failures.connect !== undefined) throw failures.connect;
+      return Promise.resolve(client);
     },
-    end: async () => {
+    end: () => {
       ends += 1;
+      if (failures.end !== undefined) throw failures.end;
+      return Promise.resolve();
     },
   } as unknown as Pool;
 
@@ -351,6 +503,7 @@ function createRecordingPool(
     physicalReleaseCount: () => physicalReleases,
     pool,
     queries,
+    releaseArguments,
   };
 }
 
@@ -553,6 +706,46 @@ describe("TF PostgreSQL integration target guard", () => {
       1, 1, 1,
     ]);
     expect(recordings.map((entry) => entry.endCount())).toEqual([1, 1, 1]);
+    expect(recordings.map((entry) => entry.releaseArguments)).toEqual([
+      [undefined],
+      [undefined],
+      [undefined],
+    ]);
+
+    await closeVerifiedIntegrationSessions(sessions);
+    expect(recordings.map((entry) => entry.physicalReleaseCount())).toEqual([
+      1, 1, 1,
+    ]);
+    expect(recordings.map((entry) => entry.endCount())).toEqual([1, 1, 1]);
+  });
+
+  test("forwards the first poison error once and rejects every later pinned use", async () => {
+    const configuration = createIntegrationTargetConfiguration(environment)!;
+    const recordings = validRecordingPools();
+    let nextPool = 0;
+    const sessions = await openVerifiedIntegrationSessions(
+      configuration,
+      () => recordings[nextPool++]!.pool,
+    );
+    const migrationClient = await sessions.migrator.connect();
+    const poisonError = new Error("uncertain migration cleanup");
+    const laterError = new Error("must not replace the first poison");
+
+    migrationClient.release(poisonError);
+    migrationClient.release(laterError);
+
+    await expect(
+      migrationClient.query("select 'must-not-run-after-poison'"),
+    ).rejects.toBe(poisonError);
+    await expect(
+      sessions.migrator.query("select 'pool-query-must-not-run-after-poison'"),
+    ).rejects.toBe(poisonError);
+    await expect(sessions.migrator.connect()).rejects.toBe(poisonError);
+    expect(recordings.map((entry) => entry.connectCount())).toEqual([1, 1, 1]);
+
+    await closeVerifiedIntegrationSessions(sessions);
+    expect(recordings[1].physicalReleaseCount()).toBe(1);
+    expect(recordings[1].releaseArguments).toEqual([poisonError]);
   });
 
   test("closes every pinned client and pool after final reset fails", async () => {
@@ -601,6 +794,224 @@ describe("TF PostgreSQL integration target guard", () => {
       1, 1, 1,
     ]);
     expect(attempted.map((entry) => entry.endCount())).toEqual([1, 1, 1]);
+  });
+
+  test("attempts every physical close after synchronous release and end failures", async () => {
+    const configuration = createIntegrationTargetConfiguration(environment)!;
+    const secret = "postgres://admin:do-not-expose@db.internal/apollo";
+    const common = validRecordingPools();
+    const recordings = [
+      createRecordingPool(
+        {
+          currentUser: "task5_fixture_admin",
+          databaseName: configuration.databaseName,
+          isSuperuser: true,
+          marker: configuration.marker,
+          serverAddress: "172.30.0.2",
+          serverPort: 5432,
+          serverVersion: 160_010,
+        },
+        {
+          release: new Error(`release failed for ${secret}`),
+          end: new Error(`end failed for ${secret}`),
+        },
+      ),
+      common[1],
+      common[2],
+    ] as const;
+    let nextPool = 0;
+    const sessions = await openVerifiedIntegrationSessions(
+      configuration,
+      () => recordings[nextPool++]!.pool,
+    );
+
+    let received: unknown;
+    try {
+      await closeVerifiedIntegrationSessions(sessions);
+    } catch (error) {
+      received = error;
+    }
+
+    expect(received).toBeInstanceOf(Error);
+    expect((received as Error).message).toBe(
+      "TF PostgreSQL integration cleanup failed",
+    );
+    expect((received as Error).message).not.toContain(secret);
+    expect(recordings.map((entry) => entry.physicalReleaseCount())).toEqual([
+      1, 1, 1,
+    ]);
+    expect(recordings.map((entry) => entry.endCount())).toEqual([1, 1, 1]);
+  });
+
+  test("treats an undefined synchronous close rejection as cleanup failure", async () => {
+    const configuration = createIntegrationTargetConfiguration(environment)!;
+    const recordings = validRecordingPools();
+    let firstEndAttempts = 0;
+    const firstPool = recordings[0].pool as Pool & {
+      end: () => Promise<void>;
+    };
+    firstPool.end = () => {
+      firstEndAttempts += 1;
+      throw undefined;
+    };
+    let nextPool = 0;
+    const sessions = await openVerifiedIntegrationSessions(
+      configuration,
+      () => recordings[nextPool++]!.pool,
+    );
+
+    await expect(
+      closeVerifiedIntegrationSessions(sessions),
+    ).rejects.toThrowError(INTEGRATION_CLEANUP_ERROR);
+    expect(firstEndAttempts).toBe(1);
+    expect(recordings.slice(1).map((entry) => entry.endCount())).toEqual([
+      1, 1,
+    ]);
+  });
+
+  test("preserves an operation error when physical cleanup also fails", async () => {
+    const configuration = createIntegrationTargetConfiguration(environment)!;
+    const cleanupFailure = new Error("forced cleanup failure");
+    const valid = validRecordingPools();
+    const recordings = [
+      createRecordingPool(
+        {
+          currentUser: "task5_fixture_admin",
+          databaseName: configuration.databaseName,
+          isSuperuser: true,
+          marker: configuration.marker,
+          serverAddress: "172.30.0.2",
+          serverPort: 5432,
+          serverVersion: 160_010,
+        },
+        { end: cleanupFailure },
+      ),
+      valid[1],
+      valid[2],
+    ] as const;
+    let nextPool = 0;
+    const operationFailure = new Error("forced operation failure");
+
+    await expect(
+      withVerifiedIntegrationSessions(
+        configuration,
+        async () => {
+          throw operationFailure;
+        },
+        () => recordings[nextPool++]!.pool,
+      ),
+    ).rejects.toBe(operationFailure);
+    expect(recordings.map((entry) => entry.physicalReleaseCount())).toEqual([
+      1, 1, 1,
+    ]);
+    expect(recordings.map((entry) => entry.endCount())).toEqual([1, 1, 1]);
+  });
+
+  test("preserves a final reset error when physical cleanup also fails", async () => {
+    const configuration = createIntegrationTargetConfiguration(environment)!;
+    const cleanupFailure = new Error("forced cleanup failure");
+    const valid = validRecordingPools();
+    const recordings = [
+      createRecordingPool(
+        {
+          currentUser: "task5_fixture_admin",
+          databaseName: configuration.databaseName,
+          isSuperuser: true,
+          marker: configuration.marker,
+          serverAddress: "172.30.0.2",
+          serverPort: 5432,
+          serverVersion: 160_010,
+        },
+        { end: cleanupFailure },
+      ),
+      valid[1],
+      valid[2],
+    ] as const;
+    let nextPool = 0;
+    const sessions = await openVerifiedIntegrationSessions(
+      configuration,
+      () => recordings[nextPool++]!.pool,
+    );
+    const resetFailure = new Error("forced reset failure");
+
+    await expect(
+      closeVerifiedIntegrationSessions(sessions, async () => {
+        throw resetFailure;
+      }),
+    ).rejects.toBe(resetFailure);
+    expect(recordings.map((entry) => entry.physicalReleaseCount())).toEqual([
+      1, 1, 1,
+    ]);
+    expect(recordings.map((entry) => entry.endCount())).toEqual([1, 1, 1]);
+  });
+
+  test("closes every returned pool when a later pool factory throws", async () => {
+    const configuration = createIntegrationTargetConfiguration(environment)!;
+    const recordings = validRecordingPools();
+    let nextPool = 0;
+
+    await expect(
+      openVerifiedIntegrationSessions(configuration, () => {
+        if (nextPool === 2) {
+          throw new Error(
+            "factory exposed postgres://runtime:secret@db.internal/apollo",
+          );
+        }
+        return recordings[nextPool++]!.pool;
+      }),
+    ).rejects.toThrowError(TARGET_VALIDATION_ERROR);
+    expect(recordings.map((entry) => entry.connectCount())).toEqual([0, 0, 0]);
+    expect(recordings.map((entry) => entry.endCount())).toEqual([1, 1, 0]);
+  });
+
+  test("returns generic validation failure after partial acquisition cleanup errors", async () => {
+    const configuration = createIntegrationTargetConfiguration(environment)!;
+    const valid = validRecordingPools();
+    const recordings = [
+      createRecordingPool(
+        {
+          currentUser: "task5_fixture_admin",
+          databaseName: configuration.databaseName,
+          isSuperuser: true,
+          marker: configuration.marker,
+          serverAddress: "172.30.0.2",
+          serverPort: 5432,
+          serverVersion: 160_010,
+        },
+        {
+          release: new Error("release exposed postgres://admin:secret@db"),
+          end: new Error("end exposed postgres://admin:secret@db"),
+        },
+      ),
+      createRecordingPool(
+        {
+          currentUser: "apollo_tf_migrator",
+          databaseName: configuration.databaseName,
+          isSuperuser: false,
+          marker: configuration.marker,
+          serverAddress: "172.30.0.2",
+          serverPort: 5432,
+          serverVersion: 160_010,
+        },
+        {
+          connect: new Error("connect exposed postgres://migrator:secret@db"),
+        },
+      ),
+      valid[2],
+    ] as const;
+    let nextPool = 0;
+
+    await expect(
+      openVerifiedIntegrationSessions(
+        configuration,
+        () => recordings[nextPool++]!.pool,
+      ),
+    ).rejects.toThrowError(TARGET_VALIDATION_ERROR);
+    expect(recordings.map((entry) => entry.connectCount())).toEqual([1, 1, 0]);
+    expect(recordings.map((entry) => entry.physicalReleaseCount())).toEqual([
+      1, 0, 0,
+    ]);
+    expect(recordings.map((entry) => entry.endCount())).toEqual([1, 1, 1]);
   });
 });
 
