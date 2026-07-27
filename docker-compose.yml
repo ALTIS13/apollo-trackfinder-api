@@ -1,23 +1,188 @@
 services:
   db:
-    image: postgres:16-bookworm
+    build:
+      context: .
+      dockerfile: artifacts/api-server/Dockerfile
+      target: postgres-role-init
+    image: ${TF_POSTGRES_IMAGE:-apollo-tf-postgres:local}
     restart: unless-stopped
     environment:
-      POSTGRES_DB: trackfinder
-      POSTGRES_PASSWORD_FILE: /run/secrets/tf_postgres_password
-      POSTGRES_USER: trackfinder
+      POSTGRES_DB: apollo_trackfinder
+      POSTGRES_PASSWORD_FILE: /run/secrets/tf_postgres_admin_password
+      POSTGRES_USER: postgres
     secrets:
-      - tf_postgres_password
+      - source: tf_postgres_admin_password
+        target: tf_postgres_admin_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: tf_migrator_password
+        target: tf_migrator_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: tf_runtime_password
+        target: tf_runtime_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
       - tf-data
     healthcheck:
       test:
-        ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U trackfinder -d trackfinder"]
+        [
+          "CMD-SHELL",
+          "pg_isready -h 127.0.0.1 -U postgres -d apollo_trackfinder",
+        ]
       interval: 5s
       timeout: 5s
       retries: 20
+
+  tf-role-bootstrap:
+    profiles: ["baseline"]
+    build:
+      context: .
+      dockerfile: artifacts/api-server/Dockerfile
+      target: postgres-role-init
+    image: ${TF_POSTGRES_IMAGE:-apollo-tf-postgres:local}
+    user: "999:999"
+    read_only: true
+    init: true
+    entrypoint:
+      - /usr/local/bin/bootstrap-tf-roles.sh
+    environment:
+      TF_ROLE_BOOTSTRAP_DATABASE_URL_FILE: /run/secrets/tf_admin_database_url
+    secrets:
+      - source: tf_admin_database_url
+        target: tf_admin_database_url
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: tf_migrator_password
+        target: tf_migrator_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: tf_runtime_password
+        target: tf_runtime_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    stop_grace_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+          pids: 64
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  tf-migrate:
+    build:
+      context: .
+      dockerfile: artifacts/api-server/Dockerfile
+      target: runner
+    image: ${TF_API_IMAGE:-apollo-tf-api:local}
+    user: "10001:10001"
+    read_only: true
+    init: true
+    entrypoint:
+      - node
+      - artifacts/api-server/dist/migrate.mjs
+    environment:
+      TF_MIGRATOR_DATABASE_URL_FILE: /run/secrets/tf_migrator_database_url
+    secrets:
+      - source: tf_migrator_database_url
+        target: tf_migrator_database_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    stop_grace_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+          pids: 64
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  tf-baseline:
+    profiles: ["baseline"]
+    build:
+      context: .
+      dockerfile: artifacts/api-server/Dockerfile
+      target: runner
+    image: ${TF_API_IMAGE:-apollo-tf-api:local}
+    user: "10001:10001"
+    read_only: true
+    init: true
+    entrypoint:
+      - node
+      - artifacts/api-server/dist/migrate.mjs
+      - --baseline-existing-startup-schema
+    environment:
+      TF_BASELINE_DATABASE_URL_FILE: /run/secrets/tf_admin_database_url
+    secrets:
+      - source: tf_admin_database_url
+        target: tf_admin_database_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    stop_grace_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+          pids: 64
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+    depends_on:
+      tf-role-bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
 
   redis:
     image: redis:7-bookworm
@@ -45,6 +210,8 @@ services:
     build:
       context: .
       dockerfile: artifacts/api-server/Dockerfile
+      target: runner
+    image: ${TF_API_IMAGE:-apollo-tf-api:local}
     restart: unless-stopped
     user: "10001:10001"
     read_only: true
@@ -62,7 +229,7 @@ services:
       APOLLO_TF_CLIENT_ID: "${APOLLO_TF_CLIENT_ID:-apollo-tf-api}"
       APOLLO_TF_CLIENT_SECRET_FILE: /run/secrets/tf_client_secret
       APOLLO_TF_WEB_ORIGIN: "${APOLLO_TF_WEB_ORIGIN:-https://tf.apollot.ru}"
-      DATABASE_URL_FILE: /run/secrets/tf_database_url
+      DATABASE_URL_FILE: /run/secrets/tf_runtime_database_url
       NODE_ENV: production
       PORT: "8080"
       REDIS_URL: redis://redis:6379/0
@@ -81,7 +248,11 @@ services:
       WEB_URL: "${WEB_URL:-https://tf.apollot.ru}"
     secrets:
       - tf_client_secret
-      - tf_database_url
+      - source: tf_runtime_database_url
+        target: tf_runtime_database_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
       - source: tf_integrations_internal_auth_secret
         target: tf_integrations_internal_auth_secret
         uid: "10001"
@@ -115,6 +286,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      tf-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       tf-integrations:
@@ -527,8 +700,18 @@ services:
 secrets:
   tf_client_secret:
     file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_client_secret
-  tf_database_url:
-    file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_database_url
+  tf_postgres_admin_password:
+    file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_postgres_admin_password
+  tf_admin_database_url:
+    file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_admin_database_url
+  tf_migrator_password:
+    file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_migrator_password
+  tf_runtime_password:
+    file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_runtime_password
+  tf_migrator_database_url:
+    file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_migrator_database_url
+  tf_runtime_database_url:
+    file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_runtime_database_url
   tf_integrations_postgres_admin_password:
     file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_integrations_postgres_admin_password
   tf_integrations_migrator_password:
@@ -559,8 +742,6 @@ secrets:
     file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_download_heartbeat_secret
   tf_module_heartbeat_keys:
     file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_module_heartbeat_keys
-  tf_postgres_password:
-    file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_postgres_password
   tf_search_heartbeat_secret:
     file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/tf_search_heartbeat_secret
   tf_search_internal_auth_secret:

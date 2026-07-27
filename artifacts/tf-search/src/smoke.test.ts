@@ -58,9 +58,7 @@ interface SmokeObservations {
 }
 
 interface SmokeModule {
-  readonly observedRequestsPerMinute: (
-    ...values: readonly number[]
-  ) => number;
+  readonly observedRequestsPerMinute: (...values: readonly number[]) => number;
   readonly canonicalizeDockerSelectors: (environment: NodeJS.ProcessEnv) => {
     readonly context: string;
     readonly environment: NodeJS.ProcessEnv;
@@ -82,11 +80,11 @@ interface SmokeModule {
       readonly temporaryParent?: string;
     },
   ) => Promise<{
-      readonly directory: string;
-      readonly ownership: object;
-      readonly rawSecretCanaries: readonly string[];
-      readonly secretNames: readonly string[];
-    }>;
+    readonly directory: string;
+    readonly ownership: object;
+    readonly rawSecretCanaries: readonly string[];
+    readonly secretNames: readonly string[];
+  }>;
   readonly removeVerifiedDirectory: (
     directory: string,
     options?: {
@@ -305,10 +303,14 @@ describe("tf-search disposable smoke contract", () => {
         true,
       );
       expect([...prepared.secretNames].sort()).toEqual([
+        "tf_admin_database_url",
         "tf_client_secret",
-        "tf_database_url",
+        "tf_migrator_database_url",
+        "tf_migrator_password",
         "tf_module_heartbeat_keys",
-        "tf_postgres_password",
+        "tf_postgres_admin_password",
+        "tf_runtime_database_url",
+        "tf_runtime_password",
         "tf_search_heartbeat_secret",
         "tf_search_internal_auth_secret",
       ]);
@@ -525,7 +527,10 @@ describe("tf-search disposable smoke contract", () => {
       });
       for (const entry of outsideEntries) {
         if (!entry.isFile() || entry.name === "external-marker") continue;
-        const value = await readFile(join(entry.parentPath, entry.name), "utf8");
+        const value = await readFile(
+          join(entry.parentPath, entry.name),
+          "utf8",
+        );
         expect(value).toBe("");
       }
     } finally {
@@ -672,7 +677,9 @@ describe("tf-search disposable smoke contract", () => {
       "task-6-cleanup-run-interleave-tmp",
     );
     await mkdir(outerTemporaryRoot, { recursive: true });
-    const fixtureRoot = await mkdtemp(join(outerTemporaryRoot, "cleanup-race-"));
+    const fixtureRoot = await mkdtemp(
+      join(outerTemporaryRoot, "cleanup-race-"),
+    );
     const workspace = join(fixtureRoot, "workspace");
     const outside = join(fixtureRoot, "outside");
     const owner = join(workspace, ".tmp", "tf-search-smoke-owner");
@@ -768,7 +775,10 @@ describe("tf-search disposable smoke contract", () => {
         }),
       ).rejects.toThrow(/marker|ownership|identity/i);
       expect(
-        await readFile(join(prepared.directory, prepared.secretNames[0]), "utf8"),
+        await readFile(
+          join(prepared.directory, prepared.secretNames[0]),
+          "utf8",
+        ),
       ).not.toBe("");
     } finally {
       await rm(fixtureRoot, { force: true, recursive: true });
@@ -785,7 +795,9 @@ describe("tf-search disposable smoke contract", () => {
       "task-6-unknown-entry-tmp",
     );
     await mkdir(outerTemporaryRoot, { recursive: true });
-    const fixtureRoot = await mkdtemp(join(outerTemporaryRoot, "unknown-race-"));
+    const fixtureRoot = await mkdtemp(
+      join(outerTemporaryRoot, "unknown-race-"),
+    );
     const workspace = join(fixtureRoot, "workspace");
     const owner = join(workspace, ".tmp", "tf-search-smoke-owner");
     let prepared:
@@ -810,7 +822,10 @@ describe("tf-search disposable smoke contract", () => {
       ).rejects.toThrow(/unexpected|allowlist|ownership/i);
       expect(await readFile(unknown, "utf8")).toBe("preserve");
       expect(
-        await readFile(join(prepared.directory, prepared.secretNames[0]), "utf8"),
+        await readFile(
+          join(prepared.directory, prepared.secretNames[0]),
+          "utf8",
+        ),
       ).not.toBe("");
     } finally {
       await rm(fixtureRoot, { force: true, recursive: true });

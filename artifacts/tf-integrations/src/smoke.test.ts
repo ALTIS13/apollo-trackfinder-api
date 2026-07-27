@@ -25,12 +25,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { stringify } from "yaml";
-import {
-  beforeAll,
-  describe,
-  expect,
-  it,
-} from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import { parseTfIntegrationsConfig } from "./config.js";
 
@@ -166,9 +161,7 @@ function isLocalDockerEndpoint(value: string): boolean {
   return normalized.startsWith("npipe://") || normalized.startsWith("unix://");
 }
 
-function canonicalEnvironment(
-  source: NodeJS.ProcessEnv,
-): {
+function canonicalEnvironment(source: NodeJS.ProcessEnv): {
   readonly context: string;
   readonly environment: NodeJS.ProcessEnv;
   readonly host: string;
@@ -380,7 +373,9 @@ async function prepareSecrets(
     );
     if (process.platform !== "win32") await chmod(directory, 0o700);
     const marker = generatedSecret();
-    const postgresPassword = generatedSecret();
+    const tfAdminPassword = generatedSecret();
+    const tfMigratorPassword = generatedSecret();
+    const tfRuntimePassword = generatedSecret();
     const clientSecret = generatedSecret();
     const searchCommandSecret = generatedSecret();
     const searchHeartbeatSecret = generatedSecret();
@@ -394,9 +389,15 @@ async function prepareSecrets(
     const key = randomBytes(32);
     const token = generatedSecret(48);
 
-    const tfDatabaseUrl =
-      `postgres://trackfinder:${encodeURIComponent(postgresPassword)}` +
-      "@db:5432/trackfinder";
+    const tfAdminDatabaseUrl =
+      `postgres://postgres:${encodeURIComponent(tfAdminPassword)}` +
+      "@db:5432/apollo_trackfinder";
+    const tfMigratorDatabaseUrl =
+      `postgres://apollo_tf_migrator:${encodeURIComponent(tfMigratorPassword)}` +
+      "@db:5432/apollo_trackfinder";
+    const tfRuntimeDatabaseUrl =
+      `postgres://apollo_tf_runtime:${encodeURIComponent(tfRuntimePassword)}` +
+      "@db:5432/apollo_trackfinder";
     const integrationMigratorUrl =
       "postgres://apollo_tf_integrations_migrator:" +
       `${encodeURIComponent(integrationMigratorPassword)}` +
@@ -415,15 +416,16 @@ async function prepareSecrets(
     });
     const secrets = [
       ["tf_client_secret", clientSecret],
-      ["tf_database_url", tfDatabaseUrl],
+      ["tf_postgres_admin_password", tfAdminPassword],
+      ["tf_admin_database_url", tfAdminDatabaseUrl],
+      ["tf_migrator_password", tfMigratorPassword],
+      ["tf_runtime_password", tfRuntimePassword],
+      ["tf_migrator_database_url", tfMigratorDatabaseUrl],
+      ["tf_runtime_database_url", tfRuntimeDatabaseUrl],
       ["tf_module_heartbeat_keys", heartbeatKeys],
-      ["tf_postgres_password", postgresPassword],
       ["tf_search_heartbeat_secret", searchHeartbeatSecret],
       ["tf_search_internal_auth_secret", searchCommandSecret],
-      [
-        "tf_integrations_postgres_admin_password",
-        integrationAdminPassword,
-      ],
+      ["tf_integrations_postgres_admin_password", integrationAdminPassword],
       ["tf_integrations_migrator_password", integrationMigratorPassword],
       ["tf_integrations_runtime_password", integrationRuntimePassword],
       ["tf_integrations_migrator_database_url", integrationMigratorUrl],
@@ -436,7 +438,9 @@ async function prepareSecrets(
       ["tf_integrations_smoke_token", token],
     ] as const;
     const postgresOwned = new Set([
-      "tf_postgres_password",
+      "tf_postgres_admin_password",
+      "tf_migrator_password",
+      "tf_runtime_password",
       "tf_integrations_postgres_admin_password",
       "tf_integrations_migrator_password",
       "tf_integrations_runtime_password",
@@ -574,9 +578,7 @@ async function reserveLoopbackPort(): Promise<number> {
   });
 }
 
-async function writeOverride(
-  prepared: PreparedSecrets,
-): Promise<string> {
+async function writeOverride(prepared: PreparedSecrets): Promise<string> {
   const path = join(prepared.directory, "compose.smoke.yml");
   await writeFile(
     path,
@@ -645,28 +647,20 @@ function assertCanaryFree(
   canaries: readonly string[],
   label: string,
 ): void {
-  if (
-    canaries.some(
-      (canary) => canary.length > 0 && value.includes(canary),
-    )
-  ) {
+  if (canaries.some((canary) => canary.length > 0 && value.includes(canary))) {
     throw new Error(`${label} contains sensitive smoke canary`);
   }
 }
 
-function sanitizeError(
-  error: unknown,
-  canaries: readonly string[],
-): Error {
+function sanitizeError(error: unknown, canaries: readonly string[]): Error {
   const message = error instanceof Error ? error.message : "Unknown error";
-  const sanitizedMessage =
-    canaries.some(
-      (canary) => canary.length > 0 && message.includes(canary),
-    )
-      ? "TF integrations smoke suppressed a sensitive smoke canary"
-      : error instanceof Error
-        ? message
-        : "TF integrations smoke failed";
+  const sanitizedMessage = canaries.some(
+    (canary) => canary.length > 0 && message.includes(canary),
+  )
+    ? "TF integrations smoke suppressed a sensitive smoke canary"
+    : error instanceof Error
+      ? message
+      : "TF integrations smoke failed";
   return new Error(sanitizedMessage);
 }
 
@@ -696,7 +690,11 @@ async function waitFor<T>(
 async function fetchJson(
   url: string,
   init: RequestInit = {},
-): Promise<{ readonly body: unknown; readonly response: Response; readonly text: string }> {
+): Promise<{
+  readonly body: unknown;
+  readonly response: Response;
+  readonly text: string;
+}> {
   const response = await fetch(url, { redirect: "error", ...init });
   const text = await response.text();
   let body: unknown;
@@ -939,8 +937,7 @@ async function ciphertextObservations(
   return {
     authenticated: authenticated && tamperRejected,
     atRest:
-      !projection.includes(prepared.token) &&
-      envelope.ciphertext.length > 0,
+      !projection.includes(prepared.token) && envelope.ciphertext.length > 0,
     projection,
   };
 }
@@ -1008,10 +1005,7 @@ $generation_cas$;
     "-c",
     statement,
   ]);
-  return (
-    result.stderr.trim().length === 0 &&
-    result.stdout.trim() === "DO"
-  );
+  return result.stderr.trim().length === 0 && result.stdout.trim() === "DO";
 }
 
 function rolePrivilegeProbeSource(): string {
@@ -1158,12 +1152,18 @@ async function rolePrivilegeObservations(
 const assignedIntegrationSecrets = {
   api: [
     "tf_client_secret",
-    "tf_database_url",
     "tf_integrations_internal_auth_secret",
     "tf_integrations_smoke_token",
     "tf_module_heartbeat_keys",
+    "tf_runtime_database_url",
     "tf_search_internal_auth_secret",
   ],
+  db: [
+    "tf_migrator_password",
+    "tf_postgres_admin_password",
+    "tf_runtime_password",
+  ],
+  "tf-migrate": ["tf_migrator_database_url"],
   "tf-integrations": [
     "tf_integrations_heartbeat_secret",
     "tf_integrations_internal_auth_secret",
@@ -1172,9 +1172,7 @@ const assignedIntegrationSecrets = {
     "tf_integrations_spotify_client_secret",
     "tf_integrations_token_keyring",
   ],
-  "tf-integrations-migrate": [
-    "tf_integrations_migrator_database_url",
-  ],
+  "tf-integrations-migrate": ["tf_integrations_migrator_database_url"],
   "tf-integrations-postgres": [
     "tf_integrations_migrator_password",
     "tf_integrations_postgres_admin_password",
@@ -1186,9 +1184,7 @@ async function secretTargetStatObservations(
   compose: (args: readonly string[]) => Promise<DockerResult>,
   nativeSecretOwnership: boolean,
 ): Promise<{
-  readonly evidence:
-    | "native-linux-owner-mode"
-    | "non-native-readonly-remap";
+  readonly evidence: "native-linux-owner-mode" | "non-native-readonly-remap";
   readonly verified: boolean;
 }> {
   const script =
@@ -1208,6 +1204,11 @@ async function secretTargetStatObservations(
     {
       names: assignedIntegrationSecrets["tf-integrations-postgres"],
       service: "tf-integrations-postgres",
+      uid: 999,
+    },
+    {
+      names: assignedIntegrationSecrets.db,
+      service: "db",
       uid: 999,
     },
   ] as const;
@@ -1238,6 +1239,30 @@ async function secretTargetStatObservations(
       uid,
     });
   }
+  results.push({
+    names: assignedIntegrationSecrets["tf-migrate"],
+    output: await compose([
+      "--progress",
+      "quiet",
+      "run",
+      "--rm",
+      "--no-deps",
+      "--user",
+      "10001:10001",
+      "--entrypoint",
+      "sh",
+      "tf-migrate",
+      "-eu",
+      "-c",
+      script,
+      "secret-stat",
+      ...assignedIntegrationSecrets["tf-migrate"].map(
+        (name) => `/run/secrets/${name}`,
+      ),
+    ]),
+    service: "tf-migrate",
+    uid: 10001,
+  });
   results.push({
     names: assignedIntegrationSecrets["tf-integrations-migrate"],
     output: await compose([
@@ -1270,11 +1295,13 @@ async function secretTargetStatObservations(
     if (
       stderrLines.some(
         (line) =>
-          service !== "tf-integrations-migrate" ||
+          (service !== "tf-integrations-migrate" && service !== "tf-migrate") ||
           !unsupportedMetadataWarning.test(line),
       )
     ) {
-      throw new Error(`Secret stat probe wrote unexpected stderr for ${service}`);
+      throw new Error(
+        `Secret stat probe wrote unexpected stderr for ${service}`,
+      );
     }
     const lines = output.stdout.trim().split(/\r?\n/).filter(Boolean);
     if (lines.length !== names.length) {
@@ -1354,9 +1381,7 @@ async function trackedFilesProjection(
   for (const path of paths) {
     const bytes = await readFile(join(repositoryRoot, path));
     if (
-      canaries.some((canary) =>
-        bytes.includes(Buffer.from(canary, "utf8")),
-      )
+      canaries.some((canary) => bytes.includes(Buffer.from(canary, "utf8")))
     ) {
       throw new Error("Tracked file contains sensitive smoke canary");
     }
@@ -1418,11 +1443,15 @@ function inspectRuntimeContract(
     }
     return match;
   };
-  const config = (container: Record<string, unknown>): Record<string, unknown> =>
+  const config = (
+    container: Record<string, unknown>,
+  ): Record<string, unknown> =>
     isRecord(container.Config) ? container.Config : {};
   const host = (container: Record<string, unknown>): Record<string, unknown> =>
     isRecord(container.HostConfig) ? container.HostConfig : {};
-  const state = (container: Record<string, unknown>): Record<string, unknown> =>
+  const state = (
+    container: Record<string, unknown>,
+  ): Record<string, unknown> =>
     isRecord(container.State) ? container.State : {};
   const attachedNetworks = (
     container: Record<string, unknown>,
@@ -1453,9 +1482,7 @@ function inspectRuntimeContract(
           typeof mount.Destination === "string" &&
           mount.Destination.startsWith("/run/secrets/"),
       )
-      .map((mount) =>
-        String(mount.Destination).slice("/run/secrets/".length),
-      )
+      .map((mount) => String(mount.Destination).slice("/run/secrets/".length))
       .sort();
   };
   const noBindings = (container: Record<string, unknown>): boolean => {
@@ -1500,10 +1527,12 @@ function inspectRuntimeContract(
   };
 
   const api = current("api");
+  const db = current("db");
+  const tfMigrate = current("tf-migrate");
   const module = current("tf-integrations");
   const migrate = current("tf-integrations-migrate");
   const postgres = current("tf-integrations-postgres");
-  if (!hardened(module) || !hardened(migrate)) {
+  if (!hardened(tfMigrate) || !hardened(module) || !hardened(migrate)) {
     throw new Error("Docker inspect least-privilege contract failed");
   }
   if (
@@ -1514,6 +1543,9 @@ function inspectRuntimeContract(
         "tf-integrations-control",
         "tf-search-control",
       ]) ||
+    JSON.stringify(attachedNetworks(db)) !== JSON.stringify(["tf-data"]) ||
+    JSON.stringify(attachedNetworks(tfMigrate)) !==
+      JSON.stringify(["tf-data"]) ||
     JSON.stringify(attachedNetworks(module)) !==
       JSON.stringify([
         "tf-integrations-control",
@@ -1537,11 +1569,16 @@ function inspectRuntimeContract(
       memory: 256 * 1024 * 1024,
       nanoCpus: 500_000_000,
       pids: 64,
+    }) ||
+    !hasLimits(tfMigrate, {
+      memory: 256 * 1024 * 1024,
+      nanoCpus: 500_000_000,
+      pids: 64,
     })
   ) {
     throw new Error("Docker inspect resource-limit contract failed");
   }
-  if (![module, migrate, postgres].every(noBindings)) {
+  if (![db, tfMigrate, module, migrate, postgres].every(noBindings)) {
     throw new Error("Docker inspect host-port contract failed");
   }
 
@@ -1565,13 +1602,19 @@ function inspectRuntimeContract(
       JSON.stringify(["tf_integrations_migrator_database_url"]) ||
     JSON.stringify(secretTargets(postgres)) !==
       JSON.stringify(expectedPostgresSecrets) ||
+    JSON.stringify(secretTargets(db)) !==
+      JSON.stringify(assignedIntegrationSecrets.db) ||
+    JSON.stringify(secretTargets(tfMigrate)) !==
+      JSON.stringify(assignedIntegrationSecrets["tf-migrate"]) ||
     JSON.stringify(secretTargets(api)) !==
       JSON.stringify(assignedIntegrationSecrets.api)
   ) {
     throw new Error("Docker inspect secret-ownership contract failed");
   }
 
+  const tfMigrationState = state(tfMigrate);
   const migrateState = state(migrate);
+  const apiState = state(api);
   const moduleState = state(module);
   const postgresState = state(postgres);
   const moduleHealth = isRecord(moduleState.Health)
@@ -1588,14 +1631,27 @@ function inspectRuntimeContract(
     typeof moduleState.StartedAt === "string"
       ? Date.parse(moduleState.StartedAt)
       : Number.NaN;
+  const tfMigrationFinished =
+    typeof tfMigrationState.FinishedAt === "string"
+      ? Date.parse(tfMigrationState.FinishedAt)
+      : Number.NaN;
+  const apiStarted =
+    typeof apiState.StartedAt === "string"
+      ? Date.parse(apiState.StartedAt)
+      : Number.NaN;
   if (
+    tfMigrationState.Status !== "exited" ||
+    tfMigrationState.ExitCode !== 0 ||
     migrateState.Status !== "exited" ||
     migrateState.ExitCode !== 0 ||
     moduleHealth !== "healthy" ||
     postgresHealth !== "healthy" ||
     !Number.isFinite(migrationFinished) ||
     !Number.isFinite(moduleStarted) ||
-    moduleStarted < migrationFinished
+    !Number.isFinite(tfMigrationFinished) ||
+    !Number.isFinite(apiStarted) ||
+    moduleStarted < migrationFinished ||
+    apiStarted < tfMigrationFinished
   ) {
     throw new Error("Docker inspect migration-gating contract failed");
   }
@@ -1634,21 +1690,9 @@ async function auditProject(
   const [containers, networks, volumes, labeledImages, namedImages] =
     await Promise.all([
       docker(["ps", "-a", "-q", "--filter", label], environment, 30_000),
-      docker(
-        ["network", "ls", "-q", "--filter", label],
-        environment,
-        30_000,
-      ),
-      docker(
-        ["volume", "ls", "-q", "--filter", label],
-        environment,
-        30_000,
-      ),
-      docker(
-        ["image", "ls", "-q", "--filter", label],
-        environment,
-        30_000,
-      ),
+      docker(["network", "ls", "-q", "--filter", label], environment, 30_000),
+      docker(["volume", "ls", "-q", "--filter", label], environment, 30_000),
+      docker(["image", "ls", "-q", "--filter", label], environment, 30_000),
       docker(
         ["image", "ls", "-q", "--filter", `reference=${project}-*`],
         environment,
@@ -1687,15 +1731,14 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
     randomBytes(4).toString("hex");
   environment.COMPOSE_PROJECT_NAME = project;
   environment.TF_API_PORT = String(await reserveLoopbackPort());
+  environment.TF_API_IMAGE = `${project}-api:smoke`;
+  environment.TF_POSTGRES_IMAGE = `${project}-postgres:smoke`;
   environment.TF_INTEGRATIONS_IMAGE = `${project}-tf-integrations:smoke`;
-  environment.TF_INTEGRATIONS_POSTGRES_IMAGE =
-    `${project}-tf-integrations-postgres:smoke`;
+  environment.TF_INTEGRATIONS_POSTGRES_IMAGE = `${project}-tf-integrations-postgres:smoke`;
 
   let prepared: PreparedSecrets | undefined;
   let overridePath: string | undefined;
-  let compose:
-    | ((args: readonly string[]) => Promise<DockerResult>)
-    | undefined;
+  let compose: ((args: readonly string[]) => Promise<DockerResult>) | undefined;
   let observations: SmokeObservations | undefined;
   let lifecycleError: unknown;
   let cleanupError: unknown;
@@ -1727,6 +1770,7 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
       "-d",
       "--build",
       "db",
+      "tf-migrate",
       "redis",
       "tf-search",
       "tf-integrations-postgres",
@@ -1799,6 +1843,8 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
       "logs",
       "--no-color",
       "api",
+      "db",
+      "tf-migrate",
       "tf-integrations",
       "tf-integrations-migrate",
       "tf-integrations-postgres",
@@ -1920,9 +1966,7 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
   return { cleanup, observations, project };
 }
 
-function fixtureConfigEnvironment(
-  nodeEnv: string,
-): {
+function fixtureConfigEnvironment(nodeEnv: string): {
   readonly environment: NodeJS.ProcessEnv;
   readonly secrets: Readonly<Record<string, string>>;
 } {
@@ -1978,9 +2022,8 @@ describe("tf-integrations smoke fixture gate", () => {
   });
 
   it("uses deterministic offline provider adapters without provider transport", async () => {
-    const { createSmokeFixtureProviders } = await import(
-      "./providers/smoke-fixtures.js"
-    );
+    const { createSmokeFixtureProviders } =
+      await import("./providers/smoke-fixtures.js");
     const fixtures = createSmokeFixtureProviders();
     const authorizationUrl = new URL(
       fixtures.spotify.authorizationUrl({
@@ -2082,14 +2125,11 @@ describe("tf-integrations smoke failure redaction", () => {
       expect(caught === original).toBe(false);
       expect(
         caught instanceof Error &&
-          (Object.hasOwn(caught, "stderr") ||
-            Object.hasOwn(caught, "stdout")),
+          (Object.hasOwn(caught, "stderr") || Object.hasOwn(caught, "stdout")),
       ).toBe(false);
       expect(
         caught instanceof Error &&
-          `${caught.message}\n${caught.stack ?? ""}`.includes(
-            capturedCanary,
-          ),
+          `${caught.message}\n${caught.stack ?? ""}`.includes(capturedCanary),
       ).toBe(false);
       let rootExists = true;
       try {
@@ -2104,7 +2144,9 @@ describe("tf-integrations smoke failure redaction", () => {
   });
 });
 
-function inspectContractFixture(project: string): Array<Record<string, unknown>> {
+function inspectContractFixture(
+  project: string,
+): Array<Record<string, unknown>> {
   const mounts = (names: readonly string[]) =>
     names.map((name) => ({
       Destination: `/run/secrets/${name}`,
@@ -2116,11 +2158,7 @@ function inspectContractFixture(project: string): Array<Record<string, unknown>>
       names.map((name) => [`${project}_${name}`, {}]),
     ),
   });
-  const hardenedHost = (
-    nanoCpus: number,
-    memory: number,
-    pids: number,
-  ) => ({
+  const hardenedHost = (nanoCpus: number, memory: number, pids: number) => ({
     CapDrop: ["ALL"],
     Init: true,
     Memory: memory,
@@ -2141,10 +2179,10 @@ function inspectContractFixture(project: string): Array<Record<string, unknown>>
       HostConfig: { PortBindings: {} },
       Mounts: mounts([
         "tf_client_secret",
-        "tf_database_url",
         "tf_integrations_internal_auth_secret",
         "tf_integrations_smoke_token",
         "tf_module_heartbeat_keys",
+        "tf_runtime_database_url",
         "tf_search_internal_auth_secret",
       ]),
       NetworkSettings: networks([
@@ -2153,7 +2191,7 @@ function inspectContractFixture(project: string): Array<Record<string, unknown>>
         "tf-integrations-control",
         "tf-search-control",
       ]),
-      State: {},
+      State: { StartedAt: "2026-07-25T12:00:02.000Z" },
     },
     {
       Config: { ...labels("tf-integrations"), User: "10001:10001" },
@@ -2200,6 +2238,28 @@ function inspectContractFixture(project: string): Array<Record<string, unknown>>
       ]),
       NetworkSettings: networks(["tf-integrations-data"]),
       State: { Health: { Status: "healthy" } },
+    },
+    {
+      Config: labels("db"),
+      HostConfig: { PortBindings: {} },
+      Mounts: mounts([
+        "tf_migrator_password",
+        "tf_postgres_admin_password",
+        "tf_runtime_password",
+      ]),
+      NetworkSettings: networks(["tf-data"]),
+      State: { Health: { Status: "healthy" } },
+    },
+    {
+      Config: { ...labels("tf-migrate"), User: "10001:10001" },
+      HostConfig: hardenedHost(500_000_000, 256 * 1024 * 1024, 64),
+      Mounts: mounts(["tf_migrator_database_url"]),
+      NetworkSettings: networks(["tf-data"]),
+      State: {
+        ExitCode: 0,
+        FinishedAt: "2026-07-25T12:00:01.000Z",
+        Status: "exited",
+      },
     },
   ];
 }
@@ -2248,8 +2308,7 @@ describe("tf-integrations Docker inspect validation", () => {
   });
 });
 
-const realDockerEnabled =
-  process.env.TF_INTEGRATIONS_SMOKE_REAL_DOCKER === "1";
+const realDockerEnabled = process.env.TF_INTEGRATIONS_SMOKE_REAL_DOCKER === "1";
 
 describe.skipIf(!realDockerEnabled)(
   "tf-integrations disposable local Docker smoke",
@@ -2281,12 +2340,10 @@ describe.skipIf(!realDockerEnabled)(
 
     it("stats every assigned integration secret with platform-explicit evidence", () => {
       expect(result.observations.secretTargetStatsVerified).toBe(true);
-      expect(
-        [
-          "non-native-readonly-remap",
-          "native-linux-owner-mode",
-        ],
-      ).toContain(result.observations.secretOwnershipEvidence);
+      expect([
+        "non-native-readonly-remap",
+        "native-linux-owner-mode",
+      ]).toContain(result.observations.secretOwnershipEvidence);
     });
 
     it("rejects replay, tampered body, wrong key, unsupported encoding, and unsigned command", () => {

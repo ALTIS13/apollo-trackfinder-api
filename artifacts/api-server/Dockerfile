@@ -1,3 +1,12 @@
+FROM postgres:16-bookworm AS postgres-role-init
+
+COPY artifacts/api-server/container/init-roles.sh /usr/local/bin/bootstrap-tf-roles.sh
+COPY artifacts/api-server/container/init-roles.sh /docker-entrypoint-initdb.d/010-tf-roles.sh
+
+RUN chmod 0555 \
+  /usr/local/bin/bootstrap-tf-roles.sh \
+  /docker-entrypoint-initdb.d/010-tf-roles.sh
+
 FROM node:20-bookworm-slim AS builder
 
 ENV PNPM_HOME=/pnpm

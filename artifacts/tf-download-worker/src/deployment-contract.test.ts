@@ -245,6 +245,35 @@ describe("TF download worker build and image boundary", () => {
 });
 
 describe("TF download worker Compose and queue Redis contract", () => {
+  it.each([
+    ["root", rootComposePath],
+    ["nested", nestedComposePath],
+  ])(
+    "keeps the %s worker outside TF database roles while API waits for migration",
+    async (_label, composePath) => {
+      const template = await composeTemplate(composePath);
+      const api = service(template, "api");
+      const migrate = service(template, "tf-migrate");
+      const worker = service(template, "tf-download-worker");
+
+      expect(api.depends_on).toMatchObject({
+        "tf-migrate": { condition: "service_completed_successfully" },
+      });
+      expect(secretSources(api)).toContain("tf_runtime_database_url");
+      expect(secretSources(migrate)).toEqual(["tf_migrator_database_url"]);
+      expect(secretSources(worker)).not.toEqual(
+        expect.arrayContaining([
+          "tf_postgres_admin_password",
+          "tf_admin_database_url",
+          "tf_migrator_password",
+          "tf_runtime_password",
+          "tf_migrator_database_url",
+          "tf_runtime_database_url",
+        ]),
+      );
+    },
+  );
+
   it("keeps root and nested worker stacks identical except for build context", async () => {
     const [root, nested] = await Promise.all([
       composeTemplate(rootComposePath),
@@ -583,9 +612,13 @@ describe("TF download worker Compose and queue Redis contract", () => {
       expect(secretSources(worker)).not.toEqual(
         expect.arrayContaining([
           "tf_client_secret",
-          "tf_database_url",
-          "tf_postgres_password",
+          "tf_admin_database_url",
+          "tf_migrator_database_url",
+          "tf_migrator_password",
           "tf_module_heartbeat_keys",
+          "tf_postgres_admin_password",
+          "tf_runtime_database_url",
+          "tf_runtime_password",
           "tf_integrations_runtime_database_url",
           "tf_integrations_token_keyring",
         ]),

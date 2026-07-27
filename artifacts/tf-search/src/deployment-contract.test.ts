@@ -75,7 +75,7 @@ interface ComposeService {
   readonly ports?: readonly string[];
   readonly read_only?: boolean;
   readonly security_opt?: readonly string[];
-  readonly secrets?: readonly string[];
+  readonly secrets?: readonly (string | { readonly source: string })[];
   readonly stop_grace_period?: string;
   readonly tmpfs?: readonly string[];
   readonly user?: string;
@@ -96,6 +96,12 @@ function service(template: ComposeTemplate, name: string): ComposeService {
   const value = template.services[name];
   if (value === undefined) throw new Error(`missing service ${name}`);
   return value;
+}
+
+function secretSources(current: ComposeService): string[] {
+  return (current.secrets ?? []).map((secret) =>
+    typeof secret === "string" ? secret : secret.source,
+  );
 }
 
 function networkNames(value: ComposeService["networks"]): readonly string[] {
@@ -200,11 +206,14 @@ describe("tf-search deployment contract", () => {
         "api",
         "db",
         "redis",
+        "tf-baseline",
         "tf-download-redis",
         "tf-download-worker",
         "tf-integrations",
         "tf-integrations-migrate",
         "tf-integrations-postgres",
+        "tf-migrate",
+        "tf-role-bootstrap",
         "tf-search",
         "web",
       ],
@@ -216,11 +225,14 @@ describe("tf-search deployment contract", () => {
         "api",
         "db",
         "redis",
+        "tf-baseline",
         "tf-download-redis",
         "tf-download-worker",
         "tf-integrations",
         "tf-integrations-migrate",
         "tf-integrations-postgres",
+        "tf-migrate",
+        "tf-role-bootstrap",
         "tf-search",
       ],
     ],
@@ -277,16 +289,16 @@ describe("tf-search deployment contract", () => {
       const search = service(template, "tf-search");
       const serialized = JSON.stringify(template);
 
-      expect(api.secrets).toEqual(
+      expect(secretSources(api)).toEqual(
         expect.arrayContaining([
           "tf_client_secret",
-          "tf_database_url",
+          "tf_runtime_database_url",
           "tf_search_internal_auth_secret",
           "tf_module_heartbeat_keys",
         ]),
       );
-      expect(api.secrets).not.toContain("tf_search_heartbeat_secret");
-      expect(search.secrets).toEqual([
+      expect(secretSources(api)).not.toContain("tf_search_heartbeat_secret");
+      expect(secretSources(search)).toEqual([
         "tf_search_internal_auth_secret",
         "tf_search_heartbeat_secret",
       ]);
@@ -307,8 +319,8 @@ describe("tf-search deployment contract", () => {
         TF_SEARCH_ALLOW_INSECURE_HTTP: "true",
       });
       expect(Object.keys(template.secrets ?? {}).sort()).toEqual([
+        "tf_admin_database_url",
         "tf_client_secret",
-        "tf_database_url",
         "tf_download_heartbeat_secret",
         "tf_download_internal_auth_secret",
         "tf_download_queue_password",
@@ -323,8 +335,12 @@ describe("tf-search deployment contract", () => {
         "tf_integrations_spotify_client_id",
         "tf_integrations_spotify_client_secret",
         "tf_integrations_token_keyring",
+        "tf_migrator_database_url",
+        "tf_migrator_password",
         "tf_module_heartbeat_keys",
-        "tf_postgres_password",
+        "tf_postgres_admin_password",
+        "tf_runtime_database_url",
+        "tf_runtime_password",
         "tf_search_heartbeat_secret",
         "tf_search_internal_auth_secret",
       ]);
@@ -393,11 +409,13 @@ describe("tf-search deployment contract", () => {
         /DATABASE|POSTGRES|REDIS|PLATFORM|SPOTIFY|YANDEX|PROVIDER|DOCKER|COOLIFY|CADDY|UFW|SSH/i;
 
       expect(environment.filter((name) => forbidden.test(name))).toEqual([]);
-      expect(search.secrets).not.toEqual(
+      expect(secretSources(search)).not.toEqual(
         expect.arrayContaining([
           "tf_client_secret",
-          "tf_database_url",
-          "tf_postgres_password",
+          "tf_admin_database_url",
+          "tf_migrator_database_url",
+          "tf_postgres_admin_password",
+          "tf_runtime_database_url",
           "tf_module_heartbeat_keys",
         ]),
       );

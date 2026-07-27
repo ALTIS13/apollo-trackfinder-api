@@ -137,10 +137,7 @@ function fileIdentity(stats) {
 }
 
 function assertIdentity(actual, expected, label) {
-  if (
-    actual.device !== expected.device ||
-    actual.inode !== expected.inode
-  ) {
+  if (actual.device !== expected.device || actual.inode !== expected.inode) {
     throw new Error(`${label} identity was replaced`);
   }
 }
@@ -336,7 +333,13 @@ async function openedRegularIdentity(handle, label) {
   return fileIdentity(stats);
 }
 
-async function createOwnedFile(record, name, value, options, finalMode = 0o444) {
+async function createOwnedFile(
+  record,
+  name,
+  value,
+  options,
+  finalMode = 0o444,
+) {
   if (name.length === 0 || name.includes("/") || name.includes("\\")) {
     throw new Error("Invalid owned file name");
   }
@@ -396,18 +399,14 @@ async function createOwnedFile(record, name, value, options, finalMode = 0o444) 
   }
 
   const current = await verifyOwnedHierarchy(record);
-  await verifiedPhysicalFile(
-    path,
-    current.directory,
-    current.workspace,
-    file,
-  );
+  await verifiedPhysicalFile(path, current.directory, current.workspace, file);
   return file;
 }
 
 async function readAndVerifyMarker(record) {
   const marker = record.files.get(OWNERSHIP_MARKER);
-  if (marker === undefined) throw new Error("Smoke ownership marker is missing");
+  if (marker === undefined)
+    throw new Error("Smoke ownership marker is missing");
   const current = await verifyOwnedHierarchy(record);
   await verifiedPhysicalFile(
     marker.lexicalCandidate,
@@ -597,10 +596,7 @@ export async function removeVerifiedDirectory(directory, options = {}) {
 export async function prepareSecretDirectory(environment, options = {}) {
   const repositoryRoot = options.repositoryRoot ?? defaultRepositoryRoot;
   const { temporaryParent, temporaryRoot, workspace } =
-    await prepareTemporaryContext(
-      repositoryRoot,
-      options,
-    );
+    await prepareTemporaryContext(repositoryRoot, options);
   const directoryPath = assertWorkspaceContainedPath(
     await mkdtemp(join(temporaryParent.lexicalCandidate, "tf-search-smoke-")),
     repositoryRoot,
@@ -619,7 +615,11 @@ export async function prepareSecretDirectory(environment, options = {}) {
   ownershipRecords.set(ownership, record);
 
   try {
-    await runInterlock(options, "after-run-created", directory.lexicalCandidate);
+    await runInterlock(
+      options,
+      "after-run-created",
+      directory.lexicalCandidate,
+    );
     const marker = await createOwnedFile(
       record,
       OWNERSHIP_MARKER,
@@ -635,22 +635,34 @@ export async function prepareSecretDirectory(environment, options = {}) {
       OWNERSHIP_MARKER,
     );
 
-    const postgresPassword = generatedSecret();
+    const postgresAdminPassword = generatedSecret();
+    const migratorPassword = generatedSecret();
+    const runtimePassword = generatedSecret();
     const clientSecret = generatedSecret();
     const commandSecret = generatedSecret();
     const heartbeatSecret = generatedSecret();
     assert.notEqual(commandSecret, heartbeatSecret);
-    const databaseUrl =
-      `postgres://trackfinder:${encodeURIComponent(postgresPassword)}` +
-      "@db:5432/trackfinder";
+    const adminDatabaseUrl =
+      `postgres://postgres:${encodeURIComponent(postgresAdminPassword)}` +
+      "@db:5432/apollo_trackfinder";
+    const migratorDatabaseUrl =
+      `postgres://apollo_tf_migrator:${encodeURIComponent(migratorPassword)}` +
+      "@db:5432/apollo_trackfinder";
+    const runtimeDatabaseUrl =
+      `postgres://apollo_tf_runtime:${encodeURIComponent(runtimePassword)}` +
+      "@db:5432/apollo_trackfinder";
     const heartbeatKeys = JSON.stringify({
       "search-media": heartbeatSecret,
     });
     const secrets = [
       ["tf_client_secret", clientSecret],
-      ["tf_database_url", databaseUrl],
+      ["tf_postgres_admin_password", postgresAdminPassword],
+      ["tf_admin_database_url", adminDatabaseUrl],
+      ["tf_migrator_password", migratorPassword],
+      ["tf_runtime_password", runtimePassword],
+      ["tf_migrator_database_url", migratorDatabaseUrl],
+      ["tf_runtime_database_url", runtimeDatabaseUrl],
       ["tf_module_heartbeat_keys", heartbeatKeys],
-      ["tf_postgres_password", postgresPassword],
       ["tf_search_heartbeat_secret", heartbeatSecret],
       ["tf_search_internal_auth_secret", commandSecret],
     ];
@@ -738,11 +750,7 @@ server.listen(8080, "0.0.0.0");
 `;
 }
 
-async function writeSmokeOverride(
-  environment,
-  prepared,
-  repositoryRoot,
-) {
+async function writeSmokeOverride(environment, prepared, repositoryRoot) {
   const port = safePort(environment);
   const overridePath = assertWorkspaceContainedPath(
     join(prepared.directory, "compose.smoke.yml"),
@@ -787,12 +795,7 @@ async function writeSmokeOverride(
     },
   };
   const record = ownershipRecord(prepared.ownership, prepared.directory);
-  await createOwnedFile(
-    record,
-    "compose.smoke.yml",
-    stringify(override),
-    {},
-  );
+  await createOwnedFile(record, "compose.smoke.yml", stringify(override), {});
   return { overridePath, port };
 }
 
@@ -967,6 +970,8 @@ export async function runTfSearchSmoke(options) {
   const environment = configuredEnvironment(selectorSafeEnvironment);
   const project = `apollo-tf-search-smoke-${process.pid}-${randomBytes(4).toString("hex")}`;
   environment.COMPOSE_PROJECT_NAME = project;
+  environment.TF_API_IMAGE = `${project}-api:smoke`;
+  environment.TF_POSTGRES_IMAGE = `${project}-postgres:smoke`;
 
   let prepared;
   let overridePath;
@@ -1028,6 +1033,7 @@ export async function runTfSearchSmoke(options) {
       "-d",
       "--build",
       "db",
+      "tf-migrate",
       "redis",
       "platform-api",
       "tf-search",
@@ -1045,7 +1051,14 @@ export async function runTfSearchSmoke(options) {
       },
     });
     assertObservations(observations);
-    const logs = await compose(["logs", "--no-color", "api", "tf-search"]);
+    const logs = await compose([
+      "logs",
+      "--no-color",
+      "api",
+      "db",
+      "tf-migrate",
+      "tf-search",
+    ]);
     logsCollected = true;
     const logText = `${logs.stdout}\n${logs.stderr}`;
     assertSecretFree(logText, prepared.rawSecretCanaries, "container logs");
@@ -1055,7 +1068,14 @@ export async function runTfSearchSmoke(options) {
   } finally {
     if (prepared !== undefined && compose !== undefined && !logsCollected) {
       try {
-        const logs = await compose(["logs", "--no-color", "api", "tf-search"]);
+        const logs = await compose([
+          "logs",
+          "--no-color",
+          "api",
+          "db",
+          "tf-migrate",
+          "tf-search",
+        ]);
         const logText = `${logs.stdout}\n${logs.stderr}`;
         assertSecretFree(
           logText,

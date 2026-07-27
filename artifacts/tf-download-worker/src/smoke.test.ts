@@ -629,6 +629,8 @@ function createSmokeCanaryBundle() {
     integrationsHeartbeatSecret: generatedSecret(),
     clientSecret: generatedSecret(),
     databasePassword: generatedSecret(),
+    databaseMigratorPassword: generatedSecret(),
+    databaseRuntimePassword: generatedSecret(),
     sourceCanary: `source-${generatedSecret()}`,
     accountCanary: randomUUID(),
     signatureCanary: `signature-${generatedSecret()}`,
@@ -1282,6 +1284,8 @@ async function runPreparedDisposableSmoke(
     integrationsSecret,
     clientSecret,
     databasePassword,
+    databaseMigratorPassword,
+    databaseRuntimePassword,
     sourceCanary,
     accountCanary,
     signatureCanary,
@@ -1298,6 +1302,8 @@ async function runPreparedDisposableSmoke(
     ...process.env,
     TF_SECRET_DIRECTORY: secretDirectory,
     TF_API_PORT: String(port),
+    TF_API_IMAGE: `${project}-api:local`,
+    TF_POSTGRES_IMAGE: `${project}-postgres:local`,
     TF_DOWNLOAD_REDIS_IMAGE: `${project}-redis:local`,
     TF_DOWNLOAD_WORKER_IMAGE: `${project}-worker:local`,
     ADMIN_DASHBOARD_TOKEN: ADMIN_TOKEN,
@@ -1411,11 +1417,13 @@ async function runPreparedDisposableSmoke(
       "node:20-bookworm-slim",
       "sh",
       "-ceu",
-      "chmod 0400 /secrets/*; chown 10001:10001 /secrets/*; chown 999:999 /secrets/tf_postgres_password /secrets/tf_download_queue_password",
+      "chmod 0400 /secrets/*; chown 10001:10001 /secrets/*; chown 999:999 /secrets/tf_postgres_admin_password /secrets/tf_migrator_password /secrets/tf_runtime_password /secrets/tf_download_queue_password",
     ]);
 
     const redisOwned = new Set([
-      "tf_postgres_password",
+      "tf_postgres_admin_password",
+      "tf_migrator_password",
+      "tf_runtime_password",
       "tf_download_queue_password",
     ]);
     for (const name of Object.keys(secrets)) {
@@ -1626,10 +1634,18 @@ async function runPreparedDisposableSmoke(
   try {
     await mkdir(secretDirectory, { recursive: true, mode: 0o700 });
     secrets = {
-      tf_postgres_password: databasePassword,
-      tf_database_url:
-        `postgres://trackfinder:${encodeURIComponent(databasePassword)}` +
-        "@db:5432/trackfinder",
+      tf_postgres_admin_password: databasePassword,
+      tf_admin_database_url:
+        `postgres://postgres:${encodeURIComponent(databasePassword)}` +
+        "@db:5432/apollo_trackfinder",
+      tf_migrator_password: databaseMigratorPassword,
+      tf_runtime_password: databaseRuntimePassword,
+      tf_migrator_database_url:
+        `postgres://apollo_tf_migrator:${encodeURIComponent(databaseMigratorPassword)}` +
+        "@db:5432/apollo_trackfinder",
+      tf_runtime_database_url:
+        `postgres://apollo_tf_runtime:${encodeURIComponent(databaseRuntimePassword)}` +
+        "@db:5432/apollo_trackfinder",
       tf_client_secret: clientSecret,
       tf_search_internal_auth_secret: searchSecret,
       tf_integrations_internal_auth_secret: integrationsSecret,
@@ -1715,7 +1731,7 @@ async function runPreparedDisposableSmoke(
     }
 
     await compose(
-      ["build", "tf-download-redis", "tf-download-worker", "api"],
+      ["build", "db", "tf-download-redis", "tf-download-worker", "api"],
       BUILD_DOCKER_TIMEOUT_MS,
     );
     let productionFixture = { fixtureFree: false, rejected: false };
@@ -1735,6 +1751,7 @@ async function runPreparedDisposableSmoke(
           "--wait-timeout",
           "300",
           "db",
+          "tf-migrate",
           "redis",
           "tf-download-redis",
           "tf-download-worker",
@@ -1747,8 +1764,11 @@ async function runPreparedDisposableSmoke(
       const inspectIds = (
         await compose([
           "ps",
+          "-a",
           "-q",
           "api",
+          "db",
+          "tf-migrate",
           "tf-download-redis",
           "tf-download-worker",
         ])
@@ -1756,7 +1776,7 @@ async function runPreparedDisposableSmoke(
         .split(/\r?\n/)
         .filter(Boolean);
       assertCondition(
-        inspectIds.length === 3,
+        inspectIds.length === 5,
         "smoke services were not created",
       );
       const inspection = (await docker(["inspect", ...inspectIds], environment))
@@ -1778,6 +1798,8 @@ async function runPreparedDisposableSmoke(
           readonly Networks?: Record<string, unknown>;
         };
         readonly State?: {
+          readonly ExitCode?: number;
+          readonly Status?: string;
           readonly Health?: { readonly Status?: string };
         };
       }>;
@@ -1792,7 +1814,12 @@ async function runPreparedDisposableSmoke(
       const workerHealthy =
         byService.get("tf-download-worker")?.State?.Health?.Status ===
         "healthy";
+      const tfMigrationSucceeded =
+        byService.get("tf-migrate")?.State?.Status === "exited" &&
+        byService.get("tf-migrate")?.State?.ExitCode === 0;
       const noPublishedWorkerOrQueuePorts = [
+        "db",
+        "tf-migrate",
         "tf-download-redis",
         "tf-download-worker",
       ].every(
@@ -1802,6 +1829,35 @@ async function runPreparedDisposableSmoke(
       );
       assertCondition(queueHealthy, "queue Redis was not healthy");
       assertCondition(workerHealthy, "worker was not healthy");
+      assertCondition(tfMigrationSucceeded, "TF migration did not succeed");
+
+      const secretTargets = (serviceName: string): string[] =>
+        (byService.get(serviceName)?.Mounts ?? [])
+          .map((mount) => mount.Destination ?? "")
+          .filter((destination) => destination.startsWith("/run/secrets/"))
+          .map((destination) => destination.slice("/run/secrets/".length))
+          .sort();
+      assertCondition(
+        JSON.stringify(secretTargets("db")) ===
+          JSON.stringify([
+            "tf_migrator_password",
+            "tf_postgres_admin_password",
+            "tf_runtime_password",
+          ]),
+        "TF PostgreSQL secret scope mismatch",
+      );
+      assertCondition(
+        JSON.stringify(secretTargets("tf-migrate")) ===
+          JSON.stringify(["tf_migrator_database_url"]),
+        "TF migrator secret scope mismatch",
+      );
+      const apiSecretTargets = secretTargets("api");
+      assertCondition(
+        apiSecretTargets.includes("tf_runtime_database_url") &&
+          !apiSecretTargets.includes("tf_migrator_database_url") &&
+          !apiSecretTargets.includes("tf_admin_database_url"),
+        "TF API secret scope mismatch",
+      );
 
       const apiHealthy = await waitFor("TF API health", async () => {
         const response = await boundedFetch(`${origin}/api/readyz`);
@@ -2228,7 +2284,8 @@ main().catch((error) => { console.error(error); process.exitCode = 1; });
           [
             `${project}-redis:local`,
             `${project}-worker:local`,
-            `${project}-api`,
+            `${project}-api:local`,
+            `${project}-postgres:local`,
             finalWorkerImage,
           ].map(async (image) =>
             dockerWithin([
