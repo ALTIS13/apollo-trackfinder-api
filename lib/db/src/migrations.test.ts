@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { Pool, QueryResult } from "pg";
 import { afterEach, describe, expect, test } from "vitest";
@@ -10,6 +11,7 @@ import {
   baselineTfStartupSchema,
   createTfMigrationReadinessProbe,
   runTfMigrations,
+  TF_MIGRATION_MANIFEST,
 } from "./migrations.js";
 import type {
   MigrationManifestEntry,
@@ -28,6 +30,10 @@ type CatalogFixture = {
   indexes: unknown[];
   ownership: unknown[];
 };
+
+const canonicalMigrationDirectory = fileURLToPath(
+  new URL("../migrations", import.meta.url),
+);
 
 const exactCatalog: CatalogFixture = {
   columns: [
@@ -130,23 +136,37 @@ const exactCatalog: CatalogFixture = {
     ],
   ],
   constraints: [
-    ["liked_tracks", "liked_tracks_pkey", "p", ["id"]],
+    ["liked_tracks", "liked_tracks_pkey", "p", ["id"], "PRIMARY KEY (id)"],
     [
       "liked_tracks",
       "liked_tracks_session_id_track_id_key",
       "u",
       ["session_id", "track_id"],
+      "UNIQUE (session_id, track_id)",
     ],
-    ["play_history", "play_history_pkey", "p", ["id"]],
-    ["playlist_tracks", "playlist_tracks_pkey", "p", ["id"]],
-    ["playlists", "playlists_pkey", "p", ["id"]],
+    ["play_history", "play_history_pkey", "p", ["id"], "PRIMARY KEY (id)"],
+    [
+      "playlist_tracks",
+      "playlist_tracks_pkey",
+      "p",
+      ["id"],
+      "PRIMARY KEY (id)",
+    ],
+    ["playlists", "playlists_pkey", "p", ["id"], "PRIMARY KEY (id)"],
     [
       "track_search_cache",
       "track_search_cache_cache_key_key",
       "u",
       ["cache_key"],
+      "UNIQUE (cache_key)",
     ],
-    ["track_search_cache", "track_search_cache_pkey", "p", ["id"]],
+    [
+      "track_search_cache",
+      "track_search_cache_pkey",
+      "p",
+      ["id"],
+      "PRIMARY KEY (id)",
+    ],
   ],
   indexes: [
     [
@@ -155,6 +175,7 @@ const exactCatalog: CatalogFixture = {
       false,
       "btree",
       ["session_id"],
+      "CREATE INDEX liked_tracks_session_idx ON public.liked_tracks USING btree (session_id)",
     ],
     [
       "play_history",
@@ -162,6 +183,7 @@ const exactCatalog: CatalogFixture = {
       false,
       "btree",
       ["played_at"],
+      "CREATE INDEX play_history_played_at_idx ON public.play_history USING btree (played_at)",
     ],
     [
       "play_history",
@@ -169,6 +191,7 @@ const exactCatalog: CatalogFixture = {
       false,
       "btree",
       ["session_id"],
+      "CREATE INDEX play_history_session_idx ON public.play_history USING btree (session_id)",
     ],
     [
       "playlist_tracks",
@@ -176,8 +199,16 @@ const exactCatalog: CatalogFixture = {
       false,
       "btree",
       ["playlist_id"],
+      "CREATE INDEX playlist_tracks_playlist_idx ON public.playlist_tracks USING btree (playlist_id)",
     ],
-    ["playlists", "playlists_session_idx", false, "btree", ["session_id"]],
+    [
+      "playlists",
+      "playlists_session_idx",
+      false,
+      "btree",
+      ["session_id"],
+      "CREATE INDEX playlists_session_idx ON public.playlists USING btree (session_id)",
+    ],
   ],
   ownership: [
     ["liked_tracks", "legacy_owner"],
@@ -197,6 +228,11 @@ class MigrationClientDouble {
   catalog: CatalogFixture = structuredClone(exactCatalog);
   historyTableExists = false;
   managedTables: string[] = [];
+  databaseRole = {
+    current_role: "legacy_owner",
+    is_superuser: true,
+    is_database_owner: true,
+  };
   releaseError?: Error;
   readonly releaseArguments: (Error | boolean | undefined)[] = [];
 
@@ -245,13 +281,25 @@ class MigrationClientDouble {
       );
     }
     if (text.includes("tf_catalog_constraints")) {
+      const constraints = text.includes("con.contype in ('p', 'u')")
+        ? this.catalog.constraints.filter(
+            (constraint) => constraint[2] === "p" || constraint[2] === "u",
+          )
+        : this.catalog.constraints;
       return result(
-        this.catalog.constraints.map(
-          ([table_name, constraint_name, constraint_type, columns]) => ({
+        constraints.map(
+          ([
             table_name,
             constraint_name,
             constraint_type,
             columns,
+            definition,
+          ]) => ({
+            table_name,
+            constraint_name,
+            constraint_type,
+            columns,
+            definition,
           }),
         ),
       );
@@ -259,12 +307,20 @@ class MigrationClientDouble {
     if (text.includes("tf_catalog_indexes")) {
       return result(
         this.catalog.indexes.map(
-          ([table_name, index_name, is_unique, method, expressions]) => ({
+          ([
             table_name,
             index_name,
             is_unique,
             method,
             expressions,
+            definition,
+          ]) => ({
+            table_name,
+            index_name,
+            is_unique,
+            method,
+            expressions,
+            definition,
           }),
         ),
       );
@@ -278,13 +334,7 @@ class MigrationClientDouble {
       );
     }
     if (text.includes("current_database_role")) {
-      return result([
-        {
-          current_role: "legacy_owner",
-          is_superuser: true,
-          is_database_owner: true,
-        },
-      ]);
+      return result([this.databaseRole]);
     }
     if (text.includes("tf_history_exists")) {
       return result([{ exists: this.historyTableExists }]);
@@ -554,23 +604,80 @@ describe("runTfMigrations", () => {
 });
 
 describe("baselineTfStartupSchema", () => {
-  test("rejects catalog drift without changing ownership or history", async () => {
+  test("rejects substituted SQL even when canonical filenames are retained", async () => {
     const directory = await fixtureDirectory({
-      "0001_tf_core_collections.sql": "select 1;",
-      "0002_tf_runtime_privileges.sql": "select 2;",
+      "0001_tf_core_collections.sql": "select 'substituted schema';",
+      "0002_tf_runtime_privileges.sql": "select 'substituted grants';",
     });
-    const manifest = await fixtureManifest(directory, [
+    const substitutedManifest = await fixtureManifest(directory, [
       "0001_tf_core_collections.sql",
       "0002_tf_runtime_privileges.sql",
     ]);
+    const pool = new MigrationPoolDouble();
+
+    await expect(
+      baselineTfStartupSchema(
+        asPool(pool),
+        directory,
+        substitutedManifest,
+        zeroDelayOptions(),
+      ),
+    ).rejects.toMatchObject({ code: "migration_baseline_mismatch" });
+    expect(pool.client.queries).toEqual([]);
+  });
+
+  test("rejects a database owner that is not the current PostgreSQL superuser", async () => {
+    const pool = new MigrationPoolDouble();
+    pool.client.databaseRole = {
+      current_role: "legacy_owner",
+      is_superuser: false,
+      is_database_owner: true,
+    };
+
+    await expect(
+      baselineTfStartupSchema(
+        asPool(pool),
+        canonicalMigrationDirectory,
+        TF_MIGRATION_MANIFEST,
+        zeroDelayOptions(),
+      ),
+    ).rejects.toMatchObject({ code: "migration_baseline_mismatch" });
+    expect(
+      pool.client.queries.some(({ text }) =>
+        text.includes("tf_catalog_columns"),
+      ),
+    ).toBe(false);
+  });
+
+  test("allows the current superuser to adopt legacy tables it does not own", async () => {
+    const pool = new MigrationPoolDouble();
+    pool.client.databaseRole = {
+      current_role: "postgres",
+      is_superuser: true,
+      is_database_owner: false,
+    };
+
+    await expect(
+      baselineTfStartupSchema(
+        asPool(pool),
+        canonicalMigrationDirectory,
+        TF_MIGRATION_MANIFEST,
+        zeroDelayOptions(),
+      ),
+    ).resolves.toMatchObject({
+      applied: TF_MIGRATION_MANIFEST.map(({ name }) => name),
+    });
+  });
+
+  test("rejects catalog drift without changing ownership or history", async () => {
     const pool = new MigrationPoolDouble();
     pool.client.catalog.columns = pool.client.catalog.columns.slice(1);
 
     await expect(
       baselineTfStartupSchema(
         asPool(pool),
-        directory,
-        manifest,
+        canonicalMigrationDirectory,
+        TF_MIGRATION_MANIFEST,
         zeroDelayOptions(),
       ),
     ).rejects.toMatchObject({ code: "migration_baseline_mismatch" });
@@ -583,26 +690,84 @@ describe("baselineTfStartupSchema", () => {
         text.includes("tf_catalog_columns"),
       ),
     ).toBe(true);
+    expect(pool.client.events).toContain("ROLLBACK");
+  });
+
+  test("rejects every extra constraint type by normalized definition", async () => {
+    for (const constraint of [
+      [
+        "playlists",
+        "playlists_name_check",
+        "c",
+        ["name"],
+        "CHECK ((char_length(name) > 0))",
+      ],
+      [
+        "playlist_tracks",
+        "playlist_tracks_playlist_fk",
+        "f",
+        ["playlist_id"],
+        "FOREIGN KEY (playlist_id) REFERENCES playlists(id)",
+      ],
+      [
+        "play_history",
+        "play_history_session_exclusion",
+        "x",
+        ["session_id"],
+        "EXCLUDE USING gist (session_id WITH =)",
+      ],
+    ]) {
+      const pool = new MigrationPoolDouble();
+      pool.client.catalog.constraints.push(constraint);
+
+      await expect(
+        baselineTfStartupSchema(
+          asPool(pool),
+          canonicalMigrationDirectory,
+          TF_MIGRATION_MANIFEST,
+          zeroDelayOptions(),
+        ),
+      ).rejects.toMatchObject({ code: "migration_baseline_mismatch" });
+    }
+  });
+
+  test("rejects predicate, include, collation, or opclass index drift from the full definition", async () => {
+    for (const changedDefinition of [
+      "CREATE INDEX liked_tracks_session_idx ON public.liked_tracks USING btree (session_id) WHERE (track_id IS NOT NULL)",
+      "CREATE INDEX liked_tracks_session_idx ON public.liked_tracks USING btree (session_id) INCLUDE (track_id)",
+      'CREATE INDEX liked_tracks_session_idx ON public.liked_tracks USING btree (session_id COLLATE "C")',
+      "CREATE INDEX liked_tracks_session_idx ON public.liked_tracks USING btree (session_id text_pattern_ops)",
+    ]) {
+      const pool = new MigrationPoolDouble();
+      pool.client.catalog.indexes[0]![5] = changedDefinition;
+
+      await expect(
+        baselineTfStartupSchema(
+          asPool(pool),
+          canonicalMigrationDirectory,
+          TF_MIGRATION_MANIFEST,
+          zeroDelayOptions(),
+        ),
+      ).rejects.toMatchObject({ code: "migration_baseline_mismatch" });
+    }
   });
 
   test("adopts exact legacy objects then applies the privilege migration", async () => {
-    const first = "select 'not executed first';";
-    const second = "select 'runtime grants';";
-    const directory = await fixtureDirectory({
-      "0001_tf_core_collections.sql": first,
-      "0002_tf_runtime_privileges.sql": second,
-    });
-    const manifest = await fixtureManifest(directory, [
-      "0001_tf_core_collections.sql",
-      "0002_tf_runtime_privileges.sql",
-    ]);
+    const first = await readFile(
+      join(canonicalMigrationDirectory, TF_MIGRATION_MANIFEST[0]!.name),
+      "utf8",
+    );
+    const second = await readFile(
+      join(canonicalMigrationDirectory, TF_MIGRATION_MANIFEST[1]!.name),
+      "utf8",
+    );
     const pool = new MigrationPoolDouble();
 
     await expect(
       baselineTfStartupSchema(
         asPool(pool),
-        directory,
-        manifest,
+        canonicalMigrationDirectory,
+        TF_MIGRATION_MANIFEST,
         zeroDelayOptions(),
       ),
     ).resolves.toEqual({
@@ -617,18 +782,54 @@ describe("baselineTfStartupSchema", () => {
     expect(
       pool.client.queries.filter(({ text }) => /owner to/i.test(text)),
     ).toHaveLength(12);
+
+    const statements = pool.client.queries.map(({ text }) => text);
+    const begins = statements
+      .map((text, index) => (text === "BEGIN" ? index : -1))
+      .filter((index) => index >= 0);
+    const commits = statements
+      .map((text, index) => (text === "COMMIT" ? index : -1))
+      .filter((index) => index >= 0);
+    const baselineBegin = begins[0]!;
+    const lock = statements.findIndex((text) =>
+      /lock table[\s\S]*access exclusive mode/i.test(text),
+    );
+    const catalog = statements.findIndex((text) =>
+      text.includes("tf_catalog_columns"),
+    );
+    const owner = statements.findIndex((text) => /owner to/i.test(text));
+    const historyInsert = statements.findIndex((text) =>
+      text.includes("insert into apollo_tf.schema_migrations"),
+    );
+
+    expect(begins).toHaveLength(2);
+    expect(commits).toHaveLength(2);
+    expect(lock).toBeGreaterThan(baselineBegin);
+    expect(catalog).toBeGreaterThan(lock);
+    expect(owner).toBeGreaterThan(catalog);
+    expect(historyInsert).toBeGreaterThan(owner);
+    expect(commits[0]).toBeGreaterThan(historyInsert);
+    expect(begins[1]).toBeGreaterThan(commits[0]!);
+    expect(statements[lock]).toMatch(
+      /track_search_cache[\s\S]*play_history[\s\S]*liked_tracks[\s\S]*playlists[\s\S]*playlist_tracks/i,
+    );
+
+    const constraintQuery = statements.find((text) =>
+      text.includes("tf_catalog_constraints"),
+    );
+    expect(constraintQuery).toMatch(/pg_get_constraintdef/i);
+    expect(constraintQuery).not.toMatch(/array_agg\s*\(\s*a\.attname/i);
+    const indexQuery = statements.find((text) =>
+      text.includes("tf_catalog_indexes"),
+    );
+    expect(indexQuery).toMatch(/pg_get_indexdef\s*\(\s*i\.oid\s*\)/i);
   });
 
   test("leaves an exact 0001 prefix when the privilege migration fails", async () => {
-    const second = "select 'broken grants';";
-    const directory = await fixtureDirectory({
-      "0001_tf_core_collections.sql": "select 'first';",
-      "0002_tf_runtime_privileges.sql": second,
-    });
-    const manifest = await fixtureManifest(directory, [
-      "0001_tf_core_collections.sql",
-      "0002_tf_runtime_privileges.sql",
-    ]);
+    const second = await readFile(
+      join(canonicalMigrationDirectory, TF_MIGRATION_MANIFEST[1]!.name),
+      "utf8",
+    );
     const pool = new MigrationPoolDouble();
     const failure = new Error("grant failed");
     pool.client.failures.set(second, failure);
@@ -636,13 +837,13 @@ describe("baselineTfStartupSchema", () => {
     await expect(
       baselineTfStartupSchema(
         asPool(pool),
-        directory,
-        manifest,
+        canonicalMigrationDirectory,
+        TF_MIGRATION_MANIFEST,
         zeroDelayOptions(),
       ),
     ).rejects.toBe(failure);
     expect([...pool.client.history]).toEqual([
-      ["0001_tf_core_collections.sql", manifest[0]!.checksum],
+      ["0001_tf_core_collections.sql", TF_MIGRATION_MANIFEST[0]!.checksum],
     ]);
   });
 });

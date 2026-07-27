@@ -467,37 +467,51 @@ const EXPECTED_COLUMNS: readonly (readonly CatalogValue[])[] = [
 ];
 
 const EXPECTED_CONSTRAINTS: readonly (readonly CatalogValue[])[] = [
-  ["liked_tracks", "liked_tracks_pkey", "p", ["id"]],
+  ["liked_tracks", "liked_tracks_pkey", "p", "primary key (id)"],
   [
     "liked_tracks",
     "liked_tracks_session_id_track_id_key",
     "u",
-    ["session_id", "track_id"],
+    "unique (session_id, track_id)",
   ],
-  ["play_history", "play_history_pkey", "p", ["id"]],
-  ["playlist_tracks", "playlist_tracks_pkey", "p", ["id"]],
-  ["playlists", "playlists_pkey", "p", ["id"]],
+  ["play_history", "play_history_pkey", "p", "primary key (id)"],
+  ["playlist_tracks", "playlist_tracks_pkey", "p", "primary key (id)"],
+  ["playlists", "playlists_pkey", "p", "primary key (id)"],
   [
     "track_search_cache",
     "track_search_cache_cache_key_key",
     "u",
-    ["cache_key"],
+    "unique (cache_key)",
   ],
-  ["track_search_cache", "track_search_cache_pkey", "p", ["id"]],
+  ["track_search_cache", "track_search_cache_pkey", "p", "primary key (id)"],
 ];
 
 const EXPECTED_INDEXES: readonly (readonly CatalogValue[])[] = [
-  ["liked_tracks", "liked_tracks_session_idx", false, "btree", ["session_id"]],
-  ["play_history", "play_history_played_at_idx", false, "btree", ["played_at"]],
-  ["play_history", "play_history_session_idx", false, "btree", ["session_id"]],
+  [
+    "liked_tracks",
+    "liked_tracks_session_idx",
+    "create index liked_tracks_session_idx on public.liked_tracks using btree (session_id)",
+  ],
+  [
+    "play_history",
+    "play_history_played_at_idx",
+    "create index play_history_played_at_idx on public.play_history using btree (played_at)",
+  ],
+  [
+    "play_history",
+    "play_history_session_idx",
+    "create index play_history_session_idx on public.play_history using btree (session_id)",
+  ],
   [
     "playlist_tracks",
     "playlist_tracks_playlist_idx",
-    false,
-    "btree",
-    ["playlist_id"],
+    "create index playlist_tracks_playlist_idx on public.playlist_tracks using btree (playlist_id)",
   ],
-  ["playlists", "playlists_session_idx", false, "btree", ["session_id"]],
+  [
+    "playlists",
+    "playlists_session_idx",
+    "create index playlists_session_idx on public.playlists using btree (session_id)",
+  ],
 ];
 
 function normalizeDefault(value: string | null): string | null {
@@ -510,6 +524,10 @@ function normalizeDefault(value: string | null): string | null {
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
+}
+
+function normalizeCatalogDefinition(value: string): string {
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 async function loadLegacyCatalog(client: PoolClient): Promise<{
@@ -528,8 +546,8 @@ async function loadLegacyCatalog(client: PoolClient): Promise<{
     column_default: string | null;
   }>(
     `/* tf_catalog_columns */
-     select c.relname as table_name,
-            a.attname as column_name,
+     select c.relname::text as table_name,
+            a.attname::text as column_name,
             a.attnum as ordinal_position,
             format_type(a.atttypid, a.atttypmod) as data_type,
             not a.attnotnull as is_nullable,
@@ -550,51 +568,38 @@ async function loadLegacyCatalog(client: PoolClient): Promise<{
     table_name: string;
     constraint_name: string;
     constraint_type: string;
-    columns: string[];
+    definition: string;
   }>(
     `/* tf_catalog_constraints */
-     select c.relname as table_name,
-            con.conname as constraint_name,
-            con.contype as constraint_type,
-            array_agg(a.attname order by keys.ordinality) as columns
+     select c.relname::text as table_name,
+            con.conname::text as constraint_name,
+            con.contype::text as constraint_type,
+            pg_get_constraintdef(con.oid, true)::text as definition
      from pg_constraint con
      join pg_class c on c.oid = con.conrelid
      join pg_namespace n on n.oid = c.relnamespace
-     cross join lateral unnest(con.conkey) with ordinality as keys(attnum, ordinality)
-     join pg_attribute a on a.attrelid = c.oid and a.attnum = keys.attnum
      where n.nspname = 'public'
        and c.relname = any($1::text[])
-       and con.contype in ('p', 'u')
-     group by c.relname, con.conname, con.contype
      order by c.relname, con.conname`,
     [tableNames],
   );
   const indexes = await client.query<{
     table_name: string;
     index_name: string;
-    is_unique: boolean;
-    method: string;
-    expressions: string[];
+    definition: string;
   }>(
     `/* tf_catalog_indexes */
-     select t.relname as table_name,
-            i.relname as index_name,
-            x.indisunique as is_unique,
-            am.amname as method,
-            array_agg(pg_get_indexdef(i.oid, keys.ordinality::int, true)
-                      order by keys.ordinality) as expressions
+     select t.relname::text as table_name,
+            i.relname::text as index_name,
+            pg_get_indexdef(i.oid)::text as definition
      from pg_index x
      join pg_class t on t.oid = x.indrelid
      join pg_namespace n on n.oid = t.relnamespace
      join pg_class i on i.oid = x.indexrelid
-     join pg_am am on am.oid = i.relam
-     cross join lateral generate_series(1, x.indnkeyatts)
-       with ordinality as keys(key_number, ordinality)
      left join pg_constraint con on con.conindid = i.oid
      where n.nspname = 'public'
        and t.relname = any($1::text[])
        and con.oid is null
-     group by t.relname, i.relname, x.indisunique, am.amname
      order by t.relname, i.relname`,
     [tableNames],
   );
@@ -603,7 +608,7 @@ async function loadLegacyCatalog(client: PoolClient): Promise<{
     owner: string;
   }>(
     `/* tf_catalog_ownership */
-     select c.relname as table_name, r.rolname as owner
+     select c.relname::text as table_name, r.rolname::text as owner
      from pg_class c
      join pg_namespace n on n.oid = c.relnamespace
      join pg_roles r on r.oid = c.relowner
@@ -627,14 +632,12 @@ async function loadLegacyCatalog(client: PoolClient): Promise<{
       row.table_name,
       row.constraint_name,
       row.constraint_type,
-      row.columns,
+      normalizeCatalogDefinition(row.definition),
     ]),
     indexes: indexes.rows.map((row) => [
       row.table_name,
       row.index_name,
-      row.is_unique,
-      row.method,
-      row.expressions,
+      normalizeCatalogDefinition(row.definition),
     ]),
     ownership: ownership.rows.map((row) => [row.table_name, row.owner]),
   };
@@ -647,31 +650,27 @@ function sameCatalog(
   return JSON.stringify(actual) === JSON.stringify(expected);
 }
 
-async function assertBaselinePreconditions(client: PoolClient): Promise<void> {
+async function requireBaselineSuperuser(client: PoolClient): Promise<void> {
   const role = await client.query<{
     current_role: string;
     is_superuser: boolean;
-    is_database_owner: boolean;
   }>(
     `/* current_database_role */
      select current_user as current_role,
-            r.rolsuper as is_superuser,
-            d.datdba = r.oid as is_database_owner
+            r.rolsuper as is_superuser
      from pg_roles r
-     join pg_database d on d.datname = current_database()
      where r.rolname = current_user`,
   );
   const current = role.rows[0];
-  if (
-    !current ||
-    (current.is_superuser !== true && current.is_database_owner !== true)
-  ) {
+  if (!current || current.is_superuser !== true) {
     throw contractError(
       "migration_baseline_mismatch",
-      "TF baseline requires the current legacy superuser or database owner",
+      "TF baseline requires the current PostgreSQL superuser",
     );
   }
+}
 
+async function validateBaselineCatalog(client: PoolClient): Promise<void> {
   const history = await client.query<{ exists: boolean }>(
     `/* tf_history_exists */
      select to_regclass('apollo_tf.schema_migrations') is not null as exists`,
@@ -687,15 +686,10 @@ async function assertBaselinePreconditions(client: PoolClient): Promise<void> {
   }
 
   const catalog = await loadLegacyCatalog(client);
-  const expectedOwnership = [...MANAGED_TABLES]
-    .sort()
-    .map((table) => [table, current.current_role] as const);
   if (
     !sameCatalog(catalog.columns, EXPECTED_COLUMNS) ||
     !sameCatalog(catalog.constraints, EXPECTED_CONSTRAINTS) ||
     !sameCatalog(catalog.indexes, EXPECTED_INDEXES) ||
-    (!current.is_superuser &&
-      !sameCatalog(catalog.ownership, expectedOwnership)) ||
     catalog.ownership.length !== MANAGED_TABLES.length
   ) {
     throw contractError(
@@ -710,6 +704,12 @@ async function recordBaseline(
   first: LoadedMigration,
 ): Promise<void> {
   await inTransaction(client, async () => {
+    await client.query(
+      `lock table ${MANAGED_TABLES.map((table) => `public.${table}`).join(
+        ", ",
+      )} in access exclusive mode`,
+    );
+    await validateBaselineCatalog(client);
     await client.query("create schema if not exists apollo_tf");
     await client.query(`
       create table if not exists apollo_tf.schema_migrations (
@@ -743,20 +743,23 @@ export async function baselineTfStartupSchema(
   manifest: readonly MigrationManifestEntry[] = TF_MIGRATION_MANIFEST,
   options: MigrationRunnerOptions = {},
 ): Promise<MigrationResult> {
-  const migrations = await loadMigrations(directory, manifest);
   if (
-    migrations.length !== 2 ||
-    migrations[0]?.name !== "0001_tf_core_collections.sql" ||
-    migrations[1]?.name !== "0002_tf_runtime_privileges.sql"
+    manifest.length !== TF_MIGRATION_MANIFEST.length ||
+    manifest.some(
+      (entry, index) =>
+        entry.name !== TF_MIGRATION_MANIFEST[index]?.name ||
+        entry.checksum !== TF_MIGRATION_MANIFEST[index]?.checksum,
+    )
   ) {
     throw contractError(
       "migration_baseline_mismatch",
-      "TF baseline accepts only the exact two-entry core manifest",
+      "TF baseline accepts only the canonical TF migration manifest",
     );
   }
+  const migrations = await loadMigrations(directory, manifest);
 
   return executeWithLock(pool, options, async (client) => {
-    await assertBaselinePreconditions(client);
+    await requireBaselineSuperuser(client);
     await recordBaseline(client, migrations[0]!);
     await applyMigration(client, migrations[1]!);
     return {
