@@ -767,6 +767,7 @@ alter default privileges for role apollo_tf_migrator
 
 do $audit$
 declare
+  first_normal_object_id constant oid := 16384;
   migrator_oid oid := (
     select oid from pg_roles where rolname = 'apollo_tf_migrator'
   );
@@ -1106,8 +1107,13 @@ begin
   if exists (
     select 1
     from pg_namespace schemas
-    where schemas.nspname <> 'information_schema'
-      and schemas.nspname !~ '^pg_'
+    where (
+        (
+          schemas.nspname <> 'information_schema'
+          and schemas.nspname !~ '^pg_'
+        )
+        or schemas.oid >= first_normal_object_id
+      )
       and (
         has_schema_privilege(runtime_oid, schemas.oid, 'CREATE')
         or has_schema_privilege(runtime_oid, schemas.oid, 'USAGE') <>
@@ -1118,8 +1124,13 @@ begin
     select 1
     from pg_class relations
     join pg_namespace schemas on schemas.oid = relations.relnamespace
-    where schemas.nspname <> 'information_schema'
-      and schemas.nspname !~ '^pg_'
+    where (
+        (
+          schemas.nspname <> 'information_schema'
+          and schemas.nspname !~ '^pg_'
+        )
+        or relations.oid >= first_normal_object_id
+      )
       and relations.relkind in ('r', 'p', 'v', 'm', 'f')
       and (
         has_table_privilege(runtime_oid, relations.oid, 'SELECT') <>
@@ -1181,8 +1192,13 @@ begin
     select 1
     from pg_class relations
     join pg_namespace schemas on schemas.oid = relations.relnamespace
-    where schemas.nspname <> 'information_schema'
-      and schemas.nspname !~ '^pg_'
+    where (
+        (
+          schemas.nspname <> 'information_schema'
+          and schemas.nspname !~ '^pg_'
+        )
+        or relations.oid >= first_normal_object_id
+      )
       and relations.relkind = 'S'
       and (
         has_sequence_privilege(runtime_oid, relations.oid, 'USAGE') <>
@@ -1205,8 +1221,13 @@ begin
     from pg_attribute attributes
     join pg_class relations on relations.oid = attributes.attrelid
     join pg_namespace schemas on schemas.oid = relations.relnamespace
-    where schemas.nspname <> 'information_schema'
-      and schemas.nspname !~ '^pg_'
+    where (
+        (
+          schemas.nspname <> 'information_schema'
+          and schemas.nspname !~ '^pg_'
+        )
+        or relations.oid >= first_normal_object_id
+      )
       and relations.relkind in ('r', 'p', 'v', 'm', 'f')
       and attributes.attnum > 0
       and not attributes.attisdropped
@@ -1277,8 +1298,13 @@ begin
     select 1
     from pg_proc routines
     join pg_namespace schemas on schemas.oid = routines.pronamespace
-    where schemas.nspname <> 'information_schema'
-      and schemas.nspname !~ '^pg_'
+    where (
+        (
+          schemas.nspname <> 'information_schema'
+          and schemas.nspname !~ '^pg_'
+        )
+        or routines.oid >= first_normal_object_id
+      )
       and has_function_privilege(runtime_oid, routines.oid, 'EXECUTE')
   )
   or exists (
@@ -1286,8 +1312,13 @@ begin
     from pg_type types
     join pg_namespace schemas on schemas.oid = types.typnamespace
     left join pg_class type_relations on type_relations.oid = types.typrelid
-    where schemas.nspname <> 'information_schema'
-      and schemas.nspname !~ '^pg_'
+    where (
+        (
+          schemas.nspname <> 'information_schema'
+          and schemas.nspname !~ '^pg_'
+        )
+        or types.oid >= first_normal_object_id
+      )
       and types.typisdefined
       and types.typelem = 0
       and (

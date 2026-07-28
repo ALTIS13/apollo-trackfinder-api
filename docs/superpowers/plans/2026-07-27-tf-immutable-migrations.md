@@ -62,9 +62,11 @@ Docker Compose, pnpm 10.33.2.
   privileges are removed from current-database non-system/non-extension
   schemas, relations, columns, sequences, routines, types, large objects,
   foreign-data wrappers, and foreign servers; extension-owned pollution fails
-  closed without mutation. Final direct and effective-runtime catalog audits
-  must both pass. Foreign object ACLs or foreign runtime-owned default ACLs are
-  rejected.
+  closed without mutation. Excluded system namespaces are never mutated, but
+  normal-OID user-created objects inside them are included in the final
+  effective-runtime fail-closed audit. Final direct and effective-runtime
+  catalog audits must both pass. Foreign object ACLs or foreign runtime-owned
+  default ACLs are rejected.
 - Runtime receives DML only for the five active TF tables, sequence USAGE only,
   and SELECT-only access to `apollo_tf.schema_migrations`. Runtime cannot
   CREATE, ALTER, DROP, TRUNCATE, call `setval`, or mutate migration history.

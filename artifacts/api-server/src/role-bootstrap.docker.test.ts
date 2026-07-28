@@ -647,6 +647,12 @@ describe
           security definer
           set search_path = pg_catalog
           as 'select 1';
+        create function pg_catalog.apollo_tf_system_namespace_canary()
+          returns integer
+          language sql
+          security definer
+          set search_path = pg_catalog
+          as 'select 1';
         grant all privileges on database apollo_trackfinder to apollo_tf_runtime;
         grant all privileges on database postgres to apollo_tf_runtime;
         grant create on tablespace pg_default to apollo_tf_runtime;
@@ -723,6 +729,82 @@ describe
         );
       `);
       expect(publicCanaries.stdout.toString()).toContain("t|t|t|t|t");
+
+      const systemNamespaceCanaryBefore = await psqlAdmin(`
+        select concat_ws('|',
+          (
+            select routines.oid >= 16384
+            from pg_proc routines
+            where routines.oid =
+              'pg_catalog.apollo_tf_system_namespace_canary()'::regprocedure
+          ),
+          has_function_privilege(
+            'public',
+            'pg_catalog.apollo_tf_system_namespace_canary()',
+            'execute'
+          ),
+          has_function_privilege(
+            'apollo_tf_runtime',
+            'pg_catalog.apollo_tf_system_namespace_canary()',
+            'execute'
+          ),
+          (
+            select routines.proacl is null
+            from pg_proc routines
+            where routines.oid =
+              'pg_catalog.apollo_tf_system_namespace_canary()'::regprocedure
+          )
+        );
+      `);
+      expect(systemNamespaceCanaryBefore.stdout.toString()).toContain(
+        "t|t|t|t",
+      );
+
+      const systemNamespaceCanaryFailure = await runManualBootstrap(true);
+      expect(systemNamespaceCanaryFailure.code).not.toBe(0);
+      expect(systemNamespaceCanaryFailure.stdout.toString()).toBe("");
+      expect(systemNamespaceCanaryFailure.stderr.toString()).toBe(
+        "TF role bootstrap failed\n",
+      );
+      const systemNamespaceCanaryRollback = await psqlAdmin(`
+        select concat_ws('|',
+          exists (
+            select 1
+            from pg_proc routines
+            where routines.oid =
+              'pg_catalog.apollo_tf_system_namespace_canary()'::regprocedure
+          ),
+          has_function_privilege(
+            'public',
+            'pg_catalog.apollo_tf_system_namespace_canary()',
+            'execute'
+          ),
+          (
+            select routines.proacl is null
+            from pg_proc routines
+            where routines.oid =
+              'pg_catalog.apollo_tf_system_namespace_canary()'::regprocedure
+          ),
+          (
+            select routines.prosecdef
+              and routines.proconfig = array['search_path=pg_catalog']::text[]
+            from pg_proc routines
+            where routines.oid =
+              'pg_catalog.apollo_tf_system_namespace_canary()'::regprocedure
+          ),
+          (
+            select rolconnlimit
+            from pg_roles
+            where rolname = 'apollo_tf_runtime'
+          )
+        );
+      `);
+      expect(systemNamespaceCanaryRollback.stdout.toString()).toContain(
+        "t|t|t|t|0",
+      );
+      await psqlAdmin(
+        "drop function pg_catalog.apollo_tf_system_namespace_canary()",
+      );
 
       await psqlAdmin(`
         create function public.extension_public_canary()
