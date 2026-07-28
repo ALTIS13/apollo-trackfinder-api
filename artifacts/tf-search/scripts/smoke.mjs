@@ -14,6 +14,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
+import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -62,6 +63,10 @@ export function tfSecretSourceOwnership(name) {
       "tf_postgres_admin_password",
       "tf_migrator_password",
       "tf_runtime_password",
+      "tf_integrations_postgres_admin_password",
+      "tf_integrations_migrator_password",
+      "tf_integrations_runtime_password",
+      "tf_download_queue_password",
     ].includes(name)
   ) {
     return Object.freeze({ uid: 999, gid: 999, mode: 0o400 });
@@ -657,7 +662,28 @@ export async function prepareSecretDirectory(environment, options = {}) {
     const clientSecret = generatedSecret();
     const commandSecret = generatedSecret();
     const heartbeatSecret = generatedSecret();
-    assert.notEqual(commandSecret, heartbeatSecret);
+    const integrationAdminPassword = generatedSecret();
+    const integrationMigratorPassword = generatedSecret();
+    const integrationRuntimePassword = generatedSecret();
+    const integrationCommandSecret = generatedSecret();
+    const integrationHeartbeatSecret = generatedSecret();
+    const integrationSpotifyClientId = generatedSecret();
+    const integrationSpotifyClientSecret = generatedSecret();
+    const integrationTokenKey = generatedSecret();
+    const downloadQueuePassword = generatedSecret();
+    const downloadInternalAuthSecret = generatedSecret();
+    const downloadHeartbeatSecret = generatedSecret();
+    assert.equal(
+      new Set([
+        commandSecret,
+        heartbeatSecret,
+        integrationCommandSecret,
+        integrationHeartbeatSecret,
+        downloadInternalAuthSecret,
+        downloadHeartbeatSecret,
+      ]).size,
+      6,
+    );
     const adminDatabaseUrl =
       `postgres://postgres:${encodeURIComponent(postgresAdminPassword)}` +
       "@db:5432/apollo_trackfinder";
@@ -667,7 +693,24 @@ export async function prepareSecretDirectory(environment, options = {}) {
     const runtimeDatabaseUrl =
       `postgres://apollo_tf_runtime:${encodeURIComponent(runtimePassword)}` +
       "@db:5432/apollo_trackfinder";
+    const integrationMigratorDatabaseUrl =
+      "postgres://apollo_tf_integrations_migrator:" +
+      `${encodeURIComponent(integrationMigratorPassword)}` +
+      "@tf-integrations-postgres:5432/apollo_tf_integrations";
+    const integrationRuntimeDatabaseUrl =
+      "postgres://apollo_tf_integrations_runtime:" +
+      `${encodeURIComponent(integrationRuntimePassword)}` +
+      "@tf-integrations-postgres:5432/apollo_tf_integrations";
+    const integrationTokenKeyring = JSON.stringify({
+      activeKeyId: "search-smoke-v1",
+      keys: { "search-smoke-v1": integrationTokenKey },
+    });
+    const downloadQueueRedisUrl =
+      `redis://default:${encodeURIComponent(downloadQueuePassword)}` +
+      "@tf-download-redis:6379/0";
     const heartbeatKeys = JSON.stringify({
+      "account-integrations": integrationHeartbeatSecret,
+      "download-worker": downloadHeartbeatSecret,
       "search-media": heartbeatSecret,
     });
     const secrets = [
@@ -681,6 +724,20 @@ export async function prepareSecretDirectory(environment, options = {}) {
       ["tf_module_heartbeat_keys", heartbeatKeys],
       ["tf_search_heartbeat_secret", heartbeatSecret],
       ["tf_search_internal_auth_secret", commandSecret],
+      ["tf_integrations_postgres_admin_password", integrationAdminPassword],
+      ["tf_integrations_migrator_password", integrationMigratorPassword],
+      ["tf_integrations_runtime_password", integrationRuntimePassword],
+      ["tf_integrations_migrator_database_url", integrationMigratorDatabaseUrl],
+      ["tf_integrations_runtime_database_url", integrationRuntimeDatabaseUrl],
+      ["tf_integrations_token_keyring", integrationTokenKeyring],
+      ["tf_integrations_spotify_client_id", integrationSpotifyClientId],
+      ["tf_integrations_spotify_client_secret", integrationSpotifyClientSecret],
+      ["tf_integrations_internal_auth_secret", integrationCommandSecret],
+      ["tf_integrations_heartbeat_secret", integrationHeartbeatSecret],
+      ["tf_download_queue_password", downloadQueuePassword],
+      ["tf_download_queue_redis_url", downloadQueueRedisUrl],
+      ["tf_download_internal_auth_secret", downloadInternalAuthSecret],
+      ["tf_download_heartbeat_secret", downloadHeartbeatSecret],
     ];
 
     for (const [name, value] of secrets) {
@@ -703,7 +760,10 @@ export async function prepareSecretDirectory(environment, options = {}) {
     return Object.freeze({
       directory: directory.lexicalCandidate,
       ownership,
-      rawSecretCanaries: Object.freeze(secrets.map(([, value]) => value)),
+      rawSecretCanaries: Object.freeze([
+        ...secrets.map(([, value]) => value),
+        integrationTokenKey,
+      ]),
       secretNames: Object.freeze(secrets.map(([name]) => name)),
     });
   } catch (error) {
@@ -716,10 +776,25 @@ export async function prepareSecretDirectory(environment, options = {}) {
   }
 }
 
-function safePort(environment) {
-  const raw =
-    environment.TF_SEARCH_SMOKE_API_PORT ??
-    String(18_000 + (process.pid % 1_000));
+async function safePort(environment) {
+  if (environment.TF_SEARCH_SMOKE_API_PORT === undefined) {
+    return new Promise((resolvePort, rejectPort) => {
+      const server = createServer();
+      server.once("error", rejectPort);
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (address === null || typeof address === "string") {
+          server.close();
+          rejectPort(new Error("Unable to reserve smoke API port"));
+          return;
+        }
+        server.close((error) =>
+          error === undefined ? resolvePort(address.port) : rejectPort(error),
+        );
+      });
+    });
+  }
+  const raw = environment.TF_SEARCH_SMOKE_API_PORT;
   if (!/^\d+$/.test(raw)) throw new Error("Invalid smoke API port");
   const port = Number(raw);
   if (!Number.isInteger(port) || port < 1_024 || port > 65_535) {
@@ -766,8 +841,7 @@ server.listen(8080, "0.0.0.0");
 `;
 }
 
-async function writeSmokeOverride(environment, prepared, repositoryRoot) {
-  const port = safePort(environment);
+async function writeSmokeOverride(environment, prepared, repositoryRoot, port) {
   const overridePath = assertWorkspaceContainedPath(
     join(prepared.directory, "compose.smoke.yml"),
     repositoryRoot,
@@ -937,7 +1011,7 @@ async function provisionNativeSecretOwnership(
   );
 }
 
-function configuredEnvironment(environment) {
+function configuredEnvironment(environment, port) {
   const configured = { ...environment };
   for (const name of SENSITIVE_ENVIRONMENT) {
     for (const key of Object.keys(configured)) {
@@ -946,7 +1020,7 @@ function configuredEnvironment(environment) {
   }
   delete configured.COMPOSE_PROJECT_NAME;
   configured.COMPOSE_BAKE = "false";
-  configured.TF_API_PORT = String(safePort(environment));
+  configured.TF_API_PORT = String(port);
   return configured;
 }
 
@@ -1028,10 +1102,15 @@ export async function runTfSearchSmoke(options) {
     originalEnvironment,
     docker,
   );
-  const environment = configuredEnvironment(selectorSafeEnvironment);
+  const port = await safePort(selectorSafeEnvironment);
+  const environment = configuredEnvironment(selectorSafeEnvironment, port);
   const project = `apollo-tf-search-smoke-${process.pid}-${randomBytes(4).toString("hex")}`;
   environment.COMPOSE_PROJECT_NAME = project;
   environment.TF_API_IMAGE = `${project}-api:smoke`;
+  environment.TF_DOWNLOAD_REDIS_IMAGE = `${project}-tf-download-redis:smoke`;
+  environment.TF_DOWNLOAD_WORKER_IMAGE = `${project}-tf-download-worker:smoke`;
+  environment.TF_INTEGRATIONS_IMAGE = `${project}-tf-integrations:smoke`;
+  environment.TF_INTEGRATIONS_POSTGRES_IMAGE = `${project}-tf-integrations-postgres:smoke`;
   environment.TF_POSTGRES_IMAGE = `${project}-postgres:smoke`;
 
   let prepared;
@@ -1076,6 +1155,7 @@ export async function runTfSearchSmoke(options) {
       environment,
       prepared,
       repositoryRoot,
+      port,
     );
     overridePath = override.overridePath;
     compose = (args) =>
@@ -1104,6 +1184,11 @@ export async function runTfSearchSmoke(options) {
       "redis",
       "platform-api",
       "tf-search",
+      "tf-integrations-postgres",
+      "tf-integrations-migrate",
+      "tf-integrations",
+      "tf-download-redis",
+      "tf-download-worker",
       "api",
     ]);
     const exerciseStack = options.exerciseStack ?? exerciseRealStack;
@@ -1125,6 +1210,11 @@ export async function runTfSearchSmoke(options) {
       "db",
       "tf-migrate",
       "tf-search",
+      "tf-integrations",
+      "tf-integrations-migrate",
+      "tf-integrations-postgres",
+      "tf-download-redis",
+      "tf-download-worker",
     ]);
     logsCollected = true;
     const logText = `${logs.stdout}\n${logs.stderr}`;
@@ -1142,6 +1232,11 @@ export async function runTfSearchSmoke(options) {
           "db",
           "tf-migrate",
           "tf-search",
+          "tf-integrations",
+          "tf-integrations-migrate",
+          "tf-integrations-postgres",
+          "tf-download-redis",
+          "tf-download-worker",
         ]);
         const logText = `${logs.stdout}\n${logs.stderr}`;
         assertSecretFree(

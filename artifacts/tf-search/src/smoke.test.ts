@@ -16,6 +16,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
+import { createServer } from "node:net";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -221,7 +222,7 @@ function successfulObservations(): SmokeObservations {
 }
 
 describe("tf-search disposable smoke contract", () => {
-  it("defines the physical source ownership for all six TF database secrets", async () => {
+  it("defines the physical source ownership for every prepared stack secret", async () => {
     const smoke = await loadSmokeModule();
 
     expect(smoke.tfSecretSourceOwnership("tf_admin_database_url")).toEqual({
@@ -233,6 +234,10 @@ describe("tf-search disposable smoke contract", () => {
       "tf_postgres_admin_password",
       "tf_migrator_password",
       "tf_runtime_password",
+      "tf_integrations_postgres_admin_password",
+      "tf_integrations_migrator_password",
+      "tf_integrations_runtime_password",
+      "tf_download_queue_password",
     ]) {
       expect(smoke.tfSecretSourceOwnership(name)).toEqual({
         uid: 999,
@@ -243,6 +248,8 @@ describe("tf-search disposable smoke contract", () => {
     for (const name of [
       "tf_migrator_database_url",
       "tf_runtime_database_url",
+      "tf_integrations_migrator_database_url",
+      "tf_integrations_runtime_database_url",
     ]) {
       expect(smoke.tfSecretSourceOwnership(name)).toEqual({
         uid: 10001,
@@ -308,6 +315,48 @@ describe("tf-search disposable smoke contract", () => {
     expect(smoke.observedRequestsPerMinute(0, 3, 1)).toBe(3);
   });
 
+  it("reserves a free loopback API port when the legacy default is occupied", async () => {
+    const smoke = await loadSmokeModule();
+    const docker = fakeDocker();
+    const legacyPort = 18_000 + (process.pid % 1_000);
+    const blocker = createServer();
+    let blockerListening = false;
+    await new Promise<void>((resolveListen, rejectListen) => {
+      blocker.once("error", (error: NodeJS.ErrnoException) =>
+        error.code === "EADDRINUSE" ? resolveListen() : rejectListen(error),
+      );
+      blocker.listen(legacyPort, "127.0.0.1", () => {
+        blockerListening = true;
+        resolveListen();
+      });
+    });
+    const environment = { ...process.env };
+    delete environment.TF_SEARCH_SMOKE_API_PORT;
+    let apiOrigin = "";
+
+    try {
+      await smoke.runTfSearchSmoke({
+        environment,
+        repositoryRoot,
+        temporaryParent: searchTestTemporaryParent,
+        docker: docker.run,
+        exerciseStack: async (context) => {
+          apiOrigin = context.apiOrigin;
+          return successfulObservations();
+        },
+      });
+      expect(new URL(apiOrigin).port).not.toBe(String(legacyPort));
+    } finally {
+      if (blockerListening) {
+        await new Promise<void>((resolveClose, rejectClose) => {
+          blocker.close((error) =>
+            error === undefined ? resolveClose() : rejectClose(error),
+          );
+        });
+      }
+    }
+  });
+
   it("isolates per-run secrets from a concurrent API temp owner", async () => {
     const smoke = await loadSmokeModule();
     const environment = { ...process.env };
@@ -341,6 +390,20 @@ describe("tf-search disposable smoke contract", () => {
       expect([...prepared.secretNames].sort()).toEqual([
         "tf_admin_database_url",
         "tf_client_secret",
+        "tf_download_heartbeat_secret",
+        "tf_download_internal_auth_secret",
+        "tf_download_queue_password",
+        "tf_download_queue_redis_url",
+        "tf_integrations_heartbeat_secret",
+        "tf_integrations_internal_auth_secret",
+        "tf_integrations_migrator_database_url",
+        "tf_integrations_migrator_password",
+        "tf_integrations_postgres_admin_password",
+        "tf_integrations_runtime_database_url",
+        "tf_integrations_runtime_password",
+        "tf_integrations_spotify_client_id",
+        "tf_integrations_spotify_client_secret",
+        "tf_integrations_token_keyring",
         "tf_migrator_database_url",
         "tf_migrator_password",
         "tf_module_heartbeat_keys",
@@ -359,13 +422,43 @@ describe("tf-search disposable smoke contract", () => {
         join(prepared.directory, "tf_search_heartbeat_secret"),
         "utf8",
       );
+      const integrationHeartbeatSecret = await readFile(
+        join(prepared.directory, "tf_integrations_heartbeat_secret"),
+        "utf8",
+      );
+      const downloadHeartbeatSecret = await readFile(
+        join(prepared.directory, "tf_download_heartbeat_secret"),
+        "utf8",
+      );
       const heartbeatMap = JSON.parse(
         await readFile(
           join(prepared.directory, "tf_module_heartbeat_keys"),
           "utf8",
         ),
       ) as Record<string, string>;
-      expect(heartbeatMap).toEqual({ "search-media": heartbeatSecret });
+      expect(heartbeatMap).toEqual({
+        "account-integrations": integrationHeartbeatSecret,
+        "download-worker": downloadHeartbeatSecret,
+        "search-media": heartbeatSecret,
+      });
+      expect(new Set(Object.values(heartbeatMap)).size).toBe(3);
+      for (const value of Object.values(heartbeatMap)) {
+        expect(value.length).toBeGreaterThanOrEqual(32);
+        expect(value.length).toBeLessThanOrEqual(128);
+      }
+
+      const downloadQueuePassword = await readFile(
+        join(prepared.directory, "tf_download_queue_password"),
+        "utf8",
+      );
+      const downloadQueueUrl = await readFile(
+        join(prepared.directory, "tf_download_queue_redis_url"),
+        "utf8",
+      );
+      expect(downloadQueueUrl).toBe(
+        `redis://default:${encodeURIComponent(downloadQueuePassword)}` +
+          "@tf-download-redis:6379/0",
+      );
 
       await smoke.removeVerifiedDirectory(prepared.directory, {
         ownership: prepared.ownership,

@@ -388,6 +388,9 @@ async function prepareSecrets(
     const integrationRuntimePassword = generatedSecret();
     const integrationCommandSecret = generatedSecret();
     const integrationHeartbeatSecret = generatedSecret();
+    const downloadQueuePassword = generatedSecret();
+    const downloadInternalAuthSecret = generatedSecret();
+    const downloadHeartbeatSecret = generatedSecret();
     const spotifyClientId = generatedSecret();
     const spotifyClientSecret = generatedSecret();
     const key = randomBytes(32);
@@ -410,12 +413,16 @@ async function prepareSecrets(
       "postgres://apollo_tf_integrations_runtime:" +
       `${encodeURIComponent(integrationRuntimePassword)}` +
       "@tf-integrations-postgres:5432/apollo_tf_integrations";
+    const downloadQueueRedisUrl =
+      `redis://default:${encodeURIComponent(downloadQueuePassword)}` +
+      "@tf-download-redis:6379/0";
     const keyring = JSON.stringify({
       activeKeyId: "smoke-v1",
       keys: { "smoke-v1": key.toString("base64url") },
     });
     const heartbeatKeys = JSON.stringify({
       "account-integrations": integrationHeartbeatSecret,
+      "download-worker": downloadHeartbeatSecret,
       "search-media": searchHeartbeatSecret,
     });
     const secrets = [
@@ -440,6 +447,10 @@ async function prepareSecrets(
       ["tf_integrations_internal_auth_secret", integrationCommandSecret],
       ["tf_integrations_heartbeat_secret", integrationHeartbeatSecret],
       ["tf_integrations_smoke_token", token],
+      ["tf_download_queue_password", downloadQueuePassword],
+      ["tf_download_queue_redis_url", downloadQueueRedisUrl],
+      ["tf_download_internal_auth_secret", downloadInternalAuthSecret],
+      ["tf_download_heartbeat_secret", downloadHeartbeatSecret],
     ] as const;
     const postgresOwned = new Set([
       "tf_postgres_admin_password",
@@ -448,6 +459,7 @@ async function prepareSecrets(
       "tf_integrations_postgres_admin_password",
       "tf_integrations_migrator_password",
       "tf_integrations_runtime_password",
+      "tf_download_queue_password",
     ]);
     const owners = secrets.map(([name]) =>
       name === "tf_admin_database_url"
@@ -1164,6 +1176,8 @@ async function rolePrivilegeObservations(
 const assignedIntegrationSecrets = {
   api: [
     "tf_client_secret",
+    "tf_download_internal_auth_secret",
+    "tf_download_queue_redis_url",
     "tf_integrations_internal_auth_secret",
     "tf_integrations_smoke_token",
     "tf_module_heartbeat_keys",
@@ -1174,6 +1188,12 @@ const assignedIntegrationSecrets = {
     "tf_migrator_password",
     "tf_postgres_admin_password",
     "tf_runtime_password",
+  ],
+  "tf-download-redis": ["tf_download_queue_password"],
+  "tf-download-worker": [
+    "tf_download_heartbeat_secret",
+    "tf_download_internal_auth_secret",
+    "tf_download_queue_redis_url",
   ],
   "tf-migrate": ["tf_migrator_database_url"],
   "tf-integrations": [
@@ -1222,6 +1242,16 @@ async function secretTargetStatObservations(
       names: assignedIntegrationSecrets.db,
       service: "db",
       uid: 999,
+    },
+    {
+      names: assignedIntegrationSecrets["tf-download-redis"],
+      service: "tf-download-redis",
+      uid: 999,
+    },
+    {
+      names: assignedIntegrationSecrets["tf-download-worker"],
+      service: "tf-download-worker",
+      uid: 10001,
     },
   ] as const;
   const results: Array<{
@@ -1544,6 +1574,8 @@ function inspectRuntimeContract(
   const module = current("tf-integrations");
   const migrate = current("tf-integrations-migrate");
   const postgres = current("tf-integrations-postgres");
+  const downloadRedis = current("tf-download-redis");
+  const downloadWorker = current("tf-download-worker");
   if (!hardened(tfMigrate) || !hardened(module) || !hardened(migrate)) {
     throw new Error("Docker inspect least-privilege contract failed");
   }
@@ -1551,6 +1583,8 @@ function inspectRuntimeContract(
     JSON.stringify(attachedNetworks(api)) !==
       JSON.stringify([
         "tf-data",
+        "tf-download-control",
+        "tf-download-queue",
         "tf-edge",
         "tf-integrations-control",
         "tf-search-control",
@@ -1567,7 +1601,15 @@ function inspectRuntimeContract(
     JSON.stringify(attachedNetworks(migrate)) !==
       JSON.stringify(["tf-integrations-data"]) ||
     JSON.stringify(attachedNetworks(postgres)) !==
-      JSON.stringify(["tf-integrations-data"])
+      JSON.stringify(["tf-integrations-data"]) ||
+    JSON.stringify(attachedNetworks(downloadRedis)) !==
+      JSON.stringify(["tf-download-queue"]) ||
+    JSON.stringify(attachedNetworks(downloadWorker)) !==
+      JSON.stringify([
+        "tf-download-control",
+        "tf-download-egress",
+        "tf-download-queue",
+      ])
   ) {
     throw new Error("Docker inspect network-isolation contract failed");
   }
@@ -1586,11 +1628,31 @@ function inspectRuntimeContract(
       memory: 256 * 1024 * 1024,
       nanoCpus: 500_000_000,
       pids: 64,
+    }) ||
+    !hasLimits(downloadRedis, {
+      memory: 256 * 1024 * 1024,
+      nanoCpus: 500_000_000,
+      pids: 128,
+    }) ||
+    !hasLimits(downloadWorker, {
+      memory: 1024 * 1024 * 1024,
+      nanoCpus: 2_000_000_000,
+      pids: 256,
     })
   ) {
     throw new Error("Docker inspect resource-limit contract failed");
   }
-  if (![db, tfMigrate, module, migrate, postgres].every(noBindings)) {
+  if (
+    ![
+      db,
+      tfMigrate,
+      module,
+      migrate,
+      postgres,
+      downloadRedis,
+      downloadWorker,
+    ].every(noBindings)
+  ) {
     throw new Error("Docker inspect host-port contract failed");
   }
 
@@ -1619,7 +1681,11 @@ function inspectRuntimeContract(
     JSON.stringify(secretTargets(tfMigrate)) !==
       JSON.stringify(assignedIntegrationSecrets["tf-migrate"]) ||
     JSON.stringify(secretTargets(api)) !==
-      JSON.stringify(assignedIntegrationSecrets.api)
+      JSON.stringify(assignedIntegrationSecrets.api) ||
+    JSON.stringify(secretTargets(downloadRedis)) !==
+      JSON.stringify(assignedIntegrationSecrets["tf-download-redis"]) ||
+    JSON.stringify(secretTargets(downloadWorker)) !==
+      JSON.stringify(assignedIntegrationSecrets["tf-download-worker"])
   ) {
     throw new Error("Docker inspect secret-ownership contract failed");
   }
@@ -1629,11 +1695,19 @@ function inspectRuntimeContract(
   const apiState = state(api);
   const moduleState = state(module);
   const postgresState = state(postgres);
+  const downloadRedisState = state(downloadRedis);
+  const downloadWorkerState = state(downloadWorker);
   const moduleHealth = isRecord(moduleState.Health)
     ? moduleState.Health.Status
     : undefined;
   const postgresHealth = isRecord(postgresState.Health)
     ? postgresState.Health.Status
+    : undefined;
+  const downloadRedisHealth = isRecord(downloadRedisState.Health)
+    ? downloadRedisState.Health.Status
+    : undefined;
+  const downloadWorkerHealth = isRecord(downloadWorkerState.Health)
+    ? downloadWorkerState.Health.Status
     : undefined;
   const migrationFinished =
     typeof migrateState.FinishedAt === "string"
@@ -1651,6 +1725,10 @@ function inspectRuntimeContract(
     typeof apiState.StartedAt === "string"
       ? Date.parse(apiState.StartedAt)
       : Number.NaN;
+  const downloadWorkerStarted =
+    typeof downloadWorkerState.StartedAt === "string"
+      ? Date.parse(downloadWorkerState.StartedAt)
+      : Number.NaN;
   if (
     tfMigrationState.Status !== "exited" ||
     tfMigrationState.ExitCode !== 0 ||
@@ -1658,12 +1736,16 @@ function inspectRuntimeContract(
     migrateState.ExitCode !== 0 ||
     moduleHealth !== "healthy" ||
     postgresHealth !== "healthy" ||
+    downloadRedisHealth !== "healthy" ||
+    downloadWorkerHealth !== "healthy" ||
     !Number.isFinite(migrationFinished) ||
     !Number.isFinite(moduleStarted) ||
     !Number.isFinite(tfMigrationFinished) ||
     !Number.isFinite(apiStarted) ||
+    !Number.isFinite(downloadWorkerStarted) ||
     moduleStarted < migrationFinished ||
-    apiStarted < tfMigrationFinished
+    apiStarted < tfMigrationFinished ||
+    apiStarted < downloadWorkerStarted
   ) {
     throw new Error("Docker inspect migration-gating contract failed");
   }
@@ -1744,6 +1826,8 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
   environment.COMPOSE_PROJECT_NAME = project;
   environment.TF_API_PORT = String(await reserveLoopbackPort());
   environment.TF_API_IMAGE = `${project}-api:smoke`;
+  environment.TF_DOWNLOAD_REDIS_IMAGE = `${project}-tf-download-redis:smoke`;
+  environment.TF_DOWNLOAD_WORKER_IMAGE = `${project}-tf-download-worker:smoke`;
   environment.TF_POSTGRES_IMAGE = `${project}-postgres:smoke`;
   environment.TF_INTEGRATIONS_IMAGE = `${project}-tf-integrations:smoke`;
   environment.TF_INTEGRATIONS_POSTGRES_IMAGE = `${project}-tf-integrations-postgres:smoke`;
@@ -1788,6 +1872,8 @@ async function runDisposableSmoke(): Promise<SmokeResult> {
       "tf-integrations-postgres",
       "tf-integrations-migrate",
       "tf-integrations",
+      "tf-download-redis",
+      "tf-download-worker",
       "api",
     ]);
 
@@ -2075,6 +2161,107 @@ describe("tf-integrations smoke fixture gate", () => {
   });
 });
 
+describe("tf-integrations disposable smoke secret contract", () => {
+  it("prepares the final API and download startup secret contract", async () => {
+    const environment: NodeJS.ProcessEnv = {};
+    let prepared: PreparedSecrets | undefined;
+
+    try {
+      prepared = await prepareSecrets(environment);
+
+      expect([...prepared.secretNames].sort()).toEqual([
+        "tf_admin_database_url",
+        "tf_client_secret",
+        "tf_download_heartbeat_secret",
+        "tf_download_internal_auth_secret",
+        "tf_download_queue_password",
+        "tf_download_queue_redis_url",
+        "tf_integrations_heartbeat_secret",
+        "tf_integrations_internal_auth_secret",
+        "tf_integrations_migrator_database_url",
+        "tf_integrations_migrator_password",
+        "tf_integrations_postgres_admin_password",
+        "tf_integrations_runtime_database_url",
+        "tf_integrations_runtime_password",
+        "tf_integrations_smoke_token",
+        "tf_integrations_spotify_client_id",
+        "tf_integrations_spotify_client_secret",
+        "tf_integrations_token_keyring",
+        "tf_migrator_database_url",
+        "tf_migrator_password",
+        "tf_module_heartbeat_keys",
+        "tf_postgres_admin_password",
+        "tf_runtime_database_url",
+        "tf_runtime_password",
+        "tf_search_heartbeat_secret",
+        "tf_search_internal_auth_secret",
+      ]);
+      expect(environment.TF_SECRET_DIRECTORY).toBe(prepared.directory);
+
+      const integrationHeartbeatSecret = await readFile(
+        join(prepared.directory, "tf_integrations_heartbeat_secret"),
+        "utf8",
+      );
+      const searchHeartbeatSecret = await readFile(
+        join(prepared.directory, "tf_search_heartbeat_secret"),
+        "utf8",
+      );
+      const downloadHeartbeatSecret = await readFile(
+        join(prepared.directory, "tf_download_heartbeat_secret"),
+        "utf8",
+      );
+      const heartbeatMapText = await readFile(
+        join(prepared.directory, "tf_module_heartbeat_keys"),
+        "utf8",
+      );
+      expect(JSON.parse(heartbeatMapText)).toEqual({
+        "account-integrations": integrationHeartbeatSecret,
+        "download-worker": downloadHeartbeatSecret,
+        "search-media": searchHeartbeatSecret,
+      });
+      expect(
+        new Set([
+          integrationHeartbeatSecret,
+          searchHeartbeatSecret,
+          downloadHeartbeatSecret,
+        ]).size,
+      ).toBe(3);
+
+      const downloadQueuePassword = await readFile(
+        join(prepared.directory, "tf_download_queue_password"),
+        "utf8",
+      );
+      const downloadQueueUrl = await readFile(
+        join(prepared.directory, "tf_download_queue_redis_url"),
+        "utf8",
+      );
+      const downloadInternalAuthSecret = await readFile(
+        join(prepared.directory, "tf_download_internal_auth_secret"),
+        "utf8",
+      );
+      expect(downloadQueueUrl).toBe(
+        `redis://default:${encodeURIComponent(downloadQueuePassword)}` +
+          "@tf-download-redis:6379/0",
+      );
+
+      for (const value of [
+        integrationHeartbeatSecret,
+        searchHeartbeatSecret,
+        downloadHeartbeatSecret,
+        downloadQueuePassword,
+        downloadQueueUrl,
+        downloadInternalAuthSecret,
+        heartbeatMapText,
+      ]) {
+        expect(prepared.canaries).toContain(value);
+        expect(prepared.canaries).toContain(digest(value));
+      }
+    } finally {
+      if (prepared !== undefined) await removePreparedSecrets(prepared);
+    }
+  });
+});
+
 describe("tf-integrations smoke failure redaction", () => {
   it("drops command output properties before propagating a failure", () => {
     const canary = generatedSecret();
@@ -2191,6 +2378,8 @@ function inspectContractFixture(
       HostConfig: { PortBindings: {} },
       Mounts: mounts([
         "tf_client_secret",
+        "tf_download_internal_auth_secret",
+        "tf_download_queue_redis_url",
         "tf_integrations_internal_auth_secret",
         "tf_integrations_smoke_token",
         "tf_module_heartbeat_keys",
@@ -2199,11 +2388,41 @@ function inspectContractFixture(
       ]),
       NetworkSettings: networks([
         "tf-data",
+        "tf-download-control",
+        "tf-download-queue",
         "tf-edge",
         "tf-integrations-control",
         "tf-search-control",
       ]),
       State: { StartedAt: "2026-07-25T12:00:02.000Z" },
+    },
+    {
+      Config: { ...labels("tf-download-redis"), User: "999:999" },
+      HostConfig: hardenedHost(500_000_000, 256 * 1024 * 1024, 128),
+      Mounts: mounts(["tf_download_queue_password"]),
+      NetworkSettings: networks(["tf-download-queue"]),
+      State: {
+        Health: { Status: "healthy" },
+        StartedAt: "2026-07-25T12:00:00.000Z",
+      },
+    },
+    {
+      Config: { ...labels("tf-download-worker"), User: "10001:10001" },
+      HostConfig: hardenedHost(2_000_000_000, 1024 * 1024 * 1024, 256),
+      Mounts: mounts([
+        "tf_download_heartbeat_secret",
+        "tf_download_internal_auth_secret",
+        "tf_download_queue_redis_url",
+      ]),
+      NetworkSettings: networks([
+        "tf-download-control",
+        "tf-download-egress",
+        "tf-download-queue",
+      ]),
+      State: {
+        Health: { Status: "healthy" },
+        StartedAt: "2026-07-25T12:00:01.000Z",
+      },
     },
     {
       Config: { ...labels("tf-integrations"), User: "10001:10001" },

@@ -1,12 +1,12 @@
 # Apollo TF implementation status
 
-Last updated: 2026-07-27.
+Last updated: 2026-07-28.
 
 ## TF immutable migrations release candidate
 
 Status: `LOCAL_RELEASE_VALIDATED`. The active branch is
 `codex/feat/tf-immutable-migrations`; no remote mutation or push is part of
-Task 2.
+this local final-fix wave.
 
 - Apollo TF uses immutable, checksummed migrations `0001` and `0002`, exact
   prefix/full-history validation, a bounded advisory lock, separate
@@ -34,7 +34,7 @@ Task 2.
   renaming a cluster role, malformed-catalog rejection, and absence of
   provider-token tables/grants. Without the integration environment the DB
   file passes twenty-three pure contracts and skips eleven live tests; the full
-  ordinary DB package passes forty-six tests and skips the same eleven.
+  ordinary DB package passes `49 passed / 11 skipped / 60 collected`.
 - The disposable runner creates `apollo_tf_test_<run_id>`, an alternate
   database, and an external sentinel outside the managed/reset object list. It
   sets the target marker and exact sentinel content derived from the run ID;
@@ -57,10 +57,23 @@ Task 2.
   bounded readiness, failure cleanup, and a zero-resource audit. No production
   migration or role implementation change was required by the real database
   proof.
-- The full local matrix passed: DB, API, search, integrations, download-worker,
-  and Platform test suites; root typecheck; API and Platform production builds;
-  all three Compose config renders; formatting and diff checks. The separate
-  role-bootstrap Docker proof passed 4/4 and its exact cleanup audit was zero.
+- The final local matrix passed: DB, API, search, integrations, download-worker,
+  and capped Platform test suites; root typecheck; API and Platform production
+  builds; all three Compose config renders; formatting and diff checks.
+- The PostgreSQL 16 role-bootstrap proof passed `4/4`. A normal-OID
+  `pg_catalog` routine with `PUBLIC EXECUTE` revoked, retained built-in direct
+  ACLs, and an extension-owned direct ACL all failed closed; exact ACL and
+  managed-role state snapshots were unchanged after rollback. Admin cleanup
+  removed only the canaries before successful normalization, and the exact
+  owned-resource audit was zero.
+- The required final-stack real-Docker smokes passed search `22/22` and
+  integrations `18/18`. Each booted the exact three-key heartbeat map and
+  authenticated download queue/API secret contract, then left zero owned
+  containers, networks, volumes, images/references, and temporary directories.
+- The uncapped Platform command had previously lost a Vitest worker twice
+  without an assertion failure on this memory-constrained host. The required
+  capped run passed `422 passed / 21 skipped / 443 collected`; no Platform
+  production or test code was changed for that local resource event.
 - The live Platform/TF bridge passed `423/443` collected tests with `20`
   explicit skips and exact success output for the closed-registration, portal,
   PKCE, replay, entitlement grant/revoke, download admission, and WebSocket

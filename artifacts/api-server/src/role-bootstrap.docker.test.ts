@@ -653,6 +653,11 @@ describe
           security definer
           set search_path = pg_catalog
           as 'select 1';
+        revoke execute on function
+          pg_catalog.apollo_tf_system_namespace_canary() from public;
+        grant execute on function
+          pg_catalog.apollo_tf_system_namespace_canary()
+          to apollo_tf_runtime;
         grant all privileges on database apollo_trackfinder to apollo_tf_runtime;
         grant all privileges on database postgres to apollo_tf_runtime;
         grant create on tablespace pg_default to apollo_tf_runtime;
@@ -730,6 +735,70 @@ describe
       `);
       expect(publicCanaries.stdout.toString()).toContain("t|t|t|t|t");
 
+      const retainedDirectAclAndRoleState = `
+        select concat_ws('|',
+          (
+            select routines.proacl::text
+            from pg_proc routines
+            where routines.oid =
+              'pg_catalog.apollo_tf_system_namespace_canary()'::regprocedure
+          ),
+          (
+            select relations.relacl::text
+            from pg_class relations
+            where relations.oid = 'pg_catalog.pg_authid'::regclass
+          ),
+          (
+            select routines.proacl::text
+            from pg_proc routines
+            where routines.oid =
+              'pg_catalog.pg_sleep(double precision)'::regprocedure
+          ),
+          (
+            select types.typacl::text
+            from pg_type types
+            where types.oid = 'pg_catalog.int4'::regtype
+          ),
+          (
+            select row(
+              roles.rolconnlimit,
+              roles.rolvaliduntil,
+              roles.rolpassword
+            )::text
+            from pg_authid roles
+            where roles.rolname = 'apollo_tf_runtime'
+          ),
+          (
+            select row(
+              roles.rolconnlimit,
+              roles.rolvaliduntil,
+              roles.rolpassword
+            )::text
+            from pg_authid roles
+            where roles.rolname = 'apollo_tf_migrator'
+          ),
+          (
+            select string_agg(
+              concat_ws(
+                ':',
+                roles.rolname,
+                settings.setdatabase,
+                settings.setconfig::text
+              ),
+              ';' order by roles.rolname, settings.setdatabase
+            )
+            from pg_db_role_setting settings
+            join pg_roles roles on roles.oid = settings.setrole
+            where roles.rolname in (
+              'apollo_tf_migrator',
+              'apollo_tf_runtime'
+            )
+          )
+        );
+      `;
+      const retainedStateBefore = await psqlAdmin(
+        retainedDirectAclAndRoleState,
+      );
       const systemNamespaceCanaryBefore = await psqlAdmin(`
         select concat_ws('|',
           (
@@ -738,26 +807,75 @@ describe
             where routines.oid =
               'pg_catalog.apollo_tf_system_namespace_canary()'::regprocedure
           ),
-          has_function_privilege(
+          not has_function_privilege(
             'public',
             'pg_catalog.apollo_tf_system_namespace_canary()',
             'execute'
           ),
-          has_function_privilege(
-            'apollo_tf_runtime',
-            'pg_catalog.apollo_tf_system_namespace_canary()',
-            'execute'
-          ),
-          (
-            select routines.proacl is null
+          exists (
+            select 1
             from pg_proc routines
+            cross join lateral aclexplode(routines.proacl) acl
             where routines.oid =
               'pg_catalog.apollo_tf_system_namespace_canary()'::regprocedure
+              and acl.grantee = (
+                select oid
+                from pg_roles
+                where rolname = 'apollo_tf_runtime'
+              )
+              and acl.privilege_type = 'EXECUTE'
+              and not acl.is_grantable
+          ),
+          exists (
+            select 1
+            from pg_class relations
+            cross join lateral aclexplode(relations.relacl) acl
+            where relations.oid = 'pg_catalog.pg_authid'::regclass
+              and acl.grantee = (
+                select oid
+                from pg_roles
+                where rolname = 'apollo_tf_runtime'
+              )
+              and acl.privilege_type = 'SELECT'
+              and not acl.is_grantable
+          ),
+          exists (
+            select 1
+            from pg_proc routines
+            cross join lateral aclexplode(routines.proacl) acl
+            where routines.oid =
+              'pg_catalog.pg_sleep(double precision)'::regprocedure
+              and acl.grantee = (
+                select oid
+                from pg_roles
+                where rolname = 'apollo_tf_runtime'
+              )
+              and acl.privilege_type = 'EXECUTE'
+              and not acl.is_grantable
+          ),
+          exists (
+            select 1
+            from pg_type types
+            cross join lateral aclexplode(types.typacl) acl
+            where types.oid = 'pg_catalog.int4'::regtype
+              and acl.grantee = (
+                select oid
+                from pg_roles
+                where rolname = 'apollo_tf_runtime'
+              )
+              and acl.privilege_type = 'USAGE'
+              and not acl.is_grantable
+          ),
+          (
+            select roles.rolconnlimit = 0
+              and roles.rolvaliduntil = '2000-01-01'::timestamptz
+            from pg_roles roles
+            where roles.rolname = 'apollo_tf_runtime'
           )
         );
       `);
       expect(systemNamespaceCanaryBefore.stdout.toString()).toContain(
-        "t|t|t|t",
+        "t|t|t|t|t|t|t",
       );
 
       const systemNamespaceCanaryFailure = await runManualBootstrap(true);
@@ -765,6 +883,10 @@ describe
       expect(systemNamespaceCanaryFailure.stdout.toString()).toBe("");
       expect(systemNamespaceCanaryFailure.stderr.toString()).toBe(
         "TF role bootstrap failed\n",
+      );
+      const retainedStateAfter = await psqlAdmin(retainedDirectAclAndRoleState);
+      expect(retainedStateAfter.stdout.toString()).toBe(
+        retainedStateBefore.stdout.toString(),
       );
       const systemNamespaceCanaryRollback = await psqlAdmin(`
         select concat_ws('|',
@@ -774,16 +896,24 @@ describe
             where routines.oid =
               'pg_catalog.apollo_tf_system_namespace_canary()'::regprocedure
           ),
-          has_function_privilege(
+          not has_function_privilege(
             'public',
             'pg_catalog.apollo_tf_system_namespace_canary()',
             'execute'
           ),
-          (
-            select routines.proacl is null
+          exists (
+            select 1
             from pg_proc routines
+            cross join lateral aclexplode(routines.proacl) acl
             where routines.oid =
               'pg_catalog.apollo_tf_system_namespace_canary()'::regprocedure
+              and acl.grantee = (
+                select oid
+                from pg_roles
+                where rolname = 'apollo_tf_runtime'
+              )
+              and acl.privilege_type = 'EXECUTE'
+              and not acl.is_grantable
           ),
           (
             select routines.prosecdef
@@ -793,18 +923,26 @@ describe
               'pg_catalog.apollo_tf_system_namespace_canary()'::regprocedure
           ),
           (
-            select rolconnlimit
-            from pg_roles
-            where rolname = 'apollo_tf_runtime'
+            select roles.rolconnlimit = 0
+              and roles.rolvaliduntil = '2000-01-01'::timestamptz
+            from pg_roles roles
+            where roles.rolname = 'apollo_tf_runtime'
           )
         );
       `);
       expect(systemNamespaceCanaryRollback.stdout.toString()).toContain(
-        "t|t|t|t|0",
+        "t|t|t|t|t",
       );
-      await psqlAdmin(
-        "drop function pg_catalog.apollo_tf_system_namespace_canary()",
-      );
+      await psqlAdmin(`
+        revoke execute on function
+          pg_catalog.apollo_tf_system_namespace_canary()
+          from apollo_tf_runtime;
+        revoke select on table pg_catalog.pg_authid from apollo_tf_runtime;
+        revoke execute on function pg_catalog.pg_sleep(double precision)
+          from apollo_tf_runtime;
+        revoke usage on type pg_catalog.int4 from apollo_tf_runtime;
+        drop function pg_catalog.apollo_tf_system_namespace_canary();
+      `);
 
       await psqlAdmin(`
         create function public.extension_public_canary()
@@ -813,13 +951,31 @@ describe
           as 'select 1';
         alter extension plpgsql
           add function public.extension_public_canary();
+        revoke execute on function public.extension_public_canary()
+          from public;
+        grant execute on function public.extension_public_canary()
+          to apollo_tf_runtime;
       `);
       const extensionPublicBefore = await psqlAdmin(`
         select concat_ws('|',
-          has_function_privilege(
+          not has_function_privilege(
             'public',
             'public.extension_public_canary()',
             'execute'
+          ),
+          exists (
+            select 1
+            from pg_proc routines
+            cross join lateral aclexplode(routines.proacl) acl
+            where routines.oid =
+              'public.extension_public_canary()'::regprocedure
+              and acl.grantee = (
+                select oid
+                from pg_roles
+                where rolname = 'apollo_tf_runtime'
+              )
+              and acl.privilege_type = 'EXECUTE'
+              and not acl.is_grantable
           ),
           exists (
             select 1
@@ -832,7 +988,7 @@ describe
           )
         );
       `);
-      expect(extensionPublicBefore.stdout.toString()).toContain("t|t");
+      expect(extensionPublicBefore.stdout.toString()).toContain("t|t|t");
 
       const extensionPublicFailure = await runManualBootstrap(true);
       expect(extensionPublicFailure.code).not.toBe(0);
@@ -842,10 +998,24 @@ describe
       );
       const extensionPublicRollback = await psqlAdmin(`
         select concat_ws('|',
-          has_function_privilege(
+          not has_function_privilege(
             'public',
             'public.extension_public_canary()',
             'execute'
+          ),
+          exists (
+            select 1
+            from pg_proc routines
+            cross join lateral aclexplode(routines.proacl) acl
+            where routines.oid =
+              'public.extension_public_canary()'::regprocedure
+              and acl.grantee = (
+                select oid
+                from pg_roles
+                where rolname = 'apollo_tf_runtime'
+              )
+              and acl.privilege_type = 'EXECUTE'
+              and not acl.is_grantable
           ),
           (
             select rolconnlimit
@@ -854,8 +1024,10 @@ describe
           )
         );
       `);
-      expect(extensionPublicRollback.stdout.toString()).toContain("t|0");
+      expect(extensionPublicRollback.stdout.toString()).toContain("t|t|0");
       await psqlAdmin(`
+        revoke execute on function public.extension_public_canary()
+          from apollo_tf_runtime;
         alter extension plpgsql
           drop function public.extension_public_canary();
         drop function public.extension_public_canary();

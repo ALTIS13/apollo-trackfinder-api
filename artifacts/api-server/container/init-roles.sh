@@ -298,7 +298,18 @@ select format(
   schemas.nspname
 )
 from pg_namespace schemas
-where exists (
+where schemas.nspname <> 'information_schema'
+  and schemas.nspname !~ '^pg_'
+  and not exists (
+    select 1
+    from pg_depend dependencies
+    where dependencies.classid = 'pg_namespace'::regclass
+      and dependencies.objid = schemas.oid
+      and dependencies.objsubid = 0
+      and dependencies.refclassid = 'pg_extension'::regclass
+      and dependencies.deptype = 'e'
+  )
+  and exists (
   select 1
   from aclexplode(schemas.nspacl) acl
   where acl.grantee in (
@@ -342,7 +353,18 @@ select format(
 )
 from pg_class relations
 join pg_namespace schemas on schemas.oid = relations.relnamespace
-where exists (
+where schemas.nspname <> 'information_schema'
+  and schemas.nspname !~ '^pg_'
+  and not exists (
+    select 1
+    from pg_depend dependencies
+    where dependencies.classid = 'pg_class'::regclass
+      and dependencies.objid = relations.oid
+      and dependencies.objsubid = 0
+      and dependencies.refclassid = 'pg_extension'::regclass
+      and dependencies.deptype = 'e'
+  )
+  and exists (
   select 1
   from aclexplode(relations.relacl) acl
   where acl.grantee in (
@@ -405,7 +427,18 @@ select format(
 from pg_attribute attributes
 join pg_class relations on relations.oid = attributes.attrelid
 join pg_namespace schemas on schemas.oid = relations.relnamespace
-where exists (
+where schemas.nspname <> 'information_schema'
+  and schemas.nspname !~ '^pg_'
+  and not exists (
+    select 1
+    from pg_depend dependencies
+    where dependencies.classid = 'pg_class'::regclass
+      and dependencies.objid = relations.oid
+      and dependencies.objsubid = 0
+      and dependencies.refclassid = 'pg_extension'::regclass
+      and dependencies.deptype = 'e'
+  )
+  and exists (
   select 1
   from aclexplode(attributes.attacl) acl
   where acl.grantee in (
@@ -455,7 +488,18 @@ select format(
 )
 from pg_proc routines
 join pg_namespace schemas on schemas.oid = routines.pronamespace
-where exists (
+where schemas.nspname <> 'information_schema'
+  and schemas.nspname !~ '^pg_'
+  and not exists (
+    select 1
+    from pg_depend dependencies
+    where dependencies.classid = 'pg_proc'::regclass
+      and dependencies.objid = routines.oid
+      and dependencies.objsubid = 0
+      and dependencies.refclassid = 'pg_extension'::regclass
+      and dependencies.deptype = 'e'
+  )
+  and exists (
   select 1
   from aclexplode(routines.proacl) acl
   where acl.grantee in (
@@ -495,7 +539,18 @@ select format(
 )
 from pg_type types
 join pg_namespace schemas on schemas.oid = types.typnamespace
-where exists (
+where schemas.nspname <> 'information_schema'
+  and schemas.nspname !~ '^pg_'
+  and not exists (
+    select 1
+    from pg_depend dependencies
+    where dependencies.classid = 'pg_type'::regclass
+      and dependencies.objid = types.oid
+      and dependencies.objsubid = 0
+      and dependencies.refclassid = 'pg_extension'::regclass
+      and dependencies.deptype = 'e'
+  )
+  and exists (
   select 1
   from aclexplode(types.typacl) acl
   where acl.grantee in (
