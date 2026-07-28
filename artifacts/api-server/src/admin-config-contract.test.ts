@@ -470,7 +470,10 @@ describe("admin telemetry container contract", () => {
     expect(adminNginx).toContain("limit_req_zone $binary_remote_addr");
     expect(adminNginx).toContain("limit_req zone=apollo_admin");
     expect(adminEntrypoint).toContain("mkpasswd -P 0 -m sha512");
-    expect(adminEntrypoint).toContain("printf 'disabled:!\\n'");
+    expect(adminEntrypoint).toMatch(
+      /if \[ "\$admin_configuration_valid" != true \]; then[\s\S]*exit 1[\s\S]*fi/,
+    );
+    expect(adminEntrypoint).not.toContain("printf 'disabled:!\\n'");
     expect(adminEntrypoint).toContain("chown root:nginx /etc/nginx/.htpasswd");
     expect(adminEntrypoint).toContain("chmod 640 /etc/nginx/.htpasswd");
     expect(adminEntrypoint).toContain("unset ADMIN_ACCESS_PASSWORD");

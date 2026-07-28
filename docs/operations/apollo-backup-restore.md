@@ -2,6 +2,19 @@
 
 This gate is local-only. It must pass before a production migration or any approved remote rollout. It does not start, mount, name, or modify a detached legacy PostgreSQL volume.
 
+## Supported Runtime
+
+Run the operator scripts on native Linux with a POSIX-compatible `/bin/sh`,
+PostgreSQL 16 client tools, `age` 1.2.1-compatible encryption, and
+GNU-compatible `mktemp`, `sha256sum`, `stat`, `chmod`, and `mv` behavior.
+`mktemp` must support a destination-local template and `sha256sum` must emit
+and verify the GNU checksum format consumed by the gate. This is not a generic
+BSD/macOS portability claim.
+
+Local disposable proof evidence is `TASK4-77b2e21-89`. Production
+backup/restore evidence is `NOT_RECORDED`; the local ID does not approve a
+production migration or data write.
+
 ## Custody and Destination
 
 1. Create the encrypted backup destination with owner-only permissions before the maintenance window. The destination is supplied as `APOLLO_BACKUP_DESTINATION`; it is not created by the backup script.
@@ -13,10 +26,10 @@ This gate is local-only. It must pass before a production migration or any appro
 
 The stack and database pair must be one of these exact identities:
 
-| Stack | Database |
-| --- | --- |
-| `apollo-platform` | `apollo_platform` |
-| `apollo-tf` | `apollo_trackfinder` |
+| Stack                    | Database                 |
+| ------------------------ | ------------------------ |
+| `apollo-platform`        | `apollo_platform`        |
+| `apollo-tf`              | `apollo_trackfinder`     |
 | `apollo-tf-integrations` | `apollo_tf_integrations` |
 
 Set `APOLLO_BACKUP_PGHOST`, `APOLLO_BACKUP_PGPORT`, `APOLLO_BACKUP_PGDATABASE`, `APOLLO_BACKUP_PGUSER`, `APOLLO_BACKUP_STACK`, and an immutable `APOLLO_BACKUP_RELEASE_ID`. Then run `deploy/ops/backup-postgres.sh` without arguments.
@@ -31,9 +44,17 @@ Run `deploy/ops/restore-postgres.sh` without arguments. It rejects a checksum mi
 
 Record the restore evidence ID, schema comparison, data-marker comparison, release ID, and reviewer approval before approving migrations. A migration is not approved merely because an encrypted backup exists.
 
+The production evidence ID must be redacted and owner-reviewable. Never place
+the backup destination, age identity, recipient, `PGPASSFILE`, database
+address, database URL, or any credential in the evidence record.
+
 ## Retained-Volume Quarantine
 
 Use `deploy/ops/classify-retained-volume.sh` only with an operator-supplied volume identifier. It reads Docker metadata and emits `DETACHED_UNKNOWN`, `ATTACHED_BLOCKED`, or `FRESH_RELEASE_VOLUME`; it never starts PostgreSQL. Unknown legacy data may advance only after an encrypted backup and restore against a cloned disposable volume under separate approval.
+
+The currently discovered legacy class is `DETACHED_UNKNOWN`. Its private name
+is not tracked. It remains unnamed, unmounted, unstarted, unmodified, and
+outside both production manifests.
 
 ## Release Decision and Rollback
 

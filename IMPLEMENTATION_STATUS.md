@@ -2,6 +2,50 @@
 
 Last updated: 2026-07-28.
 
+## Coolify production release package
+
+Status: `LOCAL_RELEASE_VALIDATED`. The exact local image source is
+`ffdb1f5ce8df85fe487fc65697f95377d76c52bc`; this status does not claim a
+deployment, workflow dispatch, GHCR publication, or remote change.
+
+- The production package consists of
+  `deploy/coolify/apollo-platform.compose.yml`,
+  `deploy/coolify/apollo-tf.compose.yml`, the fail-closed
+  `deploy/coolify/release.env.example`, and
+  `deploy/caddy/apollo.caddyfile`.
+- The opt-in production smoke built and pushed all 11 custom Linux/amd64
+  targets plus pinned Redis to a disposable local registry, resolved 12
+  registry digests, validated a temporary non-zero digest env, and started the
+  exact two-stack package from commit `ffdb1f5`.
+- The live proof passed registration/bootstrap/login, invitation redemption,
+  entitlement revoke/grant, real Platform-to-TF OAuth, degraded and restored
+  search, queued download/cancel, signed heartbeat freshness/staleness, admin
+  Basic Auth/dashboard token, web health, one-shot migrations, service
+  restarts, and persistent state.
+- Pinned Caddy `2.10.2-alpine` validated and routed
+  `api.apollot.ru`, `api.tf.apollot.ru`, `tf.apollot.ru`, and
+  `admin.apollot.ru` to exact loopback ports `18200..18203`. Caddy remains the
+  sole future owner of host `80/443`; no Coolify/Traefik domain labels exist.
+- Malformed multiline admin secret files fail without disclosure. The admin
+  nginx access log now omits the Basic Auth identity, closing the real
+  `package-11` disclosure found by the final log scan.
+- The checked-in env fails closed with exactly 18
+  `placeholder_image_digest` errors. The generated local env validated before
+  either stack started and was removed afterward.
+- Both Docker opt-ins pass: production package `10/10`, Caddy contract `4/4`.
+  Final owned-resource inventory is zero for containers, networks, volumes,
+  localhost image references, registry files, and temporary secrets; no broad
+  prune was used.
+- Local backup/restore evidence is `TASK4-77b2e21-89`. Production evidence is
+  `NOT_RECORDED`, native-Linux secret ownership remains to be proved on the
+  target, and every remote resource/migration/Caddy/hostname action still
+  requires explicit owner approval.
+- The observed legacy volume remains only `DETACHED_UNKNOWN`: unnamed,
+  unmounted, unstarted, unmodified, and absent from tracked manifests.
+- Task 5 did not contact or mutate HomeNode, Coolify, host Caddy, UFW, DNS,
+  GitHub settings/workflows, GHCR, any remote database/volume, or the detached
+  legacy volume. The release workflow was not dispatched.
+
 ## TF immutable migrations release candidate
 
 Status: `LOCAL_RELEASE_VALIDATED`. The active branch is

@@ -633,7 +633,11 @@ describe("TF download worker Compose and queue Redis contract", () => {
       text(path.join(artifactRoot, "container/queue-redis-health.sh")),
     ]);
 
-    expect(dockerfile).toContain("FROM redis:7-bookworm AS queue-redis");
+    expect(dockerfile).toContain(
+      "FROM docker.io/library/redis:7-bookworm@" +
+        "sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b " +
+        "AS queue-redis",
+    );
     expect(dockerfile).toContain(
       "COPY artifacts/tf-download-worker/container/start-queue-redis.sh /usr/local/bin/start-queue-redis.sh",
     );

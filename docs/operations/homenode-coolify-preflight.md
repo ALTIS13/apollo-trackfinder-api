@@ -1,14 +1,31 @@
 # HomeNode and Coolify release preflight
 
-Date: 2026-07-27
+Date: 2026-07-28
 
-Status: `READ_ONLY_COMPLETE`
+Status: `LOCAL_RELEASE_VALIDATED`
 
 This document records the public release constraints proven before the first
 Apollo Platform and Apollo TF deployment. Exact host inventory, capacity,
 listeners, versions, routes, and candidate upstreams remain in the ignored
 private operator record. This is not a deployment record and does not authorize
 a remote change.
+
+## Local package closure
+
+Task 5 validated the production manifests, digest validator, custom image
+targets, file-backed secret contracts, application flows, persistence, and
+Caddy routes locally from
+`ffdb1f5ce8df85fe487fc65697f95377d76c52bc`. The proof used only
+`127.0.0.1:18200..18203`, dispatched no workflow, and left exact cleanup zero.
+
+The checked-in release env remains intentionally non-deployable. It fails with
+only `placeholder_image_digest`; an approved release must replace every image
+with a workflow-produced immutable digest. The complete rollout and rollback
+order is in `docs/operations/apollo-production-rollout.md`.
+
+The preflight's remote observation remains read-only. The retained legacy class
+is recorded only as `DETACHED_UNKNOWN`; it remains unnamed, unmounted,
+unstarted, and unmodified.
 
 ## Proven boundary
 
@@ -37,7 +54,8 @@ creation. All published application ports bind to `127.0.0.1`, never
 ## Coolify deployment shape
 
 The intended deployment shape uses two independently versioned Docker Compose
-resources. Independent rollback is a release blocker and is not yet proven:
+resources. Independent local start, restart, persistence, and teardown are
+proven; remote rollback still requires an approved digest map:
 
 1. `apollo-platform`
    - Platform PostgreSQL
@@ -49,9 +67,8 @@ resources. Independent rollback is a release blocker and is not yet proven:
    - integrations PostgreSQL and one-shot migration
    - download queue Redis
    - TF API, search, integrations, download worker, and web
-   - only API and web receive candidate loopback publications
-   - the existing TF topology dashboard remains deployment-optional and private
-     until the admin hostname/authentication decision is approved
+   - API, web, and the authenticated TF topology dashboard receive only the
+     exact loopback publications `18201`, `18202`, and `18203`
 
 Run these as Raw Docker Compose resources without control-plane domains or proxy
 router labels. The existing ingress remains the only public boundary. Database,
@@ -64,47 +81,26 @@ module needs an owner-approved private route or exact HTTPS origin; it must not
 receive Platform/TF database, browser session, Docker, SSH, Coolify, Caddy, or
 UFW credentials.
 
-## Release blockers
+## Remote rollout gates
 
-The following are required before any owner-approved remote mutation:
+Local package blockers are closed. The following still block remote mutation:
 
-1. Move TF schema initialization out of API startup into a dedicated one-shot
-   `tf-migrate` service with immutable migration history. The current
-   `CREATE TABLE IF NOT EXISTS` startup routine is not a production migration
-   or rollback contract.
-2. Produce Coolify-specific Compose manifests with mandatory operator-selected
-   loopback ports, no development defaults, no `build` entries, and only
-   immutable image references.
-3. Remove operator/admin credentials from container environment and deliver all
-   runtime credentials through the existing `/run/secrets/*` boundary.
-4. Prove the selected Coolify secret-to-file mechanism on rootful native Linux
-   for runtime UID/GID `10001:10001` and database UID/GID `999:999`. Compose
-   `uid`/`gid`/`mode` declarations alone are not ownership evidence for
-   bind-backed file secrets.
-5. Allocate explicit CPU, memory, PID, graceful-stop, log-size, and
-   log-retention limits for both stacks.
-6. Create a dedicated encrypted Apollo backup destination and pass a disposable
-   PostgreSQL restore test before the first production migration. The preflight
-   found no provisioned Apollo backup path.
-7. Render and validate an operator-owned Caddy rollout artifact with exact
-   hostname-to-loopback mappings, backup, validation, smoke, and rollback
-   steps. It must include separate operator protection for
-   `admin.apollot.ru` and must not change unrelated routes.
-8. Complete a dry-run deployment with the exact production manifests and
-   canary secrets on disposable native-Linux infrastructure.
-9. Recheck listeners, disk, memory, existing container health, and rollback
-   image availability immediately before approval.
+1. Owner approval for the exact `apollo-platform` and `apollo-tf` resources,
+   secret files, image digest map, and rollback map.
+2. Native-Linux proof that every bind-backed secret has the exact declared
+   owner and mode and is readable only by its intended service.
+3. A dedicated encrypted production backup destination plus a recorded
+   production backup/restore evidence ID. Local evidence
+   `TASK4-77b2e21-89` does not authorize production writes.
+4. Immediate recheck of listeners, disk, memory, existing service health, and
+   rollback-image availability.
+5. Explicit owner approval before each resource creation, migration, Caddy
+   reload, hostname cutover, rollback, or data restoration.
 
-The Apollo portal and Platform operator UI declared by the release architecture
-are not present in the current Platform Compose stack. The apex route stays
-reserved until the portal is implemented and validated. The existing TF
-topology dashboard does not replace the Platform registration, invitation,
-account, and entitlement administration UI.
-
-`admin.apollot.ru` has no approved owning UI yet. Its cutover remains blocked
-until the owner explicitly assigns the hostname to either the Platform operator
-UI or the TF topology UI and the selected application has a complete
-operator-authentication policy.
+The apex route stays reserved. The owner must explicitly approve the TF
+topology dashboard as the `admin.apollot.ru` owner before that hostname is cut
+over; Task 5 proves its two-layer secret/token boundary locally but does not
+grant that approval.
 
 ## Approval and rollout order
 
