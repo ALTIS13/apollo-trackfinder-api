@@ -525,6 +525,7 @@ unless-stopped`, `init: true`, `stop_grace_period`, `pids_limit`,
 - Modify:
   `artifacts/admin-dashboard/docker-entrypoint.d/16-admin-dashboard-defaults.envsh`
 - Modify: `artifacts/admin-dashboard/src/config-contract.test.ts`
+- Modify: `docs/operations/apollo-backup-restore.md`
 - Modify: `docs/operations/homenode-coolify-preflight.md`
 - Modify: `IMPLEMENTATION_STATUS.md`
 
@@ -608,6 +609,8 @@ unless-stopped`, `init: true`, `stop_grace_period`, `pids_limit`,
   - image digests and rollback mapping;
   - Caddy backup/validate/reload/rollback order;
   - per-host smoke and unaffected-service checks;
+  - supported Linux backup runtime and required GNU-compatible
+    `mktemp`/`sha256sum` behavior;
   - explicit approval checkpoints before each remote mutation.
 
 - [ ] **Step 6: Full validation**
