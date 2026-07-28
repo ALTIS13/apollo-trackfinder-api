@@ -518,6 +518,13 @@ unless-stopped`, `init: true`, `stop_grace_period`, `pids_limit`,
 - Create: `scripts/src/caddy-release-contract.test.ts`
 - Create: `scripts/src/coolify-production-smoke.test.ts`
 - Create: `docs/operations/apollo-production-rollout.md`
+- Modify: `.github/workflows/apollo-release-images.yml`
+- Modify: `artifacts/api-server/src/coolify-release-contract.test.ts`
+- Modify: `scripts/src/coolify-release.ts`
+- Modify: `scripts/src/coolify-release.test.ts`
+- Modify:
+  `artifacts/admin-dashboard/docker-entrypoint.d/16-admin-dashboard-defaults.envsh`
+- Modify: `artifacts/admin-dashboard/src/config-contract.test.ts`
 - Modify: `docs/operations/homenode-coolify-preflight.md`
 - Modify: `IMPLEMENTATION_STATUS.md`
 
@@ -575,7 +582,20 @@ unless-stopped`, `init: true`, `stop_grace_period`, `pids_limit`,
 
   Reuse existing bridge/search/integrations/download test helpers where
   practical. Do not weaken previous security, migration, cleanup, or exact
-  output assertions.
+  output assertions. Close the deferred production-package findings by
+  proving:
+  - the per-build digest gate accepts only exact
+    `sha256:<64 lowercase hex characters>`;
+  - GHCR manifest inspection uses a bounded retry with a deterministic terminal
+    error;
+  - every required file-backed secret has its exact `_FILE` environment key
+    and no inline credential fallback;
+  - admin username, password, and dashboard-token files contain one safe line,
+    and malformed multiline content disables startup without secret output;
+  - the built admin image executes its real entrypoint, creates the protected
+    runtime configuration, and starts successfully;
+  - every custom production image accepts the Compose
+    `entrypoint`/`command` contract used by its final manifest.
 
 - [ ] **Step 5: Update tracked status and rollout documentation**
 
