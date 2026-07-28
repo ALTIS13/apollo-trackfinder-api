@@ -6,10 +6,6 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: read
-  packages: write
-
 concurrency:
   group: apollo-release-${{ github.ref }}
   cancel-in-progress: false
@@ -18,6 +14,8 @@ jobs:
   validate:
     name: Validate source
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       - name: Check out release source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -32,13 +30,24 @@ jobs:
       - name: Validate source
         run: |
           pnpm --filter @workspace/scripts test
-          pnpm --filter @workspace/api-server test -- src/coolify-release-contract.test.ts
+          pnpm --filter @workspace/platform-api exec vitest run --maxWorkers=2
+          pnpm --filter @workspace/api-server exec vitest run --maxWorkers=1
+          pnpm --filter @workspace/admin-dashboard exec vitest run --maxWorkers=2
+          pnpm --filter @workspace/music-player exec vitest run --maxWorkers=2
+          pnpm --filter @workspace/tf-search exec vitest run --maxWorkers=2
+          pnpm --filter @workspace/tf-integrations exec vitest run --maxWorkers=2
+          pnpm --filter @workspace/tf-download-worker exec vitest run --maxWorkers=2
           pnpm run typecheck
 
   build:
     name: Build ${{ matrix.name }}
     needs: validate
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
     strategy:
       fail-fast: false
       matrix:
@@ -127,6 +136,9 @@ jobs:
     name: Build redacted release manifest
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f

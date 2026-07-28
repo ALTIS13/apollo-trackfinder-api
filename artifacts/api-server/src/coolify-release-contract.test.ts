@@ -453,7 +453,6 @@ describe("Apollo immutable image release workflow", () => {
         readonly push: { readonly tags: readonly string[] };
         readonly workflow_dispatch: unknown;
       };
-      readonly permissions: Record<string, string>;
     };
 
     expect(Object.keys(workflow.on).sort()).toEqual([
@@ -461,10 +460,6 @@ describe("Apollo immutable image release workflow", () => {
       "workflow_dispatch",
     ]);
     expect(workflow.on.push.tags).toEqual(["v*"]);
-    expect(workflow.permissions).toEqual({
-      contents: "read",
-      packages: "write",
-    });
     expect(workflow.jobs.build.strategy.matrix.include).toEqual([
       {
         dockerfile: "artifacts/platform-api/Dockerfile",
@@ -535,12 +530,74 @@ describe("Apollo immutable image release workflow", () => {
     ]);
   });
 
+  it("grants exact least privilege per job and requires validation before build", async () => {
+    const workflow = parse(await readFile(releaseWorkflowPath, "utf8")) as {
+      readonly jobs: Record<
+        "build" | "manifest" | "validate",
+        {
+          readonly needs?: string;
+          readonly permissions?: Record<string, string>;
+        }
+      >;
+      readonly permissions?: Record<string, string>;
+    };
+
+    expect(workflow.permissions).toBeUndefined();
+    expect(workflow.jobs.validate.permissions).toEqual({
+      contents: "read",
+    });
+    expect(workflow.jobs.build.permissions).toEqual({
+      contents: "read",
+      packages: "write",
+    });
+    expect(workflow.jobs.manifest.permissions).toEqual({
+      contents: "read",
+      packages: "read",
+    });
+    expect(workflow.jobs.build.needs).toBe("validate");
+  });
+
+  it("runs every affected suite and typecheck before any image push", async () => {
+    const workflow = parse(await readFile(releaseWorkflowPath, "utf8")) as {
+      readonly jobs: {
+        readonly build: { readonly needs?: string };
+        readonly validate: {
+          readonly steps: readonly {
+            readonly name?: string;
+            readonly run?: string;
+          }[];
+        };
+      };
+    };
+    const validation = workflow.jobs.validate.steps.find(
+      ({ name }) => name === "Validate source",
+    );
+    expect(
+      validation?.run
+        ?.trim()
+        .split(/\r?\n/)
+        .map((line) => line.trim()),
+    ).toEqual([
+      "pnpm --filter @workspace/scripts test",
+      "pnpm --filter @workspace/platform-api exec vitest run --maxWorkers=2",
+      "pnpm --filter @workspace/api-server exec vitest run --maxWorkers=1",
+      "pnpm --filter @workspace/admin-dashboard exec vitest run --maxWorkers=2",
+      "pnpm --filter @workspace/music-player exec vitest run --maxWorkers=2",
+      "pnpm --filter @workspace/tf-search exec vitest run --maxWorkers=2",
+      "pnpm --filter @workspace/tf-integrations exec vitest run --maxWorkers=2",
+      "pnpm --filter @workspace/tf-download-worker exec vitest run --maxWorkers=2",
+      "pnpm run typecheck",
+    ]);
+    expect(workflow.jobs.build.needs).toBe("validate");
+  });
+
   it("uses pinned actions, GITHUB_TOKEN, attestations, digest capture, and one final manifest artifact", async () => {
     const source = await readFile(releaseWorkflowPath, "utf8");
     const workflow = parse(source) as {
       readonly jobs: Record<
         string,
         {
+          readonly env?: Record<string, string>;
           readonly steps: readonly {
             readonly id?: string;
             readonly name?: string;
@@ -575,6 +632,9 @@ describe("Apollo immutable image release workflow", () => {
     expect(buildStep?.id).toBe("build");
     expect(source).toContain("steps.build.outputs.digest");
     expect(source).toContain("docker buildx imagetools inspect");
+    expect(workflow.jobs.build?.env).toEqual({
+      DOCKER_BUILD_RECORD_UPLOAD: "false",
+    });
 
     const validationIndex = steps.findIndex(
       ({ name }) => name === "Validate source",

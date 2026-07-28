@@ -180,6 +180,150 @@ const originKeys: Readonly<Record<ReleaseStackInput["name"], string[]>> = {
     "TF_PUBLIC_ORIGIN",
   ],
 };
+const expectedStackNames = ["apollo-platform", "apollo-tf"] as const;
+const expectedServiceNames: Readonly<
+  Record<ReleaseStackInput["name"], readonly string[]>
+> = {
+  "apollo-platform": [
+    "platform-api",
+    "platform-migrate",
+    "platform-postgres",
+    "platform-redis",
+  ],
+  "apollo-tf": [
+    "tf-admin",
+    "tf-api",
+    "tf-baseline",
+    "tf-download-redis",
+    "tf-download-worker",
+    "tf-integrations",
+    "tf-integrations-migrate",
+    "tf-integrations-postgres",
+    "tf-migrate",
+    "tf-postgres",
+    "tf-redis",
+    "tf-role-bootstrap",
+    "tf-search",
+    "tf-web",
+  ],
+};
+const longRunningServices = new Set([
+  "platform-api",
+  "platform-postgres",
+  "platform-redis",
+  "tf-admin",
+  "tf-api",
+  "tf-download-redis",
+  "tf-download-worker",
+  "tf-integrations",
+  "tf-integrations-postgres",
+  "tf-postgres",
+  "tf-redis",
+  "tf-search",
+  "tf-web",
+]);
+const oneShotServices = new Set([
+  "platform-migrate",
+  "tf-baseline",
+  "tf-integrations-migrate",
+  "tf-migrate",
+  "tf-role-bootstrap",
+]);
+
+type SecretMountContract = {
+  source: string;
+  target: string;
+  uid: string;
+  gid: string;
+  mode: string;
+};
+
+function secretMountContract(
+  source: string,
+  uid = "10001",
+  gid = uid,
+  mode = "0400",
+): SecretMountContract {
+  return { source, target: source, uid, gid, mode };
+}
+
+const expectedSecretMounts: Readonly<
+  Record<string, readonly SecretMountContract[]>
+> = {
+  "platform-api": [
+    secretMountContract("platform_assertion_private_jwk"),
+    secretMountContract("platform_assertion_public_jwks"),
+    secretMountContract("platform_oauth_clients"),
+    secretMountContract("platform_operator_bootstrap_token"),
+    secretMountContract("platform_runtime_database_url"),
+  ],
+  "platform-migrate": [secretMountContract("platform_migrator_database_url")],
+  "platform-postgres": [
+    secretMountContract("platform_postgres_admin_password", "999"),
+    secretMountContract("platform_migrator_password", "999"),
+    secretMountContract("platform_runtime_password", "999"),
+  ],
+  "platform-redis": [],
+  "tf-admin": [
+    secretMountContract("admin_dashboard_token", "0"),
+    secretMountContract("admin_access_user", "0"),
+    secretMountContract("admin_access_password", "0"),
+  ],
+  "tf-api": [
+    secretMountContract("admin_dashboard_token"),
+    secretMountContract("tf_client_secret"),
+    secretMountContract("tf_runtime_database_url"),
+    secretMountContract("tf_integrations_internal_auth_secret"),
+    secretMountContract("tf_download_queue_redis_url"),
+    secretMountContract("tf_download_internal_auth_secret"),
+    secretMountContract("tf_module_heartbeat_keys"),
+    secretMountContract("tf_search_internal_auth_secret"),
+  ],
+  "tf-baseline": [
+    secretMountContract("tf_admin_database_url", "0", "10002", "0440"),
+  ],
+  "tf-download-redis": [
+    secretMountContract("tf_download_queue_password", "999"),
+  ],
+  "tf-download-worker": [
+    secretMountContract("tf_download_queue_redis_url"),
+    secretMountContract("tf_download_internal_auth_secret"),
+    secretMountContract("tf_download_heartbeat_secret"),
+  ],
+  "tf-integrations": [
+    secretMountContract("tf_integrations_runtime_database_url"),
+    secretMountContract("tf_integrations_token_keyring"),
+    secretMountContract("tf_integrations_spotify_client_id"),
+    secretMountContract("tf_integrations_spotify_client_secret"),
+    secretMountContract("tf_integrations_internal_auth_secret"),
+    secretMountContract("tf_integrations_heartbeat_secret"),
+  ],
+  "tf-integrations-migrate": [
+    secretMountContract("tf_integrations_migrator_database_url"),
+  ],
+  "tf-integrations-postgres": [
+    secretMountContract("tf_integrations_postgres_admin_password", "999"),
+    secretMountContract("tf_integrations_migrator_password", "999"),
+    secretMountContract("tf_integrations_runtime_password", "999"),
+  ],
+  "tf-migrate": [secretMountContract("tf_migrator_database_url")],
+  "tf-postgres": [
+    secretMountContract("tf_postgres_admin_password", "999"),
+    secretMountContract("tf_migrator_password", "999"),
+    secretMountContract("tf_runtime_password", "999"),
+  ],
+  "tf-redis": [],
+  "tf-role-bootstrap": [
+    secretMountContract("tf_admin_database_url", "0", "10002", "0440"),
+    secretMountContract("tf_migrator_password", "999"),
+    secretMountContract("tf_runtime_password", "999"),
+  ],
+  "tf-search": [
+    secretMountContract("tf_search_internal_auth_secret"),
+    secretMountContract("tf_search_heartbeat_secret"),
+  ],
+  "tf-web": [],
+};
 
 function addError(
   errors: ReleaseValidationError[],
@@ -204,29 +348,6 @@ function sortErrors(
 function networkKeys(service: ComposeService): string[] {
   if (Array.isArray(service.networks)) return [...service.networks];
   return Object.keys(service.networks ?? {});
-}
-
-function expectedSecretMetadata(
-  serviceName: string,
-  source: string,
-): { uid: string; gid: string; mode: string } {
-  if (serviceName === "tf-admin") {
-    return { uid: "0", gid: "0", mode: "0400" };
-  }
-  if (
-    (serviceName === "tf-role-bootstrap" || serviceName === "tf-baseline") &&
-    source === "tf_admin_database_url"
-  ) {
-    return { uid: "0", gid: "10002", mode: "0440" };
-  }
-  if (
-    serviceName.endsWith("postgres") ||
-    serviceName === "tf-role-bootstrap" ||
-    serviceName === "tf-download-redis"
-  ) {
-    return { uid: "999", gid: "999", mode: "0400" };
-  }
-  return { uid: "10001", gid: "10001", mode: "0400" };
 }
 
 function validateImage(
@@ -257,34 +378,93 @@ function validateImage(
   return match.groups.digest;
 }
 
+function isPositiveNumber(value: number | string | undefined): boolean {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) && parsed > 0;
+}
+
+function isPositiveInteger(value: number | string | undefined): boolean {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(parsed) && parsed > 0;
+}
+
+function isPositiveDuration(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const match = value.match(/^(?<amount>\d+(?:\.\d+)?)(?:ns|us|µs|ms|s|m|h)$/);
+  return match?.groups?.amount !== undefined && Number(match.groups.amount) > 0;
+}
+
+function isPositiveSize(value: number | string | undefined): boolean {
+  if (typeof value === "number") return Number.isFinite(value) && value > 0;
+  if (typeof value !== "string") return false;
+  const match = value.match(
+    /^(?<amount>\d+(?:\.\d+)?)(?:b|k|kb|kib|m|mb|mib|g|gb|gib)?$/i,
+  );
+  return match?.groups?.amount !== undefined && Number(match.groups.amount) > 0;
+}
+
+function hasActiveHealthcheck(service: ComposeService): boolean {
+  const healthcheck = service.healthcheck;
+  const test = healthcheck?.test;
+  return (
+    healthcheck !== undefined &&
+    healthcheck.disable !== true &&
+    Array.isArray(test) &&
+    test.length > 0 &&
+    String(test[0]).toUpperCase() !== "NONE" &&
+    isPositiveDuration(healthcheck.interval) &&
+    isPositiveDuration(healthcheck.timeout) &&
+    isPositiveDuration(healthcheck.start_period) &&
+    isPositiveInteger(
+      typeof healthcheck.retries === "number" ||
+        typeof healthcheck.retries === "string"
+        ? healthcheck.retries
+        : undefined,
+    )
+  );
+}
+
 function validatePolicies(
+  serviceName: string,
   service: ComposeService,
   errors: ReleaseValidationError[],
   context: Omit<ReleaseValidationError, "code">,
 ): void {
   const limits = service.deploy?.resources?.limits;
   if (
-    limits?.cpus === undefined ||
-    limits.memory === undefined ||
-    limits.pids === undefined ||
-    service.pids_limit === undefined ||
+    !isPositiveNumber(limits?.cpus) ||
+    !isPositiveSize(limits?.memory) ||
+    !isPositiveInteger(limits?.pids) ||
+    !isPositiveInteger(service.pids_limit) ||
+    limits?.pids !== service.pids_limit ||
     service.init !== true ||
-    !/^\d+s$/.test(service.stop_grace_period ?? "")
+    !isPositiveDuration(service.stop_grace_period)
   ) {
     addError(errors, "missing_resource_policy", context);
   }
   if (
     service.logging?.driver !== "json-file" ||
-    service.logging.options?.["max-file"] !== "5" ||
-    service.logging.options?.["max-size"] !== "10m"
+    !isPositiveInteger(service.logging.options?.["max-file"]) ||
+    !isPositiveSize(service.logging.options?.["max-size"])
   ) {
     addError(errors, "missing_log_policy", context);
   }
+
+  if (longRunningServices.has(serviceName)) {
+    if (service.restart !== "unless-stopped") {
+      addError(errors, "service_classification", context);
+    }
+    if (!hasActiveHealthcheck(service)) {
+      addError(errors, "missing_health_policy", context);
+    }
+    return;
+  }
   if (
-    service.restart !== "no" &&
-    (service.restart !== "unless-stopped" || service.healthcheck === undefined)
+    !oneShotServices.has(serviceName) ||
+    service.restart !== "no" ||
+    service.healthcheck !== undefined
   ) {
-    addError(errors, "missing_health_policy", context);
+    addError(errors, "service_classification", context);
   }
 }
 
@@ -330,17 +510,32 @@ function validateSecrets(
   context: Omit<ReleaseValidationError, "code">,
 ): Set<string> {
   const targets = new Set<string>();
+  const expected = new Map(
+    (expectedSecretMounts[serviceName] ?? []).map((mount) => [
+      mount.source,
+      mount,
+    ]),
+  );
+  const observedSources = new Set<string>();
+
   for (const mount of service.secrets ?? []) {
     const source = mount.source ?? "";
     const target = mount.target ?? "";
-    const expected = expectedSecretMetadata(serviceName, source);
+    const contract = expected.get(source);
+    if (contract === undefined || observedSources.has(source)) {
+      addError(errors, "unexpected_secret_mount", {
+        ...context,
+        field: "secrets",
+      });
+    }
+    observedSources.add(source);
     if (
-      source.length === 0 ||
-      target !== source ||
+      contract === undefined ||
+      target !== contract.target ||
       document.secrets?.[source] === undefined ||
-      mount.uid !== expected.uid ||
-      mount.gid !== expected.gid ||
-      mount.mode !== expected.mode
+      mount.uid !== contract.uid ||
+      mount.gid !== contract.gid ||
+      mount.mode !== contract.mode
     ) {
       addError(errors, "secret_mount_metadata", {
         ...context,
@@ -348,6 +543,14 @@ function validateSecrets(
       });
     }
     if (target.length > 0) targets.add(target);
+  }
+  for (const source of expected.keys()) {
+    if (!observedSources.has(source)) {
+      addError(errors, "missing_secret_mount", {
+        ...context,
+        field: "secrets",
+      });
+    }
   }
   return targets;
 }
@@ -400,6 +603,22 @@ function explicitResourceNames(
     .sort();
 }
 
+function isExpectedStackName(
+  value: string,
+): value is ReleaseStackInput["name"] {
+  return (expectedStackNames as readonly string[]).includes(value);
+}
+
+function expectedSecretDefinitionNames(
+  stackName: ReleaseStackInput["name"],
+): Set<string> {
+  return new Set(
+    expectedServiceNames[stackName].flatMap((serviceName) =>
+      (expectedSecretMounts[serviceName] ?? []).map(({ source }) => source),
+    ),
+  );
+}
+
 export function validateCoolifyRelease(
   input: ReleaseValidationInput,
 ): ReleaseValidationResult {
@@ -410,6 +629,7 @@ export function validateCoolifyRelease(
     string,
     { networks: Set<string>; volumes: Set<string> }
   >();
+  const stacksByName = new Map<ReleaseStackInput["name"], ReleaseStackInput>();
 
   for (const name of Object.keys(input.environment).sort()) {
     if (secretLikeName.test(name) && !allowedReleaseSecretLikeNames.has(name)) {
@@ -419,24 +639,80 @@ export function validateCoolifyRelease(
     }
   }
 
-  for (const stack of [...input.stacks].sort((a, b) =>
-    a.name.localeCompare(b.name),
-  )) {
+  for (const stack of input.stacks) {
+    const name = String(stack.name);
+    if (!isExpectedStackName(name)) {
+      addError(errors, "unexpected_stack", { stack: name });
+      continue;
+    }
+    if (stacksByName.has(name)) {
+      addError(errors, "duplicate_stack", { stack: name });
+      continue;
+    }
+    stacksByName.set(name, stack);
+  }
+  for (const name of expectedStackNames) {
+    if (!stacksByName.has(name)) {
+      addError(errors, "missing_stack", { stack: name });
+    }
+  }
+
+  for (const stackName of expectedStackNames) {
+    const stack = stacksByName.get(stackName);
+    if (stack === undefined) continue;
     if (stack.compose.name !== stack.name) {
       addError(errors, "stack_name", { stack: stack.name });
     }
+    const expectedServices = new Set(expectedServiceNames[stackName]);
+    const actualServiceNames = Object.keys(stack.compose.services);
+    for (const serviceName of expectedServices) {
+      if (stack.compose.services[serviceName] === undefined) {
+        addError(errors, "missing_service", {
+          stack: stackName,
+          service: serviceName,
+        });
+      }
+    }
+    for (const serviceName of actualServiceNames) {
+      if (!expectedServices.has(serviceName)) {
+        addError(errors, "unexpected_service", {
+          stack: stackName,
+          service: serviceName,
+        });
+      }
+    }
+
+    const expectedDefinitions = expectedSecretDefinitionNames(stackName);
+    const actualDefinitions = new Set(Object.keys(stack.compose.secrets ?? {}));
+    for (const source of expectedDefinitions) {
+      if (!actualDefinitions.has(source)) {
+        addError(errors, "missing_secret_definition", {
+          stack: stackName,
+          field: "secrets",
+        });
+      }
+    }
+    for (const source of actualDefinitions) {
+      if (!expectedDefinitions.has(source)) {
+        addError(errors, "unexpected_secret_definition", {
+          stack: stackName,
+          field: "secrets",
+        });
+      }
+    }
+
     const networkNames = explicitResourceNames(stack.compose.networks);
     const volumeNames = explicitResourceNames(stack.compose.volumes);
-    resourcesByStack.set(stack.name, {
+    resourcesByStack.set(stackName, {
       networks: new Set(networkNames),
       volumes: new Set(volumeNames),
     });
 
     const services: ReleaseManifestService[] = [];
-    for (const [serviceName, service] of Object.entries(
-      stack.compose.services,
-    ).sort(([left], [right]) => left.localeCompare(right))) {
-      const context = { stack: stack.name, service: serviceName };
+    for (const serviceName of expectedServiceNames[stackName]) {
+      const service = stack.compose.services[serviceName];
+      if (service === undefined) continue;
+      const context = { stack: stackName, service: serviceName };
       const digest = validateImage(service.image, errors, context);
       if (service.build !== undefined) {
         addError(errors, "build_entry", context);
@@ -450,7 +726,7 @@ export function validateCoolifyRelease(
       ) {
         addError(errors, "proxy_label", context);
       }
-      validatePolicies(service, errors, context);
+      validatePolicies(serviceName, service, errors, context);
       const mountedTargets = validateSecrets(
         serviceName,
         service,
@@ -500,22 +776,22 @@ export function validateCoolifyRelease(
       }
     }
 
-    const publicOrigins = originKeys[stack.name]
+    const publicOrigins = originKeys[stackName]
       .map((key) => input.environment[key])
       .filter((value): value is string => value !== undefined)
       .sort();
     if (
-      publicOrigins.length !== originKeys[stack.name].length ||
+      publicOrigins.length !== originKeys[stackName].length ||
       publicOrigins.some(
         (origin) =>
           !/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(origin) ||
           origin.includes("@"),
       )
     ) {
-      addError(errors, "invalid_public_origin", { stack: stack.name });
+      addError(errors, "invalid_public_origin", { stack: stackName });
     }
     manifests.push({
-      name: stack.name,
+      name: stackName,
       publicOrigins,
       services,
       volumes: volumeNames,
@@ -567,11 +843,13 @@ function renderCompose(
   stack: ReleaseStackInput["name"],
   composeFile: string,
   environment: Record<string, string>,
+  profiles: readonly string[] = [],
 ): ReleaseStackInput {
   const rendered = spawnSync(
     "docker",
     [
       "compose",
+      ...profiles.flatMap((profile) => ["--profile", profile]),
       "--env-file",
       envFile,
       "-f",
@@ -618,6 +896,7 @@ export function runCoolifyReleaseCli(argv: string[]): number {
         "apollo-tf",
         resolve(repositoryRoot, "deploy/coolify/apollo-tf.compose.yml"),
         environment,
+        ["baseline"],
       ),
     ];
     const result = validateCoolifyRelease({ environment, stacks });
