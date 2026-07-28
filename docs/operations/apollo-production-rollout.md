@@ -154,13 +154,90 @@ the Linux/amd64 manifest is
 1. Record an owner-approved evidence ID and create a timestamped backup of the
    operator-owned complete Caddy configuration. Keep the exact path private.
 2. Stage only the Apollo include. Do not alter unrelated imports or site
-   blocks. Supply the admin username and Caddy password hash through the
-   operator-owned runtime environment, never in the include.
+   blocks. Supply `APOLLO_ADMIN_CADDY_USER` and
+   `APOLLO_ADMIN_CADDY_PASSWORD_HASH` through the protected file-backed
+   procedure below, never in the include.
 3. Run `deploy/caddy/validate-caddy.ps1` locally. On the host, validate the
    complete staged Caddy configuration with the installed Caddy binary.
 4. Obtain explicit reload approval. Reload Caddy; do not stop it and do not
    bind another proxy to `80` or `443`.
 5. Check each approved hostname and then all unaffected existing hostnames.
+
+### Protected credential source
+
+The redacted placeholders below identify operator-owned absolute paths. Do not
+replace them in tracked files, tickets, logs, or evidence. The username source
+`<CADDY_ADMIN_USER_FILE>` must be `root:caddy` mode `0640` and contain exactly one LF-terminated line
+matching `[A-Za-z0-9._-]{1,64}`. The transient password
+source `<CADDY_ADMIN_PASSWORD_FILE>` must be `root:root` mode `0600`. The
+generated hash source `<CADDY_ADMIN_HASH_FILE>`, assembled
+`<CADDY_APOLLO_ENV_STAGED>`, and installed `<CADDY_APOLLO_ENV_FILE>` must be
+`root:caddy` mode `0640`. The hash must use the Caddy-supported bcrypt form
+`$2a$`, `$2b$`, or `$2y$`, a two-digit cost, and 53 bcrypt payload characters.
+
+Generate the hash through stdin. The password and hash never appear in command
+arguments, shell history, terminal output, or tracked content:
+
+```sh
+sudo chown root:caddy '<CADDY_ADMIN_USER_FILE>'
+sudo chmod 0640 '<CADDY_ADMIN_USER_FILE>'
+sudo chown root:root '<CADDY_ADMIN_PASSWORD_FILE>'
+sudo chmod 0600 '<CADDY_ADMIN_PASSWORD_FILE>'
+sudo sh -ceu 'umask 077; /usr/bin/caddy hash-password < "$1" > "$2"; chown root:caddy "$2"; chmod 0640 "$2"' sh '<CADDY_ADMIN_PASSWORD_FILE>' '<CADDY_ADMIN_HASH_FILE>'
+```
+
+Validate both single-line sources and assemble the protected environment file
+without printing either value:
+
+```sh
+sudo sh -ceu '
+  [ "$(wc -l < "$1" | tr -d " ")" = 1 ]
+  [ "$(tail -c 1 "$1" | od -An -t u1 | tr -d " ")" = 10 ]
+  ! grep -q "$(printf "\r")" "$1"
+  grep -Eq "^[A-Za-z0-9._-]{1,64}$" "$1"
+  grep -Eq "^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$" "$2"
+  IFS= read -r user < "$1"
+  IFS= read -r hash < "$2"
+  umask 027
+  printf "APOLLO_ADMIN_CADDY_USER='\''%s'\''\nAPOLLO_ADMIN_CADDY_PASSWORD_HASH='\''%s'\''\n" "$user" "$hash" > "$3"
+  chown root:caddy "$3"
+  chmod 0640 "$3"
+' sh '<CADDY_ADMIN_USER_FILE>' '<CADDY_ADMIN_HASH_FILE>' '<CADDY_APOLLO_ENV_STAGED>'
+sudo rm -f '<CADDY_ADMIN_PASSWORD_FILE>'
+```
+
+Before installation, preserve the complete configuration and any prior
+protected environment with their ownership and modes. Absence of
+`<CADDY_APOLLO_ENV_BACKUP>` records that no prior environment existed. Then
+install the staged source and remove only the staging/hash files:
+
+```sh
+sudo cp --preserve=mode,ownership,timestamps '<CADDY_COMPLETE_CONFIG>' '<CADDY_COMPLETE_CONFIG_BACKUP>'
+sudo rm -f '<CADDY_APOLLO_ENV_BACKUP>'
+sudo sh -ceu 'if [ -e "$1" ]; then cp --preserve=mode,ownership,timestamps "$1" "$2"; fi' sh '<CADDY_APOLLO_ENV_FILE>' '<CADDY_APOLLO_ENV_BACKUP>'
+sudo install -o root -g caddy -m 0640 '<CADDY_APOLLO_ENV_STAGED>' '<CADDY_APOLLO_ENV_FILE>'
+sudo rm -f '<CADDY_APOLLO_ENV_STAGED>' '<CADDY_ADMIN_HASH_FILE>'
+```
+
+Validate the complete configuration and reload it only after explicit owner
+approval. Both commands consume the same protected source in a non-xtrace
+shell; do not pipe their environment or expanded configuration to a logger:
+
+```sh
+sudo sh -ceu 'set -a; . "$1"; set +a; exec /usr/bin/caddy validate --config "$2" --adapter caddyfile' sh '<CADDY_APOLLO_ENV_FILE>' '<CADDY_COMPLETE_CONFIG>'
+sudo sh -ceu 'set -a; . "$1"; set +a; exec /usr/bin/caddy reload --config "$2" --adapter caddyfile' sh '<CADDY_APOLLO_ENV_FILE>' '<CADDY_COMPLETE_CONFIG>'
+```
+
+For rollback, restore both protected sources, validate the restored complete
+configuration, obtain rollback approval, and reload using that restored
+environment:
+
+```sh
+sudo cp --preserve=mode,ownership,timestamps '<CADDY_COMPLETE_CONFIG_BACKUP>' '<CADDY_COMPLETE_CONFIG>'
+sudo sh -ceu 'if [ -e "$1" ]; then cp --preserve=mode,ownership,timestamps "$1" "$2"; else rm -f "$2"; fi' sh '<CADDY_APOLLO_ENV_BACKUP>' '<CADDY_APOLLO_ENV_FILE>'
+sudo sh -ceu 'set -a; . "$1"; set +a; exec /usr/bin/caddy validate --config "$2" --adapter caddyfile' sh '<CADDY_APOLLO_ENV_FILE>' '<CADDY_COMPLETE_CONFIG>'
+sudo sh -ceu 'set -a; . "$1"; set +a; exec /usr/bin/caddy reload --config "$2" --adapter caddyfile' sh '<CADDY_APOLLO_ENV_FILE>' '<CADDY_COMPLETE_CONFIG>'
+```
 
 Per-host checks:
 

@@ -6,13 +6,14 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
-const caddyfilePath = resolve(
-  repositoryRoot,
-  "deploy/caddy/apollo.caddyfile",
-);
+const caddyfilePath = resolve(repositoryRoot, "deploy/caddy/apollo.caddyfile");
 const validatorPath = resolve(
   repositoryRoot,
   "deploy/caddy/validate-caddy.ps1",
+);
+const rolloutPath = resolve(
+  repositoryRoot,
+  "docs/operations/apollo-production-rollout.md",
 );
 
 function caddyfile(): string {
@@ -22,9 +23,11 @@ function caddyfile(): string {
 describe("Apollo Caddy release include", () => {
   it("routes only the four approved hosts to their fixed loopback publications", () => {
     const source = caddyfile();
-    const routes = [...source.matchAll(
-      /^([a-z0-9.-]+)\s*\{[\s\S]*?^\s*reverse_proxy\s+([^\s]+)\s*$/gm,
-    )].map((match) => [match[1], match[2]]);
+    const routes = [
+      ...source.matchAll(
+        /^([a-z0-9.-]+)\s*\{[\s\S]*?^\s*reverse_proxy\s+([^\s]+)\s*$/gm,
+      ),
+    ].map((match) => [match[1], match[2]]);
 
     expect(routes).toEqual([
       ["api.apollot.ru", "127.0.0.1:18200"],
@@ -73,43 +76,65 @@ describe("Apollo Caddy release include", () => {
       /(?:password|passwd|token|secret|private[_-]?key)\s+[^\s{]/i,
     );
   });
+
+  it("documents a protected file-backed credential validation and rollback flow", () => {
+    const source = readFileSync(rolloutPath, "utf8");
+
+    for (const value of [
+      "APOLLO_ADMIN_CADDY_USER",
+      "APOLLO_ADMIN_CADDY_PASSWORD_HASH",
+      "<CADDY_ADMIN_USER_FILE>",
+      "<CADDY_ADMIN_PASSWORD_FILE>",
+      "<CADDY_ADMIN_HASH_FILE>",
+      "<CADDY_APOLLO_ENV_STAGED>",
+      "<CADDY_APOLLO_ENV_FILE>",
+      "<CADDY_COMPLETE_CONFIG>",
+      "<CADDY_COMPLETE_CONFIG_BACKUP>",
+      "<CADDY_APOLLO_ENV_BACKUP>",
+      "root:caddy",
+      "0640",
+      "root:root",
+      "0600",
+      'hash-password < "$1" > "$2"',
+      'set -a; . "$1"; set +a; exec /usr/bin/caddy validate',
+      'set -a; . "$1"; set +a; exec /usr/bin/caddy reload',
+    ]) {
+      expect(source).toContain(value);
+    }
+    expect(source).toContain("exactly one LF-terminated line");
+    expect(source).toContain("bcrypt");
+  });
 });
 
 describe.runIf(process.env.APOLLO_RUN_CADDY_VALIDATION === "1")(
   "Apollo Caddy container validation",
   () => {
-    it(
-      "validates the include in the pinned official Caddy image and cleans its exact resources",
-      () => {
-        const run = spawnSync(
-          "pwsh",
-          ["-NoLogo", "-NoProfile", "-File", validatorPath],
-          {
-            cwd: repositoryRoot,
-            encoding: "utf8",
-            env: process.env,
-            windowsHide: true,
-          },
-        );
+    it("validates the include in the pinned official Caddy image and cleans its exact resources", () => {
+      const run = spawnSync(
+        "pwsh",
+        ["-NoLogo", "-NoProfile", "-File", validatorPath],
+        {
+          cwd: repositoryRoot,
+          encoding: "utf8",
+          env: process.env,
+          windowsHide: true,
+        },
+      );
 
-        expect(
-          {
-            error: run.error?.name,
-            signal: run.signal,
-            status: run.status,
-            stderr: run.stderr,
-            stdout: run.stdout.replace(/\r\n/g, "\n"),
-          },
-        ).toEqual({
-          error: undefined,
-          signal: null,
-          status: 0,
-          stderr: "",
-          stdout:
-            "Caddy include validation passed with docker.io/library/caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d\n",
-        });
-      },
-      120_000,
-    );
+      expect({
+        error: run.error?.name,
+        signal: run.signal,
+        status: run.status,
+        stderr: run.stderr,
+        stdout: run.stdout.replace(/\r\n/g, "\n"),
+      }).toEqual({
+        error: undefined,
+        signal: null,
+        status: 0,
+        stderr: "",
+        stdout:
+          "Caddy include validation passed with docker.io/library/caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d\n",
+      });
+    }, 120_000);
   },
 );
