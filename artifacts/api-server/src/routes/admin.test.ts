@@ -1,6 +1,9 @@
 import { once } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import express from "express";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseDashboardSnapshot } from "@workspace/admin-dashboard-contract";
@@ -33,6 +36,7 @@ const validSnapshot = {
 } as const;
 
 const servers: Server[] = [];
+const temporaryRoots: string[] = [];
 
 async function startAdminServer(
   options: Parameters<typeof createAdminRouter>[0],
@@ -47,14 +51,18 @@ async function startAdminServer(
 }
 
 afterEach(async () => {
-  await Promise.all(
-    servers.splice(0).map(
+  vi.unstubAllEnvs();
+  await Promise.all([
+    ...servers.splice(0).map(
       (server) =>
         new Promise<void>((resolve, reject) => {
           server.close((error) => (error ? reject(error) : resolve()));
         }),
     ),
-  );
+    ...temporaryRoots
+      .splice(0)
+      .map((root) => rm(root, { force: true, recursive: true })),
+  ]);
 });
 
 describe("admin dashboard token", () => {
@@ -96,6 +104,26 @@ describe("cached runtime probes", () => {
 });
 
 describe("GET /api/admin/dashboard", () => {
+  it("loads the default dashboard token from its configured file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "apollo-admin-route-"));
+    temporaryRoots.push(root);
+    const tokenPath = join(root, "admin_dashboard_token");
+    const token = "route-token-".padEnd(32, "x");
+    await writeFile(tokenPath, `${token}\n`);
+    vi.stubEnv("ADMIN_DASHBOARD_TOKEN_FILE", tokenPath);
+    vi.stubEnv("ADMIN_DASHBOARD_TOKEN", undefined);
+
+    const url = await startAdminServer({
+      loadSnapshot: async () => validSnapshot,
+    });
+    const response = await fetch(url, {
+      headers: { "X-Admin-Dashboard-Token": token },
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual(validSnapshot);
+  });
+
   it.each([
     ["missing", undefined],
     ["wrong same-length", "wrong-token!"],

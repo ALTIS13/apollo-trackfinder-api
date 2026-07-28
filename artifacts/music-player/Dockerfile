@@ -35,11 +35,17 @@ RUN printf 'server {\n\
     server_name _;\n\
     root /usr/share/nginx/html;\n\
     index index.html;\n\
+    location = /healthz {\n\
+        access_log off;\n\
+        default_type text/plain;\n\
+        return 200 "ok\\n";\n\
+    }\n\
     location / {\n\
         try_files $uri $uri/ /index.html;\n\
     }\n\
 }\n' > /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
+HEALTHCHECK CMD wget -qO- http://127.0.0.1/healthz || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]

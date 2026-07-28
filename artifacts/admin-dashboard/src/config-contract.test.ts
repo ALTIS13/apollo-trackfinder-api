@@ -119,12 +119,54 @@ describe("admin dashboard delivery contracts", () => {
     expect(dockerfile).toContain(
       "/docker-entrypoint.d/16-admin-dashboard-defaults.envsh",
     );
-    expect(nginxRuntimeDefaults).toContain(
-      'export ADMIN_DASHBOARD_TOKEN="${ADMIN_DASHBOARD_TOKEN:-}"',
-    );
     expect(dockerfile).toContain(
       "HEALTHCHECK CMD wget -qO- http://127.0.0.1/healthz || exit 1",
     );
+  });
+
+  it("loads bounded admin credentials only from the production secret files", () => {
+    expect(nginxRuntimeDefaults).toContain(
+      'ADMIN_DASHBOARD_TOKEN_FILE="/run/secrets/admin_dashboard_token"',
+    );
+    expect(nginxRuntimeDefaults).toContain(
+      'ADMIN_ACCESS_USER_FILE="/run/secrets/admin_access_user"',
+    );
+    expect(nginxRuntimeDefaults).toContain(
+      'ADMIN_ACCESS_PASSWORD_FILE="/run/secrets/admin_access_password"',
+    );
+    expect(nginxRuntimeDefaults).toMatch(
+      /read_secret_file\(\)\s*{[\s\S]*file_path="\$1"[\s\S]*minimum_bytes="\$2"[\s\S]*maximum_bytes="\$3"/,
+    );
+    expect(nginxRuntimeDefaults).toContain(
+      'read_secret_file "$ADMIN_DASHBOARD_TOKEN_FILE" 32 4096',
+    );
+    expect(nginxRuntimeDefaults).toContain(
+      'read_secret_file "$ADMIN_ACCESS_USER_FILE" 1 128',
+    );
+    expect(nginxRuntimeDefaults).toContain(
+      'read_secret_file "$ADMIN_ACCESS_PASSWORD_FILE" 16 4096',
+    );
+    expect(nginxRuntimeDefaults).toContain("umask 077");
+    expect(nginxRuntimeDefaults).toMatch(
+      /case "\$admin_access_user" in[\s\S]*""\|\*\[!a-zA-Z0-9_.@-\]\*/,
+    );
+    expect(nginxRuntimeDefaults).toContain(
+      "printf 'disabled:!\\n' > /etc/nginx/.htpasswd",
+    );
+    expect(nginxRuntimeDefaults).toContain("chmod 640 /etc/nginx/.htpasswd");
+    expect(nginxRuntimeDefaults).toMatch(
+      /unset\s+admin_dashboard_token\s+admin_access_user\s+admin_access_password\s+admin_password_hash/,
+    );
+    expect(nginxRuntimeDefaults).toContain(
+      "printf '%s\\n' \"$admin_access_password\" | mkpasswd -P 0 -m sha512",
+    );
+    expect(nginxRuntimeDefaults).toMatch(
+      /if admin_password_hash="\$\(printf[\s\S]*mkpasswd -P 0 -m sha512\)"\s*&&\s*\[ -n "\$admin_password_hash" \]; then/,
+    );
+    expect(nginxRuntimeDefaults).not.toContain("set -x");
+    expect(nginxRuntimeDefaults).not.toMatch(/\becho\b/);
+    expect(nginxRuntimeDefaults).not.toContain("${ADMIN_ACCESS_USER:-}");
+    expect(nginxRuntimeDefaults).not.toContain("${ADMIN_ACCESS_PASSWORD:-}");
   });
 
   it("limits the tokenized proxy to exact GET dashboard requests with deferred DNS", () => {
@@ -171,26 +213,15 @@ describe("admin dashboard delivery contracts", () => {
     );
   });
 
-  it("configures the admin service with runtime same-origin upstream and token values", () => {
+  it("configures the admin service with its runtime same-origin upstream", () => {
     expect(composeConfig).not.toMatch(/^version:/m);
-    expect(composeConfig).toMatch(/\n\s{2}tf-admin:\s*\n/);
+    expect(composeConfig).toMatch(/\n\s{2}admin:\s*\n/);
     expect(composeConfig).toContain(
       "dockerfile: artifacts/admin-dashboard/Dockerfile",
     );
     expect(composeConfig).not.toContain("VITE_ADMIN_API_URL");
-    expect(composeConfig).toContain(
-      'APOLLO_API_UPSTREAM: "http://tf-api:8080"',
-    );
-    expect(composeConfig).toContain(
-      'ADMIN_DASHBOARD_TOKEN: "${ADMIN_DASHBOARD_TOKEN:-}"',
-    );
+    expect(composeConfig).toContain('APOLLO_API_UPSTREAM: "http://api:8080"');
     expect(composeConfig).toContain('"127.0.0.1:${TF_ADMIN_PORT:-3001}:80"');
-    expect(composeConfig).toContain(
-      'ADMIN_ACCESS_USER: "${ADMIN_ACCESS_USER:-}"',
-    );
-    expect(composeConfig).toContain(
-      'ADMIN_ACCESS_PASSWORD: "${ADMIN_ACCESS_PASSWORD:-}"',
-    );
   });
 
   it("selects the fixed same-origin adapter in production without a browser token", () => {
