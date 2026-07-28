@@ -13,6 +13,7 @@ import {
   readFile,
   readdir,
   rm,
+  rmdir,
   writeFile,
 } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -248,6 +249,13 @@ async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function removeTaskCreatedParent(
+  path: string,
+  wasPresent: boolean,
+): Promise<void> {
+  if (!wasPresent) await rmdir(path);
 }
 
 function secret(bytes = 32): string {
@@ -2166,9 +2174,9 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
           rm(root as string, { force: true, recursive: true }),
         );
       }
-      if (!temporaryParentWasPresent) {
-        await attempt(() => rm(temporaryParent, { force: false }));
-      }
+      await attempt(() =>
+        removeTaskCreatedParent(temporaryParent, temporaryParentWasPresent),
+      );
       if (errors.length > 0) {
         throw new AggregateError(errors, "production smoke teardown failed");
       }
@@ -2522,6 +2530,23 @@ describe("Coolify production smoke contract", () => {
     ).toEqual(["injected lifecycle failure", "injected teardown failure"]);
     expect(owned.size).toBe(0);
     expect(auditCalls).toBe(1);
+  });
+
+  it("removes only an empty temporary parent created by the task", async () => {
+    const created = join(tmpdir(), `apollo-created-${randomUUID()}`);
+    const preexisting = join(tmpdir(), `apollo-preexisting-${randomUUID()}`);
+    await mkdir(created);
+    await mkdir(preexisting);
+    try {
+      await removeTaskCreatedParent(created, false);
+      await removeTaskCreatedParent(preexisting, true);
+
+      expect(await pathExists(created)).toBe(false);
+      expect(await pathExists(preexisting)).toBe(true);
+    } finally {
+      await rm(created, { force: true, recursive: true });
+      await rm(preexisting, { force: true, recursive: true });
+    }
   });
 
   it("audits the union of run and both Compose project labels", async () => {
