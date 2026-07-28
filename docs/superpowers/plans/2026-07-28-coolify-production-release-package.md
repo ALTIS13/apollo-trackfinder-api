@@ -627,6 +627,9 @@ unless-stopped`, `init: true`, `stop_grace_period`, `pids_limit`,
   pnpm release:validate -- --env-file deploy/coolify/release.env.example
   ```
 
+  The checked-in example command must fail closed with only
+  `placeholder_image_digest` errors. The production smoke must validate its
+  temporary non-zero digest env successfully before starting either stack.
   Then run both opt-in Docker proofs. Require exact cleanup zero.
 
 - [ ] **Step 7: Commit**
