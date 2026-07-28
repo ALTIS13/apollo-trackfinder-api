@@ -53,7 +53,7 @@ function contractEnvironment(root: string, overrides: NodeJS.ProcessEnv = {}): N
   const log = join(root, "commands.log");
   writeExecutable(join(bin, "pg_dump"), "#!/bin/sh\nprintf 'pg_dump %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_PG_DUMP_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nprintf 'task4-custom-dump'\n");
   writeExecutable(join(bin, "age"), "#!/bin/sh\nprintf 'age %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_AGE_FAIL:-}\" = 1 ]; then cat >/dev/null; printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nprintf 'age:'\ncat\n");
-  writeExecutable(join(bin, "psql"), "#!/bin/sh\nprintf 'psql %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_PSQL_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\ncase \"${FAKE_TARGET_OBJECT:-}\" in table) case \"$*\" in *pg_class*) printf '1\\n' ;; esac ;; schema) case \"$*\" in *pg_namespace*) printf '1\\n' ;; esac ;; view) case \"$*\" in *pg_views*) printf '1\\n' ;; esac ;; sequence) case \"$*\" in *pg_sequences*) printf '1\\n' ;; esac ;; type) case \"$*\" in *pg_type*) printf '1\\n' ;; esac ;; function) case \"$*\" in *pg_proc*) printf '1\\n' ;; esac ;; extension) case \"$*\" in *pg_extension*) printf '1\\n' ;; esac ;; esac\nif [ \"${FAKE_TARGET_NOT_EMPTY:-}\" = 1 ]; then printf '1\\n'; fi\n");
+  writeExecutable(join(bin, "psql"), "#!/bin/sh\nprintf 'psql %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_PSQL_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nif [ -n \"${FAKE_TARGET_RESULT:-}\" ]; then printf '%s\\n' \"$FAKE_TARGET_RESULT\"; fi\nif [ -n \"${FAKE_TARGET_PROBE:-}\" ]; then case \"$*\" in *\"$FAKE_TARGET_PROBE\"*) printf '1\\n' ;; esac; fi\nif [ \"${FAKE_TARGET_NOT_EMPTY:-}\" = 1 ]; then printf '1\\n'; fi\n");
   writeExecutable(join(bin, "pg_restore"), "#!/bin/sh\nprintf 'pg_restore %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_PG_RESTORE_FAIL:-}\" = 1 ]; then cat >/dev/null; printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\ncat > \"$FAKE_RESTORE_INPUT\"\n");
   writeExecutable(join(bin, "sha256sum"), "#!/bin/sh\nprintf 'sha256sum %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_SHA256_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nprintf '%s  %s\\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \"$1\"\n");
   writeExecutable(join(bin, "mktemp"), "#!/bin/sh\nif [ \"${FAKE_MKTEMP_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nexec /usr/bin/mktemp \"$@\"\n");
@@ -227,6 +227,50 @@ describe("encrypted PostgreSQL backup contract", () => {
     expect(finalChmod).toContain(basename(artifacts.metadata));
   });
 
+  it("writes final artifacts with actual 0600 modes in Linux", () => {
+    if (!requireScript(backupScript)) return;
+    const runId = `apollo-task4-mode-${randomBytes(6).toString("hex")}`;
+    const label = `com.apollo.task4.mode-test=${runId}`;
+    const volume = `${runId}-artifacts`;
+    let modes = "";
+    try {
+      docker(["volume", "create", "--label", label, volume]);
+      modes = docker(["run", "--rm", "--label", label, "-v", `${worktree.replaceAll("\\\\", "/")}:/repo:ro`, "-v", `${volume}:/work`, "postgres:16", "sh", "-ceu", `
+        mkdir -p /work/bin /work/backups
+        cat > /work/bin/pg_dump <<'EOF'
+#!/bin/sh
+printf 'task4-custom-dump'
+EOF
+        cat > /work/bin/age <<'EOF'
+#!/bin/sh
+cat
+EOF
+        chmod 755 /work/bin/pg_dump /work/bin/age
+        printf 'host:5432:apollo_trackfinder:backup_operator:mode-test\\n' > /work/pgpass
+        chmod 600 /work/pgpass
+        /repo/deploy/ops/backup-postgres.sh
+        stat -c '%a' /work/backups/*.dump.age /work/backups/*.sha256 /work/backups/*.json | sort -u
+      `], {
+        env: {
+          PATH: "/work/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          PGPASSFILE: "/work/pgpass",
+          APOLLO_BACKUP_DESTINATION: "/work/backups",
+          APOLLO_BACKUP_PGHOST: "mode-test.internal",
+          APOLLO_BACKUP_PGPORT: "5432",
+          APOLLO_BACKUP_PGDATABASE: "apollo_trackfinder",
+          APOLLO_BACKUP_PGUSER: "backup_operator",
+          APOLLO_BACKUP_AGE_RECIPIENT: "age1modeproofrecipient000000000000000000000000000000000000000000",
+          APOLLO_BACKUP_STACK: "apollo-tf",
+          APOLLO_BACKUP_RELEASE_ID: "release-task4-mode",
+        },
+      });
+    } finally {
+      dockerQuiet(["volume", "rm", volume]);
+    }
+    expect(modes.split("\n").at(-1)).toBe("600");
+    expect(dockerExists(["volume", "inspect", volume])).toBe(false);
+  });
+
   it("removes published artifacts when an atomic rename fails", () => {
     if (!requireScript(backupScript)) return;
     const root = temporaryRoot();
@@ -380,18 +424,55 @@ describe("encrypted PostgreSQL backup contract", () => {
     expect(existsSync(env.FAKE_RESTORE_INPUT!)).toBe(false);
   });
 
+  it("redacts hostile target-check results before restore", () => {
+    if (!requireScript(backupScript) || !requireScript(restoreScript)) return;
+    const root = temporaryRoot();
+    const env = contractEnvironment(root, { FAKE_TARGET_RESULT: "malformed-target-result-sensitive" });
+    expect(runScript(backupScript, env).status).toBe(0);
+    const result = runScript(restoreScript, restoreEnvironment(root, env, backupArtifacts(env.APOLLO_BACKUP_DESTINATION!)));
+    expect(result.status).not.toBe(0);
+    expect(output(result)).toBe("restore: target-check failed\n");
+    expect(output(result)).not.toContain(env.FAKE_TARGET_RESULT!);
+    expect(existsSync(env.FAKE_RESTORE_INPUT!)).toBe(false);
+  });
+
   it.each([
     ["table", "pg_class"],
     ["schema", "pg_namespace"],
-    ["view", "pg_views"],
-    ["sequence", "pg_sequences"],
+    ["view", "pg_class"],
+    ["sequence", "pg_class"],
     ["type", "pg_type"],
     ["function", "pg_proc"],
     ["extension", "pg_extension"],
-  ])("rejects a disposable target containing a user %s", (objectClass, _probe) => {
+    ["access method", "pg_am"],
+    ["cast", "pg_cast"],
+    ["collation", "pg_collation"],
+    ["conversion", "pg_conversion"],
+    ["default privilege", "pg_default_acl"],
+    ["event trigger", "pg_event_trigger"],
+    ["foreign-data wrapper", "pg_foreign_data_wrapper"],
+    ["foreign server", "pg_foreign_server"],
+    ["user mapping", "pg_user_mapping"],
+    ["procedural language", "pg_language"],
+    ["operator", "pg_operator"],
+    ["operator class", "pg_opclass"],
+    ["operator family", "pg_opfamily"],
+    ["row-level policy", "pg_policy"],
+    ["publication", "pg_publication"],
+    ["subscription", "pg_subscription"],
+    ["rule", "pg_rewrite"],
+    ["transform", "pg_transform"],
+    ["trigger", "pg_trigger"],
+    ["text-search configuration", "pg_ts_config"],
+    ["text-search dictionary", "pg_ts_dict"],
+    ["text-search parser", "pg_ts_parser"],
+    ["text-search template", "pg_ts_template"],
+    ["extended statistic", "pg_statistic_ext"],
+    ["large object", "pg_largeobject_metadata"],
+  ])("rejects a disposable target containing a user %s", (objectClass, probe) => {
     if (!requireScript(backupScript) || !requireScript(restoreScript)) return;
     const root = temporaryRoot();
-    const env = contractEnvironment(root, { FAKE_TARGET_OBJECT: objectClass });
+    const env = contractEnvironment(root, { FAKE_TARGET_PROBE: probe });
     expect(runScript(backupScript, env).status).toBe(0);
     const result = runScript(restoreScript, restoreEnvironment(root, env, backupArtifacts(env.APOLLO_BACKUP_DESTINATION!)));
     expect(result.status).not.toBe(0);
