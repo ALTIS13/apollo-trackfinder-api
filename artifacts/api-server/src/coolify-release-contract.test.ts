@@ -257,16 +257,18 @@ describe("Coolify production release manifests", () => {
     });
   });
 
-  it("keeps the stacks and their database networks isolated", async () => {
+  it("keeps data isolated while sharing only the internal Platform bridge", async () => {
     const [platform, tf] = await Promise.all([
       load(platformPath),
       load(tfPath),
     ]);
     expect(names(platform.compose.networks)).toEqual([
+      "platform-bridge",
       "platform-data",
       "platform-edge",
     ]);
     expect(names(tf.compose.networks)).toEqual([
+      "platform-bridge",
       "tf-data",
       "tf-download-control",
       "tf-download-egress",
@@ -280,15 +282,32 @@ describe("Coolify production release manifests", () => {
     ]);
     expect(platform.compose.networks?.["platform-data"]?.internal).toBe(true);
     expect(tf.compose.networks?.["tf-data"]?.internal).toBe(true);
+    expect(platform.compose.networks?.["platform-bridge"]).toEqual({
+      name: "apollo-platform-bridge-v1",
+      internal: true,
+    });
+    expect(tf.compose.networks?.["platform-bridge"]).toEqual({
+      name: "apollo-platform-bridge-v1",
+      external: true,
+    });
     expect(
-      new Set([
-        ...names(platform.compose.networks),
-        ...names(tf.compose.networks),
-      ]).size,
-    ).toBe(
-      names(platform.compose.networks).length +
-        names(tf.compose.networks).length,
+      names(platform.compose.networks).filter((name) =>
+        names(tf.compose.networks).includes(name),
+      ),
+    ).toEqual(["platform-bridge"]);
+    expect(networkNames(platform.compose.services["platform-api"])).toContain(
+      "platform-bridge",
     );
+    expect(networkNames(tf.compose.services["tf-api"])).toContain(
+      "platform-bridge",
+    );
+    expect(
+      tf.compose.services["tf-api"].environment?.APOLLO_PLATFORM_API_ORIGIN,
+    ).toBe("http://platform-api:8080");
+    expect(
+      tf.compose.services["tf-api"].environment
+        ?.APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP,
+    ).toBe("true");
     for (const service of Object.values(platform.compose.services)) {
       expect(networkNames(service)).not.toContain("tf-data");
     }
@@ -657,6 +676,38 @@ describe("Apollo immutable image release workflow", () => {
     );
     expect(manifestStep?.run).not.toMatch(
       /(?:password|token|secret|private|database_url|redis_url)"?\s*:/i,
+    );
+  });
+
+  it("accepts only exact lowercase image digests and bounds GHCR manifest visibility retries", async () => {
+    const workflow = parse(await readFile(releaseWorkflowPath, "utf8")) as {
+      readonly jobs: Record<
+        string,
+        {
+          readonly steps: readonly {
+            readonly name?: string;
+            readonly run?: string;
+          }[];
+        }
+      >;
+    };
+    const steps = Object.values(workflow.jobs).flatMap(({ steps }) => steps);
+    const buildDigest = steps.find(
+      ({ name }) => name === "Record resulting digest",
+    )?.run;
+    const manifestDigests = steps.find(
+      ({ name }) => name === "Capture immutable digests",
+    )?.run;
+
+    expect(buildDigest).toContain('[[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]');
+    expect(buildDigest).not.toContain('case "$digest"');
+    expect(manifestDigests).toContain("for attempt in 1 2 3 4 5; do");
+    expect(manifestDigests).toContain(
+      "GHCR manifest digest unavailable after 5 attempts",
+    );
+    expect(manifestDigests).toContain('sleep "$attempt"');
+    expect(manifestDigests).toMatch(
+      /if \[\[ "\$attempt" == "5" \]\]; then[\s\S]*exit 1[\s\S]*fi/,
     );
   });
 });

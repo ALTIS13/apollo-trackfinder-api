@@ -107,7 +107,9 @@ describe("admin dashboard delivery contracts", () => {
     const viteBuild = dockerfile.indexOf(
       "pnpm --filter @workspace/admin-dashboard build",
     );
-    const nginxStage = dockerfile.indexOf("FROM nginx:1.27-alpine");
+    const nginxStage = dockerfile.indexOf(
+      "FROM docker.io/library/nginx:1.27-alpine@sha256:",
+    );
 
     expect(viteBuild).toBeGreaterThan(-1);
     expect(nginxStage).toBeGreaterThan(viteBuild);
@@ -147,11 +149,17 @@ describe("admin dashboard delivery contracts", () => {
       'read_secret_file "$ADMIN_ACCESS_PASSWORD_FILE" 16 4096',
     );
     expect(nginxRuntimeDefaults).toContain("umask 077");
+    expect(nginxRuntimeDefaults).toContain(
+      'carriage_return="$(printf \'\\r\')"',
+    );
+    expect(nginxRuntimeDefaults).toMatch(
+      /case "\$secret_value" in[\s\S]*\*"\$carriage_return"\*[\s\S]*return 1/,
+    );
+    expect(nginxRuntimeDefaults).toMatch(
+      /if \[ "\$admin_configuration_valid" != true \]; then[\s\S]*exit 1[\s\S]*fi/,
+    );
     expect(nginxRuntimeDefaults).toMatch(
       /case "\$admin_access_user" in[\s\S]*""\|\*\[!a-zA-Z0-9_.@-\]\*/,
-    );
-    expect(nginxRuntimeDefaults).toContain(
-      "printf 'disabled:!\\n' > /etc/nginx/.htpasswd",
     );
     expect(nginxRuntimeDefaults).toContain("chmod 640 /etc/nginx/.htpasswd");
     expect(nginxRuntimeDefaults).toMatch(
@@ -160,8 +168,11 @@ describe("admin dashboard delivery contracts", () => {
     expect(nginxRuntimeDefaults).toContain(
       "printf '%s\\n' \"$admin_access_password\" | mkpasswd -P 0 -m sha512",
     );
-    expect(nginxRuntimeDefaults).toMatch(
-      /if admin_password_hash="\$\(printf[\s\S]*mkpasswd -P 0 -m sha512\)"\s*&&\s*\[ -n "\$admin_password_hash" \]; then/,
+    expect(nginxRuntimeDefaults).toContain(
+      'admin_password_hash="$(printf \'%s\\n\' "$admin_access_password" | mkpasswd -P 0 -m sha512)" || exit 1',
+    );
+    expect(nginxRuntimeDefaults).toContain(
+      '[ -n "$admin_password_hash" ] || exit 1',
     );
     expect(nginxRuntimeDefaults).not.toContain("set -x");
     expect(nginxRuntimeDefaults).not.toMatch(/\becho\b/);
@@ -210,6 +221,18 @@ describe("admin dashboard delivery contracts", () => {
     expect(nginxConfig.match(/X-Admin-Dashboard-Token/g)).toHaveLength(1);
     expect(nginxConfig).toMatch(
       /location\s+\/\s*{[^}]*try_files\s+\$uri\s+\$uri\/\s+\/index\.html/s,
+    );
+  });
+
+  it("omits the Basic Auth identity from production access logs", () => {
+    const safeLogStart = nginxConfig.indexOf("log_format apollo_admin_safe");
+    const serverStart = nginxConfig.indexOf("server {", safeLogStart);
+    const safeLogFormat = nginxConfig.slice(safeLogStart, serverStart);
+
+    expect(safeLogStart).toBeGreaterThan(-1);
+    expect(safeLogFormat).not.toContain("$remote_user");
+    expect(nginxConfig).toContain(
+      "access_log /var/log/nginx/access.log apollo_admin_safe;",
     );
   });
 

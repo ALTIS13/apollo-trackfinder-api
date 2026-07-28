@@ -126,10 +126,7 @@ jobs:
       - name: Record resulting digest
         run: |
           digest='${{ steps.build.outputs.digest }}'
-          case "$digest" in
-            sha256:[0-9a-f][0-9a-f]*) ;;
-            *) exit 1 ;;
-          esac
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           printf '%s@%s\n' '${{ matrix.image }}' "$digest"
 
   manifest:
@@ -167,13 +164,25 @@ jobs:
           : > apollo-release-images.jsonl
           for item in "${images[@]}"; do
             read -r name image <<<"$item"
-            digest="$(
-              docker buildx imagetools inspect \
-                "$image:${GITHUB_SHA}" \
-                --format '{{json .Manifest.Digest}}' |
-                tr -d '"'
-            )"
-            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            digest=
+            for attempt in 1 2 3 4 5; do
+              digest="$(
+                docker buildx imagetools inspect \
+                  "$image:${GITHUB_SHA}" \
+                  --format '{{json .Manifest.Digest}}' 2>/dev/null |
+                  tr -d '"'
+              )" || true
+              if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                break
+              fi
+              digest=
+              if [[ "$attempt" == "5" ]]; then
+                printf '%s\n' \
+                  'GHCR manifest digest unavailable after 5 attempts' >&2
+                exit 1
+              fi
+              sleep "$attempt"
+            done
             jq -cn \
               --arg name "$name" \
               --arg imageDigest "$digest" \

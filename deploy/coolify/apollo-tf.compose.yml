@@ -498,8 +498,9 @@ services:
       APOLLO_API_VERSION: ${TF_API_VERSION:?}
       APOLLO_DEPLOYED_AT: ${TF_DEPLOYED_AT:?}
       APOLLO_MODULE_HEARTBEAT_KEYS_FILE: /run/secrets/tf_module_heartbeat_keys
-      APOLLO_PLATFORM_API_ORIGIN: ${PLATFORM_PUBLIC_ORIGIN:?}
+      APOLLO_PLATFORM_API_ORIGIN: http://platform-api:8080
       APOLLO_PLATFORM_ISSUER: ${PLATFORM_PUBLIC_ORIGIN:?}
+      APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP: "true"
       APOLLO_TF_AUTH_REDIS_URL: redis://tf-redis:6379/1
       APOLLO_TF_CALLBACK_URL: ${TF_API_PUBLIC_ORIGIN:?}/api/auth/callback
       APOLLO_TF_CLIENT_ID: apollo-tf-api
@@ -566,6 +567,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
     networks:
+      - platform-bridge
       - tf-data
       - tf-edge
       - tf-integrations-control
@@ -724,6 +726,9 @@ volumes:
     name: apollo-tf-downloads-v1
 
 networks:
+  platform-bridge:
+    name: apollo-platform-bridge-v1
+    external: true
   tf-data:
     name: apollo-tf-data-v1
     internal: true

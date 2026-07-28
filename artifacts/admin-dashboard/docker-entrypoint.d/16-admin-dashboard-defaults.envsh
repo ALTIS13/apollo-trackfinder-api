@@ -5,6 +5,7 @@ ADMIN_ACCESS_USER_FILE="/run/secrets/admin_access_user"
 ADMIN_ACCESS_PASSWORD_FILE="/run/secrets/admin_access_password"
 
 umask 077
+carriage_return="$(printf '\r')"
 
 read_secret_file() {
   file_path="$1"
@@ -22,6 +23,10 @@ read_secret_file() {
 
   secret_value="$(cat "$file_path"; printf '\001')" || return 1
   secret_value="${secret_value%?}"
+  case "$secret_value" in
+    *"$carriage_return"*|*'
+'*) return 1 ;;
+  esac
   actual_size="$(printf '%s' "$secret_value" | wc -c)" || return 1
   [ "$actual_size" -eq "$secret_size" ] || return 1
 }
@@ -57,22 +62,18 @@ case "$admin_access_user" in
     ;;
 esac
 
-if [ "$admin_configuration_valid" = true ]; then
-  if admin_password_hash="$(printf '%s\n' "$admin_access_password" | mkpasswd -P 0 -m sha512)" &&
-    [ -n "$admin_password_hash" ]; then
-    export ADMIN_DASHBOARD_TOKEN="$admin_dashboard_token"
-    printf '%s:%s\n' "$admin_access_user" "$admin_password_hash" > /etc/nginx/.htpasswd
-  else
-    export ADMIN_DASHBOARD_TOKEN=
-    printf 'disabled:!\n' > /etc/nginx/.htpasswd
-  fi
-else
-  export ADMIN_DASHBOARD_TOKEN=
-  printf 'disabled:!\n' > /etc/nginx/.htpasswd
+if [ "$admin_configuration_valid" != true ]; then
+  unset admin_dashboard_token admin_access_user admin_access_password
+  unset admin_password_hash admin_configuration_valid secret_value
+  exit 1
 fi
 
+admin_password_hash="$(printf '%s\n' "$admin_access_password" | mkpasswd -P 0 -m sha512)" || exit 1
+[ -n "$admin_password_hash" ] || exit 1
+export ADMIN_DASHBOARD_TOKEN="$admin_dashboard_token"
+printf '%s:%s\n' "$admin_access_user" "$admin_password_hash" > /etc/nginx/.htpasswd
 chown root:nginx /etc/nginx/.htpasswd
 chmod 640 /etc/nginx/.htpasswd
 unset admin_dashboard_token admin_access_user admin_access_password admin_password_hash
 unset admin_configuration_valid actual_size secret_size secret_value
-unset file_path minimum_bytes maximum_bytes
+unset carriage_return file_path minimum_bytes maximum_bytes

@@ -651,7 +651,11 @@ describe("TF auth runtime configuration", () => {
     production.environment.APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP = "true";
     await expect(
       parseTfAuthRuntimeConfig(production.environment),
-    ).rejects.toThrow("TF authentication configuration is invalid");
+    ).resolves.toMatchObject({
+      issuer: "https://api.apollot.ru",
+      apiOrigin: "http://platform-api:8080",
+      allowPrivateHttpTransport: true,
+    });
   });
 
   it("accepts a file-backed fixed PKCE verifier only in explicit bridge mode", async () => {

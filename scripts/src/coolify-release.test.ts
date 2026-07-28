@@ -138,6 +138,95 @@ const exactSecretMounts = {
   ],
   "tf-web": [],
 } satisfies Record<ServiceName, ComposeSecretMount[]>;
+const exactSecretFileEnvironment: Readonly<
+  Partial<Record<ServiceName, Record<string, string>>>
+> = {
+  "platform-api": {
+    APOLLO_ASSERTION_PRIVATE_JWK_FILE:
+      "/run/secrets/platform_assertion_private_jwk",
+    APOLLO_ASSERTION_PUBLIC_JWKS_FILE:
+      "/run/secrets/platform_assertion_public_jwks",
+    APOLLO_OAUTH_CLIENTS_FILE: "/run/secrets/platform_oauth_clients",
+    APOLLO_OPERATOR_BOOTSTRAP_TOKEN_FILE:
+      "/run/secrets/platform_operator_bootstrap_token",
+    DATABASE_URL_FILE: "/run/secrets/platform_runtime_database_url",
+  },
+  "platform-migrate": {
+    MIGRATOR_DATABASE_URL_FILE: "/run/secrets/platform_migrator_database_url",
+  },
+  "platform-postgres": {
+    POSTGRES_PASSWORD_FILE: "/run/secrets/platform_postgres_admin_password",
+  },
+  "tf-admin": {
+    ADMIN_ACCESS_PASSWORD_FILE: "/run/secrets/admin_access_password",
+    ADMIN_ACCESS_USER_FILE: "/run/secrets/admin_access_user",
+    ADMIN_DASHBOARD_TOKEN_FILE: "/run/secrets/admin_dashboard_token",
+  },
+  "tf-api": {
+    ADMIN_DASHBOARD_TOKEN_FILE: "/run/secrets/admin_dashboard_token",
+    APOLLO_MODULE_HEARTBEAT_KEYS_FILE: "/run/secrets/tf_module_heartbeat_keys",
+    APOLLO_TF_CLIENT_SECRET_FILE: "/run/secrets/tf_client_secret",
+    DATABASE_URL_FILE: "/run/secrets/tf_runtime_database_url",
+    TF_DOWNLOAD_QUEUE_REDIS_URL_FILE:
+      "/run/secrets/tf_download_queue_redis_url",
+    TF_DOWNLOAD_WORKER_INTERNAL_AUTH_SECRET_FILE:
+      "/run/secrets/tf_download_internal_auth_secret",
+    TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE:
+      "/run/secrets/tf_integrations_internal_auth_secret",
+    TF_SEARCH_INTERNAL_AUTH_SECRET_FILE:
+      "/run/secrets/tf_search_internal_auth_secret",
+  },
+  "tf-baseline": {
+    TF_BASELINE_DATABASE_URL_FILE: "/run/secrets/tf_admin_database_url",
+  },
+  "tf-download-redis": {
+    TF_DOWNLOAD_QUEUE_PASSWORD_FILE: "/run/secrets/tf_download_queue_password",
+  },
+  "tf-download-worker": {
+    TF_DOWNLOAD_HEARTBEAT_SECRET_FILE:
+      "/run/secrets/tf_download_heartbeat_secret",
+    TF_DOWNLOAD_INTERNAL_AUTH_SECRET_FILE:
+      "/run/secrets/tf_download_internal_auth_secret",
+    TF_DOWNLOAD_QUEUE_REDIS_URL_FILE:
+      "/run/secrets/tf_download_queue_redis_url",
+  },
+  "tf-integrations": {
+    TF_INTEGRATIONS_DATABASE_URL_FILE:
+      "/run/secrets/tf_integrations_runtime_database_url",
+    TF_INTEGRATIONS_HEARTBEAT_SECRET_FILE:
+      "/run/secrets/tf_integrations_heartbeat_secret",
+    TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE:
+      "/run/secrets/tf_integrations_internal_auth_secret",
+    TF_INTEGRATIONS_SPOTIFY_CLIENT_ID_FILE:
+      "/run/secrets/tf_integrations_spotify_client_id",
+    TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET_FILE:
+      "/run/secrets/tf_integrations_spotify_client_secret",
+    TF_INTEGRATIONS_TOKEN_KEYRING_FILE:
+      "/run/secrets/tf_integrations_token_keyring",
+  },
+  "tf-integrations-migrate": {
+    TF_INTEGRATIONS_DATABASE_URL_FILE:
+      "/run/secrets/tf_integrations_migrator_database_url",
+  },
+  "tf-integrations-postgres": {
+    POSTGRES_PASSWORD_FILE:
+      "/run/secrets/tf_integrations_postgres_admin_password",
+  },
+  "tf-migrate": {
+    TF_MIGRATOR_DATABASE_URL_FILE: "/run/secrets/tf_migrator_database_url",
+  },
+  "tf-postgres": {
+    POSTGRES_PASSWORD_FILE: "/run/secrets/tf_postgres_admin_password",
+  },
+  "tf-role-bootstrap": {
+    TF_ROLE_BOOTSTRAP_DATABASE_URL_FILE: "/run/secrets/tf_admin_database_url",
+  },
+  "tf-search": {
+    TF_SEARCH_HEARTBEAT_SECRET_FILE: "/run/secrets/tf_search_heartbeat_secret",
+    TF_SEARCH_INTERNAL_AUTH_SECRET_FILE:
+      "/run/secrets/tf_search_internal_auth_secret",
+  },
+};
 
 function serviceFixture(
   stackName: ReleaseStackInput["name"],
@@ -161,7 +250,7 @@ function serviceFixture(
       driver: "json-file",
       options: { "max-file": "5", "max-size": "10m" },
     },
-    environment: {},
+    environment: { ...(exactSecretFileEnvironment[name] ?? {}) },
     networks: { [network]: null },
     secrets: exactSecretMounts[name].map((secret) => ({ ...secret })),
   };
@@ -186,14 +275,6 @@ function serviceFixture(
         protocol: "tcp",
       },
     ];
-  }
-  if (name === "platform-api") {
-    service.environment!["DATABASE_URL_FILE"] =
-      "/run/secrets/platform_runtime_database_url";
-  }
-  if (name === "tf-api") {
-    service.environment!["DATABASE_URL_FILE"] =
-      "/run/secrets/tf_runtime_database_url";
   }
   return service;
 }
@@ -347,6 +428,61 @@ describe("validateCoolifyRelease", () => {
     tfEnvironment["APOLLO_TF_AUTH_REDIS_URL"] = "redis://tf-redis:6379/1";
     tfEnvironment["REDIS_URL"] = "redis://tf-redis:6379/0";
     expect(validateCoolifyRelease(input).ok).toBe(true);
+  });
+
+  it("requires every credential consumer to use its exact mounted secret file key", () => {
+    const required = [
+      ["apollo-platform", "platform-api", "APOLLO_ASSERTION_PRIVATE_JWK_FILE"],
+      ["apollo-platform", "platform-api", "APOLLO_OAUTH_CLIENTS_FILE"],
+      [
+        "apollo-platform",
+        "platform-api",
+        "APOLLO_OPERATOR_BOOTSTRAP_TOKEN_FILE",
+      ],
+      ["apollo-platform", "platform-api", "DATABASE_URL_FILE"],
+      ["apollo-platform", "platform-migrate", "MIGRATOR_DATABASE_URL_FILE"],
+      ["apollo-platform", "platform-postgres", "POSTGRES_PASSWORD_FILE"],
+      ["apollo-tf", "tf-admin", "ADMIN_ACCESS_PASSWORD_FILE"],
+      ["apollo-tf", "tf-admin", "ADMIN_ACCESS_USER_FILE"],
+      ["apollo-tf", "tf-admin", "ADMIN_DASHBOARD_TOKEN_FILE"],
+      ["apollo-tf", "tf-api", "ADMIN_DASHBOARD_TOKEN_FILE"],
+      ["apollo-tf", "tf-api", "APOLLO_TF_CLIENT_SECRET_FILE"],
+      ["apollo-tf", "tf-api", "DATABASE_URL_FILE"],
+      ["apollo-tf", "tf-download-redis", "TF_DOWNLOAD_QUEUE_PASSWORD_FILE"],
+      [
+        "apollo-tf",
+        "tf-download-worker",
+        "TF_DOWNLOAD_INTERNAL_AUTH_SECRET_FILE",
+      ],
+      ["apollo-tf", "tf-download-worker", "TF_DOWNLOAD_QUEUE_REDIS_URL_FILE"],
+      ["apollo-tf", "tf-integrations", "TF_INTEGRATIONS_DATABASE_URL_FILE"],
+      [
+        "apollo-tf",
+        "tf-integrations",
+        "TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE",
+      ],
+      [
+        "apollo-tf",
+        "tf-integrations",
+        "TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET_FILE",
+      ],
+      ["apollo-tf", "tf-integrations", "TF_INTEGRATIONS_TOKEN_KEYRING_FILE"],
+      [
+        "apollo-tf",
+        "tf-integrations-migrate",
+        "TF_INTEGRATIONS_DATABASE_URL_FILE",
+      ],
+      ["apollo-tf", "tf-migrate", "TF_MIGRATOR_DATABASE_URL_FILE"],
+      ["apollo-tf", "tf-postgres", "POSTGRES_PASSWORD_FILE"],
+      ["apollo-tf", "tf-search", "TF_SEARCH_INTERNAL_AUTH_SECRET_FILE"],
+    ] as const;
+
+    for (const [stackName, serviceName, key] of required) {
+      const missing = validInput();
+      const stack = missing.stacks.find(({ name }) => name === stackName)!;
+      delete stack.compose.services[serviceName].environment![key];
+      expect(errorCodes(missing)).toContain("missing_secret_file_environment");
+    }
   });
 
   it.each([
@@ -597,6 +733,24 @@ describe("validateCoolifyRelease", () => {
     expect(errorCodes(input)).toEqual(
       expect.arrayContaining(["shared_network", "shared_volume"]),
     );
+  });
+
+  it("allows only the owner-defined internal Platform bridge", () => {
+    const input = validInput();
+    input.stacks[0].compose.networks!["platform-bridge"] = {
+      internal: true,
+      name: "apollo-platform-bridge-v1",
+    };
+    input.stacks[1].compose.networks!["platform-bridge"] = {
+      external: true,
+      name: "apollo-platform-bridge-v1",
+    };
+    expect(validateCoolifyRelease(input)).toMatchObject({ ok: true });
+
+    input.stacks[1].compose.networks!["platform-bridge"] = {
+      name: "apollo-platform-bridge-v1",
+    };
+    expect(errorCodes(input)).toContain("shared_network");
   });
 
   it.each(["uid", "gid", "mode"] as const)(

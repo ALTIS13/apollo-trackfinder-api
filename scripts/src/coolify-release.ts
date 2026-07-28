@@ -59,7 +59,10 @@ export type ComposeService = {
 
 export type ComposeDocument = {
   name?: string;
-  networks?: Record<string, { internal?: boolean; name?: string }>;
+  networks?: Record<
+    string,
+    { external?: boolean; internal?: boolean; name?: string }
+  >;
   secrets?: Record<string, { file?: string }>;
   services: Record<string, ComposeService>;
   volumes?: Record<string, { name?: string }>;
@@ -324,6 +327,95 @@ const expectedSecretMounts: Readonly<
   ],
   "tf-web": [],
 };
+const expectedSecretFileEnvironment: Readonly<
+  Record<string, Readonly<Record<string, string>>>
+> = {
+  "platform-api": {
+    APOLLO_ASSERTION_PRIVATE_JWK_FILE:
+      "/run/secrets/platform_assertion_private_jwk",
+    APOLLO_ASSERTION_PUBLIC_JWKS_FILE:
+      "/run/secrets/platform_assertion_public_jwks",
+    APOLLO_OAUTH_CLIENTS_FILE: "/run/secrets/platform_oauth_clients",
+    APOLLO_OPERATOR_BOOTSTRAP_TOKEN_FILE:
+      "/run/secrets/platform_operator_bootstrap_token",
+    DATABASE_URL_FILE: "/run/secrets/platform_runtime_database_url",
+  },
+  "platform-migrate": {
+    MIGRATOR_DATABASE_URL_FILE: "/run/secrets/platform_migrator_database_url",
+  },
+  "platform-postgres": {
+    POSTGRES_PASSWORD_FILE: "/run/secrets/platform_postgres_admin_password",
+  },
+  "tf-admin": {
+    ADMIN_ACCESS_PASSWORD_FILE: "/run/secrets/admin_access_password",
+    ADMIN_ACCESS_USER_FILE: "/run/secrets/admin_access_user",
+    ADMIN_DASHBOARD_TOKEN_FILE: "/run/secrets/admin_dashboard_token",
+  },
+  "tf-api": {
+    ADMIN_DASHBOARD_TOKEN_FILE: "/run/secrets/admin_dashboard_token",
+    APOLLO_MODULE_HEARTBEAT_KEYS_FILE: "/run/secrets/tf_module_heartbeat_keys",
+    APOLLO_TF_CLIENT_SECRET_FILE: "/run/secrets/tf_client_secret",
+    DATABASE_URL_FILE: "/run/secrets/tf_runtime_database_url",
+    TF_DOWNLOAD_QUEUE_REDIS_URL_FILE:
+      "/run/secrets/tf_download_queue_redis_url",
+    TF_DOWNLOAD_WORKER_INTERNAL_AUTH_SECRET_FILE:
+      "/run/secrets/tf_download_internal_auth_secret",
+    TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE:
+      "/run/secrets/tf_integrations_internal_auth_secret",
+    TF_SEARCH_INTERNAL_AUTH_SECRET_FILE:
+      "/run/secrets/tf_search_internal_auth_secret",
+  },
+  "tf-baseline": {
+    TF_BASELINE_DATABASE_URL_FILE: "/run/secrets/tf_admin_database_url",
+  },
+  "tf-download-redis": {
+    TF_DOWNLOAD_QUEUE_PASSWORD_FILE: "/run/secrets/tf_download_queue_password",
+  },
+  "tf-download-worker": {
+    TF_DOWNLOAD_HEARTBEAT_SECRET_FILE:
+      "/run/secrets/tf_download_heartbeat_secret",
+    TF_DOWNLOAD_INTERNAL_AUTH_SECRET_FILE:
+      "/run/secrets/tf_download_internal_auth_secret",
+    TF_DOWNLOAD_QUEUE_REDIS_URL_FILE:
+      "/run/secrets/tf_download_queue_redis_url",
+  },
+  "tf-integrations": {
+    TF_INTEGRATIONS_DATABASE_URL_FILE:
+      "/run/secrets/tf_integrations_runtime_database_url",
+    TF_INTEGRATIONS_HEARTBEAT_SECRET_FILE:
+      "/run/secrets/tf_integrations_heartbeat_secret",
+    TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE:
+      "/run/secrets/tf_integrations_internal_auth_secret",
+    TF_INTEGRATIONS_SPOTIFY_CLIENT_ID_FILE:
+      "/run/secrets/tf_integrations_spotify_client_id",
+    TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET_FILE:
+      "/run/secrets/tf_integrations_spotify_client_secret",
+    TF_INTEGRATIONS_TOKEN_KEYRING_FILE:
+      "/run/secrets/tf_integrations_token_keyring",
+  },
+  "tf-integrations-migrate": {
+    TF_INTEGRATIONS_DATABASE_URL_FILE:
+      "/run/secrets/tf_integrations_migrator_database_url",
+  },
+  "tf-integrations-postgres": {
+    POSTGRES_PASSWORD_FILE:
+      "/run/secrets/tf_integrations_postgres_admin_password",
+  },
+  "tf-migrate": {
+    TF_MIGRATOR_DATABASE_URL_FILE: "/run/secrets/tf_migrator_database_url",
+  },
+  "tf-postgres": {
+    POSTGRES_PASSWORD_FILE: "/run/secrets/tf_postgres_admin_password",
+  },
+  "tf-role-bootstrap": {
+    TF_ROLE_BOOTSTRAP_DATABASE_URL_FILE: "/run/secrets/tf_admin_database_url",
+  },
+  "tf-search": {
+    TF_SEARCH_HEARTBEAT_SECRET_FILE: "/run/secrets/tf_search_heartbeat_secret",
+    TF_SEARCH_INTERNAL_AUTH_SECRET_FILE:
+      "/run/secrets/tf_search_internal_auth_secret",
+  },
+};
 
 function addError(
   errors: ReleaseValidationError[],
@@ -475,6 +567,19 @@ function validateEnvironment(
   errors: ReleaseValidationError[],
   context: Omit<ReleaseValidationError, "code">,
 ): void {
+  for (const [name, value] of Object.entries(
+    expectedSecretFileEnvironment[serviceName] ?? {},
+  )) {
+    if (
+      service.environment?.[name] !== value ||
+      !mountedTargets.has(value.slice("/run/secrets/".length))
+    ) {
+      addError(errors, "missing_secret_file_environment", {
+        ...context,
+        field: "environment",
+      });
+    }
+  }
   for (const [name, value] of Object.entries(service.environment ?? {})) {
     if (!secretLikeName.test(name)) continue;
     if (!sensitiveEnvironmentAllowlist[serviceName]?.has(name)) {
@@ -801,11 +906,24 @@ export function validateCoolifyRelease(
   const platformResources = resourcesByStack.get("apollo-platform");
   const tfResources = resourcesByStack.get("apollo-tf");
   if (platformResources !== undefined && tfResources !== undefined) {
-    if (
-      [...platformResources.networks].some((name) =>
-        tfResources.networks.has(name),
-      )
-    ) {
+    const sharedNetworks = [...platformResources.networks].filter((name) =>
+      tfResources.networks.has(name),
+    );
+    const platformBridge = input.stacks.find(
+      ({ name }) => name === "apollo-platform",
+    )?.compose.networks?.["platform-bridge"];
+    const tfBridge = input.stacks.find(({ name }) => name === "apollo-tf")
+      ?.compose.networks?.["platform-bridge"];
+    const validPlatformBridge =
+      sharedNetworks.length === 1 &&
+      sharedNetworks[0] === "apollo-platform-bridge-v1" &&
+      platformBridge?.name === "apollo-platform-bridge-v1" &&
+      platformBridge.internal === true &&
+      platformBridge.external !== true &&
+      tfBridge?.name === "apollo-platform-bridge-v1" &&
+      tfBridge.external === true &&
+      tfBridge.internal !== true;
+    if (sharedNetworks.length > 0 && !validPlatformBridge) {
       addError(errors, "shared_network");
     }
     if (
