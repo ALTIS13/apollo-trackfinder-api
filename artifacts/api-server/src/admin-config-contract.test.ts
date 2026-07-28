@@ -9,9 +9,55 @@ const apiRoot = process.cwd();
 const workspaceRoot = resolve(apiRoot, "../..");
 const HEARTBEAT_KEYS_ENV = "APOLLO_MODULE_HEARTBEAT_KEYS";
 const HEARTBEAT_KEYS_FILE_ENV = "APOLLO_MODULE_HEARTBEAT_KEYS_FILE";
+const ADMIN_DASHBOARD_TOKEN_FILE = "/run/secrets/admin_dashboard_token";
+
+type RenderedSecretMount = {
+  readonly source: string;
+  readonly target: string;
+  readonly uid?: string;
+  readonly gid?: string;
+  readonly mode?: string;
+};
+
+type RenderedService = {
+  readonly environment?: Record<string, string>;
+  readonly secrets?: readonly RenderedSecretMount[];
+};
+
+type RenderedCompose = {
+  readonly services: Record<string, RenderedService>;
+  readonly secrets: Record<string, { readonly file: string }>;
+};
 
 function readWorkspaceFile(path: string): string {
   return readFileSync(resolve(workspaceRoot, path), "utf8");
+}
+
+function renderCompose(path: string): RenderedCompose {
+  const result = spawnSync(
+    "docker",
+    [
+      "compose",
+      "--file",
+      resolve(workspaceRoot, path),
+      "config",
+      "--format",
+      "json",
+    ],
+    {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        TF_SECRET_DIRECTORY: "/var/lib/apollo-tf/secrets",
+      },
+      maxBuffer: 8 * 1024 * 1024,
+      windowsHide: true,
+    },
+  );
+  if (result.error !== undefined) throw result.error;
+  expect(result.status, result.stderr).toBe(0);
+  return JSON.parse(result.stdout) as RenderedCompose;
 }
 
 function readDirectoryFiles(absolutePath: string): string[] {
@@ -135,18 +181,23 @@ describe("admin telemetry container contract", () => {
     );
   });
 
-  it("passes the runtime token only to API and admin services", () => {
-    const interpolation = 'ADMIN_DASHBOARD_TOKEN: "${ADMIN_DASHBOARD_TOKEN:-}"';
+  it("mounts file-backed admin secrets only into their consumers", () => {
+    const apiFileEnvironment = `ADMIN_DASHBOARD_TOKEN_FILE: ${ADMIN_DASHBOARD_TOKEN_FILE}`;
+    const inlineAssignments =
+      /^\s*(?:ADMIN_DASHBOARD_TOKEN|ADMIN_ACCESS_USER|ADMIN_ACCESS_PASSWORD):/m;
 
-    expect(serviceBlock(rootCompose, "api")).toContain(interpolation);
+    expect(serviceBlock(rootCompose, "api")).toContain(apiFileEnvironment);
     const rootAdmin = serviceBlock(rootCompose, "admin");
-    expect(rootAdmin).toContain(interpolation);
-    expect(rootAdmin).toContain('ADMIN_ACCESS_USER: "${ADMIN_ACCESS_USER:-}"');
-    expect(rootAdmin).toContain(
-      'ADMIN_ACCESS_PASSWORD: "${ADMIN_ACCESS_PASSWORD:-}"',
-    );
+    expect(rootAdmin).toContain("source: admin_dashboard_token");
+    expect(rootAdmin).toContain("target: admin_dashboard_token");
+    expect(rootAdmin).toContain("source: admin_access_user");
+    expect(rootAdmin).toContain("target: admin_access_user");
+    expect(rootAdmin).toContain("source: admin_access_password");
+    expect(rootAdmin).toContain("target: admin_access_password");
     expect(rootAdmin).toContain('"127.0.0.1:${TF_ADMIN_PORT:-3001}:80"');
     expect(serviceBlock(rootCompose, "api")).not.toContain("ADMIN_ACCESS_");
+    expect(serviceBlock(rootCompose, "api")).not.toMatch(inlineAssignments);
+    expect(rootAdmin).not.toMatch(inlineAssignments);
     expect(serviceBlock(rootCompose, "db")).not.toContain(
       "ADMIN_DASHBOARD_TOKEN",
     );
@@ -154,14 +205,97 @@ describe("admin telemetry container contract", () => {
       "ADMIN_DASHBOARD_TOKEN",
     );
 
-    expect(serviceBlock(apiCompose, "api")).toContain(interpolation);
+    expect(serviceBlock(apiCompose, "api")).toContain(apiFileEnvironment);
+    expect(serviceBlock(apiCompose, "api")).not.toMatch(inlineAssignments);
     expect(serviceBlock(apiCompose, "db")).not.toContain(
       "ADMIN_DASHBOARD_TOKEN",
     );
     expect(serviceBlock(apiCompose, "redis")).not.toContain(
       "ADMIN_DASHBOARD_TOKEN",
     );
+
+    for (const compose of [rootCompose, apiCompose]) {
+      expect(compose).toContain(
+        "file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/admin_dashboard_token",
+      );
+      expect(compose).toContain(
+        "file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/admin_access_user",
+      );
+      expect(compose).toContain(
+        "file: ${TF_SECRET_DIRECTORY:-/var/lib/apollo-tf/secrets}/admin_access_password",
+      );
+    }
   });
+
+  it.each([
+    ["root", "docker-compose.yml", true],
+    ["nested", "artifacts/api-server/docker-compose.yml", false],
+  ])(
+    "renders the %s file-backed admin boundary with exact mounts",
+    (_label, path, hasAdmin) => {
+      const rendered = renderCompose(path);
+      const api = rendered.services["api"]!;
+      const apiEnvironment = api.environment ?? {};
+
+      expect(apiEnvironment["ADMIN_DASHBOARD_TOKEN_FILE"]).toBe(
+        ADMIN_DASHBOARD_TOKEN_FILE,
+      );
+      expect(apiEnvironment).not.toHaveProperty("ADMIN_DASHBOARD_TOKEN");
+      expect(api.secrets).toContainEqual({
+        source: "admin_dashboard_token",
+        target: "admin_dashboard_token",
+        uid: "10001",
+        gid: "10001",
+        mode: "0400",
+      });
+
+      const renderedSecrets = hasAdmin
+        ? [
+            "admin_dashboard_token",
+            "admin_access_user",
+            "admin_access_password",
+          ]
+        : ["admin_dashboard_token"];
+      for (const secret of renderedSecrets) {
+        expect(rendered.secrets[secret]?.file).toBe(
+          `/var/lib/apollo-tf/secrets/${secret}`,
+        );
+      }
+
+      if (hasAdmin) {
+        const admin = rendered.services["admin"]!;
+        expect(admin.environment).toEqual({
+          APOLLO_API_UPSTREAM: "http://api:8080",
+        });
+        expect(admin.secrets).toEqual([
+          {
+            source: "admin_dashboard_token",
+            target: "admin_dashboard_token",
+            uid: "0",
+            gid: "0",
+            mode: "0400",
+          },
+          {
+            source: "admin_access_user",
+            target: "admin_access_user",
+            uid: "0",
+            gid: "0",
+            mode: "0400",
+          },
+          {
+            source: "admin_access_password",
+            target: "admin_access_password",
+            uid: "0",
+            gid: "0",
+            mode: "0400",
+          },
+        ]);
+      } else {
+        expect(rendered.services).not.toHaveProperty("admin");
+      }
+    },
+    30_000,
+  );
 
   it("builds both consumers with the shared dashboard contract", () => {
     const apiSourceCopy = apiDockerfile.indexOf(
@@ -192,19 +326,13 @@ describe("admin telemetry container contract", () => {
   });
 
   it("keeps the token server-side and redacted from request logs", () => {
-    const assertInterpolatedTokens = (compose: string) => {
-      const assignments = [
-        ...compose.matchAll(/ADMIN_DASHBOARD_TOKEN:\s*(.+)$/gm),
-      ];
-      expect(assignments.length).toBeGreaterThan(0);
-      for (const assignment of assignments) {
-        expect(assignment[1].trim()).toBe('"${ADMIN_DASHBOARD_TOKEN:-}"');
-      }
-    };
-
     expect(adminDockerfile).not.toContain("VITE_ADMIN_DASHBOARD_TOKEN");
-    assertInterpolatedTokens(rootCompose);
-    assertInterpolatedTokens(apiCompose);
+    expect(rootCompose).not.toMatch(
+      /^\s*ADMIN_DASHBOARD_TOKEN:\s*"\$\{ADMIN_DASHBOARD_TOKEN:-}"/m,
+    );
+    expect(apiCompose).not.toMatch(
+      /^\s*ADMIN_DASHBOARD_TOKEN:\s*"\$\{ADMIN_DASHBOARD_TOKEN:-}"/m,
+    );
     expect(loggerSource).toContain("req.headers['x-admin-dashboard-token']");
   });
 
