@@ -218,6 +218,30 @@ describe("Coolify production release manifests", () => {
     expect(published).toEqual(["platform-api", "tf-admin", "tf-api", "tf-web"]);
   });
 
+  it("pins the complete ingress variable-to-port allocation", async () => {
+    const entries = Object.fromEntries(
+      (await readFile(releaseEnvironmentPath, "utf8"))
+        .split(/\r?\n/)
+        .filter((line) => line.includes("="))
+        .map((line) => {
+          const separator = line.indexOf("=");
+          return [line.slice(0, separator), line.slice(separator + 1)];
+        }),
+    );
+
+    expect({
+      PLATFORM_API_PORT: entries.PLATFORM_API_PORT,
+      TF_API_PORT: entries.TF_API_PORT,
+      TF_WEB_PORT: entries.TF_WEB_PORT,
+      TF_ADMIN_PORT: entries.TF_ADMIN_PORT,
+    }).toEqual({
+      PLATFORM_API_PORT: "18200",
+      TF_API_PORT: "18201",
+      TF_WEB_PORT: "18202",
+      TF_ADMIN_PORT: "18203",
+    });
+  });
+
   it("keeps the stacks and their database networks isolated", async () => {
     const [platform, tf] = await Promise.all([
       load(platformPath),
