@@ -551,7 +551,6 @@ describe("Apollo immutable image release workflow", () => {
       packages: "write",
     });
     expect(workflow.jobs.manifest.permissions).toEqual({
-      contents: "read",
       packages: "read",
     });
     expect(workflow.jobs.build.needs).toBe("validate");
