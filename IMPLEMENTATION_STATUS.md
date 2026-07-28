@@ -1,11 +1,11 @@
 # Apollo TF implementation status
 
-Last updated: 2026-07-28.
+Last updated: 2026-07-29.
 
 ## Coolify production release package
 
 Status: `LOCAL_RELEASE_VALIDATED`. The exact local image source is
-`ffdb1f5ce8df85fe487fc65697f95377d76c52bc`; this status does not claim a
+`385aac57350ac86523dd7393c39c398ea54d37c7`; this status does not claim a
 deployment, workflow dispatch, GHCR publication, or remote change.
 
 - The production package consists of
@@ -16,12 +16,14 @@ deployment, workflow dispatch, GHCR publication, or remote change.
 - The opt-in production smoke built and pushed all 11 custom Linux/amd64
   targets plus pinned Redis to a disposable local registry, resolved 12
   registry digests, validated a temporary non-zero digest env, and started the
-  exact two-stack package from commit `ffdb1f5`.
+  exact two-stack package from commit `385aac5`.
 - The live proof passed registration/bootstrap/login, invitation redemption,
   entitlement revoke/grant, real Platform-to-TF OAuth, degraded and restored
-  search, queued download/cancel, signed heartbeat freshness/staleness, admin
-  Basic Auth/dashboard token, web health, one-shot migrations, service
-  restarts, and persistent state.
+  granted search, queued download/cancel, signed heartbeat
+  `healthy -> unknown -> healthy` after a producer stop longer than 90 seconds,
+  the exact profiled `tf-role-bootstrap` and `tf-baseline` one-shots against a
+  separate disposable database, admin Basic Auth/dashboard token, web health,
+  service restarts, and persistent state.
 - Pinned Caddy `2.10.2-alpine` validated and routed
   `api.apollot.ru`, `api.tf.apollot.ru`, `tf.apollot.ru`, and
   `admin.apollot.ru` to exact loopback ports `18200..18203`. Caddy remains the
@@ -32,7 +34,7 @@ deployment, workflow dispatch, GHCR publication, or remote change.
 - The checked-in env fails closed with exactly 18
   `placeholder_image_digest` errors. The generated local env validated before
   either stack started and was removed afterward.
-- Both Docker opt-ins pass: production package `10/10`, Caddy contract `4/4`.
+- Both Docker opt-ins pass: production package `27/27`, Caddy contract `5/5`.
   Final owned-resource inventory is zero for containers, networks, volumes,
   localhost image references, registry files, and temporary secrets; no broad
   prune was used.

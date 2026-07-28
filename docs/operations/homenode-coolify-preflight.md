@@ -1,6 +1,6 @@
 # HomeNode and Coolify release preflight
 
-Date: 2026-07-28
+Date: 2026-07-29
 
 Status: `LOCAL_RELEASE_VALIDATED`
 
@@ -15,8 +15,12 @@ a remote change.
 Task 5 validated the production manifests, digest validator, custom image
 targets, file-backed secret contracts, application flows, persistence, and
 Caddy routes locally from
-`ffdb1f5ce8df85fe487fc65697f95377d76c52bc`. The proof used only
+`385aac57350ac86523dd7393c39c398ea54d37c7`. The proof used only
 `127.0.0.1:18200..18203`, dispatched no workflow, and left exact cleanup zero.
+It also exercised the exact `baseline` profile one-shot contracts against a
+separate disposable database, restored granted search after restart, and held
+a signed producer down beyond the 90-second stale deadline before proving
+`healthy -> unknown -> healthy` recovery.
 
 The checked-in release env remains intentionally non-deployable. It fails with
 only `placeholder_image_digest`; an approved release must replace every image
