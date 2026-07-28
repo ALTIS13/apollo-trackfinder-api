@@ -632,7 +632,11 @@ unless-stopped`, `init: true`, `stop_grace_period`, `pids_limit`,
 - [ ] **Step 7: Commit**
 
   ```powershell
-  git add deploy/caddy scripts/src docs/operations IMPLEMENTATION_STATUS.md
+  git add .github/workflows/apollo-release-images.yml `
+    artifacts/api-server/src/coolify-release-contract.test.ts `
+    artifacts/admin-dashboard/docker-entrypoint.d/16-admin-dashboard-defaults.envsh `
+    artifacts/admin-dashboard/src/config-contract.test.ts `
+    deploy/caddy scripts/src docs/operations IMPLEMENTATION_STATUS.md
   git commit -m "test(release): prove Coolify production package"
   ```
 
