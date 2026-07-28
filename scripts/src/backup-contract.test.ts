@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 const worktree = resolve(import.meta.dirname, "../..");
 const bash = "C:/Program Files/Git/bin/bash.exe";
 const backupScript = join(worktree, "deploy/ops/backup-postgres.sh");
+const verifyScript = join(worktree, "deploy/ops/verify-backup.sh");
 const restoreScript = join(worktree, "deploy/ops/restore-postgres.sh");
 const classifyScript = join(worktree, "deploy/ops/classify-retained-volume.sh");
 const temporaryRoots: string[] = [];
@@ -50,13 +51,13 @@ function contractEnvironment(root: string, overrides: NodeJS.ProcessEnv = {}): N
   writeFileSync(passfile, "test-only-passfile\n", { encoding: "utf8", mode: 0o600 });
   execFileSync(bash, ["-lc", `mkdir -p '${posixPath(bin)}' '${posixPath(destination)}'`]);
   const log = join(root, "commands.log");
-  writeExecutable(join(bin, "pg_dump"), "#!/bin/sh\nprintf 'pg_dump %s\\n' \"$*\" >> \"$FAKE_LOG\"\nprintf 'task4-custom-dump'\n");
-  writeExecutable(join(bin, "age"), "#!/bin/sh\nprintf 'age %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_AGE_FAIL:-}\" = 1 ]; then cat >/dev/null; exit 1; fi\nprintf 'age:'\ncat\n");
-  writeExecutable(join(bin, "psql"), "#!/bin/sh\nprintf 'psql %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_TARGET_NOT_EMPTY:-}\" = 1 ]; then printf '1\\n'; fi\n");
-  writeExecutable(join(bin, "pg_restore"), "#!/bin/sh\nprintf 'pg_restore %s\\n' \"$*\" >> \"$FAKE_LOG\"\ncat > \"$FAKE_RESTORE_INPUT\"\n");
-  writeExecutable(join(bin, "sha256sum"), "#!/bin/sh\nprintf '%s  %s\\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \"$1\"\n");
-  writeExecutable(join(bin, "chmod"), "#!/bin/sh\nprintf 'chmod %s\\n' \"$*\" >> \"$FAKE_LOG\"\n");
-  writeExecutable(join(bin, "docker"), "#!/bin/sh\nprintf 'docker %s\\n' \"$*\" >> \"$FAKE_LOG\"\ncase \"$1\" in volume) printf '{}\\n' ;; ps) : ;; esac\n");
+  writeExecutable(join(bin, "pg_dump"), "#!/bin/sh\nprintf 'pg_dump %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_PG_DUMP_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nprintf 'task4-custom-dump'\n");
+  writeExecutable(join(bin, "age"), "#!/bin/sh\nprintf 'age %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_AGE_FAIL:-}\" = 1 ]; then cat >/dev/null; printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nprintf 'age:'\ncat\n");
+  writeExecutable(join(bin, "psql"), "#!/bin/sh\nprintf 'psql %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_PSQL_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\ncase \"${FAKE_TARGET_OBJECT:-}\" in table) case \"$*\" in *pg_class*) printf '1\\n' ;; esac ;; schema) case \"$*\" in *pg_namespace*) printf '1\\n' ;; esac ;; view) case \"$*\" in *pg_views*) printf '1\\n' ;; esac ;; sequence) case \"$*\" in *pg_sequences*) printf '1\\n' ;; esac ;; type) case \"$*\" in *pg_type*) printf '1\\n' ;; esac ;; function) case \"$*\" in *pg_proc*) printf '1\\n' ;; esac ;; extension) case \"$*\" in *pg_extension*) printf '1\\n' ;; esac ;; esac\nif [ \"${FAKE_TARGET_NOT_EMPTY:-}\" = 1 ]; then printf '1\\n'; fi\n");
+  writeExecutable(join(bin, "pg_restore"), "#!/bin/sh\nprintf 'pg_restore %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_PG_RESTORE_FAIL:-}\" = 1 ]; then cat >/dev/null; printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\ncat > \"$FAKE_RESTORE_INPUT\"\n");
+  writeExecutable(join(bin, "sha256sum"), "#!/bin/sh\nprintf 'sha256sum %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_SHA256_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nprintf '%s  %s\\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \"$1\"\n");
+  writeExecutable(join(bin, "mktemp"), "#!/bin/sh\nif [ \"${FAKE_MKTEMP_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nexec /usr/bin/mktemp \"$@\"\n");
+  writeExecutable(join(bin, "docker"), "#!/bin/sh\nprintf 'docker %s\\n' \"$*\" >> \"$FAKE_LOG\"\ncase \"$1\" in volume) if [ \"${FAKE_DOCKER_FRESH:-}\" = 1 ]; then printf '{\\\"com.apollo.release\\\":\\\"fresh\\\"}\\n'; else printf '{}\\n'; fi ;; ps) if [ \"${FAKE_DOCKER_ATTACHED:-}\" = 1 ]; then printf 'task-owned-container\\n'; fi ;; esac\n");
   return {
     ...process.env,
     PATH: `${bin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
@@ -71,6 +72,34 @@ function contractEnvironment(root: string, overrides: NodeJS.ProcessEnv = {}): N
     APOLLO_BACKUP_AGE_RECIPIENT: `age1${"a".repeat(58)}`,
     FAKE_LOG: log,
     FAKE_RESTORE_INPUT: join(root, "restore-input"),
+    FAKE_SENSITIVE: ["sensitive", "tool", "output"].join("-"),
+    ...overrides,
+  };
+}
+
+function withBashFunctions(root: string, env: NodeJS.ProcessEnv, functions: string): NodeJS.ProcessEnv {
+  const hook = join(root, "bash-functions");
+  writeFileSync(hook, functions, { encoding: "utf8", mode: 0o600 });
+  return { ...env, BASH_ENV: posixPath(hook) };
+}
+
+function restoreEnvironment(root: string, env: NodeJS.ProcessEnv, artifacts: ReturnType<typeof backupArtifacts>, overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const identity = join(root, "identity");
+  writeFileSync(identity, "test identity\n", { mode: 0o600 });
+  return {
+    ...env,
+    APOLLO_RESTORE_BACKUP: artifacts.dump,
+    APOLLO_RESTORE_CHECKSUM: artifacts.checksum,
+    APOLLO_RESTORE_METADATA: artifacts.metadata,
+    APOLLO_RESTORE_AGE_IDENTITY: identity,
+    APOLLO_RESTORE_PGHOST: "restore.internal",
+    APOLLO_RESTORE_PGPORT: "55433",
+    APOLLO_RESTORE_PGDATABASE: "apollo_trackfinder",
+    APOLLO_RESTORE_PGUSER: "restore_operator",
+    APOLLO_RESTORE_EXPECTED_STACK: "apollo-tf",
+    APOLLO_RESTORE_EXPECTED_DATABASE: "apollo_trackfinder",
+    APOLLO_RESTORE_EXPECTED_RELEASE_ID: "release-task4-001",
+    APOLLO_RESTORE_DISPOSABLE: "1",
     ...overrides,
   };
 }
@@ -150,6 +179,65 @@ describe("encrypted PostgreSQL backup contract", () => {
     expect(readdirSync(env.APOLLO_BACKUP_DESTINATION!)).toEqual([]);
   });
 
+  it.each([
+    ["pg_dump", { FAKE_PG_DUMP_FAIL: "1" }, "backup: dump failed\n"],
+    ["age", { FAKE_AGE_FAIL: "1" }, "backup: encrypt failed\n"],
+  ])("redacts %s failures", (_tool, overrides, expected) => {
+    if (!requireScript(backupScript)) return;
+    const root = temporaryRoot();
+    const env = contractEnvironment(root, overrides);
+    const result = runScript(backupScript, env);
+    expect(result.status).not.toBe(0);
+    expect(output(result)).toBe(expected);
+    expect(output(result).includes(env.FAKE_SENSITIVE!)).toBe(false);
+  });
+
+  it("redacts mktemp failures", () => {
+    if (!requireScript(backupScript)) return;
+    const root = temporaryRoot();
+    const env = withBashFunctions(root, contractEnvironment(root), "mktemp() { printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; return 1; }\n");
+    const result = runScript(backupScript, env);
+    expect(result.status).not.toBe(0);
+    expect(output(result)).toBe("backup: prepare failed\n");
+    expect(output(result).includes(env.FAKE_SENSITIVE!)).toBe(false);
+  });
+
+  it("redacts cleanup failures after an interrupted backup", () => {
+    if (!requireScript(backupScript)) return;
+    const root = temporaryRoot();
+    const env = withBashFunctions(root, contractEnvironment(root, { FAKE_AGE_FAIL: "1" }), "rm() { printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; return 1; }\n");
+    const result = runScript(backupScript, env);
+    expect(result.status).not.toBe(0);
+    expect(output(result)).toBe("backup: encrypt failed\n");
+    expect(output(result).includes(env.FAKE_SENSITIVE!)).toBe(false);
+  });
+
+  it("uses atomic renames and requests 0600 for final artifacts", () => {
+    if (!requireScript(backupScript)) return;
+    const root = temporaryRoot();
+    const env = withBashFunctions(root, contractEnvironment(root), "chmod() { printf 'chmod %s\\n' \"$*\" >> \"$FAKE_LOG\"; }\nmv() { printf 'mv %s\\n' \"$*\" >> \"$FAKE_LOG\"; /usr/bin/mv \"$@\"; }\n");
+    const result = runScript(backupScript, env);
+    expect(result.status).toBe(0);
+    const artifacts = backupArtifacts(env.APOLLO_BACKUP_DESTINATION!);
+    const log = readFileSync(env.FAKE_LOG!, "utf8");
+    expect(log.match(/^mv /gm)).toHaveLength(3);
+    const finalChmod = log.split("\n").find((line) => line.startsWith("chmod 600") && line.includes(basename(artifacts.dump)));
+    expect(finalChmod).toContain("chmod 600");
+    expect(finalChmod).toContain(basename(artifacts.checksum));
+    expect(finalChmod).toContain(basename(artifacts.metadata));
+  });
+
+  it("removes published artifacts when an atomic rename fails", () => {
+    if (!requireScript(backupScript)) return;
+    const root = temporaryRoot();
+    const env = withBashFunctions(root, contractEnvironment(root), "mv_count=0\nmv() { mv_count=$((mv_count + 1)); if [ \"$mv_count\" -eq 2 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; return 1; fi; /usr/bin/mv \"$@\"; }\n");
+    const result = runScript(backupScript, env);
+    expect(result.status).not.toBe(0);
+    expect(output(result)).toBe("backup: commit failed\n");
+    expect(output(result).includes(env.FAKE_SENSITIVE!)).toBe(false);
+    expect(readdirSync(env.APOLLO_BACKUP_DESTINATION!)).toEqual([]);
+  });
+
   it("writes metadata without connection, destination, credential, or recipient values", () => {
     if (!requireScript(backupScript)) return;
     const root = temporaryRoot();
@@ -170,6 +258,68 @@ describe("encrypted PostgreSQL backup contract", () => {
       release_id: "release-task4-001",
       stack: "apollo-tf",
     });
+  });
+
+  it("verifies an untampered backup directly", () => {
+    if (!requireScript(backupScript) || !requireScript(verifyScript)) return;
+    const root = temporaryRoot();
+    const env = contractEnvironment(root);
+    expect(runScript(backupScript, env).status).toBe(0);
+    const artifacts = backupArtifacts(env.APOLLO_BACKUP_DESTINATION!);
+    expect(JSON.parse(readFileSync(artifacts.metadata, "utf8")).encrypted_sha256).toMatch(/^[a-f0-9]{64}$/);
+    const result = runScript(verifyScript, {
+      ...env,
+      APOLLO_BACKUP_FILE: artifacts.dump,
+      APOLLO_BACKUP_CHECKSUM_FILE: artifacts.checksum,
+      APOLLO_BACKUP_METADATA_FILE: artifacts.metadata,
+      APOLLO_BACKUP_EXPECTED_STACK: "apollo-tf",
+      APOLLO_BACKUP_EXPECTED_DATABASE: "apollo_trackfinder",
+      APOLLO_BACKUP_EXPECTED_RELEASE_ID: "release-task4-001",
+    });
+    expect(result.status).toBe(0);
+    expect(output(result)).toBe("verify: complete\n");
+  });
+
+  it("rejects hostile metadata before running checksum verification or disclosing it", () => {
+    if (!requireScript(backupScript) || !requireScript(verifyScript)) return;
+    const root = temporaryRoot();
+    const env = contractEnvironment(root);
+    expect(runScript(backupScript, env).status).toBe(0);
+    const artifacts = backupArtifacts(env.APOLLO_BACKUP_DESTINATION!);
+    writeFileSync(artifacts.metadata, JSON.stringify({ hostile: env.FAKE_SENSITIVE }));
+    const result = runScript(verifyScript, {
+      ...env,
+      APOLLO_BACKUP_FILE: artifacts.dump,
+      APOLLO_BACKUP_CHECKSUM_FILE: artifacts.checksum,
+      APOLLO_BACKUP_METADATA_FILE: artifacts.metadata,
+      APOLLO_BACKUP_EXPECTED_STACK: "apollo-tf",
+      APOLLO_BACKUP_EXPECTED_DATABASE: "apollo_trackfinder",
+      APOLLO_BACKUP_EXPECTED_RELEASE_ID: "release-task4-001",
+    });
+    expect(result.status).not.toBe(0);
+    expect(output(result)).toBe("verify: metadata failed\n");
+    expect(output(result).includes(env.FAKE_SENSITIVE!)).toBe(false);
+    expect(readFileSync(env.FAKE_LOG!, "utf8")).not.toContain("sha256sum");
+  });
+
+  it("redacts direct verifier checksum failures", () => {
+    if (!requireScript(backupScript) || !requireScript(verifyScript)) return;
+    const root = temporaryRoot();
+    const env = contractEnvironment(root);
+    expect(runScript(backupScript, env).status).toBe(0);
+    const artifacts = backupArtifacts(env.APOLLO_BACKUP_DESTINATION!);
+    const result = runScript(verifyScript, withBashFunctions(root, {
+      ...env,
+      APOLLO_BACKUP_FILE: artifacts.dump,
+      APOLLO_BACKUP_CHECKSUM_FILE: artifacts.checksum,
+      APOLLO_BACKUP_METADATA_FILE: artifacts.metadata,
+      APOLLO_BACKUP_EXPECTED_STACK: "apollo-tf",
+      APOLLO_BACKUP_EXPECTED_DATABASE: "apollo_trackfinder",
+      APOLLO_BACKUP_EXPECTED_RELEASE_ID: "release-task4-001",
+    }, "sha256sum() { printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; return 1; }\n"));
+    expect(result.status).not.toBe(0);
+    expect(output(result)).toBe("verify: checksum failed\n");
+    expect(output(result).includes(env.FAKE_SENSITIVE!)).toBe(false);
   });
 
   it.each([
@@ -230,6 +380,39 @@ describe("encrypted PostgreSQL backup contract", () => {
     expect(existsSync(env.FAKE_RESTORE_INPUT!)).toBe(false);
   });
 
+  it.each([
+    ["table", "pg_class"],
+    ["schema", "pg_namespace"],
+    ["view", "pg_views"],
+    ["sequence", "pg_sequences"],
+    ["type", "pg_type"],
+    ["function", "pg_proc"],
+    ["extension", "pg_extension"],
+  ])("rejects a disposable target containing a user %s", (objectClass, _probe) => {
+    if (!requireScript(backupScript) || !requireScript(restoreScript)) return;
+    const root = temporaryRoot();
+    const env = contractEnvironment(root, { FAKE_TARGET_OBJECT: objectClass });
+    expect(runScript(backupScript, env).status).toBe(0);
+    const result = runScript(restoreScript, restoreEnvironment(root, env, backupArtifacts(env.APOLLO_BACKUP_DESTINATION!)));
+    expect(result.status).not.toBe(0);
+    expect(output(result)).toBe("restore: target-check failed\n");
+    expect(existsSync(env.FAKE_RESTORE_INPUT!)).toBe(false);
+  });
+
+  it.each([
+    ["psql", { FAKE_PSQL_FAIL: "1" }, "restore: target-check failed\n"],
+    ["pg_restore", { FAKE_PG_RESTORE_FAIL: "1" }, "restore: restore failed\n"],
+  ])("redacts restore %s failures", (_tool, overrides, expected) => {
+    if (!requireScript(backupScript) || !requireScript(restoreScript)) return;
+    const root = temporaryRoot();
+    const env = contractEnvironment(root, overrides);
+    expect(runScript(backupScript, env).status).toBe(0);
+    const result = runScript(restoreScript, restoreEnvironment(root, env, backupArtifacts(env.APOLLO_BACKUP_DESTINATION!)));
+    expect(result.status).not.toBe(0);
+    expect(output(result)).toBe(expected);
+    expect(output(result).includes(env.FAKE_SENSITIVE!)).toBe(false);
+  });
+
   it("classifies an original retained volume with metadata only", () => {
     if (!requireScript(classifyScript)) return;
     const root = temporaryRoot();
@@ -240,6 +423,26 @@ describe("encrypted PostgreSQL backup contract", () => {
     const dockerCalls = readFileSync(env.FAKE_LOG!, "utf8");
     expect(dockerCalls).toContain("docker volume inspect retained-volume");
     expect(dockerCalls).not.toMatch(/docker (create|run|start|compose)/);
+  });
+
+  it("blocks an attached retained volume without starting PostgreSQL", () => {
+    if (!requireScript(classifyScript)) return;
+    const root = temporaryRoot();
+    const env = contractEnvironment(root, { FAKE_DOCKER_ATTACHED: "1" });
+    const result = runScript(classifyScript, env, ["retained-volume"]);
+    expect(result.status).toBe(0);
+    expect(output(result)).toBe("ATTACHED_BLOCKED\n");
+    expect(readFileSync(env.FAKE_LOG!, "utf8")).not.toMatch(/docker (create|run|start|compose)/);
+  });
+
+  it("recognizes a fresh release volume from metadata only", () => {
+    if (!requireScript(classifyScript)) return;
+    const root = temporaryRoot();
+    const env = contractEnvironment(root, { FAKE_DOCKER_FRESH: "1" });
+    const result = runScript(classifyScript, env, ["fresh-release-volume"]);
+    expect(result.status).toBe(0);
+    expect(output(result)).toBe("FRESH_RELEASE_VOLUME\n");
+    expect(readFileSync(env.FAKE_LOG!, "utf8")).not.toMatch(/docker (create|run|start|compose)/);
   });
 });
 
@@ -271,8 +474,12 @@ function dockerQuiet(args: string[]): void {
   spawnSync("docker", args, { cwd: worktree, encoding: "utf8", stdio: "ignore" });
 }
 
-function dockerClientArgs(network: string, root: string, image: string, proofVolume: string): string[] {
-  return ["run", "--rm", "-i", "--network", network, "-v", `${root.replaceAll("\\", "/")}:/work`, "-v", `${worktree.replaceAll("\\", "/")}:/work/repo:ro`, "-v", `${proofVolume}:/backup`, "-w", "/work", image];
+function dockerExists(args: string[]): boolean {
+  return spawnSync("docker", args, { cwd: worktree, encoding: "utf8", stdio: "ignore" }).status === 0;
+}
+
+function dockerClientArgs(network: string, root: string, image: string, proofVolume: string, label: string): string[] {
+  return ["run", "--rm", "-i", "--label", label, "--network", network, "-v", `${root.replaceAll("\\", "/")}:/work`, "-v", `${worktree.replaceAll("\\", "/")}:/work/repo:ro`, "-v", `${proofVolume}:/backup`, "-w", "/work", image];
 }
 
 describe.runIf(dockerProofEnabled)("PostgreSQL 16 encrypted restore proof", () => {
@@ -299,17 +506,17 @@ describe.runIf(dockerProofEnabled)("PostgreSQL 16 encrypted restore proof", () =
       docker(["volume", "create", "--label", label, sourceVolume]);
       docker(["volume", "create", "--label", label, targetVolume]);
       docker(["volume", "create", "--label", label, proofVolume]);
-      docker([...dockerClientArgs(network, root, image, proofVolume), "sh", "-ceu", "umask 077; mkdir -p /backup/data; IFS= read -r password; printf '%s\\n' \"$password\" > /backup/postgres-password; printf 'source:5432:apollo_trackfinder:postgres:%s\\ntarget:5432:apollo_trackfinder:postgres:%s\\n' \"$password\" \"$password\" > /backup/pgpass"], { input: `${password}\n` });
+      docker([...dockerClientArgs(network, root, image, proofVolume, label), "sh", "-ceu", "umask 077; mkdir -p /backup/data; IFS= read -r password; printf '%s\\n' \"$password\" > /backup/postgres-password; printf 'source:5432:apollo_trackfinder:postgres:%s\\ntarget:5432:apollo_trackfinder:postgres:%s\\n' \"$password\" \"$password\" > /backup/pgpass"], { input: `${password}\n` });
       docker(["run", "-d", "--name", source, "--label", label, "--network", network, "--network-alias", "source", "-e", "POSTGRES_DB=apollo_trackfinder", "-e", "POSTGRES_USER=postgres", "-e", "POSTGRES_PASSWORD_FILE=/run/secrets/postgres-password", "-v", `${sourceVolume}:/var/lib/postgresql/data`, "-v", `${proofVolume}:/run/secrets:ro`, "postgres:16"]);
       for (let attempt = 0; attempt < 30; attempt += 1) {
-        const ready = spawnSync("docker", [...dockerClientArgs(network, root, image, proofVolume), "pg_isready", "-h", "source", "-U", "postgres", "-d", "apollo_trackfinder"], { encoding: "utf8" });
+        const ready = spawnSync("docker", [...dockerClientArgs(network, root, image, proofVolume, label), "pg_isready", "-h", "source", "-U", "postgres", "-d", "apollo_trackfinder"], { encoding: "utf8" });
         if (ready.status === 0) break;
         if (attempt === 29) throw new Error("source readiness timed out");
         execFileSync(bash, ["-lc", "sleep 1"]);
       }
-      docker([...dockerClientArgs(network, root, image, proofVolume), "sh", "-ceu", "psql -h source -U postgres -d apollo_trackfinder -c \"CREATE TABLE task4_marker (marker text primary key); INSERT INTO task4_marker VALUES ('restore-marker')\""], { env: { PGPASSFILE: "/backup/pgpass" } });
-      const recipient = docker([...dockerClientArgs(network, root, image, proofVolume), "sh", "-ceu", "age-keygen -o /backup/identity >/dev/null; age-keygen -y /backup/identity"]);
-      docker([...dockerClientArgs(network, root, image, proofVolume), "sh", "-ceu", "/work/repo/deploy/ops/backup-postgres.sh"], {
+      docker([...dockerClientArgs(network, root, image, proofVolume, label), "sh", "-ceu", "psql -h source -U postgres -d apollo_trackfinder -c \"CREATE TABLE task4_marker (marker text primary key); INSERT INTO task4_marker VALUES ('restore-marker')\""], { env: { PGPASSFILE: "/backup/pgpass" } });
+      const recipient = docker([...dockerClientArgs(network, root, image, proofVolume, label), "sh", "-ceu", "age-keygen -o /backup/identity >/dev/null; age-keygen -y /backup/identity"]);
+      docker([...dockerClientArgs(network, root, image, proofVolume, label), "sh", "-ceu", "/work/repo/deploy/ops/backup-postgres.sh"], {
         env: {
           PGPASSFILE: "/backup/pgpass",
           APOLLO_BACKUP_PGHOST: "source",
@@ -322,17 +529,17 @@ describe.runIf(dockerProofEnabled)("PostgreSQL 16 encrypted restore proof", () =
           APOLLO_BACKUP_AGE_RECIPIENT: recipient,
         },
       });
-      expect(docker([...dockerClientArgs(network, root, image, proofVolume), "sh", "-ceu", "stat -c '%a' /backup/data/task4-disposable-proof-001.dump.age /backup/data/task4-disposable-proof-001.sha256 /backup/data/task4-disposable-proof-001.json | sort -u"])).toBe("600");
+      expect(docker([...dockerClientArgs(network, root, image, proofVolume, label), "sh", "-ceu", "stat -c '%a' /backup/data/task4-disposable-proof-001.dump.age /backup/data/task4-disposable-proof-001.sha256 /backup/data/task4-disposable-proof-001.json | sort -u"])).toBe("600");
       docker(["rm", "-fv", source]);
       sourceDestroyed = true;
       docker(["run", "-d", "--name", target, "--label", label, "--network", network, "--network-alias", "target", "-e", "POSTGRES_DB=apollo_trackfinder", "-e", "POSTGRES_USER=postgres", "-e", "POSTGRES_PASSWORD_FILE=/run/secrets/postgres-password", "-v", `${targetVolume}:/var/lib/postgresql/data`, "-v", `${proofVolume}:/run/secrets:ro`, "postgres:16"]);
       for (let attempt = 0; attempt < 30; attempt += 1) {
-        const ready = spawnSync("docker", [...dockerClientArgs(network, root, image, proofVolume), "pg_isready", "-h", "target", "-U", "postgres", "-d", "apollo_trackfinder"], { encoding: "utf8" });
+        const ready = spawnSync("docker", [...dockerClientArgs(network, root, image, proofVolume, label), "pg_isready", "-h", "target", "-U", "postgres", "-d", "apollo_trackfinder"], { encoding: "utf8" });
         if (ready.status === 0) break;
         if (attempt === 29) throw new Error("target readiness timed out");
         execFileSync(bash, ["-lc", "sleep 1"]);
       }
-      docker([...dockerClientArgs(network, root, image, proofVolume), "sh", "-ceu", "/work/repo/deploy/ops/restore-postgres.sh"], {
+      docker([...dockerClientArgs(network, root, image, proofVolume, label), "sh", "-ceu", "/work/repo/deploy/ops/restore-postgres.sh"], {
         env: {
           PGPASSFILE: "/backup/pgpass",
           APOLLO_RESTORE_BACKUP: "/backup/data/task4-disposable-proof-001.dump.age",
@@ -349,8 +556,8 @@ describe.runIf(dockerProofEnabled)("PostgreSQL 16 encrypted restore proof", () =
           APOLLO_RESTORE_DISPOSABLE: "1",
         },
       });
-      const marker = docker([...dockerClientArgs(network, root, image, proofVolume), "psql", "-Atqc", "SELECT marker FROM task4_marker", "-h", "target", "-U", "postgres", "-d", "apollo_trackfinder"], { env: { PGPASSFILE: "/backup/pgpass" } });
-      const schemaCount = docker([...dockerClientArgs(network, root, image, proofVolume), "psql", "-Atqc", "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'task4_marker'", "-h", "target", "-U", "postgres", "-d", "apollo_trackfinder"], { env: { PGPASSFILE: "/backup/pgpass" } });
+      const marker = docker([...dockerClientArgs(network, root, image, proofVolume, label), "psql", "-Atqc", "SELECT marker FROM task4_marker", "-h", "target", "-U", "postgres", "-d", "apollo_trackfinder"], { env: { PGPASSFILE: "/backup/pgpass" } });
+      const schemaCount = docker([...dockerClientArgs(network, root, image, proofVolume, label), "psql", "-Atqc", "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'task4_marker'", "-h", "target", "-U", "postgres", "-d", "apollo_trackfinder"], { env: { PGPASSFILE: "/backup/pgpass" } });
       expect(marker).toBe("restore-marker");
       expect(schemaCount).toBe("1");
       expect(sourceDestroyed).toBe(true);
@@ -366,6 +573,7 @@ describe.runIf(dockerProofEnabled)("PostgreSQL 16 encrypted restore proof", () =
       expect(docker(["network", "ls", "-q", "--filter", `label=${label}`])).toBe("");
       expect(docker(["volume", "ls", "-q", "--filter", `label=${label}`])).toBe("");
       expect(docker(["image", "ls", "-q", "--filter", `label=${label}`])).toBe("");
+      expect(dockerExists(["volume", "inspect", proofVolume])).toBe(false);
     }
   }, 180_000);
 });

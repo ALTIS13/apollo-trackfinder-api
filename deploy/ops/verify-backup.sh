@@ -10,11 +10,12 @@ cleanup() {
     printf 'verify: %s failed\n' "$stage" >&2
   fi
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 require_value() {
-  value=$(printenv "$1" 2>/dev/null || :)
-  [ -n "$value" ] || return 1
+  eval "value=\${$1-}"
+  [ -n "$value" ]
 }
 
 safe_release_id() {
@@ -32,6 +33,17 @@ valid_stack_database() {
   esac
 }
 
+read_one_line() {
+  file_value=
+  line_count=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_count=$((line_count + 1))
+    [ "$line_count" -eq 1 ] || return 1
+    file_value=$line
+  done < "$1"
+  [ "$line_count" -eq 1 ]
+}
+
 if [ "$#" -ne 0 ] || ! require_value APOLLO_BACKUP_FILE || ! require_value APOLLO_BACKUP_CHECKSUM_FILE || ! require_value APOLLO_BACKUP_METADATA_FILE || ! require_value APOLLO_BACKUP_EXPECTED_STACK || ! require_value APOLLO_BACKUP_EXPECTED_DATABASE || ! require_value APOLLO_BACKUP_EXPECTED_RELEASE_ID; then
   exit 1
 fi
@@ -39,14 +51,21 @@ fi
 [ -r "$APOLLO_BACKUP_FILE" ] && [ -r "$APOLLO_BACKUP_CHECKSUM_FILE" ] && [ -r "$APOLLO_BACKUP_METADATA_FILE" ] && safe_identifier "$APOLLO_BACKUP_EXPECTED_DATABASE" && safe_release_id "$APOLLO_BACKUP_EXPECTED_RELEASE_ID" && valid_stack_database "$APOLLO_BACKUP_EXPECTED_STACK" "$APOLLO_BACKUP_EXPECTED_DATABASE" || exit 1
 command -v sha256sum >/dev/null 2>&1 || exit 1
 
-stage=checksum
-expected_checksum=$(tr -d '\r\n' < "$APOLLO_BACKUP_CHECKSUM_FILE")
-[ -n "$expected_checksum" ] || exit 1
-actual_checksum=$(sha256sum "$APOLLO_BACKUP_FILE" | awk '{print $1}' | tr -d '\r') || exit 1
-[ "$actual_checksum" = "$expected_checksum" ] || exit 1
-
 stage=metadata
+read_one_line "$APOLLO_BACKUP_CHECKSUM_FILE" || exit 1
+expected_checksum=$file_value
+expected_checksum=${expected_checksum%"$(printf '\r')"}
+case "$expected_checksum" in ''|*[!0123456789abcdef]* ) exit 1 ;; esac
+[ "${#expected_checksum}" -eq 64 ] || exit 1
 expected_metadata=$(printf '{"format_version":1,"stack":"%s","database":"%s","release_id":"%s","encrypted_sha256":"%s"}' "$APOLLO_BACKUP_EXPECTED_STACK" "$APOLLO_BACKUP_EXPECTED_DATABASE" "$APOLLO_BACKUP_EXPECTED_RELEASE_ID" "$expected_checksum")
-metadata=$(tr -d '\r\n' < "$APOLLO_BACKUP_METADATA_FILE")
-[ "$metadata" = "$expected_metadata" ] || exit 1
+read_one_line "$APOLLO_BACKUP_METADATA_FILE" || exit 1
+file_value=${file_value%"$(printf '\r')"}
+[ "$file_value" = "$expected_metadata" ] || exit 1
+
+stage=checksum
+actual_checksum=$(sha256sum "$APOLLO_BACKUP_FILE" 2>/dev/null) || exit 1
+case "$actual_checksum" in \\*) actual_checksum=${actual_checksum#\\} ;; esac
+set -- $actual_checksum
+[ "$#" -ge 1 ] || exit 1
+[ "$1" = "$expected_checksum" ] || exit 1
 printf 'verify: complete\n'

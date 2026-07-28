@@ -12,20 +12,21 @@ completed=0
 cleanup() {
   result=$?
   if [ -n "$temporary_directory" ]; then
-    rm -rf "$temporary_directory"
+    rm -rf "$temporary_directory" >/dev/null 2>&1 || :
   fi
   if [ "$completed" -ne 1 ]; then
-    rm -f "$final_dump" "$final_checksum" "$final_metadata"
+    rm -f "$final_dump" "$final_checksum" "$final_metadata" >/dev/null 2>&1 || :
   fi
   if [ "$result" -ne 0 ]; then
     printf 'backup: %s failed\n' "$stage" >&2
   fi
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 require_value() {
-  value=$(printenv "$1" 2>/dev/null || :)
-  [ -n "$value" ] || return 1
+  eval "value=\${$1-}"
+  [ -n "$value" ]
 }
 
 safe_release_id() {
@@ -66,38 +67,44 @@ final_metadata="$prefix.json"
 [ ! -e "$final_dump" ] && [ ! -e "$final_checksum" ] && [ ! -e "$final_metadata" ] || exit 1
 
 stage=prepare
-temporary_directory=$(mktemp -d "$APOLLO_BACKUP_DESTINATION/.apollo-backup.XXXXXX") || exit 1
+temporary_directory=$(mktemp -d "$APOLLO_BACKUP_DESTINATION/.apollo-backup.XXXXXX" 2>/dev/null) || exit 1
 temporary_dump="$temporary_directory/backup.dump.age"
+temporary_hash="$temporary_directory/backup.hash"
 temporary_checksum="$temporary_directory/backup.sha256"
 temporary_metadata="$temporary_directory/backup.json"
 dump_status="$temporary_directory/pg_dump.status"
+tool_errors="$temporary_directory/tool-errors"
 
 stage=encrypt
 set +e
 (
-  pg_dump --format=custom --no-owner --no-privileges -h "$APOLLO_BACKUP_PGHOST" -p "$APOLLO_BACKUP_PGPORT" -U "$APOLLO_BACKUP_PGUSER" "$APOLLO_BACKUP_PGDATABASE"
+  pg_dump --format=custom --no-owner --no-privileges -h "$APOLLO_BACKUP_PGHOST" -p "$APOLLO_BACKUP_PGPORT" -U "$APOLLO_BACKUP_PGUSER" "$APOLLO_BACKUP_PGDATABASE" 2>"$tool_errors"
   result=$?
   printf '%s\n' "$result" > "$dump_status"
   exit "$result"
-) | age -r "$APOLLO_BACKUP_AGE_RECIPIENT" > "$temporary_dump"
+) | age -r "$APOLLO_BACKUP_AGE_RECIPIENT" 2>>"$tool_errors" > "$temporary_dump"
 age_result=$?
 set -e
 [ "$age_result" -eq 0 ] || exit 1
-[ "$(cat "$dump_status")" = 0 ] || { stage=dump; exit 1; }
+IFS= read -r dump_result < "$dump_status" || { stage=dump; exit 1; }
+[ "$dump_result" = 0 ] || { stage=dump; exit 1; }
 
 stage=checksum
-sha256sum "$temporary_dump" | awk '{print $1}' | tr -d '\r' > "$temporary_checksum" || exit 1
-checksum=$(tr -d '\r\n' < "$temporary_checksum")
+sha256sum "$temporary_dump" > "$temporary_hash" 2>>"$tool_errors" || exit 1
+IFS=' ' read -r checksum _ignored < "$temporary_hash" || exit 1
+checksum=${checksum%"$(printf '\r')"}
+case "$checksum" in \\*) checksum=${checksum#\\} ;; esac
 [ -n "$checksum" ] || exit 1
+printf '%s\n' "$checksum" > "$temporary_checksum"
 
 stage=metadata
-printf '{"format_version":1,"stack":"%s","database":"%s","release_id":"%s","encrypted_sha256":"%s"}\n' "$APOLLO_BACKUP_STACK" "$APOLLO_BACKUP_PGDATABASE" "$APOLLO_BACKUP_RELEASE_ID" "$checksum" > "$temporary_metadata" || exit 1
-chmod 600 "$temporary_dump" "$temporary_checksum" "$temporary_metadata" || exit 1
+printf '{"format_version":1,"stack":"%s","database":"%s","release_id":"%s","encrypted_sha256":"%s"}\n' "$APOLLO_BACKUP_STACK" "$APOLLO_BACKUP_PGDATABASE" "$APOLLO_BACKUP_RELEASE_ID" "$checksum" > "$temporary_metadata"
+chmod 600 "$temporary_dump" "$temporary_checksum" "$temporary_metadata" >/dev/null 2>&1 || exit 1
 
 stage=commit
-mv "$temporary_dump" "$final_dump" || exit 1
-mv "$temporary_checksum" "$final_checksum" || exit 1
-mv "$temporary_metadata" "$final_metadata" || exit 1
-chmod 600 "$final_dump" "$final_checksum" "$final_metadata" || exit 1
+mv "$temporary_dump" "$final_dump" >/dev/null 2>&1 || exit 1
+mv "$temporary_checksum" "$final_checksum" >/dev/null 2>&1 || exit 1
+mv "$temporary_metadata" "$final_metadata" >/dev/null 2>&1 || exit 1
+chmod 600 "$final_dump" "$final_checksum" "$final_metadata" >/dev/null 2>&1 || exit 1
 completed=1
 printf 'backup: complete\n'
