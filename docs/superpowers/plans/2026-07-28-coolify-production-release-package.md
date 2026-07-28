@@ -302,6 +302,14 @@ unless-stopped`, `init: true`, `stop_grace_period`, `pids_limit`,
 - Create: `.github/workflows/apollo-release-images.yml`
 - Create: `scripts/src/coolify-release.ts`
 - Create: `scripts/src/coolify-release.test.ts`
+- Modify: `artifacts/api-server/src/coolify-release-contract.test.ts`
+- Modify: `artifacts/platform-api/Dockerfile`
+- Modify: `artifacts/api-server/Dockerfile`
+- Modify: `artifacts/admin-dashboard/Dockerfile`
+- Modify: `artifacts/music-player/Dockerfile`
+- Modify: `artifacts/tf-search/Dockerfile`
+- Modify: `artifacts/tf-integrations/Dockerfile`
+- Modify: `artifacts/tf-download-worker/Dockerfile`
 - Modify: `scripts/package.json`
 - Modify: `scripts/tsconfig.json`
 - Modify: `package.json`
@@ -324,6 +332,9 @@ unless-stopped`, `init: true`, `stop_grace_period`, `pids_limit`,
   - environment-delivered credentials;
   - missing health/resource/log policy;
   - shared Platform/TF volumes or networks;
+  - an all-zero placeholder digest;
+  - any secret mount whose exact UID/GID/mode differs from the documented
+    owning service contract;
   - raw secret/path leakage in output.
 
   Test success returns only stack names, service names, image digests, ports,
@@ -352,7 +363,25 @@ unless-stopped`, `init: true`, `stop_grace_period`, `pids_limit`,
   `apollo-release-manifest.json` artifact. Reject pull-request secret use and
   floating action tags.
 
-- [ ] **Step 4: Implement the GHCR workflow**
+- [ ] **Step 4: Write failing base-image provenance tests**
+
+  Inspect every `FROM` instruction in the seven production Dockerfiles. Require
+  `repository:tag@sha256:<64 lowercase hex characters>` and reject a tag-only
+  base, an all-zero digest, an unqualified repository, or a build argument used
+  as the digest. Resolve each official multi-platform digest from its canonical
+  registry tag with `docker buildx imagetools inspect`; record the source tag
+  and resolved digest in the commit report without copying registry
+  credentials.
+
+- [ ] **Step 5: Pin production base images**
+
+  Pin all Node, PostgreSQL, Redis, nginx, and other `FROM` images used by the
+  Platform API, TF API, TF web, TF admin, search, integrations, integrations
+  PostgreSQL, download worker, and download Redis targets. Preserve the current
+  major/minor source tags before the digest so dependency intent remains
+  readable.
+
+- [ ] **Step 6: Implement the GHCR workflow**
 
   Build these image/target pairs from one commit:
 
@@ -373,18 +402,25 @@ unless-stopped`, `init: true`, `stop_grace_period`, `pids_limit`,
   Use `ghcr.io/altis13/apollo-<name>` and record each resulting digest. The
   workflow must run typecheck and affected tests before any push.
 
-- [ ] **Step 5: Verify**
+- [ ] **Step 7: Verify**
 
   ```powershell
   pnpm --filter @workspace/scripts test
+  pnpm --filter @workspace/api-server test -- src/coolify-release-contract.test.ts
   pnpm release:validate -- --env-file deploy/coolify/release.env.example
   pnpm run typecheck
   ```
 
-- [ ] **Step 6: Commit**
+  The checked-in zero-digest example must fail with
+  `placeholder_image_digest`. A temporary copy whose image values contain
+  deterministic non-zero syntactic digests must pass the static validator;
+  only the workflow-generated digest manifest is eligible for Task 5 runtime
+  smoke or a future remote rollout.
+
+- [ ] **Step 8: Commit**
 
   ```powershell
-  git add .github scripts package.json pnpm-lock.yaml
+  git add .github scripts package.json pnpm-lock.yaml artifacts/*/Dockerfile artifacts/api-server/src/coolify-release-contract.test.ts
   git commit -m "feat(release): validate and publish immutable images"
   ```
 
