@@ -10,6 +10,21 @@ const releaseDirectory = join(repositoryRoot, "deploy", "coolify");
 const platformPath = join(releaseDirectory, "apollo-platform.compose.yml");
 const tfPath = join(releaseDirectory, "apollo-tf.compose.yml");
 const releaseEnvironmentPath = join(releaseDirectory, "release.env.example");
+const releaseWorkflowPath = join(
+  repositoryRoot,
+  ".github",
+  "workflows",
+  "apollo-release-images.yml",
+);
+const productionDockerfiles = [
+  "artifacts/platform-api/Dockerfile",
+  "artifacts/api-server/Dockerfile",
+  "artifacts/admin-dashboard/Dockerfile",
+  "artifacts/music-player/Dockerfile",
+  "artifacts/tf-search/Dockerfile",
+  "artifacts/tf-integrations/Dockerfile",
+  "artifacts/tf-download-worker/Dockerfile",
+] as const;
 
 type SecretMount = {
   readonly gid?: string;
@@ -420,4 +435,201 @@ describe("Coolify production release manifests", () => {
       expect(line).toMatch(/@sha256:0{64}$/);
     }
   });
+});
+
+describe("Apollo immutable image release workflow", () => {
+  it("publishes every production target from manual or version-tag releases", async () => {
+    const workflow = parse(await readFile(releaseWorkflowPath, "utf8")) as {
+      readonly jobs: {
+        readonly build: {
+          readonly strategy: {
+            readonly matrix: {
+              readonly include: readonly Record<string, string>[];
+            };
+          };
+        };
+      };
+      readonly on: {
+        readonly push: { readonly tags: readonly string[] };
+        readonly workflow_dispatch: unknown;
+      };
+      readonly permissions: Record<string, string>;
+    };
+
+    expect(Object.keys(workflow.on).sort()).toEqual([
+      "push",
+      "workflow_dispatch",
+    ]);
+    expect(workflow.on.push.tags).toEqual(["v*"]);
+    expect(workflow.permissions).toEqual({
+      contents: "read",
+      packages: "write",
+    });
+    expect(workflow.jobs.build.strategy.matrix.include).toEqual([
+      {
+        dockerfile: "artifacts/platform-api/Dockerfile",
+        image: "ghcr.io/altis13/apollo-platform-api",
+        name: "platform-api",
+        target: "runtime",
+      },
+      {
+        dockerfile: "artifacts/platform-api/Dockerfile",
+        image: "ghcr.io/altis13/apollo-platform-postgres",
+        name: "platform-postgres",
+        target: "postgres-role-init",
+      },
+      {
+        dockerfile: "artifacts/api-server/Dockerfile",
+        image: "ghcr.io/altis13/apollo-tf-api",
+        name: "tf-api",
+        target: "runner",
+      },
+      {
+        dockerfile: "artifacts/api-server/Dockerfile",
+        image: "ghcr.io/altis13/apollo-tf-postgres",
+        name: "tf-postgres",
+        target: "postgres-role-init",
+      },
+      {
+        dockerfile: "artifacts/music-player/Dockerfile",
+        image: "ghcr.io/altis13/apollo-tf-web",
+        name: "tf-web",
+        target: "runner",
+      },
+      {
+        dockerfile: "artifacts/admin-dashboard/Dockerfile",
+        image: "ghcr.io/altis13/apollo-tf-admin",
+        name: "tf-admin",
+        target: "default",
+      },
+      {
+        dockerfile: "artifacts/tf-search/Dockerfile",
+        image: "ghcr.io/altis13/apollo-tf-search",
+        name: "tf-search",
+        target: "runner",
+      },
+      {
+        dockerfile: "artifacts/tf-integrations/Dockerfile",
+        image: "ghcr.io/altis13/apollo-tf-integrations",
+        name: "tf-integrations",
+        target: "runner",
+      },
+      {
+        dockerfile: "artifacts/tf-integrations/Dockerfile",
+        image: "ghcr.io/altis13/apollo-tf-integrations-postgres",
+        name: "tf-integrations-postgres",
+        target: "postgres-role-init",
+      },
+      {
+        dockerfile: "artifacts/tf-download-worker/Dockerfile",
+        image: "ghcr.io/altis13/apollo-tf-download-worker",
+        name: "tf-download-worker",
+        target: "runner",
+      },
+      {
+        dockerfile: "artifacts/tf-download-worker/Dockerfile",
+        image: "ghcr.io/altis13/apollo-tf-download-redis",
+        name: "tf-download-redis",
+        target: "queue-redis",
+      },
+    ]);
+  });
+
+  it("uses pinned actions, GITHUB_TOKEN, attestations, digest capture, and one final manifest artifact", async () => {
+    const source = await readFile(releaseWorkflowPath, "utf8");
+    const workflow = parse(source) as {
+      readonly jobs: Record<
+        string,
+        {
+          readonly steps: readonly {
+            readonly id?: string;
+            readonly name?: string;
+            readonly run?: string;
+            readonly uses?: string;
+            readonly with?: Record<string, unknown>;
+          }[];
+        }
+      >;
+    };
+    const steps = Object.values(workflow.jobs).flatMap(({ steps }) => steps);
+    const actionUses = steps
+      .map(({ uses }) => uses)
+      .filter((uses): uses is string => uses !== undefined);
+
+    expect(actionUses.length).toBeGreaterThan(0);
+    for (const uses of actionUses) {
+      expect(uses).toMatch(/^[^@\s]+@[a-f0-9]{40}$/);
+    }
+    expect(source).not.toContain("pull_request:");
+    expect(source).not.toMatch(/secrets\.(?!GITHUB_TOKEN\b)[A-Z0-9_]+/);
+    expect(source).toContain("secrets.GITHUB_TOKEN");
+
+    const buildStep = steps.find(({ uses }) =>
+      uses?.startsWith("docker/build-push-action@"),
+    );
+    expect(buildStep?.with).toMatchObject({
+      provenance: "mode=max",
+      push: true,
+      sbom: true,
+    });
+    expect(buildStep?.id).toBe("build");
+    expect(source).toContain("steps.build.outputs.digest");
+    expect(source).toContain("docker buildx imagetools inspect");
+
+    const validationIndex = steps.findIndex(
+      ({ name }) => name === "Validate source",
+    );
+    const pushIndex = steps.findIndex(({ uses }) =>
+      uses?.startsWith("docker/build-push-action@"),
+    );
+    expect(validationIndex).toBeGreaterThanOrEqual(0);
+    expect(pushIndex).toBeGreaterThan(validationIndex);
+
+    const uploads = steps.filter(({ uses }) =>
+      uses?.startsWith("actions/upload-artifact@"),
+    );
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]?.with).toMatchObject({
+      name: "apollo-release-manifest",
+      path: "apollo-release-manifest.json",
+    });
+    const manifestStep = steps.find(
+      ({ name }) => name === "Capture immutable digests",
+    );
+    expect(manifestStep?.run).not.toMatch(
+      /(?:password|token|secret|private|database_url|redis_url)"?\s*:/i,
+    );
+  });
+});
+
+describe("production Dockerfile base image provenance", () => {
+  it.each(productionDockerfiles)(
+    "pins every external FROM in %s to a qualified non-placeholder index digest",
+    async (relativePath) => {
+      const source = await readFile(join(repositoryRoot, relativePath), "utf8");
+      const stageNames = new Set<string>();
+      const externalImages: string[] = [];
+
+      for (const line of source.split(/\r?\n/)) {
+        const match = line.match(
+          /^FROM\s+(?<image>\S+)(?:\s+AS\s+(?<stage>[a-z0-9_-]+))?$/i,
+        );
+        if (match?.groups?.image === undefined) continue;
+        const image = match.groups.image;
+        if (!stageNames.has(image)) externalImages.push(image);
+        if (match.groups.stage !== undefined) {
+          stageNames.add(match.groups.stage);
+        }
+      }
+
+      expect(externalImages.length).toBeGreaterThan(0);
+      for (const image of externalImages) {
+        expect(image).not.toContain("$");
+        expect(image).toMatch(
+          /^[a-z0-9.-]+(?::\d+)?\/[a-z0-9._/-]+:[a-z0-9._-]+@sha256:[a-f0-9]{64}$/,
+        );
+        expect(image).not.toMatch(/@sha256:0{64}$/);
+      }
+    },
+  );
 });

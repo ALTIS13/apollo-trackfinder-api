@@ -1919,8 +1919,8 @@ describe("TF deployment identity contract", () => {
       readFile(apiRoleBootstrapScript, "utf8"),
     ]);
 
-    expect(dockerfile).toContain(
-      "FROM postgres:16-bookworm AS postgres-role-init",
+    expect(dockerfile).toMatch(
+      /^FROM docker\.io\/library\/postgres:16-bookworm@sha256:[a-f0-9]{64} AS postgres-role-init$/m,
     );
     expect(dockerfile).toContain(
       "COPY artifacts/api-server/container/init-roles.sh /usr/local/bin/bootstrap-tf-roles.sh",

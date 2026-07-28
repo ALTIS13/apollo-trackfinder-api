@@ -1,4 +1,4 @@
-FROM node:20-slim AS builder
+FROM docker.io/library/node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
 
 WORKDIR /app
 
@@ -26,7 +26,7 @@ ENV VITE_API_URL=${VITE_API_URL}
 
 RUN pnpm --filter @workspace/music-player run build
 
-FROM nginx:alpine AS runner
+FROM docker.io/library/nginx:alpine@sha256:4a73073bd557c65b759505da037898b61f1be6cbcc3c2c3aeac22d2a470c1752 AS runner
 
 COPY --from=builder /app/artifacts/music-player/dist/public /usr/share/nginx/html
 

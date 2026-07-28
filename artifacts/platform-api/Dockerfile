@@ -1,9 +1,9 @@
-FROM postgres:16-bookworm AS postgres-role-init
+FROM docker.io/library/postgres:16-bookworm@sha256:92620daddcd947f8d5ab5ba66e848702fe443d87fed30c4cea8e389fd78dfc55 AS postgres-role-init
 
 COPY artifacts/platform-api/container/init-roles.sh /docker-entrypoint-initdb.d/010-platform-roles.sh
 RUN chmod 0555 /docker-entrypoint-initdb.d/010-platform-roles.sh
 
-FROM node:20-bookworm-slim AS builder
+FROM docker.io/library/node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
@@ -26,7 +26,7 @@ RUN pnpm --dir artifacts/platform-api build
 RUN pnpm --filter @workspace/platform-api deploy --prod --legacy /runtime
 RUN find -L /runtime/node_modules/argon2 -name '*.node' -print -quit | grep -q .
 
-FROM node:20-bookworm-slim AS runtime
+FROM docker.io/library/node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS runtime
 
 RUN groupadd --gid 10001 apollo \
   && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin apollo

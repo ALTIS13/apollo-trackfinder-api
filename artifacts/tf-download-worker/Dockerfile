@@ -1,4 +1,4 @@
-FROM redis:7-bookworm AS queue-redis
+FROM docker.io/library/redis:7-bookworm@sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b AS queue-redis
 
 COPY artifacts/tf-download-worker/container/start-queue-redis.sh /usr/local/bin/start-queue-redis.sh
 COPY artifacts/tf-download-worker/container/queue-redis-health.sh /usr/local/bin/queue-redis-health.sh
@@ -9,7 +9,7 @@ RUN chmod 0555 /usr/local/bin/start-queue-redis.sh \
 USER 999:999
 ENTRYPOINT ["/usr/local/bin/start-queue-redis.sh"]
 
-FROM node:20-bookworm-slim AS builder
+FROM docker.io/library/node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
@@ -30,7 +30,7 @@ COPY artifacts/tf-download-worker ./artifacts/tf-download-worker
 
 RUN pnpm --dir artifacts/tf-download-worker build
 
-FROM node:20-bookworm-slim AS runtime
+FROM docker.io/library/node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS runtime
 
 ARG YT_DLP_VERSION=2026.7.4
 ARG YT_DLP_SHA256=f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266
@@ -101,3 +101,5 @@ ENTRYPOINT ["/app/bin/start-smoke-worker.sh", "/app/bin/start-worker.sh"]
 CMD ["node", "/app/dist/index.mjs"]
 
 FROM runtime AS final
+
+FROM final AS runner
