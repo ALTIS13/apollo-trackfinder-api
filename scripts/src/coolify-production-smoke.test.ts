@@ -408,9 +408,10 @@ async function removeExactRegistryReferences(
   }
 }
 
-async function assertFixedResourcesAbsent(
-  docker: DockerCommand,
-): Promise<void> {
+async function assertFixedResourcesAbsent(docker: DockerCommand): Promise<{
+  readonly networks: readonly (typeof fixedNetworks)[number][];
+  readonly volumes: readonly (typeof fixedVolumes)[number][];
+}> {
   for (const [kind, names] of [
     ["network", fixedNetworks],
     ["volume", fixedVolumes],
@@ -431,6 +432,10 @@ async function assertFixedResourcesAbsent(
   ) {
     throw new Error("production smoke Compose resources are already owned");
   }
+  return {
+    networks: [...fixedNetworks],
+    volumes: [...fixedVolumes],
+  };
 }
 
 async function writeSecretFile(
@@ -1812,6 +1817,182 @@ async function runWithVerifiedCleanup<T, A>(options: {
   return { audit, value };
 }
 
+type ProductionSmokeLifecycleOperations = {
+  readonly acquireResources: () => Promise<void>;
+  readonly runApplicationFlows: () => Promise<void>;
+  readonly startCaddy: () => Promise<void>;
+  readonly startHelpers: () => Promise<void>;
+  readonly startPlatform: () => Promise<void>;
+  readonly startTf: () => Promise<void>;
+};
+
+async function runProductionSmokeLifecycle<A>(
+  options: ProductionSmokeLifecycleOperations & {
+    readonly audit: () => Promise<A>;
+    readonly cleanup: () => Promise<void>;
+    readonly isClean?: (audit: A) => boolean;
+    readonly stage?: () => string;
+  },
+): Promise<{ readonly audit: A; readonly value: void }> {
+  let lifecycleStage = "resource-acquisition";
+  const runStage = async (
+    name: string,
+    operation: () => Promise<void>,
+  ): Promise<void> => {
+    lifecycleStage = name;
+    await operation();
+  };
+  return runWithVerifiedCleanup({
+    audit: options.audit,
+    cleanup: options.cleanup,
+    isClean:
+      options.isClean ??
+      ((audit) =>
+        Object.values(audit as Record<string, unknown>).every(
+          (value) => value === 0,
+        )),
+    run: async () => {
+      await runStage("resource-acquisition", options.acquireResources);
+      await runStage("helper-startup", options.startHelpers);
+      await runStage("platform-compose-startup", options.startPlatform);
+      await runStage("tf-compose-startup", options.startTf);
+      await runStage("application-flows", options.runApplicationFlows);
+      await runStage("caddy-startup", options.startCaddy);
+    },
+    stage: options.stage ?? (() => lifecycleStage),
+  });
+}
+
+async function cleanupOwnedSmokeResources(options: {
+  readonly acquiredImages: ReadonlyMap<string, boolean>;
+  readonly docker: DockerCommand;
+  readonly envFile: string | undefined;
+  readonly fixedResourceOwnership: {
+    readonly networks: readonly string[];
+    readonly volumes: readonly string[];
+  };
+  readonly registry: string | undefined;
+  readonly root: string | undefined;
+  readonly runId: string;
+  readonly temporaryParent: string | undefined;
+  readonly temporaryParentWasPresent: boolean;
+}): Promise<void> {
+  const errors: unknown[] = [];
+  const attempt = async (operation: () => Promise<unknown>) => {
+    try {
+      await operation();
+    } catch (error) {
+      errors.push(error);
+    }
+  };
+
+  let helpers: readonly string[] = [];
+  await attempt(async () => {
+    helpers = await containerIdsForLabels(options.docker, [
+      `apollo.local-release.run=${options.runId}`,
+    ]);
+  });
+  for (const container of helpers) {
+    await attempt(() => options.docker(["rm", "-f", container]));
+  }
+  if (options.envFile !== undefined) {
+    await attempt(() =>
+      compose(
+        options.docker,
+        tfCompose,
+        options.envFile as string,
+        "apollo-tf",
+        ["down", "--volumes", "--remove-orphans", "--timeout", "20"],
+      ),
+    );
+    await attempt(() =>
+      compose(
+        options.docker,
+        platformCompose,
+        options.envFile as string,
+        "apollo-platform",
+        ["down", "--volumes", "--remove-orphans", "--timeout", "20"],
+      ),
+    );
+  }
+  let leftovers: readonly string[] = [];
+  await attempt(async () => {
+    leftovers = await containerIdsForLabels(options.docker, [
+      `apollo.local-release.run=${options.runId}`,
+      "com.docker.compose.project=apollo-platform",
+      "com.docker.compose.project=apollo-tf",
+    ]);
+  });
+  for (const container of leftovers) {
+    await attempt(() => options.docker(["rm", "-f", container]));
+  }
+  for (const kind of ["network", "volume"] as const) {
+    let resources: readonly string[] = [];
+    await attempt(async () => {
+      resources = await resourceIdsForRunLabel(
+        options.docker,
+        kind,
+        options.runId,
+      );
+    });
+    for (const resource of resources) {
+      await attempt(() =>
+        options.docker([
+          kind,
+          "rm",
+          ...(kind === "volume" ? ["-f"] : []),
+          resource,
+        ]),
+      );
+    }
+  }
+  for (const [kind, names] of [
+    ["network", options.fixedResourceOwnership.networks],
+    ["volume", options.fixedResourceOwnership.volumes],
+  ] as const) {
+    for (const name of names) {
+      await attempt(async () => {
+        if (await resourcePresent(options.docker, kind, name)) {
+          await options.docker([
+            kind,
+            "rm",
+            ...(kind === "volume" ? ["-f"] : []),
+            name,
+          ]);
+        }
+      });
+    }
+  }
+  await attempt(() =>
+    removeExactRegistryReferences(options.docker, options.registry),
+  );
+  for (const [image, wasPresent] of options.acquiredImages) {
+    if (!wasPresent) {
+      await attempt(async () => {
+        if (await imagePresent(options.docker, image)) {
+          await options.docker(["image", "rm", image]);
+        }
+      });
+    }
+  }
+  if (options.root !== undefined) {
+    await attempt(() =>
+      rm(options.root as string, { force: true, recursive: true }),
+    );
+  }
+  if (options.temporaryParent !== undefined) {
+    await attempt(() =>
+      removeTaskCreatedParent(
+        options.temporaryParent as string,
+        options.temporaryParentWasPresent,
+      ),
+    );
+  }
+  if (errors.length > 0) {
+    throw new AggregateError(errors, "production smoke teardown failed");
+  }
+}
+
 async function runCoolifyProductionSmoke(): Promise<unknown> {
   let stage = "local-docker";
   const environment = await assertLocalDocker();
@@ -1825,7 +2006,7 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
     await command("git", ["rev-parse", "HEAD"])
   ).stdout.trim();
   stage = "fixed-resource-preflight";
-  await assertFixedResourcesAbsent(docker);
+  const fixedResourceOwnership = await assertFixedResourcesAbsent(docker);
 
   const runId = randomBytes(6).toString("hex");
   const temporaryParent = join(repositoryRoot, ".tmp");
@@ -1838,10 +2019,16 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
   let registryData: string | undefined;
   let envFile: string | undefined;
   let registry: string | undefined;
+  let registryPort: number | undefined;
   let temporaryParentWasPresent = true;
   let secrets: Awaited<ReturnType<typeof prepareSecrets>> | undefined;
-  const { audit: cleanup } = await runWithVerifiedCleanup({
-    run: async () => {
+  let profileRawSecrets: readonly string[] = [];
+  let platformEvidence:
+    | Awaited<ReturnType<typeof exercisePlatform>>
+    | undefined;
+  let tfEvidence: Awaited<ReturnType<typeof exerciseTf>> | undefined;
+  const { audit: cleanup } = await runProductionSmokeLifecycle({
+    acquireResources: async () => {
       stage = "resource-acquisition";
       temporaryParentWasPresent = await pathExists(temporaryParent);
       await mkdir(temporaryParent, { recursive: true });
@@ -1851,7 +2038,7 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
       source = join(root, "source");
       registryData = join(root, "registry");
       envFile = join(root, "release.env");
-      const registryPort = await freePort();
+      registryPort = await freePort();
       registry = `localhost:${registryPort}`;
 
       stage = "image-inventory";
@@ -1873,7 +2060,19 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
       await rm(archive, { force: true });
       stage = "secret-preparation";
       secrets = await prepareSecrets(root);
-
+    },
+    startHelpers: async () => {
+      if (
+        root === undefined ||
+        source === undefined ||
+        registryData === undefined ||
+        envFile === undefined ||
+        registry === undefined ||
+        registryPort === undefined ||
+        secrets === undefined
+      ) {
+        throw new Error("production smoke resources were not acquired");
+      }
       stage = "registry-start";
       await docker([
         "run",
@@ -1976,7 +2175,7 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
         { env: environment },
       );
       stage = "profiled-entrypoints";
-      const profileRawSecrets = await proveProfiledEntrypoints(
+      profileRawSecrets = await proveProfiledEntrypoints(
         docker,
         root,
         runId,
@@ -1992,7 +2191,11 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
         root,
         runId,
       );
-
+    },
+    startPlatform: async () => {
+      if (envFile === undefined) {
+        throw new Error("production smoke release env was not acquired");
+      }
       stage = "platform-start";
       await compose(docker, platformCompose, envFile, "apollo-platform", [
         "up",
@@ -2005,6 +2208,11 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
         "Platform readiness",
         async () => (await fetch("http://127.0.0.1:18200/readyz")).ok,
       );
+    },
+    startTf: async () => {
+      if (envFile === undefined) {
+        throw new Error("production smoke release env was not acquired");
+      }
       stage = "tf-start";
       await compose(docker, tfCompose, envFile, "apollo-tf", [
         "up",
@@ -2018,10 +2226,15 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
         async () => (await fetch("http://127.0.0.1:18201/api/readyz")).ok,
         240_000,
       );
+    },
+    runApplicationFlows: async () => {
+      if (envFile === undefined || secrets === undefined) {
+        throw new Error("production smoke runtime inputs were not acquired");
+      }
       stage = "platform-flow";
-      const platformEvidence = await exercisePlatform(secrets);
+      platformEvidence = await exercisePlatform(secrets);
       stage = "tf-flow";
-      const tfEvidence = await exerciseTf(
+      tfEvidence = await exerciseTf(
         docker,
         envFile,
         secrets.dashboardToken,
@@ -2048,6 +2261,10 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
         "persistent TF readiness",
         async () => (await fetch("http://127.0.0.1:18201/api/readyz")).ok,
       );
+      if (tfEvidence === undefined) {
+        throw new Error("TF application evidence was not produced");
+      }
+      const persistedTfEvidence = tfEvidence;
       stage = "persistence";
       const persistedRegistration = await jsonRequest(
         "http://127.0.0.1:18200/v1/registration",
@@ -2056,15 +2273,25 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
       expect(persistedRegistration.body).toEqual({ mode: "invite_only" });
       await waitFor("canceled download persistence", async () => {
         const status = await jsonRequest(
-          `http://127.0.0.1:18201/api/tracks/download/status/${tfEvidence.jobId}`,
+          `http://127.0.0.1:18201/api/tracks/download/status/${persistedTfEvidence.jobId}`,
           {
             expected: 200,
-            headers: tfHeaders(tfEvidence.session),
-            jar: tfEvidence.session,
+            headers: tfHeaders(persistedTfEvidence.session),
+            jar: persistedTfEvidence.session,
           },
         );
         return status.body.status === "canceled";
       });
+    },
+    startCaddy: async () => {
+      if (
+        root === undefined ||
+        envFile === undefined ||
+        secrets === undefined ||
+        platformEvidence === undefined
+      ) {
+        throw new Error("production smoke Caddy inputs were not produced");
+      }
       stage = "caddy-routes";
       await proveCaddyRoutes(docker, root, runId, secrets);
 
@@ -2091,96 +2318,19 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
           `container logs disclosed a disposable secret [${disclosure}]`,
         );
       }
-      return undefined;
     },
-    cleanup: async () => {
-      const errors: unknown[] = [];
-      const attempt = async (operation: () => Promise<unknown>) => {
-        try {
-          await operation();
-        } catch (error) {
-          errors.push(error);
-        }
-      };
-
-      let helpers: readonly string[] = [];
-      await attempt(async () => {
-        helpers = await containerIdsForLabels(docker, [
-          `apollo.local-release.run=${runId}`,
-        ]);
-      });
-      for (const container of helpers) {
-        await attempt(() => docker(["rm", "-f", container]));
-      }
-      if (envFile !== undefined) {
-        await attempt(() =>
-          compose(docker, tfCompose, envFile as string, "apollo-tf", [
-            "down",
-            "--volumes",
-            "--remove-orphans",
-            "--timeout",
-            "20",
-          ]),
-        );
-        await attempt(() =>
-          compose(
-            docker,
-            platformCompose,
-            envFile as string,
-            "apollo-platform",
-            ["down", "--volumes", "--remove-orphans", "--timeout", "20"],
-          ),
-        );
-      }
-      let leftovers: readonly string[] = [];
-      await attempt(async () => {
-        leftovers = await containerIdsForLabels(docker, [
-          `apollo.local-release.run=${runId}`,
-          "com.docker.compose.project=apollo-platform",
-          "com.docker.compose.project=apollo-tf",
-        ]);
-      });
-      for (const container of leftovers) {
-        await attempt(() => docker(["rm", "-f", container]));
-      }
-      for (const kind of ["network", "volume"] as const) {
-        let resources: readonly string[] = [];
-        await attempt(async () => {
-          resources = await resourceIdsForRunLabel(docker, kind, runId);
-        });
-        for (const resource of resources) {
-          await attempt(() =>
-            docker([
-              kind,
-              "rm",
-              ...(kind === "volume" ? ["-f"] : []),
-              resource,
-            ]),
-          );
-        }
-      }
-      await attempt(() => removeExactRegistryReferences(docker, registry));
-      for (const [image, wasPresent] of acquiredImages) {
-        if (!wasPresent) {
-          await attempt(async () => {
-            if (await imagePresent(docker, image)) {
-              await docker(["image", "rm", image]);
-            }
-          });
-        }
-      }
-      if (root !== undefined) {
-        await attempt(() =>
-          rm(root as string, { force: true, recursive: true }),
-        );
-      }
-      await attempt(() =>
-        removeTaskCreatedParent(temporaryParent, temporaryParentWasPresent),
-      );
-      if (errors.length > 0) {
-        throw new AggregateError(errors, "production smoke teardown failed");
-      }
-    },
+    cleanup: () =>
+      cleanupOwnedSmokeResources({
+        acquiredImages,
+        docker,
+        envFile,
+        fixedResourceOwnership,
+        registry,
+        root,
+        runId,
+        temporaryParent,
+        temporaryParentWasPresent,
+      }),
     audit: () => cleanupAudit(docker, runId, registry, root),
     isClean: (audit) => Object.values(audit).every((value) => value === 0),
     stage: () => stage,
@@ -2198,6 +2348,146 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
     `COOLIFY_PRODUCTION_EVIDENCE=${JSON.stringify(evidence)}\n`,
   );
   return evidence;
+}
+
+type FakeSmokeResource = Map<string, Set<string>>;
+
+function createFakeSmokeDocker(
+  options: {
+    readonly composeDownFailures?: ReadonlySet<string>;
+  } = {},
+) {
+  const runId = "contract-run";
+  const unrelatedNetwork = "unrelated-preexisting-network";
+  const containers = new Map<string, Set<string>>();
+  const networks: FakeSmokeResource = new Map([
+    [unrelatedNetwork, new Set(["unrelated.owner=true"])],
+  ]);
+  const volumes: FakeSmokeResource = new Map();
+  const commands: string[][] = [];
+  const resourceMap = (kind: "network" | "volume") =>
+    kind === "network" ? networks : volumes;
+  const docker: DockerCommand = async (args) => {
+    commands.push([...args]);
+    if (
+      (args[0] === "network" || args[0] === "volume") &&
+      args[1] === "inspect"
+    ) {
+      return {
+        exitCode: resourceMap(args[0]).has(args[2] ?? "") ? 0 : 1,
+        stderr: "",
+        stdout: "",
+      };
+    }
+    if (args[0] === "ps" && args[1] === "-aq") {
+      const label = args.at(-1)?.replace(/^label=/, "") ?? "";
+      return {
+        exitCode: 0,
+        stderr: "",
+        stdout:
+          [...containers]
+            .filter(([, labels]) => labels.has(label))
+            .map(([id]) => id)
+            .join("\n") + (containers.size > 0 ? "\n" : ""),
+      };
+    }
+    if (args[0] === "rm" && args[1] === "-f") {
+      for (const id of args.slice(2)) containers.delete(id);
+      return { exitCode: 0, stderr: "", stdout: "" };
+    }
+    if (args[0] === "compose") {
+      const project = args[args.indexOf("-p") + 1] ?? "";
+      if (args.includes("down") && options.composeDownFailures?.has(project)) {
+        throw new Error(`injected ${project} down failure`);
+      }
+      return { exitCode: 0, stderr: "", stdout: "" };
+    }
+    if ((args[0] === "network" || args[0] === "volume") && args[1] === "ls") {
+      const label = args.at(-1)?.replace(/^label=/, "") ?? "";
+      const resources = resourceMap(args[0]);
+      return {
+        exitCode: 0,
+        stderr: "",
+        stdout:
+          [...resources]
+            .filter(([, labels]) => labels.has(label))
+            .map(([name]) => name)
+            .join("\n") + (resources.size > 0 ? "\n" : ""),
+      };
+    }
+    if ((args[0] === "network" || args[0] === "volume") && args[1] === "rm") {
+      resourceMap(args[0]).delete(args.at(-1) ?? "");
+      return { exitCode: 0, stderr: "", stdout: "" };
+    }
+    throw new Error(`unexpected fake Docker command: ${args.join(" ")}`);
+  };
+
+  return {
+    commands,
+    containers,
+    docker,
+    networks,
+    runId,
+    unrelatedNetwork,
+    volumes,
+  };
+}
+
+function createInjectedLifecycleOperations(
+  state: ReturnType<typeof createFakeSmokeDocker>,
+  failureOperation?: keyof ProductionSmokeLifecycleOperations,
+): ProductionSmokeLifecycleOperations {
+  let acquired = false;
+  const acquireOwnedResources = () => {
+    if (acquired) return;
+    acquired = true;
+    state.containers.set(
+      "helper",
+      new Set([`apollo.local-release.run=${state.runId}`]),
+    );
+    state.containers.set(
+      "platform",
+      new Set(["com.docker.compose.project=apollo-platform"]),
+    );
+    state.containers.set(
+      "tf",
+      new Set(["com.docker.compose.project=apollo-tf"]),
+    );
+    for (const name of fixedNetworks) state.networks.set(name, new Set());
+    for (const name of fixedVolumes) state.volumes.set(name, new Set());
+    state.networks.set(
+      "contract-helper-network",
+      new Set([`apollo.local-release.run=${state.runId}`]),
+    );
+    state.volumes.set(
+      "contract-helper-volume",
+      new Set([`apollo.local-release.run=${state.runId}`]),
+    );
+  };
+  const operation =
+    (name: keyof ProductionSmokeLifecycleOperations, stage: string) =>
+    async () => {
+      if (failureOperation === name) {
+        acquireOwnedResources();
+        throw new Error(`injected ${stage} failure`);
+      }
+      if (name === "startCaddy") acquireOwnedResources();
+    };
+  return {
+    acquireResources: operation("acquireResources", "resource-acquisition"),
+    runApplicationFlows: operation("runApplicationFlows", "application-flows"),
+    startCaddy: operation("startCaddy", "caddy-startup"),
+    startHelpers: operation("startHelpers", "helper-startup"),
+    startPlatform: operation("startPlatform", "platform-compose-startup"),
+    startTf: operation("startTf", "tf-compose-startup"),
+  };
+}
+
+function flattenErrorMessages(error: unknown): readonly string[] {
+  if (error instanceof AggregateError) {
+    return error.errors.flatMap(flattenErrorMessages);
+  }
+  return [error instanceof Error ? error.message : String(error)];
 }
 
 describe("Coolify production smoke contract", () => {
@@ -2460,76 +2750,149 @@ describe("Coolify production smoke contract", () => {
   });
 
   it.each([
-    "resource-acquisition",
-    "helper-startup",
-    "platform-compose-startup",
-    "tf-compose-startup",
-    "caddy-startup",
-  ])("audits exact cleanup after injected %s failure", async (stage) => {
-    const owned = new Set<string>();
+    ["resource-acquisition", "acquireResources"],
+    ["helper-startup", "startHelpers"],
+    ["platform-compose-startup", "startPlatform"],
+    ["tf-compose-startup", "startTf"],
+    ["caddy-startup", "startCaddy"],
+  ] as const)(
+    "runs real exact cleanup after injected %s failure",
+    async (stage, failureOperation) => {
+      const state = createFakeSmokeDocker({
+        composeDownFailures: new Set(["apollo-platform", "apollo-tf"]),
+      });
+      const fixedResourceOwnership = await assertFixedResourcesAbsent(
+        state.docker,
+      );
+      let auditCalls = 0;
+      let error: unknown;
+      const operations = createInjectedLifecycleOperations(
+        state,
+        failureOperation,
+      );
+
+      await runProductionSmokeLifecycle({
+        ...operations,
+        audit: async () => {
+          auditCalls += 1;
+          return cleanupAudit(state.docker, state.runId, undefined, undefined);
+        },
+        cleanup: () =>
+          cleanupOwnedSmokeResources({
+            acquiredImages: new Map(),
+            docker: state.docker,
+            envFile: "synthetic-release.env",
+            fixedResourceOwnership,
+            registry: undefined,
+            root: undefined,
+            runId: state.runId,
+            temporaryParent: undefined,
+            temporaryParentWasPresent: true,
+          }),
+      }).catch((caught) => {
+        error = caught;
+      });
+
+      expect(error).toBeInstanceOf(AggregateError);
+      expect(flattenErrorMessages(error)).toContain(
+        `injected ${stage} failure`,
+      );
+      expect(flattenErrorMessages(error)).toContain(
+        "injected apollo-platform down failure",
+      );
+      expect(flattenErrorMessages(error)).toContain(
+        "injected apollo-tf down failure",
+      );
+      expect(auditCalls).toBe(1);
+      await expect(
+        cleanupAudit(state.docker, state.runId, undefined, undefined),
+      ).resolves.toEqual({
+        containers: 0,
+        imageReferences: 0,
+        networks: 0,
+        registryFiles: 0,
+        temporarySecrets: 0,
+        volumes: 0,
+      });
+      expect(state.networks.has(state.unrelatedNetwork)).toBe(true);
+      for (const name of fixedNetworks) {
+        expect(state.commands).toContainEqual(["network", "inspect", name]);
+        expect(state.commands).toContainEqual(["network", "rm", name]);
+      }
+      for (const name of fixedVolumes) {
+        expect(state.commands).toContainEqual(["volume", "inspect", name]);
+        expect(state.commands).toContainEqual(["volume", "rm", "-f", name]);
+      }
+      expect(state.commands.some((args) => args.includes("prune"))).toBe(false);
+    },
+  );
+
+  it("runs real exact cleanup for teardown failure", async () => {
+    const state = createFakeSmokeDocker({
+      composeDownFailures: new Set(["apollo-platform", "apollo-tf"]),
+    });
+    const fixedResourceOwnership = await assertFixedResourcesAbsent(
+      state.docker,
+    );
+    const operations = createInjectedLifecycleOperations(state);
     let auditCalls = 0;
     let error: unknown;
 
-    await runWithVerifiedCleanup({
+    await runProductionSmokeLifecycle({
+      ...operations,
       audit: async () => {
         auditCalls += 1;
-        return owned.size;
+        return cleanupAudit(state.docker, state.runId, undefined, undefined);
       },
-      cleanup: async () => {
-        owned.clear();
-      },
-      isClean: (remaining) => remaining === 0,
-      run: async () => {
-        owned.add(`${stage}-resource`);
-        throw new Error(`injected ${stage} failure`);
-      },
-      stage: () => stage,
+      cleanup: () =>
+        cleanupOwnedSmokeResources({
+          acquiredImages: new Map(),
+          docker: state.docker,
+          envFile: "synthetic-release.env",
+          fixedResourceOwnership,
+          registry: undefined,
+          root: undefined,
+          runId: state.runId,
+          temporaryParent: undefined,
+          temporaryParentWasPresent: true,
+        }),
     }).catch((caught) => {
       error = caught;
     });
 
     expect(error).toBeInstanceOf(AggregateError);
-    expect(
-      (error as AggregateError).errors.some(
-        (item) =>
-          item instanceof Error && item.message === `injected ${stage} failure`,
-      ),
-    ).toBe(true);
-    expect(owned.size).toBe(0);
+    expect(flattenErrorMessages(error)).toContain(
+      "injected apollo-platform down failure",
+    );
+    expect(flattenErrorMessages(error)).toContain(
+      "injected apollo-tf down failure",
+    );
     expect(auditCalls).toBe(1);
+    await expect(
+      cleanupAudit(state.docker, state.runId, undefined, undefined),
+    ).resolves.toEqual({
+      containers: 0,
+      imageReferences: 0,
+      networks: 0,
+      registryFiles: 0,
+      temporarySecrets: 0,
+      volumes: 0,
+    });
+    expect(state.networks.has(state.unrelatedNetwork)).toBe(true);
   });
 
-  it("preserves lifecycle and teardown failures while still auditing", async () => {
-    const owned = new Set(["owned-helper"]);
-    let auditCalls = 0;
-    let error: unknown;
+  it("rejects pre-existing fixed resources without removing them", async () => {
+    const state = createFakeSmokeDocker();
+    state.networks.set(fixedNetworks[0], new Set());
 
-    await runWithVerifiedCleanup({
-      audit: async () => {
-        auditCalls += 1;
-        return owned.size;
-      },
-      cleanup: async () => {
-        owned.clear();
-        throw new Error("injected teardown failure");
-      },
-      isClean: (remaining) => remaining === 0,
-      run: async () => {
-        throw new Error("injected lifecycle failure");
-      },
-      stage: () => "tf-compose-startup",
-    }).catch((caught) => {
-      error = caught;
-    });
+    await expect(assertFixedResourcesAbsent(state.docker)).rejects.toThrow(
+      "production smoke fixed resource is already owned",
+    );
 
-    expect(error).toBeInstanceOf(AggregateError);
+    expect(state.networks.has(fixedNetworks[0])).toBe(true);
     expect(
-      (error as AggregateError).errors.map((item) =>
-        item instanceof Error ? item.message : String(item),
-      ),
-    ).toEqual(["injected lifecycle failure", "injected teardown failure"]);
-    expect(owned.size).toBe(0);
-    expect(auditCalls).toBe(1);
+      state.commands.some((args) => args[0] === "network" && args[1] === "rm"),
+    ).toBe(false);
   });
 
   it("removes only an empty temporary parent created by the task", async () => {
@@ -2702,10 +3065,9 @@ describe("Coolify production smoke contract", () => {
   });
 
   it("removes network-sharing helpers before Compose resources", () => {
-    const source = runCoolifyProductionSmoke.toString();
-    const cleanupSource = source.slice(source.indexOf("cleanup: async"));
+    const cleanupSource = cleanupOwnedSmokeResources.toString();
     const helperRemoval = cleanupSource.indexOf(
-      'docker(["rm", "-f", container])',
+      'options.docker(["rm", "-f", container])',
     );
     const tfTeardown = cleanupSource.indexOf("tfCompose");
     const platformTeardown = cleanupSource.indexOf("platformCompose");

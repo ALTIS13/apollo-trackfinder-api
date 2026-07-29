@@ -1,6 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -11,13 +20,24 @@ const validatorPath = resolve(
   repositoryRoot,
   "deploy/caddy/validate-caddy.ps1",
 );
+const protectedCommandPath = resolve(
+  repositoryRoot,
+  "deploy/caddy/caddy-protected-command.sh",
+);
 const rolloutPath = resolve(
   repositoryRoot,
   "docs/operations/apollo-production-rollout.md",
 );
+const rollbackEnvironmentCommand =
+  'if [ -e "$1" ]; then cp --preserve=mode,ownership,timestamps "$1" "$2"; else rm -f "$2"; fi';
 
 function caddyfile(): string {
   return readFileSync(caddyfilePath, "utf8");
+}
+
+function shellPath(path: string): string {
+  if (process.platform !== "win32") return path;
+  return `/${path[0]?.toLowerCase()}${path.slice(2).replaceAll("\\", "/")}`;
 }
 
 describe("Apollo Caddy release include", () => {
@@ -96,14 +116,141 @@ describe("Apollo Caddy release include", () => {
       "root:root",
       "0600",
       'hash-password < "$1" > "$2"',
-      'set -a; . "$1"; set +a; exec /usr/bin/caddy validate',
-      'set -a; . "$1"; set +a; exec /usr/bin/caddy reload',
+      "deploy/caddy/caddy-protected-command.sh validate",
+      "deploy/caddy/caddy-protected-command.sh reload",
     ]) {
       expect(source).toContain(value);
     }
     expect(source).toContain("exactly one LF-terminated line");
     expect(source).toContain("bcrypt");
   });
+
+  it.each([
+    ["prior env present", true, "present"],
+    ["prior env absent", false, "absent"],
+  ] as const)(
+    "runs rollback validate and reload with %s",
+    (_label, priorEnvironment, expectedCredentialState) => {
+      const root = mkdtempSync(join(tmpdir(), "apollo-caddy-command-"));
+      const environmentPath = join(root, "apollo.env");
+      const environmentBackupPath = join(root, "apollo.env.backup");
+      const configPath = join(root, "Caddyfile");
+      const fakeCaddyPath = join(root, "caddy-contract");
+      const contractCommandPath = join(root, "caddy-protected-command.sh");
+      writeFileSync(configPath, "{}\n", { mode: 0o600 });
+      writeFileSync(
+        fakeCaddyPath,
+        `#!/bin/sh
+set -eu
+[ "$2" = "--config" ]
+[ "$4" = "--adapter" ]
+[ "$5" = "caddyfile" ]
+if [ "\${APOLLO_ADMIN_CADDY_USER+x}" = x ] &&
+   [ "\${APOLLO_ADMIN_CADDY_PASSWORD_HASH+x}" = x ]; then
+  credential_state=present
+else
+  credential_state=absent
+fi
+printf '%s:%s\\n' "$1" "$credential_state"
+`,
+        { mode: 0o700 },
+      );
+      chmodSync(fakeCaddyPath, 0o700);
+      const commandSource = readFileSync(protectedCommandPath, "utf8");
+      expect(commandSource.match(/\/usr\/bin\/caddy/g)).toHaveLength(1);
+      writeFileSync(
+        contractCommandPath,
+        commandSource.replace(
+          "/usr/bin/caddy",
+          `'${shellPath(fakeCaddyPath).replaceAll("'", "'\\''")}'`,
+        ),
+        { mode: 0o700 },
+      );
+      chmodSync(contractCommandPath, 0o700);
+      writeFileSync(
+        environmentPath,
+        `APOLLO_ADMIN_CADDY_USER='${randomUUID()}'\n` +
+          `APOLLO_ADMIN_CADDY_PASSWORD_HASH='${randomUUID()}'\n`,
+        { mode: 0o600 },
+      );
+      if (priorEnvironment) {
+        writeFileSync(
+          environmentBackupPath,
+          `APOLLO_ADMIN_CADDY_USER='${randomUUID()}'\n` +
+            `APOLLO_ADMIN_CADDY_PASSWORD_HASH='${randomUUID()}'\n`,
+          { mode: 0o600 },
+        );
+      }
+      const executable =
+        process.platform === "win32"
+          ? "C:\\Program Files\\Git\\bin\\bash.exe"
+          : "bash";
+      try {
+        expect(readFileSync(rolloutPath, "utf8")).toContain(
+          rollbackEnvironmentCommand,
+        );
+        const restore = spawnSync(
+          executable,
+          [
+            "-ceu",
+            rollbackEnvironmentCommand,
+            "sh",
+            shellPath(environmentBackupPath),
+            shellPath(environmentPath),
+          ],
+          {
+            encoding: "utf8",
+            windowsHide: true,
+          },
+        );
+        expect({
+          signal: restore.signal,
+          status: restore.status,
+          stderr: restore.stderr,
+          stdout: restore.stdout,
+        }).toEqual({
+          signal: null,
+          status: 0,
+          stderr: "",
+          stdout: "",
+        });
+        expect(existsSync(environmentPath)).toBe(priorEnvironment);
+        for (const operation of ["validate", "reload"] as const) {
+          const run = spawnSync(
+            executable,
+            [
+              shellPath(contractCommandPath),
+              operation,
+              shellPath(environmentPath),
+              shellPath(configPath),
+            ],
+            {
+              encoding: "utf8",
+              env: {
+                ...process.env,
+                APOLLO_ADMIN_CADDY_PASSWORD_HASH: randomUUID(),
+                APOLLO_ADMIN_CADDY_USER: randomUUID(),
+              },
+              windowsHide: true,
+            },
+          );
+          expect({
+            signal: run.signal,
+            status: run.status,
+            stderr: run.stderr,
+            stdout: run.stdout,
+          }).toEqual({
+            signal: null,
+            status: 0,
+            stderr: "",
+            stdout: `${operation}:${expectedCredentialState}\n`,
+          });
+        }
+      } finally {
+        rmSync(root, { force: true, recursive: true });
+      }
+    },
+  );
 });
 
 describe.runIf(process.env.APOLLO_RUN_CADDY_VALIDATION === "1")(

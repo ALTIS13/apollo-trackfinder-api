@@ -221,22 +221,26 @@ sudo rm -f '<CADDY_APOLLO_ENV_STAGED>' '<CADDY_ADMIN_HASH_FILE>'
 
 Validate the complete configuration and reload it only after explicit owner
 approval. Both commands consume the same protected source in a non-xtrace
-shell; do not pipe their environment or expanded configuration to a logger:
+shell through the tracked helper; do not pipe their environment or expanded
+configuration to a logger. Install or execute the helper from an
+owner-reviewed checkout as `root:root` mode `0755`:
 
 ```sh
-sudo sh -ceu 'set -a; . "$1"; set +a; exec /usr/bin/caddy validate --config "$2" --adapter caddyfile' sh '<CADDY_APOLLO_ENV_FILE>' '<CADDY_COMPLETE_CONFIG>'
-sudo sh -ceu 'set -a; . "$1"; set +a; exec /usr/bin/caddy reload --config "$2" --adapter caddyfile' sh '<CADDY_APOLLO_ENV_FILE>' '<CADDY_COMPLETE_CONFIG>'
+sudo deploy/caddy/caddy-protected-command.sh validate '<CADDY_APOLLO_ENV_FILE>' '<CADDY_COMPLETE_CONFIG>'
+sudo deploy/caddy/caddy-protected-command.sh reload '<CADDY_APOLLO_ENV_FILE>' '<CADDY_COMPLETE_CONFIG>'
 ```
 
 For rollback, restore both protected sources, validate the restored complete
-configuration, obtain rollback approval, and reload using that restored
-environment:
+configuration, obtain rollback approval, and reload. The helper clears the two
+Apollo credential variables first and sources the restored protected
+environment only when the file exists. When no prior environment existed, both
+complete-configuration commands run with those variables unset:
 
 ```sh
 sudo cp --preserve=mode,ownership,timestamps '<CADDY_COMPLETE_CONFIG_BACKUP>' '<CADDY_COMPLETE_CONFIG>'
 sudo sh -ceu 'if [ -e "$1" ]; then cp --preserve=mode,ownership,timestamps "$1" "$2"; else rm -f "$2"; fi' sh '<CADDY_APOLLO_ENV_BACKUP>' '<CADDY_APOLLO_ENV_FILE>'
-sudo sh -ceu 'set -a; . "$1"; set +a; exec /usr/bin/caddy validate --config "$2" --adapter caddyfile' sh '<CADDY_APOLLO_ENV_FILE>' '<CADDY_COMPLETE_CONFIG>'
-sudo sh -ceu 'set -a; . "$1"; set +a; exec /usr/bin/caddy reload --config "$2" --adapter caddyfile' sh '<CADDY_APOLLO_ENV_FILE>' '<CADDY_COMPLETE_CONFIG>'
+sudo deploy/caddy/caddy-protected-command.sh validate '<CADDY_APOLLO_ENV_FILE>' '<CADDY_COMPLETE_CONFIG>'
+sudo deploy/caddy/caddy-protected-command.sh reload '<CADDY_APOLLO_ENV_FILE>' '<CADDY_COMPLETE_CONFIG>'
 ```
 
 Per-host checks:
