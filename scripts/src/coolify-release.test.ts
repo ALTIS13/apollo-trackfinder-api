@@ -553,9 +553,102 @@ const exactSecretFileEnvironment: Readonly<
   },
 };
 
+function exactPlainEnvironment(
+  releaseEnvironment: Readonly<Record<string, string>>,
+): Readonly<Record<ServiceName, Record<string, string>>> {
+  return {
+    "platform-api": {
+      APOLLO_ALLOWED_ORIGINS: releaseEnvironment["PLATFORM_ALLOWED_ORIGINS"]!,
+      APOLLO_API_VERSION: releaseEnvironment["PLATFORM_API_VERSION"]!,
+      APOLLO_DEPLOYED_AT: releaseEnvironment["PLATFORM_DEPLOYED_AT"]!,
+      APOLLO_DEVELOPMENT_TOKEN_ECHO: "false",
+      APOLLO_INTROSPECTION_CLIENT_ID: "apollo-tf-api",
+      APOLLO_ISSUER: releaseEnvironment["PLATFORM_PUBLIC_ORIGIN"]!,
+      APOLLO_REDIS_URL: "redis://platform-redis:6379",
+      APOLLO_TRUST_PROXY_HOPS: "1",
+      NODE_ENV: "production",
+      PORT: "8080",
+    },
+    "platform-migrate": {},
+    "platform-postgres": {
+      POSTGRES_DB: "apollo_platform",
+      POSTGRES_USER: "postgres",
+    },
+    "platform-redis": {},
+    "tf-admin": { APOLLO_API_UPSTREAM: "http://tf-api:8080" },
+    "tf-api": {
+      APOLLO_API_VERSION: releaseEnvironment["TF_API_VERSION"]!,
+      APOLLO_DEPLOYED_AT: releaseEnvironment["TF_DEPLOYED_AT"]!,
+      APOLLO_PLATFORM_API_ORIGIN: "http://platform-api:8080",
+      APOLLO_PLATFORM_ISSUER: releaseEnvironment["PLATFORM_PUBLIC_ORIGIN"]!,
+      APOLLO_TF_AUTH_REDIS_URL: "redis://tf-redis:6379/1",
+      APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP: "true",
+      APOLLO_TF_CALLBACK_URL: `${releaseEnvironment["TF_API_PUBLIC_ORIGIN"]!}/api/auth/callback`,
+      APOLLO_TF_CLIENT_ID: "apollo-tf-api",
+      APOLLO_TF_WEB_ORIGIN: releaseEnvironment["TF_PUBLIC_ORIGIN"]!,
+      NODE_ENV: "production",
+      PORT: "8080",
+      REDIS_URL: "redis://tf-redis:6379/0",
+      SERVER_URL: releaseEnvironment["TF_API_PUBLIC_ORIGIN"]!,
+      TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+      TF_DOWNLOAD_WORKER_ALLOW_INSECURE_HTTP: "true",
+      TF_DOWNLOAD_WORKER_ORIGIN: "http://tf-download-worker:8080",
+      TF_INTEGRATIONS_ALLOW_INSECURE_HTTP: "true",
+      TF_INTEGRATIONS_ORIGIN: "http://tf-integrations:8080",
+      TF_SEARCH_ALLOW_INSECURE_HTTP: "true",
+      TF_SEARCH_ORIGIN: "http://tf-search:8080",
+      WEB_URL: releaseEnvironment["TF_PUBLIC_ORIGIN"]!,
+    },
+    "tf-baseline": {},
+    "tf-download-redis": {},
+    "tf-download-worker": {
+      APOLLO_API_VERSION: releaseEnvironment["TF_DOWNLOAD_VERSION"]!,
+      APOLLO_DEPLOYED_AT: releaseEnvironment["TF_DOWNLOAD_DEPLOYED_AT"]!,
+      NODE_ENV: "production",
+      PORT: "8080",
+      TF_DOWNLOAD_HEARTBEAT_ALLOW_INSECURE_HTTP: "true",
+      TF_DOWNLOAD_HEARTBEAT_API_ORIGIN: "http://tf-api:8080",
+      TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+      TF_DOWNLOAD_STORAGE_ROOT: "/var/lib/apollo-tf/downloads",
+    },
+    "tf-integrations": {
+      APOLLO_API_VERSION: releaseEnvironment["TF_INTEGRATIONS_VERSION"]!,
+      APOLLO_DEPLOYED_AT:
+        releaseEnvironment["TF_INTEGRATIONS_DEPLOYED_AT"]!,
+      NODE_ENV: "production",
+      PORT: "8080",
+      TF_INTEGRATIONS_HEARTBEAT_ALLOW_INSECURE_HTTP: "true",
+      TF_INTEGRATIONS_HEARTBEAT_API_ORIGIN: "http://tf-api:8080",
+      TF_INTEGRATIONS_SPOTIFY_CALLBACK_URI: `${releaseEnvironment["TF_API_PUBLIC_ORIGIN"]!}/api/spotify/callback`,
+    },
+    "tf-integrations-migrate": {},
+    "tf-integrations-postgres": {
+      POSTGRES_DB: "apollo_tf_integrations",
+      POSTGRES_USER: "postgres",
+    },
+    "tf-migrate": {},
+    "tf-postgres": {
+      POSTGRES_DB: "apollo_trackfinder",
+      POSTGRES_USER: "postgres",
+    },
+    "tf-redis": {},
+    "tf-role-bootstrap": {},
+    "tf-search": {
+      APOLLO_API_VERSION: releaseEnvironment["TF_SEARCH_VERSION"]!,
+      APOLLO_DEPLOYED_AT: releaseEnvironment["TF_SEARCH_DEPLOYED_AT"]!,
+      NODE_ENV: "production",
+      PORT: "8080",
+      TF_SEARCH_HEARTBEAT_ALLOW_INSECURE_HTTP: "true",
+      TF_SEARCH_HEARTBEAT_API_ORIGIN: "http://tf-api:8080",
+    },
+    "tf-web": {},
+  };
+}
+
 function serviceFixture(
   stackName: ReleaseStackInput["name"],
   name: ServiceName,
+  releaseEnvironment: Readonly<Record<string, string>>,
 ): ComposeService {
   const isLongRunning = longRunningServices.has(name);
   const imageName = serviceImageNames[name];
@@ -574,7 +667,10 @@ function serviceFixture(
       driver: "json-file",
       options: { "max-file": "5", "max-size": "10m" },
     },
-    environment: { ...(exactSecretFileEnvironment[name] ?? {}) },
+    environment: {
+      ...exactPlainEnvironment(releaseEnvironment)[name],
+      ...(exactSecretFileEnvironment[name] ?? {}),
+    },
     networks: structuredClone(exactServiceNetworks[name]),
     secrets: exactSecretMounts[name].map((secret) => ({ ...secret })),
   };
@@ -627,9 +723,10 @@ function serviceFixture(
 function serviceMap(
   stackName: ReleaseStackInput["name"],
   names: readonly ServiceName[],
+  releaseEnvironment: Readonly<Record<string, string>>,
 ): Record<string, ComposeService> {
   return Object.fromEntries(
-    names.map((name) => [name, serviceFixture(stackName, name)]),
+    names.map((name) => [name, serviceFixture(stackName, name, releaseEnvironment)]),
   );
 }
 
@@ -657,8 +754,47 @@ function secretDefinitions(
 }
 
 function validInput(): ReleaseValidationInput {
-  const platform = serviceMap("apollo-platform", platformServices);
-  const tf = serviceMap("apollo-tf", tfServices);
+  const environment = {
+    PLATFORM_API_PORT: "18200",
+    PLATFORM_ALLOWED_ORIGINS: "https://apollot.ru,https://admin.apollot.ru",
+    PLATFORM_PUBLIC_ORIGIN: "https://api.apollot.ru",
+    PLATFORM_API_VERSION: "release-a",
+    PLATFORM_DEPLOYED_AT: "2026-07-28T00:00:00Z",
+    PLATFORM_SECRET_DIRECTORY: "/var/lib/apollo-platform/secrets",
+    RELEASE_SOURCE_COMMIT: sourceCommit,
+    TF_ADMIN_PUBLIC_ORIGIN: "https://admin.apollot.ru",
+    TF_ADMIN_CREDENTIAL_DIRECTORY:
+      "/var/lib/apollo-tf/admin-credentials/generation-1",
+    TF_ADMIN_PORT: "18203",
+    TF_API_PORT: "18201",
+    TF_API_PUBLIC_ORIGIN: "https://api.tf.apollot.ru",
+    TF_API_VERSION: "release-a",
+    TF_DEPLOYED_AT: "2026-07-28T00:00:00Z",
+    TF_DOWNLOAD_DEPLOYED_AT: "2026-07-28T00:00:00Z",
+    TF_DOWNLOAD_VERSION: "release-a",
+    TF_INTEGRATIONS_DEPLOYED_AT: "2026-07-28T00:00:00Z",
+    TF_INTEGRATIONS_VERSION: "release-a",
+    TF_PUBLIC_ORIGIN: "https://tf.apollot.ru",
+    TF_SEARCH_DEPLOYED_AT: "2026-07-28T00:00:00Z",
+    TF_SEARCH_VERSION: "release-a",
+    TF_SECRET_DIRECTORY: "/var/lib/apollo-tf/secrets",
+    TF_WEB_PORT: "18202",
+    PLATFORM_API_IMAGE: `${imageRepositories["platform-api"]}@${imageDigests["platform-api"]}`,
+    PLATFORM_POSTGRES_IMAGE: `${imageRepositories["platform-postgres"]}@${imageDigests["platform-postgres"]}`,
+    PLATFORM_REDIS_IMAGE: `${imageRepositories.redis}@${imageDigests.redis}`,
+    TF_ADMIN_IMAGE: `${imageRepositories["tf-admin"]}@${imageDigests["tf-admin"]}`,
+    TF_API_IMAGE: `${imageRepositories["tf-api"]}@${imageDigests["tf-api"]}`,
+    TF_DOWNLOAD_REDIS_IMAGE: `${imageRepositories["tf-download-redis"]}@${imageDigests["tf-download-redis"]}`,
+    TF_DOWNLOAD_WORKER_IMAGE: `${imageRepositories["tf-download-worker"]}@${imageDigests["tf-download-worker"]}`,
+    TF_INTEGRATIONS_IMAGE: `${imageRepositories["tf-integrations"]}@${imageDigests["tf-integrations"]}`,
+    TF_INTEGRATIONS_POSTGRES_IMAGE: `${imageRepositories["tf-integrations-postgres"]}@${imageDigests["tf-integrations-postgres"]}`,
+    TF_POSTGRES_IMAGE: `${imageRepositories["tf-postgres"]}@${imageDigests["tf-postgres"]}`,
+    TF_REDIS_IMAGE: `${imageRepositories.redis}@${imageDigests.redis}`,
+    TF_SEARCH_IMAGE: `${imageRepositories["tf-search"]}@${imageDigests["tf-search"]}`,
+    TF_WEB_IMAGE: `${imageRepositories["tf-web"]}@${imageDigests["tf-web"]}`,
+  };
+  const platform = serviceMap("apollo-platform", platformServices, environment);
+  const tf = serviceMap("apollo-tf", tfServices, environment);
 
   return {
     mode: "production",
@@ -672,45 +808,7 @@ function validInput(): ReleaseValidationInput {
         repository: imageRepositories[name],
       })),
     },
-    environment: {
-      PLATFORM_API_PORT: "18200",
-      PLATFORM_ALLOWED_ORIGINS: "https://apollot.ru,https://admin.apollot.ru",
-      PLATFORM_PUBLIC_ORIGIN: "https://api.apollot.ru",
-      PLATFORM_API_VERSION: "release-a",
-      PLATFORM_DEPLOYED_AT: "2026-07-28T00:00:00Z",
-      PLATFORM_SECRET_DIRECTORY: "/var/lib/apollo-platform/secrets",
-      RELEASE_SOURCE_COMMIT: sourceCommit,
-      TF_ADMIN_PUBLIC_ORIGIN: "https://admin.apollot.ru",
-      TF_ADMIN_CREDENTIAL_DIRECTORY:
-        "/var/lib/apollo-tf/admin-credentials/generation-1",
-      TF_ADMIN_PORT: "18203",
-      TF_API_PORT: "18201",
-      TF_API_PUBLIC_ORIGIN: "https://api.tf.apollot.ru",
-      TF_API_VERSION: "release-a",
-      TF_DEPLOYED_AT: "2026-07-28T00:00:00Z",
-      TF_DOWNLOAD_DEPLOYED_AT: "2026-07-28T00:00:00Z",
-      TF_DOWNLOAD_VERSION: "release-a",
-      TF_INTEGRATIONS_DEPLOYED_AT: "2026-07-28T00:00:00Z",
-      TF_INTEGRATIONS_VERSION: "release-a",
-      TF_PUBLIC_ORIGIN: "https://tf.apollot.ru",
-      TF_SEARCH_DEPLOYED_AT: "2026-07-28T00:00:00Z",
-      TF_SEARCH_VERSION: "release-a",
-      TF_SECRET_DIRECTORY: "/var/lib/apollo-tf/secrets",
-      TF_WEB_PORT: "18202",
-      PLATFORM_API_IMAGE: `${imageRepositories["platform-api"]}@${imageDigests["platform-api"]}`,
-      PLATFORM_POSTGRES_IMAGE: `${imageRepositories["platform-postgres"]}@${imageDigests["platform-postgres"]}`,
-      PLATFORM_REDIS_IMAGE: `${imageRepositories.redis}@${imageDigests.redis}`,
-      TF_ADMIN_IMAGE: `${imageRepositories["tf-admin"]}@${imageDigests["tf-admin"]}`,
-      TF_API_IMAGE: `${imageRepositories["tf-api"]}@${imageDigests["tf-api"]}`,
-      TF_DOWNLOAD_REDIS_IMAGE: `${imageRepositories["tf-download-redis"]}@${imageDigests["tf-download-redis"]}`,
-      TF_DOWNLOAD_WORKER_IMAGE: `${imageRepositories["tf-download-worker"]}@${imageDigests["tf-download-worker"]}`,
-      TF_INTEGRATIONS_IMAGE: `${imageRepositories["tf-integrations"]}@${imageDigests["tf-integrations"]}`,
-      TF_INTEGRATIONS_POSTGRES_IMAGE: `${imageRepositories["tf-integrations-postgres"]}@${imageDigests["tf-integrations-postgres"]}`,
-      TF_POSTGRES_IMAGE: `${imageRepositories["tf-postgres"]}@${imageDigests["tf-postgres"]}`,
-      TF_REDIS_IMAGE: `${imageRepositories.redis}@${imageDigests.redis}`,
-      TF_SEARCH_IMAGE: `${imageRepositories["tf-search"]}@${imageDigests["tf-search"]}`,
-      TF_WEB_IMAGE: `${imageRepositories["tf-web"]}@${imageDigests["tf-web"]}`,
-    },
+    environment,
     stacks: [
       {
         name: "apollo-platform",
@@ -802,15 +900,118 @@ describe("validateCoolifyRelease", () => {
 
   it("accepts documented non-secret runtime controls with sensitive-looking names", () => {
     const input = validInput();
-    const platformEnvironment =
-      input.stacks[0].compose.services["platform-api"].environment!;
-    platformEnvironment["APOLLO_DEVELOPMENT_TOKEN_ECHO"] = "false";
-    platformEnvironment["APOLLO_REDIS_URL"] = "redis://platform-redis:6379";
-    const tfEnvironment =
-      input.stacks[1].compose.services["tf-api"].environment!;
-    tfEnvironment["APOLLO_TF_AUTH_REDIS_URL"] = "redis://tf-redis:6379/1";
-    tfEnvironment["REDIS_URL"] = "redis://tf-redis:6379/0";
     expect(validateCoolifyRelease(input).ok).toBe(true);
+  });
+
+  it.each([
+    ["apollo-platform", "platform-api", "APOLLO_ISSUER"],
+    ["apollo-platform", "platform-api", "APOLLO_ALLOWED_ORIGINS"],
+    ["apollo-platform", "platform-api", "NODE_ENV"],
+    [
+      "apollo-tf",
+      "tf-integrations",
+      "TF_INTEGRATIONS_HEARTBEAT_API_ORIGIN",
+    ],
+    [
+      "apollo-tf",
+      "tf-integrations",
+      "TF_INTEGRATIONS_SPOTIFY_CALLBACK_URI",
+    ],
+    [
+      "apollo-tf",
+      "tf-search",
+      "TF_SEARCH_HEARTBEAT_ALLOW_INSECURE_HTTP",
+    ],
+    [
+      "apollo-tf",
+      "tf-download-worker",
+      "TF_DOWNLOAD_HEARTBEAT_API_ORIGIN",
+    ],
+    ["apollo-tf", "tf-api", "APOLLO_PLATFORM_API_ORIGIN"],
+    ["apollo-tf", "tf-api", "APOLLO_PLATFORM_ISSUER"],
+    ["apollo-tf", "tf-api", "APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP"],
+    ["apollo-tf", "tf-api", "APOLLO_TF_CALLBACK_URL"],
+    ["apollo-tf", "tf-api", "SERVER_URL"],
+    ["apollo-tf", "tf-api", "WEB_URL"],
+    ["apollo-tf", "tf-api", "TF_DOWNLOAD_WORKER_ORIGIN"],
+    ["apollo-tf", "tf-api", "TF_INTEGRATIONS_ORIGIN"],
+    ["apollo-tf", "tf-api", "TF_SEARCH_ORIGIN"],
+    ["apollo-tf", "tf-admin", "APOLLO_API_UPSTREAM"],
+  ] as const)(
+    "rejects rendered environment drift for %s.%s.%s without leaking values",
+    (stackName, serviceName, environmentName) => {
+      const input = validInput();
+      const hostileValue = `https://hostile.invalid/${environmentName.toLowerCase()}`;
+      const stack = input.stacks.find(({ name }) => name === stackName)!;
+      stack.compose.services[serviceName].environment![environmentName] =
+        hostileValue;
+
+      const result = validateCoolifyRelease(input);
+      expect(result).toEqual({
+        ok: false,
+        errors: [
+          {
+            code: "environment_contract",
+            field: "environment",
+            service: serviceName,
+            stack: stackName,
+          },
+        ],
+      });
+
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(hostileValue);
+      for (const expectedOrigin of [
+        "https://apollot.ru,https://admin.apollot.ru",
+        "https://api.apollot.ru",
+        "https://admin.apollot.ru",
+        "https://api.tf.apollot.ru",
+        "https://tf.apollot.ru",
+      ]) {
+        expect(serialized).not.toContain(expectedOrigin);
+      }
+    },
+  );
+
+  it("rejects missing rendered environment keys with one redacted contract error", () => {
+    const input = validInput();
+    delete input.stacks[0].compose.services["platform-api"].environment![
+      "NODE_ENV"
+    ];
+
+    expect(validateCoolifyRelease(input)).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "environment_contract",
+          field: "environment",
+          service: "platform-api",
+          stack: "apollo-platform",
+        },
+      ],
+    });
+  });
+
+  it("rejects unexpected rendered environment keys for an otherwise empty service", () => {
+    const input = validInput();
+    const hostileValue = "https://hostile.invalid/unexpected-environment";
+    input.stacks[0].compose.services["platform-redis"].environment![
+      "UNEXPECTED_ENVIRONMENT"
+    ] = hostileValue;
+
+    const result = validateCoolifyRelease(input);
+    expect(result).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "environment_contract",
+          field: "environment",
+          service: "platform-redis",
+          stack: "apollo-platform",
+        },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain(hostileValue);
   });
 
   it("requires every credential consumer to use its exact mounted secret file key", () => {
@@ -916,6 +1117,7 @@ describe("validateCoolifyRelease", () => {
     unexpected.stacks[0].compose.services["platform-extra"] = serviceFixture(
       "apollo-platform",
       "platform-redis",
+      unexpected.environment,
     );
     expect(errorCodes(unexpected)).toContain("unexpected_service");
   });

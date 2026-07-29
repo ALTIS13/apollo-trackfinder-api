@@ -909,6 +909,110 @@ const expectedSecretFileEnvironment: Readonly<
   },
 };
 
+type RuntimeEnvironment = Readonly<Record<string, string>>;
+type RuntimeEnvironmentResolver = (
+  releaseEnvironment: Readonly<Record<string, string>>,
+) => RuntimeEnvironment;
+
+const expectedPlainEnvironment: Readonly<
+  Record<string, RuntimeEnvironmentResolver>
+> = {
+  "platform-api": (releaseEnvironment) => ({
+    APOLLO_ALLOWED_ORIGINS: releaseEnvironment["PLATFORM_ALLOWED_ORIGINS"],
+    APOLLO_API_VERSION: releaseEnvironment["PLATFORM_API_VERSION"],
+    APOLLO_DEPLOYED_AT: releaseEnvironment["PLATFORM_DEPLOYED_AT"],
+    APOLLO_DEVELOPMENT_TOKEN_ECHO: "false",
+    APOLLO_INTROSPECTION_CLIENT_ID: "apollo-tf-api",
+    APOLLO_ISSUER: releaseEnvironment["PLATFORM_PUBLIC_ORIGIN"],
+    APOLLO_REDIS_URL: "redis://platform-redis:6379",
+    APOLLO_TRUST_PROXY_HOPS: "1",
+    NODE_ENV: "production",
+    PORT: "8080",
+  }),
+  "platform-migrate": () => ({}),
+  "platform-postgres": () => ({
+    POSTGRES_DB: "apollo_platform",
+    POSTGRES_USER: "postgres",
+  }),
+  "platform-redis": () => ({}),
+  "tf-admin": () => ({ APOLLO_API_UPSTREAM: "http://tf-api:8080" }),
+  "tf-api": (releaseEnvironment) => ({
+    APOLLO_API_VERSION: releaseEnvironment["TF_API_VERSION"],
+    APOLLO_DEPLOYED_AT: releaseEnvironment["TF_DEPLOYED_AT"],
+    APOLLO_PLATFORM_API_ORIGIN: "http://platform-api:8080",
+    APOLLO_PLATFORM_ISSUER: releaseEnvironment["PLATFORM_PUBLIC_ORIGIN"],
+    APOLLO_TF_AUTH_REDIS_URL: "redis://tf-redis:6379/1",
+    APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP: "true",
+    APOLLO_TF_CALLBACK_URL: `${releaseEnvironment["TF_API_PUBLIC_ORIGIN"]}/api/auth/callback`,
+    APOLLO_TF_CLIENT_ID: "apollo-tf-api",
+    APOLLO_TF_WEB_ORIGIN: releaseEnvironment["TF_PUBLIC_ORIGIN"],
+    NODE_ENV: "production",
+    PORT: "8080",
+    REDIS_URL: "redis://tf-redis:6379/0",
+    SERVER_URL: releaseEnvironment["TF_API_PUBLIC_ORIGIN"],
+    TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+    TF_DOWNLOAD_WORKER_ALLOW_INSECURE_HTTP: "true",
+    TF_DOWNLOAD_WORKER_ORIGIN: "http://tf-download-worker:8080",
+    TF_INTEGRATIONS_ALLOW_INSECURE_HTTP: "true",
+    TF_INTEGRATIONS_ORIGIN: "http://tf-integrations:8080",
+    TF_SEARCH_ALLOW_INSECURE_HTTP: "true",
+    TF_SEARCH_ORIGIN: "http://tf-search:8080",
+    WEB_URL: releaseEnvironment["TF_PUBLIC_ORIGIN"],
+  }),
+  "tf-baseline": () => ({}),
+  "tf-download-redis": () => ({}),
+  "tf-download-worker": (releaseEnvironment) => ({
+    APOLLO_API_VERSION: releaseEnvironment["TF_DOWNLOAD_VERSION"],
+    APOLLO_DEPLOYED_AT: releaseEnvironment["TF_DOWNLOAD_DEPLOYED_AT"],
+    NODE_ENV: "production",
+    PORT: "8080",
+    TF_DOWNLOAD_HEARTBEAT_ALLOW_INSECURE_HTTP: "true",
+    TF_DOWNLOAD_HEARTBEAT_API_ORIGIN: "http://tf-api:8080",
+    TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true",
+    TF_DOWNLOAD_STORAGE_ROOT: "/var/lib/apollo-tf/downloads",
+  }),
+  "tf-integrations": (releaseEnvironment) => ({
+    APOLLO_API_VERSION: releaseEnvironment["TF_INTEGRATIONS_VERSION"],
+    APOLLO_DEPLOYED_AT: releaseEnvironment["TF_INTEGRATIONS_DEPLOYED_AT"],
+    NODE_ENV: "production",
+    PORT: "8080",
+    TF_INTEGRATIONS_HEARTBEAT_ALLOW_INSECURE_HTTP: "true",
+    TF_INTEGRATIONS_HEARTBEAT_API_ORIGIN: "http://tf-api:8080",
+    TF_INTEGRATIONS_SPOTIFY_CALLBACK_URI: `${releaseEnvironment["TF_API_PUBLIC_ORIGIN"]}/api/spotify/callback`,
+  }),
+  "tf-integrations-migrate": () => ({}),
+  "tf-integrations-postgres": () => ({
+    POSTGRES_DB: "apollo_tf_integrations",
+    POSTGRES_USER: "postgres",
+  }),
+  "tf-migrate": () => ({}),
+  "tf-postgres": () => ({
+    POSTGRES_DB: "apollo_trackfinder",
+    POSTGRES_USER: "postgres",
+  }),
+  "tf-redis": () => ({}),
+  "tf-role-bootstrap": () => ({}),
+  "tf-search": (releaseEnvironment) => ({
+    APOLLO_API_VERSION: releaseEnvironment["TF_SEARCH_VERSION"],
+    APOLLO_DEPLOYED_AT: releaseEnvironment["TF_SEARCH_DEPLOYED_AT"],
+    NODE_ENV: "production",
+    PORT: "8080",
+    TF_SEARCH_HEARTBEAT_ALLOW_INSECURE_HTTP: "true",
+    TF_SEARCH_HEARTBEAT_API_ORIGIN: "http://tf-api:8080",
+  }),
+  "tf-web": () => ({}),
+};
+
+function expectedEnvironmentForService(
+  serviceName: string,
+  releaseEnvironment: Readonly<Record<string, string>>,
+): RuntimeEnvironment {
+  return {
+    ...(expectedSecretFileEnvironment[serviceName] ?? {}),
+    ...(expectedPlainEnvironment[serviceName]?.(releaseEnvironment) ?? {}),
+  };
+}
+
 function addError(
   errors: ReleaseValidationError[],
   code: string,
@@ -942,6 +1046,27 @@ function exactKeys(
   return (
     actual.length === wanted.length &&
     actual.every((name, index) => name === wanted[index])
+  );
+}
+
+function exactRuntimeEnvironment(
+  actual: Readonly<Record<string, string>> | undefined,
+  expected: RuntimeEnvironment,
+): boolean {
+  const observed = Object.entries(actual ?? {}).sort(
+    ([leftName, leftValue], [rightName, rightValue]) =>
+      leftName.localeCompare(rightName) || leftValue.localeCompare(rightValue),
+  );
+  const wanted = Object.entries(expected).sort(
+    ([leftName, leftValue], [rightName, rightValue]) =>
+      leftName.localeCompare(rightName) || leftValue.localeCompare(rightValue),
+  );
+  return (
+    observed.length === wanted.length &&
+    observed.every(
+      ([name, value], index) =>
+        name === wanted[index]?.[0] && value === wanted[index]?.[1],
+    )
   );
 }
 
@@ -1491,10 +1616,22 @@ function validatePolicies(
 function validateEnvironment(
   serviceName: string,
   service: ComposeService,
+  releaseEnvironment: Readonly<Record<string, string>>,
   mountedTargets: Set<string>,
   errors: ReleaseValidationError[],
   context: Omit<ReleaseValidationError, "code">,
 ): void {
+  if (
+    !exactRuntimeEnvironment(
+      service.environment,
+      expectedEnvironmentForService(serviceName, releaseEnvironment),
+    )
+  ) {
+    addError(errors, "environment_contract", {
+      ...context,
+      field: "environment",
+    });
+  }
   for (const [name, value] of Object.entries(
     expectedSecretFileEnvironment[serviceName] ?? {},
   )) {
@@ -1808,6 +1945,7 @@ export function validateCoolifyRelease(
       validateEnvironment(
         serviceName,
         service,
+        input.environment,
         mountedTargets,
         errors,
         context,
