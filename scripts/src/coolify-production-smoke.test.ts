@@ -631,6 +631,209 @@ async function assertLocalDocker(
   return environment;
 }
 
+type OwnedLocalBuilder = {
+  readonly container: string;
+  readonly context: string;
+  readonly name: string;
+  readonly volume: string;
+};
+
+function expectedOwnedLocalBuilder(
+  context: string,
+  name: string,
+): OwnedLocalBuilder {
+  if (
+    !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(context) ||
+    !/^apollo-coolify-[a-z0-9-]{1,48}$/.test(name)
+  ) {
+    throw new Error("invalid task-owned builder identity");
+  }
+  const container = `buildx_buildkit_${name}0`;
+  return {
+    container,
+    context,
+    name,
+    volume: `${container}_state`,
+  };
+}
+
+function assertOwnedBuilderInspection(
+  stdout: string,
+  ownership: OwnedLocalBuilder,
+): void {
+  const names = [
+    ...stdout.matchAll(/^Name:\s*(?<value>\S+)\s*$/gm),
+  ].map((match) => match.groups?.value);
+  const driver = stdout.match(/^Driver:\s*(?<value>\S+)\s*$/m)?.groups?.value;
+  const endpoints = [
+    ...stdout.matchAll(/^Endpoint:\s*(?<value>\S+)\s*$/gm),
+  ].map((match) => match.groups?.value);
+  const statuses = [
+    ...stdout.matchAll(/^Status:\s*(?<value>\S+)\s*$/gm),
+  ].map((match) => match.groups?.value);
+  if (
+    names[0] !== ownership.name ||
+    names[1] !== `${ownership.name}0` ||
+    names.length !== 2 ||
+    driver !== "docker-container" ||
+    endpoints.length !== 1 ||
+    endpoints[0] !== ownership.context ||
+    statuses.length !== 1 ||
+    statuses[0] !== "running"
+  ) {
+    throw new Error("task-owned builder inventory mismatch");
+  }
+}
+
+async function inspectOwnedLocalBuilder(
+  docker: DockerCommand,
+  ownership: OwnedLocalBuilder,
+): Promise<boolean> {
+  const result = await docker(["buildx", "inspect", ownership.name], {
+    allowNonZero: true,
+  });
+  if (result.exitCode === 1) return false;
+  if (result.exitCode !== 0) {
+    throw new Error("task-owned builder inventory failed");
+  }
+  assertOwnedBuilderInspection(result.stdout, ownership);
+  return true;
+}
+
+async function createOwnedLocalBuilder(
+  docker: DockerCommand,
+  context: string,
+  name: string,
+): Promise<OwnedLocalBuilder> {
+  const ownership = expectedOwnedLocalBuilder(context, name);
+  if (await inspectOwnedLocalBuilder(docker, ownership)) {
+    throw new Error("task-owned builder already exists");
+  }
+  await docker(
+    [
+      "buildx",
+      "create",
+      "--name",
+      ownership.name,
+      "--driver",
+      "docker-container",
+      "--bootstrap",
+      ownership.context,
+    ],
+    { timeoutMs: 2 * 60_000 },
+  );
+  if (!(await inspectOwnedLocalBuilder(docker, ownership))) {
+    throw new Error("task-owned builder was not created");
+  }
+  const mounts = JSON.parse(
+    (
+      await docker([
+        "container",
+        "inspect",
+        ownership.container,
+        "--format",
+        "{{json .Mounts}}",
+      ])
+    ).stdout.trim(),
+  ) as {
+    readonly Destination?: string;
+    readonly Name?: string;
+    readonly Type?: string;
+  }[];
+  if (
+    mounts.length !== 1 ||
+    mounts[0]?.Destination !== "/var/lib/buildkit" ||
+    mounts[0]?.Name !== ownership.volume ||
+    mounts[0]?.Type !== "volume"
+  ) {
+    throw new Error("task-owned builder cache inventory mismatch");
+  }
+  const volume = JSON.parse(
+    (
+      await docker([
+        "volume",
+        "inspect",
+        ownership.volume,
+        "--format",
+        "{{json .Name}}",
+      ])
+    ).stdout.trim(),
+  ) as string;
+  if (volume !== ownership.volume) {
+    throw new Error("task-owned builder volume inventory mismatch");
+  }
+  return ownership;
+}
+
+function buildWithOwnedBuilder(
+  docker: DockerCommand,
+  ownership: OwnedLocalBuilder,
+  args: readonly string[],
+  options: Omit<CommandOptions, "env"> = {},
+): Promise<CommandResult> {
+  return docker(
+    ["buildx", "build", "--builder", ownership.name, ...args],
+    options,
+  );
+}
+
+function inspectImageWithOwnedBuilder(
+  docker: DockerCommand,
+  ownership: OwnedLocalBuilder,
+  reference: string,
+): Promise<CommandResult> {
+  return docker([
+    "buildx",
+    "imagetools",
+    "inspect",
+    "--builder",
+    ownership.name,
+    reference,
+    "--format",
+    "{{json .Manifest.Digest}}",
+  ]);
+}
+
+async function removeOwnedLocalBuilder(
+  docker: DockerCommand,
+  ownership: OwnedLocalBuilder,
+): Promise<void> {
+  if (await inspectOwnedLocalBuilder(docker, ownership)) {
+    await docker(["buildx", "rm", "--force", ownership.name], {
+      timeoutMs: 2 * 60_000,
+    });
+  }
+}
+
+async function auditOwnedLocalBuilder(
+  docker: DockerCommand,
+  ownership: OwnedLocalBuilder,
+): Promise<{
+  readonly builders: number;
+  readonly containers: number;
+  readonly volumes: number;
+}> {
+  const builder = await inspectOwnedLocalBuilder(docker, ownership);
+  const container = await docker(
+    ["container", "inspect", ownership.container],
+    { allowNonZero: true },
+  );
+  const volume = await docker(["volume", "inspect", ownership.volume], {
+    allowNonZero: true,
+  });
+  if (
+    ![0, 1].includes(container.exitCode) ||
+    ![0, 1].includes(volume.exitCode)
+  ) {
+    throw new Error("task-owned builder resource audit failed");
+  }
+  return {
+    builders: builder ? 1 : 0,
+    containers: container.exitCode === 0 ? 1 : 0,
+    volumes: volume.exitCode === 0 ? 1 : 0,
+  };
+}
+
 async function imagePresent(
   docker: DockerCommand,
   image: string,
@@ -1999,7 +2202,11 @@ async function cleanupAudit(
   registry: string | undefined,
   root: string | undefined,
   temporaryRootParent?: string,
+  builderOwnership?: OwnedLocalBuilder,
 ): Promise<{
+  readonly builderCacheVolumes: number;
+  readonly builderContainers: number;
+  readonly builderInstances: number;
   readonly containers: number;
   readonly imageReferences: number;
   readonly networks: number;
@@ -2007,6 +2214,10 @@ async function cleanupAudit(
   readonly temporarySecrets: number;
   readonly volumes: number;
 }> {
+  const builderAudit =
+    builderOwnership === undefined
+      ? { builders: 0, containers: 0, volumes: 0 }
+      : await auditOwnedLocalBuilder(docker, builderOwnership);
   const containers = (
     await containerIdsForLabels(docker, [
       `apollo.local-release.run=${runId}`,
@@ -2051,6 +2262,9 @@ async function cleanupAudit(
     }
   }
   return {
+    builderCacheVolumes: builderAudit.volumes,
+    builderContainers: builderAudit.containers,
+    builderInstances: builderAudit.builders,
     containers,
     imageReferences,
     networks,
@@ -2146,6 +2360,7 @@ async function runProductionSmokeLifecycle<A>(
 
 async function cleanupOwnedSmokeResources(options: {
   readonly acquiredImages: ReadonlyMap<string, boolean>;
+  readonly builderOwnership?: OwnedLocalBuilder;
   readonly docker: DockerCommand;
   readonly envFile: string | undefined;
   readonly fixedResourceOwnership: {
@@ -2166,6 +2381,14 @@ async function cleanupOwnedSmokeResources(options: {
     }
   };
 
+  if (options.builderOwnership !== undefined) {
+    await attempt(() =>
+      removeOwnedLocalBuilder(
+        options.docker,
+        options.builderOwnership as OwnedLocalBuilder,
+      ),
+    );
+  }
   let helpers: readonly string[] = [];
   await attempt(async () => {
     helpers = await containerIdsForLabels(options.docker, [
@@ -2271,6 +2494,10 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
   let stage = "local-docker";
   const environment = await assertLocalDocker();
   const docker = createDocker(environment);
+  const localContext = environment.DOCKER_CONTEXT;
+  if (localContext === undefined) {
+    throw new Error("verified local Docker context was not retained");
+  }
   stage = "clean-source";
   const status = (await command("git", ["status", "--porcelain"])).stdout;
   if (status.trim().length > 0) {
@@ -2283,6 +2510,10 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
   const fixedResourceOwnership = await assertFixedResourcesAbsent(docker);
 
   const runId = randomBytes(6).toString("hex");
+  const intendedBuilderOwnership = expectedOwnedLocalBuilder(
+    localContext,
+    `apollo-coolify-${runId}`,
+  );
   const temporaryRootParent = tmpdir();
   const registryContainer = `apollo-release-registry-${runId}`;
   const acquiredImages = new Map<string, boolean>();
@@ -2296,6 +2527,7 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
   let registryPort: number | undefined;
   let secrets: Awaited<ReturnType<typeof prepareSecrets>> | undefined;
   let profileRawSecrets: readonly string[] = [];
+  let builderOwnership: OwnedLocalBuilder | undefined;
   let platformEvidence:
     | Awaited<ReturnType<typeof exercisePlatform>>
     | undefined;
@@ -2303,6 +2535,11 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
   const { audit: cleanup } = await runProductionSmokeLifecycle({
     acquireResources: async () => {
       stage = "resource-acquisition";
+      builderOwnership = await createOwnedLocalBuilder(
+        docker,
+        localContext,
+        intendedBuilderOwnership.name,
+      );
       root = await prepareOwnedTemporaryRoot(temporaryRootParent);
       source = join(root, "source");
       registryData = join(root, "registry");
@@ -2342,6 +2579,9 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
       ) {
         throw new Error("production smoke resources were not acquired");
       }
+      if (builderOwnership === undefined) {
+        throw new Error("production smoke builder was not acquired");
+      }
       stage = "registry-start";
       await docker([
         "run",
@@ -2364,10 +2604,10 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
       for (const target of productionTargets) {
         stage = `build-${target.image}`;
         const reference = `${registry}/${target.image}:${sourceCommit}`;
-        await docker(
+        await buildWithOwnedBuilder(
+          docker,
+          builderOwnership,
           [
-            "buildx",
-            "build",
             "--file",
             join(source, target.dockerfile),
             "--target",
@@ -2386,14 +2626,11 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
         localReferences.push(reference);
         stage = `digest-${target.image}`;
         const digest = (
-          await docker([
-            "buildx",
-            "imagetools",
-            "inspect",
+          await inspectImageWithOwnedBuilder(
+            docker,
+            builderOwnership,
             reference,
-            "--format",
-            "{{json .Manifest.Digest}}",
-          ])
+          )
         ).stdout
           .replaceAll('"', "")
           .trim();
@@ -2410,14 +2647,11 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
       await docker(["push", redisReference], { timeoutMs: 10 * 60_000 });
       localReferences.push(redisReference);
       digests.redis = (
-        await docker([
-          "buildx",
-          "imagetools",
-          "inspect",
+        await inspectImageWithOwnedBuilder(
+          docker,
+          builderOwnership,
           redisReference,
-          "--format",
-          "{{json .Manifest.Digest}}",
-        ])
+        )
       ).stdout
         .replaceAll('"', "")
         .trim();
@@ -2591,6 +2825,7 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
     cleanup: () =>
       cleanupOwnedSmokeResources({
         acquiredImages,
+        builderOwnership: intendedBuilderOwnership,
         docker,
         envFile,
         fixedResourceOwnership,
@@ -2599,7 +2834,14 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
         temporaryRootParent,
       }),
     audit: () =>
-      cleanupAudit(docker, runId, registry, root, temporaryRootParent),
+      cleanupAudit(
+        docker,
+        runId,
+        registry,
+        root,
+        temporaryRootParent,
+        intendedBuilderOwnership,
+      ),
     isClean: (audit) => Object.values(audit).every((value) => value === 0),
     stage: () => stage,
   });
@@ -2892,6 +3134,163 @@ describe("Coolify production smoke contract", () => {
     ).toBe(false);
   });
 
+  it("binds source builds to an inventoried task-owned local builder even when the persistent builder is remote", async () => {
+    const builderName = "apollo-coolify-contract-run";
+    const builderContainer = `buildx_buildkit_${builderName}0`;
+    const builderVolume = `${builderContainer}_state`;
+    const commands: string[][] = [];
+    let builderExists = false;
+    const docker: DockerCommand = async (args) => {
+      commands.push([...args]);
+      if (args[0] === "buildx" && args[1] === "inspect") {
+        return builderExists
+          ? {
+              exitCode: 0,
+              stderr: "",
+              stdout:
+                `Name: ${builderName}\n` +
+                "Driver: docker-container\n\n" +
+                "Nodes:\n" +
+                `Name: ${builderName}0\n` +
+                "Endpoint: desktop-linux\n" +
+                "Status: running\n",
+            }
+          : { exitCode: 1, stderr: "", stdout: "" };
+      }
+      if (args[0] === "buildx" && args[1] === "create") {
+        builderExists = true;
+        return { exitCode: 0, stderr: "", stdout: `${builderName}\n` };
+      }
+      if (args[0] === "container" && args[1] === "inspect") {
+        return {
+          exitCode: 0,
+          stderr: "",
+          stdout: `${JSON.stringify([
+            {
+              Destination: "/var/lib/buildkit",
+              Name: builderVolume,
+              Type: "volume",
+            },
+          ])}\n`,
+        };
+      }
+      if (args[0] === "volume" && args[1] === "inspect") {
+        return {
+          exitCode: 0,
+          stderr: "",
+          stdout: `${JSON.stringify(builderVolume)}\n`,
+        };
+      }
+      if (args[0] === "buildx" && args[1] === "build") {
+        expect(args.slice(0, 4)).toEqual([
+          "buildx",
+          "build",
+          "--builder",
+          builderName,
+        ]);
+        expect(args).not.toContain("persistently-selected-remote");
+        return { exitCode: 0, stderr: "", stdout: "" };
+      }
+      throw new Error(`unexpected synthetic Docker command: ${args.join(" ")}`);
+    };
+
+    const ownership = await createOwnedLocalBuilder(
+      docker,
+      "desktop-linux",
+      builderName,
+    );
+    await buildWithOwnedBuilder(docker, ownership, [
+      "--file",
+      "Dockerfile",
+      "--push",
+      "synthetic-source",
+    ]);
+
+    expect(ownership).toEqual({
+      container: builderContainer,
+      context: "desktop-linux",
+      name: builderName,
+      volume: builderVolume,
+    });
+    expect(commands).toContainEqual([
+      "buildx",
+      "create",
+      "--name",
+      builderName,
+      "--driver",
+      "docker-container",
+      "--bootstrap",
+      "desktop-linux",
+    ]);
+    expect(
+      commands.filter(
+        (args) => args[0] === "buildx" && args[1] === "build",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("removes and audits only the exact task-owned builder container and cache volume", async () => {
+    const ownership = {
+      container: "buildx_buildkit_apollo-coolify-contract-run0",
+      context: "desktop-linux",
+      name: "apollo-coolify-contract-run",
+      volume: "buildx_buildkit_apollo-coolify-contract-run0_state",
+    };
+    const commands: string[][] = [];
+    let builderExists = true;
+    const docker: DockerCommand = async (args, options) => {
+      commands.push([...args]);
+      if (args[0] === "buildx" && args[1] === "rm") {
+        builderExists = false;
+        return { exitCode: 0, stderr: "", stdout: "" };
+      }
+      if (args[0] === "buildx" && args[1] === "inspect") {
+        return builderExists
+          ? {
+              exitCode: 0,
+              stderr: "",
+              stdout:
+                `Name: ${ownership.name}\n` +
+                "Driver: docker-container\n\n" +
+                "Nodes:\n" +
+                `Name: ${ownership.name}0\n` +
+                `Endpoint: ${ownership.context}\n` +
+                "Status: running\n",
+            }
+          : { exitCode: 1, stderr: "", stdout: "" };
+      }
+      if (
+        (args[0] === "container" || args[0] === "volume") &&
+        args[1] === "inspect"
+      ) {
+        return builderExists
+          ? { exitCode: 0, stderr: "", stdout: "{}\n" }
+          : { exitCode: 1, stderr: "", stdout: "" };
+      }
+      if (options?.allowNonZero === true) {
+        return { exitCode: 1, stderr: "", stdout: "" };
+      }
+      throw new Error(`unexpected synthetic Docker command: ${args.join(" ")}`);
+    };
+
+    await removeOwnedLocalBuilder(docker, ownership);
+    await expect(auditOwnedLocalBuilder(docker, ownership)).resolves.toEqual({
+      builders: 0,
+      containers: 0,
+      volumes: 0,
+    });
+    expect(commands).toContainEqual([
+      "buildx",
+      "rm",
+      "--force",
+      ownership.name,
+    ]);
+    expect(commands.some((args) => args.includes("prune"))).toBe(false);
+    expect(
+      commands.some((args) => args.includes("persistently-selected-remote")),
+    ).toBe(false);
+  });
+
   it("identifies log disclosures without returning the matched value", () => {
     expect(
       findSecretDisclosure("prefix synthetic-two suffix", [
@@ -3073,6 +3472,9 @@ describe("Coolify production smoke contract", () => {
       await expect(
         cleanupAudit(state.docker, state.runId, undefined, undefined),
       ).resolves.toEqual({
+        builderCacheVolumes: 0,
+        builderContainers: 0,
+        builderInstances: 0,
         containers: 0,
         imageReferences: 0,
         networks: 0,
@@ -3135,6 +3537,9 @@ describe("Coolify production smoke contract", () => {
     await expect(
       cleanupAudit(state.docker, state.runId, undefined, undefined),
     ).resolves.toEqual({
+      builderCacheVolumes: 0,
+      builderContainers: 0,
+      builderInstances: 0,
       containers: 0,
       imageReferences: 0,
       networks: 0,
@@ -3486,6 +3891,9 @@ describe("Coolify production smoke contract", () => {
         }),
       ).resolves.toMatchObject({
         audit: {
+          builderCacheVolumes: 0,
+          builderContainers: 0,
+          builderInstances: 0,
           containers: 0,
           imageReferences: 0,
           networks: 0,
@@ -3738,6 +4146,9 @@ describe.runIf(process.env.APOLLO_RUN_COOLIFY_PRODUCTION_SMOKE === "1")(
       async () => {
         await expect(runCoolifyProductionSmoke()).resolves.toMatchObject({
           cleanup: {
+            builderCacheVolumes: 0,
+            builderContainers: 0,
+            builderInstances: 0,
             containers: 0,
             imageReferences: 0,
             networks: 0,
