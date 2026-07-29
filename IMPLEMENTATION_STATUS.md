@@ -5,7 +5,7 @@ Last updated: 2026-07-29.
 ## Coolify production release package
 
 Status: `LOCAL_RELEASE_VALIDATED`. The exact local image source is
-`fae7f7ae4760d1f8d09e5a4236d6e8af4d60a817`; this status does not claim a
+`0f1e89ede85a07e6ac08a208328a08df29c1fcde`; this status does not claim a
 deployment, workflow dispatch, GHCR publication, or remote change.
 
 - The production package consists of
@@ -17,7 +17,7 @@ deployment, workflow dispatch, GHCR publication, or remote change.
   targets plus pinned Redis to a disposable local registry, resolved 12
   registry digests, validated a temporary non-zero digest env in explicit
   loopback mode, and started the exact two-stack package from commit
-  `fae7f7a`. Every build named an exact task-owned builder created from the
+  `0f1e89e`. Every build named an exact task-owned builder created from the
   verified local Docker context; the adversarial persistent-remote-builder
   contract passed.
 - The live proof passed registration/bootstrap/login, invitation redemption,
@@ -46,11 +46,18 @@ deployment, workflow dispatch, GHCR publication, or remote change.
   repository, digest, and immutable reference for every image and renders
   Compose from an isolated allowlist. The explicit local mode remains separate.
   The checked-in env fails closed with `19 image_provenance`,
-  `18 placeholder_image_digest`, and `1 release_environment_value` errors.
-- Final verification passed production smoke `43/43`, pinned Caddy `10/10`,
-  hostile validator `52/52`, workflow provenance `25/25`, full scripts
-  `175 passed / 4 opt-in skipped`, all required product suites, and root
-  typecheck.
+  `18 placeholder_image_digest`, `1 release_artifact`, and
+  `1 release_environment_value` errors, with `0 environment_contract` and no
+  other category.
+- Fresh Task 3 verification passed production smoke `43/43` in `801.560s`,
+  pinned Caddy `10/10` in `12.134s`, PostgreSQL 16 and 17 encrypted restore
+  proofs at `1 passed / 71 skipped` in `32.203s` and `17.174s`, full scripts
+  `194 passed / 4 opt-in skipped`, and root typecheck. Product suites passed:
+  API `607 passed / 8 skipped`, Platform API `422 passed / 21 skipped`, search
+  `142 passed / 1 skipped`, integrations `106 passed / 10 skipped`, download
+  worker `186 passed / 2 skipped`, admin `218 passed`, and music player
+  `118 passed`. The full scripts gate includes the hostile rendered-environment
+  matrix and the tracked exact newline-free credential verifier.
 - Final owned-resource inventory is zero for task builders and cache, containers,
   networks, volumes, localhost image references, registry files, temporary
   secrets, repository `.tmp`, OS-temp owned roots, and durable pending/active

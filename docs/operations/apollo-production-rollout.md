@@ -4,7 +4,7 @@ Status: `LOCAL_RELEASE_VALIDATED`
 
 This is an owner-reviewable rollout plan, not a deployment record. The final
 fix wave validated the exact package locally from source commit
-`fae7f7ae4760d1f8d09e5a4236d6e8af4d60a817`. HomeNode, Coolify, the host
+`0f1e89ede85a07e6ac08a208328a08df29c1fcde`. HomeNode, Coolify, the host
 Caddy configuration, UFW, DNS, GitHub settings, GHCR, remote databases, and
 remote volumes were not contacted or mutated.
 
@@ -86,23 +86,23 @@ disclosure.
 ## Image Evidence
 
 The local proof built all custom targets for Linux/amd64 from
-`fae7f7ae4760d1f8d09e5a4236d6e8af4d60a817`, pushed them to a disposable
+`0f1e89ede85a07e6ac08a208328a08df29c1fcde`, pushed them to a disposable
 loopback registry, and resolved these registry digests:
 
 | Release variable                         | Target                     | Local proof digest                                                        |
 | ---------------------------------------- | -------------------------- | ------------------------------------------------------------------------- |
-| `PLATFORM_API_IMAGE`                     | `platform-api`             | `sha256:482f864a9cab9928a724f481c640fd1a98e2a0bf3680ef3b5f20788e49c0c4d2` |
-| `PLATFORM_POSTGRES_IMAGE`                | `platform-postgres`        | `sha256:aa285ccf8236190b03a67663f3bc9c55741578bba44ed3854aa06113e12f2285` |
+| `PLATFORM_API_IMAGE`                     | `platform-api`             | `sha256:0567da6b86658c45f35df5b6d165b9fe00cfb37465e796b3499a62cc250b6111` |
+| `PLATFORM_POSTGRES_IMAGE`                | `platform-postgres`        | `sha256:b114ca869273b1ab64082d4eb156239ba32112139a2767808317d3948588c8cf` |
 | `PLATFORM_REDIS_IMAGE`, `TF_REDIS_IMAGE` | pinned Redis mirror        | `sha256:fe24fa2bcb59930f8863cf36a472df24efaccd8be4ee98ffe528f06d57d68dc2` |
-| `TF_ADMIN_IMAGE`                         | `tf-admin`                 | `sha256:b278bea5ab422829bb7434eb30114a90ef170fdcfae9e1843ff21ad3dec8660c` |
-| `TF_API_IMAGE`                           | `tf-api`                   | `sha256:beb4fdb5cddef9dc10eaffc1a931f38a54b57329fde954d6af920ed301ad5d4b` |
-| `TF_DOWNLOAD_REDIS_IMAGE`                | `tf-download-redis`        | `sha256:ae0ddfce6402579584a386cc4da8d98e3e35d2d6fe5090e788ec80da7f13ddcf` |
-| `TF_DOWNLOAD_WORKER_IMAGE`               | `tf-download-worker`       | `sha256:7bf8d183295b32de888e5a6f92ba32bc396468fefde1db63ee419c5284789deb` |
-| `TF_INTEGRATIONS_IMAGE`                  | `tf-integrations`          | `sha256:5d0f9731cd70fae89b57bd7d63ab4c33cd578745fcadbfea2b7554be6395afb1` |
-| `TF_INTEGRATIONS_POSTGRES_IMAGE`         | `tf-integrations-postgres` | `sha256:4d2c788f722fd21b64899e471cb3ee37b173727fba7a3bd84b158b98f7c6265d` |
-| `TF_POSTGRES_IMAGE`                      | `tf-postgres`              | `sha256:909c29e38e0807903a79d6e3c2e89ce93aa36504d725b4d7d3bb35e9bf71e894` |
-| `TF_SEARCH_IMAGE`                        | `tf-search`                | `sha256:8aff273bc2a70f9e8f602e45e4fae6785573f0531b3d104c242a40d9104d16b6` |
-| `TF_WEB_IMAGE`                           | `tf-web`                   | `sha256:7ee4c3d01022a1c0895c6d1b18dbc6b4c7551aecf5e75d93b511f9a77f15c5f9` |
+| `TF_ADMIN_IMAGE`                         | `tf-admin`                 | `sha256:a300dcad037dbebb4b478b72d1f250b6282938710ecb181a89e5e5974f5b94fa` |
+| `TF_API_IMAGE`                           | `tf-api`                   | `sha256:28c9f7fc7893394ba8561b1e9272238907534257932eb8085417ca6ee1d370b7` |
+| `TF_DOWNLOAD_REDIS_IMAGE`                | `tf-download-redis`        | `sha256:d141dca1f98cc7ab9ee3d373d9edcabe59e8b015f000e9cc578d30687e97bde8` |
+| `TF_DOWNLOAD_WORKER_IMAGE`               | `tf-download-worker`       | `sha256:277888042df5611e117a8b5993c2c743b61217e1ef06e4508d30f338094aab54` |
+| `TF_INTEGRATIONS_IMAGE`                  | `tf-integrations`          | `sha256:6d98f03a1aa01af94e959f232899ed5876df90c99ea073e21eeaff9973a4ecbf` |
+| `TF_INTEGRATIONS_POSTGRES_IMAGE`         | `tf-integrations-postgres` | `sha256:e815c3fb531db2cbd78a6af53ceba0992b40b19a604100876b2982cada2dcd14` |
+| `TF_POSTGRES_IMAGE`                      | `tf-postgres`              | `sha256:5c3567bad138eb88998ca7fd692c7a1bbe30289a144ca8dac2be8f6d5ea324c5` |
+| `TF_SEARCH_IMAGE`                        | `tf-search`                | `sha256:3513c488f40a8bc808553acfd5889aaff3aa946d3bd166ceba1808ef2cbc1798` |
+| `TF_WEB_IMAGE`                           | `tf-web`                   | `sha256:c5d06fd397271c4dedca67b184f37a46d7d4057787bea425c648b6387f9850b8` |
 
 The disposable registry and all references were removed. These digests are
 local evidence, not deployable GHCR references. An approved release workflow
@@ -295,7 +295,7 @@ Rollback order:
 ## Local Proof
 
 The opt-in production smoke at
-`fae7f7ae4760d1f8d09e5a4236d6e8af4d60a817` created and explicitly selected a
+`0f1e89ede85a07e6ac08a208328a08df29c1fcde` created and explicitly selected a
 task-owned Buildx builder from the verified local Docker context, built all
 custom targets, mirrored pinned Redis, validated a temporary non-zero digest
 env in explicit `loopback-local-smoke` mode, and started both exact manifests.
@@ -310,10 +310,18 @@ after a producer stop longer than 90 seconds. It restarted long-running
 services, proved persistence, ran the 12-case Caddy matrix through real
 upstreams, scanned logs for disposable values, and reported exact cleanup zero
 for builders, builder cache, containers, images, networks, volumes, registry
-files, and temporary secrets.
+files, and temporary secrets. The fresh smoke passed `43/43` in `801.560s`;
+the independent post-smoke inventory also returned zero for every task-owned
+container, network, volume, image reference, builder, cache, registry file,
+temporary path, and repository `.tmp` item.
 
 The checked-in `deploy/coolify/release.env.example` intentionally contains zero
-digests and a zero source commit. It fails closed with allowlisted
-`image_provenance`, `placeholder_image_digest`, and
-`release_environment_value` categories and must never be used for deployment.
-No release workflow was dispatched.
+digests and a zero source commit. With the explicit zero-placeholder manifest,
+it fails closed with exactly `19 image_provenance`,
+`18 placeholder_image_digest`, `1 release_artifact`, and
+`1 release_environment_value`, with `0 environment_contract` and no other
+category. It must never be used for deployment. Fresh supporting validation
+passed pinned Caddy `10/10` in `12.134s`, PostgreSQL 16 and 17 restore proofs
+at `1 passed / 71 skipped` in `32.203s` and `17.174s`, full scripts
+`194 passed / 4 opt-in skipped`, every required product suite, and root
+typecheck. No release workflow was dispatched.

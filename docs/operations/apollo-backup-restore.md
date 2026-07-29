@@ -23,9 +23,17 @@ The scripts check the exact `pg_dump` major and `SHOW server_version_num`
 before backup work. Cross-major evidence is rejected. Current separate local
 disposable proof IDs are `pg16-disposable-proof-001` and
 `pg17-integrations-disposable-proof-001`, both from source
-`fae7f7ae4760d1f8d09e5a4236d6e8af4d60a817`. Production backup/restore
-evidence is `NOT_RECORDED`; neither local ID approves a production migration
-or data write.
+`0f1e89ede85a07e6ac08a208328a08df29c1fcde`. Fresh opt-in proofs passed
+`1 passed / 71 skipped` for PostgreSQL 16 in `32.203s` and
+`1 passed / 71 skipped` for PostgreSQL 17 in `17.174s`, including exact zero
+owned-resource cleanup. Production backup/restore evidence is `NOT_RECORDED`;
+neither local ID approves a production migration or data write.
+
+The paired checked-in placeholder validation failed closed with exactly
+`19 image_provenance`, `18 placeholder_image_digest`, `1 release_artifact`,
+and `1 release_environment_value`, with `0 environment_contract` and no other
+category. No workflow, registry publication, retained-volume access, or remote
+mutation occurred while recording this local evidence.
 
 ## Custody and Destination
 

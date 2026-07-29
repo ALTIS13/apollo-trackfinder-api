@@ -15,9 +15,10 @@ a remote change.
 The final fix wave validated the production manifests, exact provenance
 validator, custom image targets, file-backed secret contracts, application
 flows, persistence, and the complete Caddy matrix locally from
-`fae7f7ae4760d1f8d09e5a4236d6e8af4d60a817`. The proof used a task-owned local
+`0f1e89ede85a07e6ac08a208328a08df29c1fcde`. The proof used a task-owned local
 Buildx builder and only `127.0.0.1:18200..18203`, dispatched no workflow, and
-left exact cleanup zero. It also exercised the exact `baseline` profile
+passed production smoke `43/43` in `801.560s` with exact cleanup zero. It also
+exercised the exact `baseline` profile
 one-shot contracts against a separate disposable database, restored granted
 search after restart, held a signed producer down beyond the 90-second stale
 deadline before proving `healthy -> unknown -> healthy` recovery, and proved
@@ -25,12 +26,26 @@ the shared dashboard token with both real consumer UIDs on disposable native
 Linux.
 
 The checked-in release env remains intentionally non-deployable. It fails with
-allowlisted image-provenance, placeholder-digest, and release-environment
-categories. An approved release must replace every image with a
+exactly `19 image_provenance`, `18 placeholder_image_digest`,
+`1 release_artifact`, and `1 release_environment_value`, with
+`0 environment_contract` and no other category. An approved release must
+replace every image with a
 workflow-produced immutable reference, set the exact source commit, and pass
 production validation against the downloaded release manifest. The complete
 rollout and rollback order is in
 `docs/operations/apollo-production-rollout.md`.
+
+Fresh supporting validation passed pinned Caddy `10/10` in `12.134s`,
+PostgreSQL 16 and 17 encrypted restore proofs at
+`1 passed / 71 skipped` in `32.203s` and `17.174s`, full scripts
+`194 passed / 4 opt-in skipped`, API `607 passed / 8 skipped`, Platform API
+`422 passed / 21 skipped`, search `142 passed / 1 skipped`, integrations
+`106 passed / 10 skipped`, download worker `186 passed / 2 skipped`, admin
+`218 passed`, music player `118 passed`, and root typecheck. The scripts gate
+included the hostile rendered-environment matrix and the tracked exact
+newline-free credential verifier. The independent owned-resource inventory
+was zero, and no workflow, registry publication, retained-volume access, or
+remote mutation occurred.
 
 The preflight's remote observation remains read-only. The retained legacy class
 is recorded only as `DETACHED_UNKNOWN`; it remains unnamed, unmounted,
