@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { lstat, mkdir, open, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -78,6 +79,8 @@ const argumentFlags = new Set(["--mode", "--release-id", "--source-commit"]);
 const sourceRepository = "https://github.com/ALTIS13/Apollo.TF";
 const builderIdPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const absentManifestPattern = /(?:manifest unknown|not found)/i;
+const windowsShimArgumentPattern = /^[A-Za-z0-9@._=:/-]+$/;
+const windowsShimExecutables = new Set(["corepack", "pnpm"]);
 const digestAttempts = 5;
 const publicOperatorErrorCodes = new Set([
   "artifact_validation_failed",
@@ -218,40 +221,61 @@ const sourceValidationCommands: readonly {
   },
 ];
 
-const defaultOperatorReleaseDependencies: OperatorReleaseDependencies = {
-  command(executable, args, options) {
-    return new Promise((complete) => {
-      let stderr = "";
-      let stdout = "";
-      let completed = false;
-      const finish = (result: OperatorReleaseCommandResult): void => {
-        if (completed) return;
-        completed = true;
-        complete(result);
-      };
-      const child = spawn(executable, [...args], {
-        cwd: options.cwd,
-        env: options.env,
-        shell: false,
-        timeout: options.timeoutMs,
-        windowsHide: true,
-      });
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => {
-        stdout += chunk;
-      });
-      child.stderr.on("data", (chunk: string) => {
-        stderr += chunk;
-      });
-      child.on("error", () => {
-        finish({ status: -1, stderr: "", stdout: "" });
-      });
-      child.on("close", (status) => {
-        finish({ status: status ?? -1, stderr, stdout });
-      });
+export function runOperatorReleaseCommand(
+  executable: string,
+  args: readonly string[],
+  options: { cwd: string; env?: NodeJS.ProcessEnv; timeoutMs?: number },
+): Promise<OperatorReleaseCommandResult> {
+  let spawnedExecutable = executable;
+  let spawnedArgs = [...args];
+  if (process.platform === "win32" && windowsShimExecutables.has(executable)) {
+    if (args.some((argument) => !windowsShimArgumentPattern.test(argument))) {
+      return Promise.resolve({ status: -1, stderr: "", stdout: "" });
+    }
+    spawnedExecutable = "cmd.exe";
+    spawnedArgs = [
+      "/d",
+      "/s",
+      "/c",
+      `${executable}.cmd${args.length === 0 ? "" : ` ${args.join(" ")}`}`,
+    ];
+  }
+
+  return new Promise((complete) => {
+    let stderr = "";
+    let stdout = "";
+    let completed = false;
+    const finish = (result: OperatorReleaseCommandResult): void => {
+      if (completed) return;
+      completed = true;
+      complete(result);
+    };
+    const child = spawn(spawnedExecutable, spawnedArgs, {
+      cwd: options.cwd,
+      env: options.env,
+      shell: false,
+      timeout: options.timeoutMs,
+      windowsHide: true,
     });
-  },
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", () => {
+      finish({ status: -1, stderr: "", stdout: "" });
+    });
+    child.on("close", (status) => {
+      finish({ status: status ?? -1, stderr, stdout });
+    });
+  });
+}
+
+const defaultOperatorReleaseDependencies: OperatorReleaseDependencies = {
+  command: runOperatorReleaseCommand,
   randomId: randomUUID,
   temporaryRoot: () =>
     join(tmpdir(), `apollo-operator-release-${randomUUID()}`),
@@ -425,9 +449,35 @@ function renderReleaseEnvironment(artifact: ReleaseArtifact): string {
   return `${lines.join("\n")}\n`;
 }
 
+async function writeDurableExclusive(
+  path: string,
+  contents: string,
+): Promise<void> {
+  const handle = await open(path, "wx", 0o600);
+  try {
+    await handle.writeFile(contents, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+function sha256(contents: string): string {
+  return createHash("sha256").update(contents).digest("hex");
+}
+
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) {
+    hash.update(chunk);
+  }
+  return hash.digest("hex");
+}
+
 async function writeReleaseOutput(
   stagingDirectory: string,
   releaseDirectory: string,
+  releaseId: string,
   releaseArtifact: ReleaseArtifact,
 ): Promise<OperatorReleaseOutput> {
   const stagedManifestPath = join(
@@ -435,26 +485,11 @@ async function writeReleaseOutput(
     "apollo-release-manifest.json",
   );
   const stagedEnvFragmentPath = join(stagingDirectory, "release-images.env");
+  const manifestContents = `${JSON.stringify(releaseArtifact, null, 2)}\n`;
   const renderedEnvironment = renderReleaseEnvironment(releaseArtifact);
   try {
-    const manifestHandle = await open(stagedManifestPath, "wx", 0o600);
-    try {
-      await manifestHandle.writeFile(
-        `${JSON.stringify(releaseArtifact, null, 2)}\n`,
-        "utf8",
-      );
-      await manifestHandle.sync();
-    } finally {
-      await manifestHandle.close();
-    }
-
-    const environmentHandle = await open(stagedEnvFragmentPath, "wx", 0o600);
-    try {
-      await environmentHandle.writeFile(renderedEnvironment, "utf8");
-      await environmentHandle.sync();
-    } finally {
-      await environmentHandle.close();
-    }
+    await writeDurableExclusive(stagedManifestPath, manifestContents);
+    await writeDurableExclusive(stagedEnvFragmentPath, renderedEnvironment);
 
     validateReleaseArtifact(
       JSON.parse(await readFile(stagedManifestPath, "utf8")) as ReleaseArtifact,
@@ -464,16 +499,55 @@ async function writeReleaseOutput(
     ) {
       throw operatorError("artifact_validation_failed");
     }
-    if (await pathExists(releaseDirectory)) {
-      throw operatorError("artifact_validation_failed");
-    }
-    await rename(stagingDirectory, releaseDirectory);
   } catch {
     throw operatorError("artifact_validation_failed");
   }
+
+  try {
+    await mkdir(releaseDirectory, { mode: 0o700 });
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException).code === "EEXIST" ||
+      (await pathExists(releaseDirectory))
+    ) {
+      throw operatorError("release_output_exists");
+    }
+    throw operatorError("artifact_validation_failed");
+  }
+
+  const manifestPath = join(releaseDirectory, "apollo-release-manifest.json");
+  const envFragmentPath = join(releaseDirectory, "release-images.env");
+  const completionPath = join(releaseDirectory, "apollo-release-complete.json");
+  try {
+    await writeDurableExclusive(manifestPath, manifestContents);
+    await writeDurableExclusive(envFragmentPath, renderedEnvironment);
+    validateReleaseArtifact(
+      JSON.parse(await readFile(manifestPath, "utf8")) as ReleaseArtifact,
+    );
+    if ((await readFile(envFragmentPath, "utf8")) !== renderedEnvironment) {
+      throw operatorError("artifact_validation_failed");
+    }
+    await writeDurableExclusive(
+      completionPath,
+      `${JSON.stringify(
+        {
+          environmentSha256: sha256(renderedEnvironment),
+          formatVersion: 1,
+          manifestSha256: sha256(manifestContents),
+          releaseId,
+          sourceCommit: releaseArtifact.sourceCommit,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  } catch {
+    throw operatorError("artifact_validation_failed");
+  }
+
   return {
-    envFragmentPath: join(releaseDirectory, "release-images.env"),
-    manifestPath: join(releaseDirectory, "apollo-release-manifest.json"),
+    envFragmentPath,
+    manifestPath,
     releaseArtifact,
   };
 }
@@ -498,15 +572,17 @@ export async function publishOperatorRelease(
     options.releaseId,
   );
   let archivePath: string | undefined;
+  let archiveSha256: string | undefined;
+  let buildRoot: string | undefined;
   let builderName: string | undefined;
   let builderRemovalRequired = false;
   let output: OperatorReleaseOutput | undefined;
   let primaryError: Error | undefined;
   let releaseStagingDirectory: string | undefined;
   let releaseStagingOwned = false;
-  let sourceRoot: string | undefined;
   let temporaryRoot: string | undefined;
   let temporaryRootOwned = false;
+  let validationRoot: string | undefined;
 
   try {
     const worktree = await checkedCommand(
@@ -530,12 +606,13 @@ export async function publishOperatorRelease(
     }
 
     temporaryRoot = dependencies.temporaryRoot();
-    sourceRoot = join(temporaryRoot, "source");
+    validationRoot = join(temporaryRoot, "validation-source");
+    buildRoot = join(temporaryRoot, "build-source");
     archivePath = join(temporaryRoot, "source.tar");
     try {
       await mkdir(temporaryRoot);
       temporaryRootOwned = true;
-      await mkdir(sourceRoot);
+      await mkdir(validationRoot);
     } catch {
       throw operatorError("source_validation_failed");
     }
@@ -552,11 +629,16 @@ export async function publishOperatorRelease(
       ],
       { cwd: options.repositoryRoot, timeoutMs: 5 * 60_000 },
     );
+    try {
+      archiveSha256 = await sha256File(archivePath);
+    } catch {
+      throw operatorError("source_validation_failed");
+    }
     await checkedCommand(
       dependencies,
       "source_validation_failed",
       "tar",
-      ["-xf", archivePath, "-C", sourceRoot],
+      ["-xf", archivePath, "-C", validationRoot],
       { cwd: options.repositoryRoot, timeoutMs: 5 * 60_000 },
     );
     for (const validation of sourceValidationCommands) {
@@ -565,9 +647,28 @@ export async function publishOperatorRelease(
         "source_validation_failed",
         validation.executable,
         validation.args,
-        { cwd: sourceRoot, timeoutMs: validation.timeoutMs },
+        { cwd: validationRoot, timeoutMs: validation.timeoutMs },
       );
     }
+    try {
+      if ((await sha256File(archivePath)) !== archiveSha256) {
+        throw operatorError("source_validation_failed");
+      }
+    } catch {
+      throw operatorError("source_validation_failed");
+    }
+    try {
+      await mkdir(buildRoot);
+    } catch {
+      throw operatorError("source_validation_failed");
+    }
+    await checkedCommand(
+      dependencies,
+      "source_validation_failed",
+      "tar",
+      ["-xf", archivePath, "-C", buildRoot],
+      { cwd: options.repositoryRoot, timeoutMs: 5 * 60_000 },
+    );
 
     for (const target of operatorReleaseImageTargets) {
       let inspection: OperatorReleaseCommandResult;
@@ -582,7 +683,7 @@ export async function publishOperatorRelease(
             "--format",
             "{{json .Manifest.Digest}}",
           ],
-          { cwd: sourceRoot, timeoutMs: 60_000 },
+          { cwd: buildRoot, timeoutMs: 60_000 },
         );
       } catch {
         throw operatorError("release_tag_check_failed");
@@ -619,7 +720,7 @@ export async function publishOperatorRelease(
         "--driver",
         "docker-container",
       ],
-      { cwd: sourceRoot, timeoutMs: 5 * 60_000 },
+      { cwd: buildRoot, timeoutMs: 5 * 60_000 },
     );
     builderRemovalRequired = true;
 
@@ -646,15 +747,15 @@ export async function publishOperatorRelease(
           "--label",
           `org.opencontainers.image.version=${options.releaseId}`,
           "--file",
-          join(sourceRoot, target.dockerfile),
+          join(buildRoot, target.dockerfile),
           "--target",
           target.target,
           "--tag",
           `${target.repository}:${options.releaseId}`,
           "--push",
-          sourceRoot,
+          buildRoot,
         ],
-        { cwd: sourceRoot, timeoutMs: 60 * 60_000 },
+        { cwd: buildRoot, timeoutMs: 60 * 60_000 },
       );
     }
 
@@ -675,7 +776,7 @@ export async function publishOperatorRelease(
               "--format",
               "{{json .Manifest.Digest}}",
             ],
-            { cwd: sourceRoot, timeoutMs: 60_000 },
+            { cwd: buildRoot, timeoutMs: 60_000 },
           );
         } catch {
           inspection = { status: -1, stderr: "", stdout: "" };
@@ -713,9 +814,9 @@ export async function publishOperatorRelease(
     output = await writeReleaseOutput(
       releaseStagingDirectory,
       releaseDirectory,
+      options.releaseId,
       releaseArtifact,
     );
-    releaseStagingOwned = false;
   } catch (error) {
     primaryError = sanitizedOperatorError(error);
   }
@@ -733,7 +834,7 @@ export async function publishOperatorRelease(
       const removal = await dependencies.command(
         "docker",
         ["buildx", "rm", builderName!],
-        { cwd: sourceRoot!, timeoutMs: 5 * 60_000 },
+        { cwd: buildRoot!, timeoutMs: 5 * 60_000 },
       );
       if (removal.status !== 0) cleanupFailed = true;
     } catch {

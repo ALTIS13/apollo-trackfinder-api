@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   lstat,
   mkdtemp,
@@ -23,6 +24,7 @@ import {
   pinnedRedisReference as operatorPinnedRedisReference,
   publishOperatorRelease,
   releaseImageCatalog as operatorReleaseImageCatalog,
+  runOperatorReleaseCommand,
   runOperatorReleaseCli,
   type OperatorReleaseCommandResult,
   type OperatorReleaseDependencies,
@@ -92,6 +94,14 @@ async function publisherHarness(options?: {
         executable,
       };
       commands.push(recorded);
+      if (executable === "git" && args[0] === "archive") {
+        const outputIndex = args.indexOf("--output");
+        await writeFile(
+          args[outputIndex + 1]!,
+          "synthetic-source-archive\n",
+          "utf8",
+        );
+      }
       const defaultResult = (): OperatorReleaseCommandResult => {
         if (
           executable === "docker" &&
@@ -130,6 +140,13 @@ async function publisherHarness(options?: {
     commands,
     dependencies,
     publishedTags,
+    releaseCompletion: join(
+      repositoryRoot,
+      ".ops-private",
+      "releases",
+      releaseId,
+      "apollo-release-complete.json",
+    ),
     releaseOutput: join(repositoryRoot, ".ops-private", "releases", releaseId),
     releaseStaging: join(
       repositoryRoot,
@@ -139,8 +156,9 @@ async function publisherHarness(options?: {
     ),
     repositoryRoot,
     root,
-    sourceRoot: join(temporaryRoot, "source"),
+    buildRoot: join(temporaryRoot, "build-source"),
     temporaryRoot,
+    validationRoot: join(temporaryRoot, "validation-source"),
   };
 }
 
@@ -170,7 +188,12 @@ async function expectIncompleteReleaseEvidence(
   expect(
     await pathExists(join(harness.releaseOutput, "release-images.env")),
   ).toBe(false);
+  expect(await pathExists(harness.releaseCompletion)).toBe(false);
   expect(await pathExists(harness.releaseStaging)).toBe(false);
+}
+
+function sha256(contents: string): string {
+  return createHash("sha256").update(contents).digest("hex");
 }
 
 describe("operator release arguments", () => {
@@ -646,6 +669,101 @@ describe("operator release publication", () => {
     }
   });
 
+  it("keeps validation mutations out of the clean build extraction", async () => {
+    const mutationName = "validation-only-mutation";
+    let registryRoot: string | undefined;
+    let registrySawMutation: boolean | undefined;
+    let validationRoot: string | undefined;
+    const harness = await publisherHarness({
+      async command(command, defaultResult) {
+        if (
+          validationRoot === undefined &&
+          command.executable === "pnpm" &&
+          command.args[0] === "install"
+        ) {
+          validationRoot = command.cwd;
+          await writeFile(join(command.cwd, mutationName), "mutated\n", "utf8");
+        }
+        if (
+          registryRoot === undefined &&
+          command.executable === "docker" &&
+          command.args[0] === "buildx" &&
+          command.args[1] === "imagetools" &&
+          command.args[2] === "inspect"
+        ) {
+          registryRoot = command.cwd;
+          registrySawMutation = await pathExists(
+            join(command.cwd, mutationName),
+          );
+        }
+        return defaultResult();
+      },
+    });
+    try {
+      await expect(
+        publishOperatorRelease(
+          {
+            mode: "production",
+            releaseId,
+            repositoryRoot: harness.repositoryRoot,
+            sourceCommit,
+          },
+          harness.dependencies,
+        ),
+      ).resolves.toMatchObject({
+        releaseArtifact: { sourceCommit },
+      });
+      expect(validationRoot).toBe(harness.validationRoot);
+      expect(registryRoot).toBe(harness.buildRoot);
+      expect(registryRoot).not.toBe(validationRoot);
+      expect(registrySawMutation).toBe(false);
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects validation that mutates the exact source archive", async () => {
+    let archiveMutated = false;
+    const harness = await publisherHarness({
+      async command(command, defaultResult) {
+        if (
+          !archiveMutated &&
+          command.executable === "pnpm" &&
+          command.args[0] === "install"
+        ) {
+          await writeFile(
+            join(dirname(command.cwd), "source.tar"),
+            "mutated-source-archive\n",
+            "utf8",
+          );
+          archiveMutated = true;
+        }
+        return defaultResult();
+      },
+    });
+    try {
+      await expect(
+        publishOperatorRelease(
+          {
+            mode: "production",
+            releaseId,
+            repositoryRoot: harness.repositoryRoot,
+            sourceCommit,
+          },
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^source_validation_failed$/);
+      expect(archiveMutated).toBe(true);
+      expect(await pathExists(harness.buildRoot)).toBe(false);
+      expect(
+        harness.commands.some(({ executable }) => executable === "docker"),
+      ).toBe(false);
+      expect(await pathExists(harness.temporaryRoot)).toBe(false);
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
   it("validates the archived commit before publishing every custom image with an owned builder", async () => {
     const harness = await publisherHarness();
     try {
@@ -778,7 +896,7 @@ describe("operator release publication", () => {
           "-xf",
           join(harness.temporaryRoot, "source.tar"),
           "-C",
-          harness.sourceRoot,
+          harness.validationRoot,
         ],
       ]);
       expect(commandLines.slice(4, 4 + validationCommands.length)).toEqual(
@@ -787,14 +905,21 @@ describe("operator release publication", () => {
       expect(
         harness.commands
           .slice(4, 4 + validationCommands.length)
-          .every(({ cwd }) => cwd === harness.sourceRoot),
+          .every(({ cwd }) => cwd === harness.validationRoot),
       ).toBe(true);
+      expect(commandLines[4 + validationCommands.length]).toEqual([
+        "tar",
+        "-xf",
+        join(harness.temporaryRoot, "source.tar"),
+        "-C",
+        harness.buildRoot,
+      ]);
       expect(
         harness.commands
           .slice(0, builderCreateIndex)
           .filter(({ executable }) => executable === "docker"),
       ).toHaveLength(11);
-      expect(builderCreateIndex).toBe(4 + validationCommands.length + 11);
+      expect(builderCreateIndex).toBe(5 + validationCommands.length + 11);
       expect(commandLines[builderCreateIndex]).toEqual([
         "docker",
         "buildx",
@@ -808,7 +933,7 @@ describe("operator release publication", () => {
       expect(builds).toHaveLength(11);
       for (const [index, build] of builds.entries()) {
         const target = operatorReleaseImageTargets[index];
-        expect(build.cwd).toBe(harness.sourceRoot);
+        expect(build.cwd).toBe(harness.buildRoot);
         expect(build.args).toEqual([
           "buildx",
           "build",
@@ -827,13 +952,13 @@ describe("operator release publication", () => {
           "--label",
           `org.opencontainers.image.version=${releaseId}`,
           "--file",
-          join(harness.sourceRoot, target!.dockerfile),
+          join(harness.buildRoot, target!.dockerfile),
           "--target",
           target!.target,
           "--tag",
           `${target!.repository}:${releaseId}`,
           "--push",
-          harness.sourceRoot,
+          harness.buildRoot,
         ]);
       }
       expect(registryInspections).toHaveLength(22);
@@ -862,8 +987,9 @@ describe("operator release publication", () => {
         "docker.io/library/redis",
       );
 
+      const manifestContents = await readFile(output.manifestPath, "utf8");
       const manifest = JSON.parse(
-        await readFile(output.manifestPath, "utf8"),
+        manifestContents,
       ) as typeof output.releaseArtifact;
       expect(manifest).toEqual(output.releaseArtifact);
       expect(manifest.images.map(({ name }) => name)).toEqual(
@@ -877,25 +1003,35 @@ describe("operator release publication", () => {
         name: "redis",
         repository: "docker.io/library/redis",
       });
+      const environmentContents = [
+        `RELEASE_SOURCE_COMMIT=${sourceCommit}`,
+        `PLATFORM_POSTGRES_IMAGE=ghcr.io/altis13/apollo-platform-postgres@${digestFor(1)}`,
+        "PLATFORM_REDIS_IMAGE=docker.io/library/redis@sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b",
+        `PLATFORM_API_IMAGE=ghcr.io/altis13/apollo-platform-api@${digestFor(0)}`,
+        `TF_POSTGRES_IMAGE=ghcr.io/altis13/apollo-tf-postgres@${digestFor(3)}`,
+        "TF_REDIS_IMAGE=docker.io/library/redis@sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b",
+        `TF_API_IMAGE=ghcr.io/altis13/apollo-tf-api@${digestFor(2)}`,
+        `TF_WEB_IMAGE=ghcr.io/altis13/apollo-tf-web@${digestFor(4)}`,
+        `TF_ADMIN_IMAGE=ghcr.io/altis13/apollo-tf-admin@${digestFor(5)}`,
+        `TF_SEARCH_IMAGE=ghcr.io/altis13/apollo-tf-search@${digestFor(6)}`,
+        `TF_INTEGRATIONS_POSTGRES_IMAGE=ghcr.io/altis13/apollo-tf-integrations-postgres@${digestFor(8)}`,
+        `TF_INTEGRATIONS_IMAGE=ghcr.io/altis13/apollo-tf-integrations@${digestFor(7)}`,
+        `TF_DOWNLOAD_REDIS_IMAGE=ghcr.io/altis13/apollo-tf-download-redis@${digestFor(10)}`,
+        `TF_DOWNLOAD_WORKER_IMAGE=ghcr.io/altis13/apollo-tf-download-worker@${digestFor(9)}`,
+        "",
+      ].join("\n");
       expect(await readFile(output.envFragmentPath, "utf8")).toBe(
-        [
-          `RELEASE_SOURCE_COMMIT=${sourceCommit}`,
-          `PLATFORM_POSTGRES_IMAGE=ghcr.io/altis13/apollo-platform-postgres@${digestFor(1)}`,
-          "PLATFORM_REDIS_IMAGE=docker.io/library/redis@sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b",
-          `PLATFORM_API_IMAGE=ghcr.io/altis13/apollo-platform-api@${digestFor(0)}`,
-          `TF_POSTGRES_IMAGE=ghcr.io/altis13/apollo-tf-postgres@${digestFor(3)}`,
-          "TF_REDIS_IMAGE=docker.io/library/redis@sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b",
-          `TF_API_IMAGE=ghcr.io/altis13/apollo-tf-api@${digestFor(2)}`,
-          `TF_WEB_IMAGE=ghcr.io/altis13/apollo-tf-web@${digestFor(4)}`,
-          `TF_ADMIN_IMAGE=ghcr.io/altis13/apollo-tf-admin@${digestFor(5)}`,
-          `TF_SEARCH_IMAGE=ghcr.io/altis13/apollo-tf-search@${digestFor(6)}`,
-          `TF_INTEGRATIONS_POSTGRES_IMAGE=ghcr.io/altis13/apollo-tf-integrations-postgres@${digestFor(8)}`,
-          `TF_INTEGRATIONS_IMAGE=ghcr.io/altis13/apollo-tf-integrations@${digestFor(7)}`,
-          `TF_DOWNLOAD_REDIS_IMAGE=ghcr.io/altis13/apollo-tf-download-redis@${digestFor(10)}`,
-          `TF_DOWNLOAD_WORKER_IMAGE=ghcr.io/altis13/apollo-tf-download-worker@${digestFor(9)}`,
-          "",
-        ].join("\n"),
+        environmentContents,
       );
+      expect(
+        JSON.parse(await readFile(harness.releaseCompletion, "utf8")),
+      ).toEqual({
+        environmentSha256: sha256(environmentContents),
+        formatVersion: 1,
+        manifestSha256: sha256(manifestContents),
+        releaseId,
+        sourceCommit,
+      });
       await expect(readFile(harness.temporaryRoot, "utf8")).rejects.toThrow();
     } finally {
       await rm(harness.root, { force: true, recursive: true });
@@ -1112,7 +1248,7 @@ describe("operator release publication", () => {
     }
   });
 
-  it("removes owned staging after an output rename collision without removing the collision", async () => {
+  it("preserves a late incomplete release claim and refuses to overwrite it on retry", async () => {
     let collisionCreated = false;
     let releaseOutput = "";
     const lastReference = `${
@@ -1131,7 +1267,12 @@ describe("operator release publication", () => {
           result.status === 0
         ) {
           await mkdir(dirname(releaseOutput), { recursive: true });
-          await writeFile(releaseOutput, "unrelated-collision\n", "utf8");
+          await mkdir(releaseOutput);
+          await writeFile(
+            join(releaseOutput, "unrelated-sentinel"),
+            "unrelated-collision\n",
+            "utf8",
+          );
           collisionCreated = true;
         }
         return result;
@@ -1139,7 +1280,7 @@ describe("operator release publication", () => {
     });
     releaseOutput = harness.releaseOutput;
     try {
-      await expect(
+      const publish = () =>
         publishOperatorRelease(
           {
             mode: "production",
@@ -1148,14 +1289,31 @@ describe("operator release publication", () => {
             sourceCommit,
           },
           harness.dependencies,
-        ),
-      ).rejects.toThrowError(/^artifact_validation_failed$/);
+        );
+      await expect(publish()).rejects.toThrowError(/^release_output_exists$/);
       expect(collisionCreated).toBe(true);
-      expect(await readFile(harness.releaseOutput, "utf8")).toBe(
-        "unrelated-collision\n",
-      );
+      expect(
+        await readFile(
+          join(harness.releaseOutput, "unrelated-sentinel"),
+          "utf8",
+        ),
+      ).toBe("unrelated-collision\n");
       await expectIncompleteReleaseEvidence(harness);
       expect(await pathExists(harness.temporaryRoot)).toBe(false);
+      const dockerCommandCount = harness.commands.filter(
+        ({ executable }) => executable === "docker",
+      ).length;
+
+      await expect(publish()).rejects.toThrowError(/^release_output_exists$/);
+      expect(
+        await readFile(
+          join(harness.releaseOutput, "unrelated-sentinel"),
+          "utf8",
+        ),
+      ).toBe("unrelated-collision\n");
+      expect(
+        harness.commands.filter(({ executable }) => executable === "docker"),
+      ).toHaveLength(dockerCommandCount);
     } finally {
       await rm(harness.root, { force: true, recursive: true });
     }
@@ -1204,6 +1362,9 @@ describe("operator release publication", () => {
           "utf8",
         ),
       ).toContain(`RELEASE_SOURCE_COMMIT=${sourceCommit}\n`);
+      expect(
+        JSON.parse(await readFile(harness.releaseCompletion, "utf8")),
+      ).toMatchObject({ formatVersion: 1, releaseId, sourceCommit });
       expect(await pathExists(harness.releaseStaging)).toBe(false);
       expect(await pathExists(harness.temporaryRoot)).toBe(false);
       expect(
@@ -1220,6 +1381,25 @@ describe("operator release publication", () => {
       await rm(harness.root, { force: true, recursive: true });
     }
   });
+});
+
+describe("operator release default command runner", () => {
+  it.runIf(process.platform === "win32")(
+    "launches the fixed Corepack and pnpm Windows shims",
+    async () => {
+      for (const executable of ["corepack", "pnpm"] as const) {
+        const result = await runOperatorReleaseCommand(
+          executable,
+          ["--version"],
+          { cwd: workspaceRoot, timeoutMs: 30_000 },
+        );
+
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe("");
+        expect(result.stdout.trim()).toMatch(/^[0-9]+[.][0-9]+[.][0-9]+/);
+      }
+    },
+  );
 });
 
 describe("operator release CLI", () => {
