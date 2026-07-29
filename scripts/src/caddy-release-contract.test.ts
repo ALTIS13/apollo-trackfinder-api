@@ -29,6 +29,10 @@ const credentialGeneratorPath = resolve(
   repositoryRoot,
   "deploy/caddy/prepare-admin-credentials.sh",
 );
+const credentialVerifierPath = resolve(
+  repositoryRoot,
+  "deploy/caddy/verify-admin-credentials.sh",
+);
 const rolloutPath = resolve(
   repositoryRoot,
   "docs/operations/apollo-production-rollout.md",
@@ -147,11 +151,17 @@ describe("Apollo Caddy release include", () => {
       "root:root",
       "0600",
       'hash-password < "$1" > "$2"',
+      "deploy/caddy/verify-admin-credentials.sh",
       "deploy/caddy/caddy-protected-command.sh validate",
       "deploy/caddy/caddy-protected-command.sh reload",
     ]) {
       expect(source).toContain(value);
     }
+    expect(source).toContain(
+      "sudo deploy/caddy/verify-admin-credentials.sh \\\n" +
+        "  '<ADMIN_CREDENTIAL_GENERATION_PARENT>/<ADMIN_CREDENTIAL_GENERATION>/admin_access_htpasswd' \\\n" +
+        "  '<ADMIN_CREDENTIAL_GENERATION_PARENT>/<ADMIN_CREDENTIAL_GENERATION>/caddy.env'",
+    );
     expect(source).toContain("exactly one LF-terminated line");
     expect(source).toContain("bcrypt");
   });
@@ -270,6 +280,71 @@ printf 'chown %s\n' "$*" >> "$APOLLO_COMMAND_LOG"
       );
       expect(htpasswd).not.toContain(password);
       expect(caddyEnvironment).not.toContain(password);
+
+      const verify = (htpasswdFile: string, environmentFile: string) =>
+        spawnSync(
+          executable,
+          [
+            shellPath(credentialVerifierPath),
+            shellPath(htpasswdFile),
+            shellPath(environmentFile),
+          ],
+          {
+            cwd: repositoryRoot,
+            encoding: "utf8",
+            windowsHide: true,
+          },
+        );
+      const htpasswdFile = join(outputDirectory, "admin_access_htpasswd");
+      const environmentFile = join(outputDirectory, "caddy.env");
+      const verified = verify(htpasswdFile, environmentFile);
+      expect({
+        signal: verified.signal,
+        status: verified.status,
+        stderr: verified.stderr,
+        stdout: verified.stdout,
+      }).toEqual({
+        signal: null,
+        status: 0,
+        stderr: "",
+        stdout: "",
+      });
+
+      const hostileCases = [
+        ["empty htpasswd", "", caddyEnvironment],
+        ["LF-terminated htpasswd", `${htpasswd}\n`, caddyEnvironment],
+        [
+          "mismatched Caddy username",
+          htpasswd,
+          `APOLLO_ADMIN_CADDY_USER='other-user'\n` +
+            `APOLLO_ADMIN_CADDY_PASSWORD_HASH='${bcrypt}'\n`,
+        ],
+        [
+          "mismatched Caddy hash",
+          htpasswd,
+          `APOLLO_ADMIN_CADDY_USER='${username}'\n` +
+            `APOLLO_ADMIN_CADDY_PASSWORD_HASH='$2a$12$${"B".repeat(53)}'\n`,
+        ],
+      ] as const;
+      for (const [name, hostileHtpasswd, hostileEnvironment] of hostileCases) {
+        const hostileHtpasswdFile = join(root, `${name}.htpasswd`);
+        const hostileEnvironmentFile = join(root, `${name}.env`);
+        writeFileSync(hostileHtpasswdFile, hostileHtpasswd, { mode: 0o400 });
+        writeFileSync(hostileEnvironmentFile, hostileEnvironment, {
+          mode: 0o640,
+        });
+
+        const rejected = verify(hostileHtpasswdFile, hostileEnvironmentFile);
+        expect(rejected.status, name).not.toBe(0);
+        expect(rejected.stdout, name).toBe("");
+        expect(rejected.stderr, name).toBe("");
+        for (const secret of [username, bcrypt, password]) {
+          expect(`${rejected.stdout}${rejected.stderr}`, name).not.toContain(
+            secret,
+          );
+        }
+      }
+
       expect(readFileSync(commandLog, "utf8")).toBe(
         "caddy hash-password\n" +
           "chown root:root " +

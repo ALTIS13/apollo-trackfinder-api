@@ -224,15 +224,7 @@ and hash never enter command arguments, shell history, terminal output, logs,
 or tracked content. Verify equality without printing either value:
 
 ```sh
-sudo sh -ceu '
-  IFS=: read -r nginx_user nginx_hash < "$1"
-  unset APOLLO_ADMIN_CADDY_USER APOLLO_ADMIN_CADDY_PASSWORD_HASH
-  set -a
-  . "$2"
-  set +a
-  [ "$nginx_user" = "$APOLLO_ADMIN_CADDY_USER" ]
-  [ "$nginx_hash" = "$APOLLO_ADMIN_CADDY_PASSWORD_HASH" ]
-' sh \
+sudo deploy/caddy/verify-admin-credentials.sh \
   '<ADMIN_CREDENTIAL_GENERATION_PARENT>/<ADMIN_CREDENTIAL_GENERATION>/admin_access_htpasswd' \
   '<ADMIN_CREDENTIAL_GENERATION_PARENT>/<ADMIN_CREDENTIAL_GENERATION>/caddy.env'
 ```
