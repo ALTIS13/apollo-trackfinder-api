@@ -9,15 +9,17 @@
 fail-closed local Docker Buildx publisher that produces the existing immutable
 Apollo release manifest and digest environment fragment for Coolify.
 
-**Architecture:** A new TypeScript CLI archives one explicitly approved Git
-commit into an owned temporary directory, creates an owned Buildx
-`docker-container` builder, publishes the eleven custom Linux/amd64 images to
-the fixed `ghcr.io/altis13` repositories, resolves all custom and Redis
-digests, and atomically writes ignored release evidence. Docker obtains GHCR
-credentials only from its existing credential store; the CLI has no token,
-password, registry, or GitHub Actions input. The existing production validator
-remains the authority for manifest schema, repositories, digest references,
-Compose rendering, and runtime contracts.
+**Architecture:** A shared release-image catalog defines every build target,
+approved repository, environment binding, and the exact digest-pinned Redis
+image. A new TypeScript CLI archives one explicitly approved Git commit into an
+owned temporary directory, validates that archive before any registry write,
+creates an owned Buildx `docker-container` builder, publishes the eleven custom
+Linux/amd64 images to the fixed `ghcr.io/altis13` repositories, resolves all
+custom digests, and atomically writes ignored release evidence. Docker obtains
+GHCR credentials only from its existing credential store; the CLI has no
+token, password, registry, or GitHub Actions input. The existing production
+validator remains the authority for manifest schema, repositories, digest
+references, Compose rendering, and runtime contracts.
 
 **Tech Stack:** TypeScript on Node.js 24, Vitest, Docker Buildx, OCI/GHCR,
 PowerShell operator environment, existing Coolify release validator.
@@ -58,14 +60,15 @@ PowerShell operator environment, existing Coolify release validator.
 
 - Create: `scripts/src/operator-release.ts`
 - Create: `scripts/src/operator-release.test.ts`
+- Create: `scripts/src/release-images.ts`
 - Modify: `scripts/src/coolify-release.ts`
 - Modify: `scripts/src/coolify-release.test.ts`
-- Modify: `package.json`
 
 **Interfaces:**
 
-- Consumes: the existing `ReleaseArtifact`, `ReleaseArtifactImage`, approved
-  image repositories, and production artifact validation rules.
+- Consumes: the existing `ReleaseArtifact`, `ReleaseArtifactImage`, exact
+  digest-pinned Redis reference from production smoke, and production artifact
+  validation rules.
 - Produces:
 
 ```ts
@@ -85,6 +88,16 @@ export type OperatorReleaseImageTarget = {
   repository: string;
   target: string;
 };
+
+export type ReleaseImageCatalogEntry =
+  | (OperatorReleaseImageTarget & { kind: "custom" })
+  | {
+      environmentNames: readonly ["PLATFORM_REDIS_IMAGE", "TF_REDIS_IMAGE"];
+      kind: "external";
+      name: "redis";
+      reference: string;
+      repository: "docker.io/library/redis";
+    };
 
 export type OperatorReleaseOutput = {
   envFragmentPath: string;
@@ -138,8 +151,10 @@ expect(
 
 Assert rejection of secret-bearing/registry flags, path separators in
 `releaseId`, zero commit, duplicate flags, unknown mode, and missing values.
-Assert that the eleven custom target definitions exactly match the current
-Dockerfiles, targets, GHCR repositories, and release environment names.
+Assert that the shared catalog contains the eleven custom target definitions
+matching the current Dockerfiles, targets, GHCR repositories, and release
+environment names, plus one Redis entry whose full digest-qualified reference
+exactly matches the pinned Redis constant already used by production smoke.
 
 - [ ] **Step 2: Run the focused tests and verify RED**
 
@@ -153,10 +168,11 @@ Expected: FAIL because `operator-release.ts` and its exports do not exist.
 
 - [ ] **Step 3: Export the shared release artifact allowlist**
 
-Export the existing image-name tuple, repository map, image environment map,
-and artifact types from `coolify-release.ts` without changing their values.
-Rename test prose from “workflow artifact” to “operator release manifest”; the
-validation behavior must remain unchanged.
+Create `release-images.ts` as the only catalog owner. Derive and export the
+image-name tuple, repository map, image environment map, custom build targets,
+and pinned Redis reference from it. Consume/re-export those values from
+`coolify-release.ts` without changing validation behavior. Rename test prose
+from “workflow artifact” to “operator release manifest”.
 
 - [ ] **Step 4: Implement the minimal parser and target inventory**
 
@@ -164,7 +180,9 @@ Implement strict pairwise argument parsing, release ID pattern
 `^v[0-9]+[.][0-9]+[.][0-9]+(?:-[a-z0-9][a-z0-9.-]{0,63})?$`, non-zero
 40-character lowercase source commits, fixed production repositories, and
 fixed ignored output directory resolution. Do not add a credential parameter
-or read credential-related environment variables.
+or read credential-related environment variables. Do not expose
+`release:publish` in root `package.json` until Task 2 supplies a complete CLI
+entry point and non-zero failure behavior.
 
 - [ ] **Step 5: Verify GREEN and regressions**
 
@@ -180,7 +198,7 @@ Expected: all tests pass and TypeScript exits `0`.
 - [ ] **Step 6: Commit Task 1**
 
 ```powershell
-git add package.json scripts/src/operator-release.ts scripts/src/operator-release.test.ts scripts/src/coolify-release.ts scripts/src/coolify-release.test.ts
+git add scripts/src/operator-release.ts scripts/src/operator-release.test.ts scripts/src/release-images.ts scripts/src/coolify-release.ts scripts/src/coolify-release.test.ts
 git commit -m "feat(release): define operator publisher contract"
 ```
 
@@ -190,7 +208,8 @@ git commit -m "feat(release): define operator publisher contract"
 
 - Modify: `scripts/src/operator-release.ts`
 - Modify: `scripts/src/operator-release.test.ts`
-- Modify: `.gitignore`
+- Modify: `scripts/src/coolify-production-smoke.test.ts`
+- Modify: `package.json`
 
 **Interfaces:**
 
@@ -225,15 +244,19 @@ export async function publishOperatorRelease(
   2. Verify the source commit object exists.
   3. Fail if `.ops-private/releases/<release-id>` already exists.
   4. Create an owned temporary root and archive the exact source commit.
-  5. Create a unique owned Buildx `docker-container` builder.
-  6. Build and push each custom target for `linux/amd64` with SBOM,
+  5. Install with the frozen lockfile and run the same complete release
+     test/typecheck gate inside the extracted archive.
+  6. Prove every custom repository tag for the release ID is absent. A partial
+     prior publication makes that release ID permanently unusable.
+  7. Create a unique owned Buildx `docker-container` builder.
+  8. Build and push each custom target for `linux/amd64` with SBOM,
      max provenance, and exact OCI source/revision/version labels.
-  7. Resolve each pushed digest and Redis `7-bookworm` digest with bounded
-     retries.
-  8. Build the exact `ReleaseArtifact`, validate its shape/repositories, and
-     render a deterministic env fragment.
-  9. Atomically rename a staging directory into the final ignored output.
-  10. Always remove the owned builder and temporary root; never prune.
+  9. Resolve each pushed digest with bounded retries and use the catalog's
+     exact pinned Redis digest without resolving a mutable tag.
+  10. Build the exact `ReleaseArtifact`, validate its shape/repositories, and
+      render a deterministic env fragment.
+  11. Atomically rename a staging directory into the final ignored output.
+  12. Always remove the owned builder and temporary root; never prune.
 
 - [ ] **Step 1: Write failing source/archive and command-plan tests**
 
@@ -252,8 +275,10 @@ docker buildx build
 --push
 ```
 
-Assert eleven builds, twelve digest inspections, fixed repositories, no
-credential text, no ambient builder reuse, and no prune command.
+Assert eleven builds, eleven pushed-digest inspections, fixed repositories, no
+credential text, no ambient builder reuse, and no prune command. Assert that
+the pinned Redis reference is copied directly into the manifest and is never
+passed to a mutable-tag inspection command.
 
 - [ ] **Step 2: Run tests and verify RED**
 
@@ -267,12 +292,16 @@ Expected: FAIL because publication orchestration is missing.
 
 - [ ] **Step 3: Implement owned command execution and digest resolution**
 
-Use `spawn`/`spawnSync` argument arrays only. Sanitize all public failures to
-stable codes such as `dirty_worktree`, `invalid_source_commit`,
-`release_output_exists`, `builder_create_failed`, `image_build_failed`,
-`digest_resolution_failed`, `artifact_validation_failed`, and
-`cleanup_failed`. Never include paths, stderr, image credentials, or command
-arguments in the returned JSON error.
+Before any registry inspection or push, run `corepack enable`,
+`pnpm install --frozen-lockfile`, the scripts, Platform, API, admin, music,
+search, integrations, and download-worker suites, and root typecheck with
+`cwd` set to the extracted archive. Use `spawn`/`spawnSync` argument arrays
+only. Sanitize all public failures to stable codes such as `dirty_worktree`,
+`invalid_source_commit`, `release_output_exists`,
+`source_validation_failed`, `release_tag_exists`, `builder_create_failed`,
+`image_build_failed`, `digest_resolution_failed`,
+`artifact_validation_failed`, and `cleanup_failed`. Never include paths,
+stderr, image credentials, or command arguments in the returned JSON error.
 
 - [ ] **Step 4: Write failing atomicity and cleanup tests**
 
@@ -285,6 +314,10 @@ Assert that:
 - the primary failure wins over cleanup failure;
 - cleanup-only failure is returned;
 - unrelated resource names are never passed to a removal command.
+- any pre-existing custom image tag fails before the builder is created or any
+  image is pushed;
+- a partial registry push is retained as non-release evidence and the same
+  release ID cannot be retried or overwritten.
 
 - [ ] **Step 5: Implement atomic evidence and cleanup**
 
@@ -293,6 +326,14 @@ directory. Sort manifest images by logical name. Render env lines in the
 existing release environment order, with Redis assigned to both
 `PLATFORM_REDIS_IMAGE` and `TF_REDIS_IMAGE`. Rename staging to final only after
 all content is fsynced/closed and validated.
+
+Refactor `coolify-production-smoke.test.ts` to consume the same shared custom
+target catalog and pinned Redis reference. Add the complete CLI entry point and
+only now expose:
+
+```json
+"release:publish": "node --experimental-strip-types -- scripts/src/operator-release.ts"
+```
 
 - [ ] **Step 6: Verify GREEN and the full scripts suite**
 
@@ -310,7 +351,7 @@ and typecheck exits `0`.
 - [ ] **Step 7: Commit Task 2**
 
 ```powershell
-git add .gitignore scripts/src/operator-release.ts scripts/src/operator-release.test.ts
+git add package.json scripts/src/operator-release.ts scripts/src/operator-release.test.ts scripts/src/coolify-production-smoke.test.ts
 git commit -m "feat(release): publish immutable images locally"
 ```
 
@@ -323,6 +364,8 @@ git commit -m "feat(release): publish immutable images locally"
 - Modify: `docs/operations/apollo-production-rollout.md`
 - Modify: `docs/operations/homenode-coolify-preflight.md`
 - Modify: `docs/operations/apollo-backup-restore.md`
+- Modify: `artifacts/api-server/src/coolify-release-contract.test.ts`
+- Modify: `artifacts/music-player/Dockerfile`
 - Modify: `.ops-private/APOLLO_TF_HOMENODE.md` (ignored operator record)
 - Modify: `.ops-private/APOLLO_TF_ROLLOUT.md` (ignored operator record)
 - Modify: `scripts/src/operator-release.test.ts`
@@ -345,6 +388,9 @@ Add source/document assertions requiring:
 - runbook records that public GHCR images allow anonymous HomeNode/Coolify
   pulls, with package visibility checked after first publication;
 - no current guidance calls an artifact “workflow-produced”.
+- API release contracts validate the publisher/catalog/package script instead
+  of reading the deleted workflow;
+- the music-player image installs exact workspace pnpm `10.33.2`, not latest.
 
 - [ ] **Step 2: Run tests and verify RED**
 
@@ -375,12 +421,18 @@ policy before future releases. Remove the failed Actions run from the active
 release gate while retaining it only as historical evidence in the ignored
 operator record.
 
+Replace the API suite's workflow-source assertions with direct contracts for
+the shared catalog, operator CLI entry point, source-archive validation gate,
+OCI labels, SBOM/provenance flags, and fixed repository/digest handling. Pin
+the music-player Dockerfile to `pnpm@10.33.2`.
+
 - [ ] **Step 4: Verify no Actions dependency and all release contracts**
 
 Run:
 
 ```powershell
 pnpm --filter @workspace/scripts exec vitest run src/operator-release.test.ts src/coolify-release.test.ts src/caddy-release-contract.test.ts
+pnpm --filter @workspace/api-server exec vitest run src/coolify-release-contract.test.ts
 pnpm --filter @workspace/scripts test
 pnpm run typecheck
 pnpm exec prettier --check package.json scripts/src/operator-release.ts scripts/src/operator-release.test.ts IMPLEMENTATION_STATUS.md docs/operations/apollo-production-rollout.md docs/operations/homenode-coolify-preflight.md docs/operations/apollo-backup-restore.md
@@ -393,7 +445,7 @@ or active workflow-produced guidance remains.
 - [ ] **Step 5: Commit Task 3**
 
 ```powershell
-git add .github/workflows/apollo-release-images.yml IMPLEMENTATION_STATUS.md docs/operations/apollo-production-rollout.md docs/operations/homenode-coolify-preflight.md docs/operations/apollo-backup-restore.md scripts/src/operator-release.test.ts
+git add .github/workflows/apollo-release-images.yml IMPLEMENTATION_STATUS.md docs/operations/apollo-production-rollout.md docs/operations/homenode-coolify-preflight.md docs/operations/apollo-backup-restore.md artifacts/api-server/src/coolify-release-contract.test.ts artifacts/music-player/Dockerfile scripts/src/operator-release.test.ts
 git commit -m "docs(release): switch to operator publication"
 ```
 
