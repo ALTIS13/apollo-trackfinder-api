@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { writeFileSync } from "node:fs";
 import {
   copyFile,
@@ -9,6 +10,7 @@ import {
   readFile,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -924,7 +926,7 @@ describe("operator release publication", () => {
       expect(
         harness.commands.some(
           ({ args, executable }) =>
-            executable === "git" ||
+            (executable === "git" && args[0] !== "archive") ||
             args.some((argument) => argument.includes("pnpm.js")),
         ),
       ).toBe(false);
@@ -1325,6 +1327,32 @@ describe("operator release publication", () => {
     }
   });
 
+  it("refuses a pre-existing exact-name builder without creating or removing it", async () => {
+    const harness = await publisherHarness();
+    const builderName = "apollo-release-task-2-owned";
+    harness.builders.add(builderName);
+    try {
+      await prepareHarness(harness);
+      await expect(
+        publishOperatorRelease(
+          publicationOptions(harness),
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^builder_create_failed$/);
+      expect(
+        harness.commands.filter(
+          ({ args, executable }) =>
+            executable === "docker" &&
+            args[0] === "buildx" &&
+            (args[1] === "create" || args[1] === "rm"),
+        ),
+      ).toEqual([]);
+      expect(harness.builders).toEqual(new Set([builderName]));
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
   it("awaits cancellation cleanup and removes only the owned builder", async () => {
     const controller = new AbortController();
     let buildCount = 0;
@@ -1486,6 +1514,189 @@ describe("operator release publication", () => {
         ),
       ).toBe(false);
       expect(await pathExists(harness.temporaryRoot)).toBe(false);
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("fails cleanup when owned-builder inspection is indeterminate", async () => {
+    let builderCreated = false;
+    const harness = await publisherHarness({
+      command(command, defaultResult) {
+        const result = defaultResult();
+        if (
+          command.executable === "docker" &&
+          command.args[0] === "buildx" &&
+          command.args[1] === "create"
+        ) {
+          builderCreated = true;
+        }
+        if (
+          builderCreated &&
+          command.executable === "docker" &&
+          command.args[0] === "buildx" &&
+          command.args[1] === "inspect"
+        ) {
+          return {
+            status: 2,
+            stderr: "sentinel-private-docker-daemon-unavailable",
+            stdout: "",
+          };
+        }
+        return result;
+      },
+    });
+    try {
+      await prepareHarness(harness);
+      await expect(
+        publishOperatorRelease(
+          publicationOptions(harness),
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^cleanup_failed$/);
+      expect(harness.builders).toEqual(
+        new Set(["apollo-release-task-2-owned"]),
+      );
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("surfaces cleanup failure over a primary publication failure", async () => {
+    let builderCreated = false;
+    const harness = await publisherHarness({
+      command(command, defaultResult) {
+        const result = defaultResult();
+        if (
+          command.executable === "docker" &&
+          command.args[0] === "buildx" &&
+          command.args[1] === "create"
+        ) {
+          builderCreated = true;
+        }
+        if (
+          builderCreated &&
+          command.executable === "docker" &&
+          command.args[0] === "buildx" &&
+          command.args[1] === "build"
+        ) {
+          return {
+            status: 1,
+            stderr: "sentinel-private-build-failure",
+            stdout: "",
+          };
+        }
+        if (
+          builderCreated &&
+          command.executable === "docker" &&
+          command.args[0] === "buildx" &&
+          command.args[1] === "inspect"
+        ) {
+          return {
+            status: 2,
+            stderr: "sentinel-private-docker-daemon-unavailable",
+            stdout: "",
+          };
+        }
+        return result;
+      },
+    });
+    try {
+      await prepareHarness(harness);
+      await expect(
+        publishOperatorRelease(
+          publicationOptions(harness),
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^cleanup_failed$/);
+      expect(harness.builders).toEqual(
+        new Set(["apollo-release-task-2-owned"]),
+      );
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("confirms that owned-builder removal made the builder absent", async () => {
+    const harness = await publisherHarness({
+      command(command, defaultResult) {
+        if (
+          command.executable === "docker" &&
+          command.args[0] === "buildx" &&
+          command.args[1] === "rm"
+        ) {
+          return { status: 0, stderr: "", stdout: "" };
+        }
+        return defaultResult();
+      },
+    });
+    try {
+      await prepareHarness(harness);
+      await expect(
+        publishOperatorRelease(
+          publicationOptions(harness),
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^cleanup_failed$/);
+      expect(harness.builders).toEqual(
+        new Set(["apollo-release-task-2-owned"]),
+      );
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects a claim directory redirected through a junction or symlink", async () => {
+    const harness = await publisherHarness();
+    const redirectedClaim = join(harness.root, "redirected-claim");
+    try {
+      await prepareHarness(harness);
+      await rename(harness.releaseClaim, redirectedClaim);
+      await symlink(
+        redirectedClaim,
+        harness.releaseClaim,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+
+      await expect(
+        publishOperatorRelease(
+          publicationOptions(harness),
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^invalid_release_receipt$/);
+      expect(
+        harness.commands.some(({ executable }) => executable === "docker"),
+      ).toBe(false);
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects a receipt and archive replaced together after preparation", async () => {
+    const harness = await publisherHarness();
+    try {
+      await prepareHarness(harness);
+      const maliciousArchive = "attacker-selected-source-archive\n";
+      await writeFile(harness.releaseArchive, maliciousArchive, "utf8");
+      const receipt = JSON.parse(
+        await readFile(harness.releaseReceipt, "utf8"),
+      ) as { archiveSha256: string };
+      receipt.archiveSha256 = sha256(maliciousArchive);
+      await writeFile(
+        harness.releaseReceipt,
+        `${JSON.stringify(receipt, null, 2)}\n`,
+        "utf8",
+      );
+
+      await expect(
+        publishOperatorRelease(
+          publicationOptions(harness),
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^invalid_release_receipt$/);
+      expect(
+        harness.commands.some(({ executable }) => executable === "docker"),
+      ).toBe(false);
     } finally {
       await rm(harness.root, { force: true, recursive: true });
     }
@@ -1753,9 +1964,17 @@ describe("operator release publication", () => {
           .every(({ cwd }) => cwd === harness.validationRoot),
       ).toBe(true);
       expect(commandLines[4 + validationCommands.length]).toEqual([
+        "git",
+        "archive",
+        "--format=tar",
+        "--output",
+        join(harness.temporaryRoot, "source.tar"),
+        sourceCommit,
+      ]);
+      expect(commandLines[5 + validationCommands.length]).toEqual([
         "tar",
         "-xf",
-        harness.releaseArchive,
+        join(harness.temporaryRoot, "source.tar"),
         "-C",
         harness.buildRoot,
       ]);
@@ -1763,8 +1982,8 @@ describe("operator release publication", () => {
         harness.commands
           .slice(0, builderCreateIndex)
           .filter(({ executable }) => executable === "docker"),
-      ).toHaveLength(11);
-      expect(builderCreateIndex).toBe(5 + validationCommands.length + 11);
+      ).toHaveLength(12);
+      expect(builderCreateIndex).toBe(7 + validationCommands.length + 11);
       expect(commandLines[builderCreateIndex]).toEqual([
         "docker",
         "buildx",
@@ -1921,7 +2140,7 @@ describe("operator release publication", () => {
     }
   });
 
-  it("keeps build 6 as the primary failure and refuses the partially published release on retry", async () => {
+  it("surfaces build 6 cleanup failure and refuses the partially published release on retry", async () => {
     let buildCount = 0;
     const harness = await publisherHarness({
       command(command, defaultResult) {
@@ -1957,7 +2176,7 @@ describe("operator release publication", () => {
       publishOperatorRelease(publicationOptions(harness), harness.dependencies);
     try {
       await prepareHarness(harness);
-      await expect(publish()).rejects.toThrowError(/^image_build_failed$/);
+      await expect(publish()).rejects.toThrowError(/^cleanup_failed$/);
       expect(buildCount).toBe(6);
       expect(harness.publishedTags.size).toBe(5);
       await expectIncompleteReleaseEvidence(harness);
@@ -2409,6 +2628,45 @@ describe("operator release default command runner", () => {
 });
 
 describe("operator release CLI", () => {
+  it("installs cooperative signal handling only for publication", async () => {
+    const source = await readFile(
+      join(workspaceRoot, "scripts", "src", "operator-release.ts"),
+      "utf8",
+    );
+    expect(source).toContain(
+      'const cancellation =\n      operation === "publish" ? new AbortController() : undefined;',
+    );
+    expect(source).toContain("cancellation?.signal");
+  });
+
+  it("keeps repeated-signal cancellation handlers installed until cleanup", () => {
+    const installSignalHandlers = (
+      operatorReleaseModule as typeof operatorReleaseModule & {
+        installOperatorReleaseSignalHandlers?: (
+          processEvents: EventEmitter,
+          cancellation: AbortController,
+        ) => () => void;
+      }
+    ).installOperatorReleaseSignalHandlers;
+    expect(installSignalHandlers).toBeTypeOf("function");
+    if (installSignalHandlers === undefined) return;
+
+    const processEvents = new EventEmitter();
+    const cancellation = new AbortController();
+    const cleanup = installSignalHandlers(processEvents, cancellation);
+    expect(processEvents.listenerCount("SIGINT")).toBe(1);
+    expect(processEvents.listenerCount("SIGTERM")).toBe(1);
+
+    processEvents.emit("SIGINT");
+    processEvents.emit("SIGINT");
+    expect(cancellation.signal.aborted).toBe(true);
+    expect(processEvents.listenerCount("SIGINT")).toBe(1);
+
+    cleanup();
+    expect(processEvents.listenerCount("SIGINT")).toBe(0);
+    expect(processEvents.listenerCount("SIGTERM")).toBe(0);
+  });
+
   it.each([
     ["release:prepare", ["--mode", "invalid"]],
     ["release:publish", ["--mode", "invalid"]],
@@ -2598,6 +2856,16 @@ describe("operator release CLI", () => {
       join(workspaceRoot, "docs", "operations", "apollo-production-rollout.md"),
       "utf8",
     );
+    const implementationPlan = await readFile(
+      join(
+        workspaceRoot,
+        "docs",
+        "superpowers",
+        "plans",
+        "2026-07-29-operator-release-publisher.md",
+      ),
+      "utf8",
+    );
     const guidanceSources = await Promise.all(
       [
         "IMPLEMENTATION_STATUS.md",
@@ -2617,17 +2885,24 @@ describe("operator release CLI", () => {
       "$preparation = pnpm --silent release:prepare -- --mode production --release-id $releaseId --source-commit $approvedSourceCommit | ConvertFrom-Json",
     );
     expect(rolloutRunbook).toContain(
-      "$env:CR_PAT | docker login ghcr.io -u ALTIS13 --password-stdin",
+      "$pat = Read-Host 'GHCR classic PAT' -AsSecureString",
+    );
+    expect(rolloutRunbook).toContain(
+      "$plainPat | docker login ghcr.io -u ALTIS13 --password-stdin",
     );
     expect(rolloutRunbook).toContain(
       "if ($LASTEXITCODE -ne 0) { throw 'GHCR login failed' }",
+    );
+    expect(implementationPlan).toContain(
+      "if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }",
     );
     expect(rolloutRunbook).toContain(
       "pnpm --silent release:publish -- --mode production --release-id $releaseId --source-commit $approvedSourceCommit --receipt $preparation.receiptPath",
     );
     expect(rolloutRunbook).toContain(
-      "Remove-Item Env:\\CR_PAT -ErrorAction SilentlyContinue",
+      "[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($patPointer)",
     );
+    expect(rolloutRunbook).not.toContain("$env:CR_PAT");
     expect(rolloutRunbook).toContain(
       "pnpm --silent release:validate -- --env-file '<PRIVATE_RELEASE_ENV>' --mode production --release-manifest '.ops-private/releases/v0.1.0-rc.1/apollo-release-manifest.json'",
     );
@@ -2635,18 +2910,23 @@ describe("operator release CLI", () => {
       "pnpm --silent release:prepare",
     );
     const tryIndex = rolloutRunbook.indexOf("try {", prepareIndex);
+    const credentialPromptIndex = rolloutRunbook.indexOf(
+      "$pat = Read-Host",
+      tryIndex,
+    );
     const loginIndex = rolloutRunbook.indexOf("docker login ghcr.io");
     const publishIndex = rolloutRunbook.indexOf(
       "pnpm --silent release:publish",
     );
     const finallyIndex = rolloutRunbook.indexOf("finally {", publishIndex);
     const credentialRemovalIndex = rolloutRunbook.indexOf(
-      "Remove-Item Env:\\CR_PAT",
+      "[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($patPointer)",
       finallyIndex,
     );
     expect([
       prepareIndex,
       tryIndex,
+      credentialPromptIndex,
       loginIndex,
       publishIndex,
       finallyIndex,
@@ -2656,6 +2936,7 @@ describe("operator release CLI", () => {
         ...[
           prepareIndex,
           tryIndex,
+          credentialPromptIndex,
           loginIndex,
           publishIndex,
           finallyIndex,

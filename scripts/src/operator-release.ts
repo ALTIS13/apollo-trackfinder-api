@@ -7,6 +7,7 @@ import {
   mkdir,
   open,
   readFile,
+  realpath,
   readdir,
   readlink,
   rename,
@@ -124,6 +125,7 @@ const publicationArgumentFlags = new Set([...argumentFlags, "--receipt"]);
 const sourceRepository = "https://github.com/ALTIS13/Apollo.TF";
 const builderIdPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const absentManifestPattern = /(?:manifest unknown|not found)/i;
+const absentBuilderPattern = /(?:no builder|not found)/i;
 const windowsShimExecutables = new Set(["corepack", "pnpm"]);
 const digestAttempts = 5;
 const digestBackoffMilliseconds = [250, 500, 1_000, 2_000] as const;
@@ -543,8 +545,8 @@ export async function prepareOperatorRelease(
       cleanupFailed = true;
     }
   }
-  if (primaryError !== undefined) throw primaryError;
   if (cleanupFailed) throw operatorError("cleanup_failed");
+  if (primaryError !== undefined) throw primaryError;
   if (output === undefined) throw operatorError("release_error");
   return output;
 }
@@ -666,6 +668,31 @@ async function pathExists(path: string): Promise<boolean> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
+  }
+}
+
+async function assertUnredirectedPrivateClaim(
+  repositoryRoot: string,
+  claimDirectory: string,
+): Promise<void> {
+  const expectedPaths = [
+    resolve(repositoryRoot, ".ops-private"),
+    resolve(repositoryRoot, ".ops-private", "release-claims"),
+    resolve(claimDirectory),
+  ];
+  for (const expectedPath of expectedPaths) {
+    const stat = await lstat(expectedPath);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw operatorError("invalid_release_receipt");
+    }
+    const canonicalPath = await realpath(expectedPath);
+    const comparable = (value: string): string =>
+      process.platform === "win32"
+        ? resolve(value).toLowerCase()
+        : resolve(value);
+    if (comparable(canonicalPath) !== comparable(expectedPath)) {
+      throw operatorError("invalid_release_receipt");
+    }
   }
 }
 
@@ -1161,6 +1188,10 @@ export async function publishOperatorRelease(
 
   try {
     throwIfCancelled(options.signal);
+    await assertUnredirectedPrivateClaim(
+      options.repositoryRoot,
+      claimDirectory,
+    );
     const receipt = await loadOperatorReleaseReceipt(options, claimDirectory);
     archivePath = join(claimDirectory, receipt.archiveFile);
     try {
@@ -1206,6 +1237,7 @@ export async function publishOperatorRelease(
 
     temporaryRoot = dependencies.temporaryRoot();
     buildRoot = join(temporaryRoot, "build-source");
+    const regeneratedArchivePath = join(temporaryRoot, "source.tar");
     try {
       await mkdir(temporaryRoot);
       temporaryRootOwned = true;
@@ -1215,9 +1247,31 @@ export async function publishOperatorRelease(
     }
     await checkedCommand(
       dependencies,
+      "invalid_release_receipt",
+      "git",
+      [
+        "archive",
+        "--format=tar",
+        "--output",
+        regeneratedArchivePath,
+        options.sourceCommit,
+      ],
+      {
+        cwd: options.repositoryRoot,
+        env: environment,
+        signal: options.signal,
+        timeoutMs: 5 * 60_000,
+      },
+    );
+    if ((await sha256File(regeneratedArchivePath)) !== receipt.archiveSha256) {
+      throw operatorError("invalid_release_receipt");
+    }
+
+    await checkedCommand(
+      dependencies,
       "source_validation_failed",
       "tar",
-      ["-xf", archivePath, "-C", buildRoot],
+      ["-xf", regeneratedArchivePath, "-C", buildRoot],
       {
         cwd: options.repositoryRoot,
         env: environment,
@@ -1226,7 +1280,7 @@ export async function publishOperatorRelease(
       },
     );
     if (
-      (await sha256File(archivePath)) !== receipt.archiveSha256 ||
+      (await sha256File(regeneratedArchivePath)) !== receipt.archiveSha256 ||
       (await sha256Directory(buildRoot)) !== receipt.sourceTreeSha256
     ) {
       throw operatorError("invalid_release_receipt");
@@ -1278,6 +1332,27 @@ export async function publishOperatorRelease(
       dirname(releaseDirectory),
       `.${options.releaseId}.staging-${runId}`,
     );
+    let builderPreflight: OperatorReleaseCommandResult;
+    try {
+      builderPreflight = await dependencies.command(
+        "docker",
+        ["buildx", "inspect", builderName],
+        {
+          cwd: buildRoot,
+          env: environment,
+          signal: options.signal,
+          timeoutMs: 5 * 60_000,
+        },
+      );
+    } catch {
+      throw operatorError("builder_create_failed");
+    }
+    if (
+      builderPreflight.status === 0 ||
+      !absentBuilderPattern.test(builderPreflight.stderr)
+    ) {
+      throw operatorError("builder_create_failed");
+    }
     try {
       await writeDurableExclusive(
         join(claimDirectory, "builder-claim.json"),
@@ -1296,26 +1371,51 @@ export async function publishOperatorRelease(
     } catch {
       throw operatorError("builder_create_failed");
     }
-    builderRemovalRequired = true;
-    await checkedCommand(
-      dependencies,
-      "builder_create_failed",
-      "docker",
-      [
-        "buildx",
-        "create",
-        "--name",
-        builderName,
-        "--driver",
-        "docker-container",
-      ],
-      {
-        cwd: buildRoot,
-        env: environment,
-        signal: options.signal,
-        timeoutMs: 5 * 60_000,
-      },
-    );
+    try {
+      await checkedCommand(
+        dependencies,
+        "builder_create_failed",
+        "docker",
+        [
+          "buildx",
+          "create",
+          "--name",
+          builderName,
+          "--driver",
+          "docker-container",
+        ],
+        {
+          cwd: buildRoot,
+          env: environment,
+          signal: options.signal,
+          timeoutMs: 5 * 60_000,
+        },
+      );
+      builderRemovalRequired = true;
+    } catch {
+      try {
+        const reconciliation = await dependencies.command(
+          "docker",
+          ["buildx", "inspect", builderName],
+          {
+            cwd: buildRoot,
+            env: environment,
+            timeoutMs: 5 * 60_000,
+          },
+        );
+        if (reconciliation.status === 0) {
+          builderRemovalRequired = true;
+        } else if (!absentBuilderPattern.test(reconciliation.stderr)) {
+          throw operatorError("cleanup_failed");
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message === "cleanup_failed") {
+          throw error;
+        }
+        throw operatorError("cleanup_failed");
+      }
+      throw operatorError("builder_create_failed");
+    }
 
     const metadataRoot = join(temporaryRoot, "build-metadata");
     try {
@@ -1490,7 +1590,27 @@ export async function publishOperatorRelease(
             timeoutMs: 5 * 60_000,
           },
         );
-        if (removal.status !== 0) cleanupFailed = true;
+        if (removal.status !== 0) {
+          cleanupFailed = true;
+        } else {
+          const confirmation = await dependencies.command(
+            "docker",
+            ["buildx", "inspect", builderName!],
+            {
+              cwd: buildRoot!,
+              env: environment,
+              timeoutMs: 5 * 60_000,
+            },
+          );
+          if (
+            confirmation.status === 0 ||
+            !absentBuilderPattern.test(confirmation.stderr)
+          ) {
+            cleanupFailed = true;
+          }
+        }
+      } else if (!absentBuilderPattern.test(inspection.stderr)) {
+        cleanupFailed = true;
       }
     } catch {
       cleanupFailed = true;
@@ -1504,8 +1624,8 @@ export async function publishOperatorRelease(
     }
   }
 
-  if (primaryError !== undefined) throw primaryError;
   if (cleanupFailed) throw operatorError("cleanup_failed");
+  if (primaryError !== undefined) throw primaryError;
   if (output === undefined) throw operatorError("release_error");
   return output;
 }
@@ -1557,6 +1677,24 @@ export async function runOperatorReleaseCli(
   }
 }
 
+type OperatorReleaseSignalEvents = {
+  on(event: "SIGINT" | "SIGTERM", listener: () => void): unknown;
+  removeListener(event: "SIGINT" | "SIGTERM", listener: () => void): unknown;
+};
+
+export function installOperatorReleaseSignalHandlers(
+  processEvents: OperatorReleaseSignalEvents,
+  cancellation: AbortController,
+): () => void {
+  const cancel = (): void => cancellation.abort();
+  processEvents.on("SIGINT", cancel);
+  processEvents.on("SIGTERM", cancel);
+  return () => {
+    processEvents.removeListener("SIGINT", cancel);
+    processEvents.removeListener("SIGTERM", cancel);
+  };
+}
+
 const entryPath = process.argv[1];
 if (
   entryPath !== undefined &&
@@ -1567,23 +1705,24 @@ if (
     process.stderr.write(`${JSON.stringify({ error: "invalid_arguments" })}\n`);
     process.exitCode = 1;
   } else {
-    const cancellation = new AbortController();
-    const cancel = (): void => cancellation.abort();
-    process.once("SIGINT", cancel);
-    process.once("SIGTERM", cancel);
+    const cancellation =
+      operation === "publish" ? new AbortController() : undefined;
+    const removeSignalHandlers =
+      cancellation === undefined
+        ? () => {}
+        : installOperatorReleaseSignalHandlers(process, cancellation);
     void runOperatorReleaseCli(
       operation,
       process.argv.slice(3),
       defaultOperatorReleaseDependencies,
       defaultOperatorReleaseCliIo,
-      cancellation.signal,
+      cancellation?.signal,
     )
       .then((status) => {
         process.exitCode = status;
       })
       .finally(() => {
-        process.removeListener("SIGINT", cancel);
-        process.removeListener("SIGTERM", cancel);
+        removeSignalHandlers();
       });
   }
 }

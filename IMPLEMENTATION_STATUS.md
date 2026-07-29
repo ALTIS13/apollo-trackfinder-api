@@ -10,14 +10,15 @@ uncommitted `HEAD`. The publisher is locally proven, but no production image
 has been pushed, no GHCR login has occurred, and no GitHub or infrastructure
 setting has been changed.
 
-- The focused fake-command publisher contract passed `71/71` in `10.96s`.
-  Its combined successful prepare/publication path records `52` commands:
+- The focused fake-command publisher contract passed `79/79`.
+  Its combined successful prepare/publication path records `55` commands:
   `15` source-preparation commands, then archive extraction, `11` pre-push tag
-  inspections, one task-owned builder create, `11` Linux/amd64 builds with
+  inspections, exact-name builder preflight, one task-owned builder create,
+  `11` Linux/amd64 builds with
   owned metadata files, `11` immutable-tag digest inspections, and exact
-  task-owned builder inspect/removal. It never supplies a credential, token,
+  task-owned builder inspect/removal/absence confirmation. It never supplies a credential, token,
   password, secret, `prune`, `--use`, or registry override argument.
-- Preparation claims the release ID before work, validates the exact archived
+- Preparation claims the release ID before source-gate work, validates the exact archived
   source with an explicit child environment, and durably records a private
   protocol-v2 receipt binding release/source identity, archive SHA-256,
   validated tree SHA-256, and the complete image catalog. Publication consumes
@@ -28,7 +29,8 @@ setting has been changed.
   `250/500/1000/2000ms` backoff. The Redis evidence is derived from the exact
   catalog pin. Manifest, environment, and marker are hash-checked inside one
   sibling staging directory and published by one atomic directory rename.
-  Cleanup reconciles only the claimed builder and owned temporary paths.
+  Publication rejects pre-existing builder collisions, confirms owned-builder
+  removal, and cleans only owned temporary paths.
 - The complete nine-command non-publishing matrix passed consecutively
   (counts are passed/skipped): scripts `268/4` in `256.92s`; Platform API
   `422/21` tests and `18/6` files in `24.98s`; API `603/8` tests and `32/2`
@@ -38,6 +40,10 @@ setting has been changed.
   and root typecheck in `21.1s`. Generated ignored Platform/integrations
   `dist` roots were moved intact into ignored `.ops-private` quarantine after
   typecheck; they were not deleted or tracked.
+- The post-review final-tree supplement passed scripts `276/4` in `276.58s`,
+  API release contract `21/21`, and root typecheck. It specifically covers
+  redirected claims, archive substitution, builder collision/reconciliation,
+  cleanup confirmation and precedence, plus repeated-signal behavior.
 - Actual publication still requires an owner-created classic PAT with
   `write:packages`, an external `docker login --password-stdin`, the exact
   checkpoint command documented in the rollout runbook, and a separate explicit

@@ -311,7 +311,8 @@ Assert that:
 - no final manifest/env fragment exists after an incomplete release;
 - the temporary output is removed;
 - owned builder removal is attempted exactly once;
-- the primary failure wins over cleanup failure;
+- `cleanup_failed` wins when owned-resource absence cannot be confirmed;
+  otherwise the primary publication failure is preserved;
 - cleanup-only failure is returned;
 - unrelated resource names are never passed to a removal command.
 - any pre-existing custom image tag fails before the builder is created or any
@@ -481,20 +482,38 @@ Expected: FAIL while the workflow file and old guidance remain.
 Document this sequence:
 
 ```powershell
-$env:CR_PAT | docker login ghcr.io -u ALTIS13 --password-stdin
-Remove-Item Env:\CR_PAT
-$approvedSourceCommit = git rev-parse HEAD
-pnpm release:publish -- --mode production --release-id v0.1.0-rc.1 --source-commit $approvedSourceCommit
+$approvedSourceCommit = '<APPROVED_COMMIT>'
+$releaseId = 'v0.1.0-rc.1'
+$preparation = pnpm --silent release:prepare -- --mode production --release-id $releaseId --source-commit $approvedSourceCommit | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw 'Release preparation failed' }
+
+$pat = $null
+$patPointer = [IntPtr]::Zero
+$plainPat = $null
+try {
+  $pat = Read-Host 'GHCR classic PAT' -AsSecureString
+  $patPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($pat)
+  $plainPat = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($patPointer)
+  $plainPat | docker login ghcr.io -u ALTIS13 --password-stdin
+  if ($LASTEXITCODE -ne 0) { throw 'GHCR login failed' }
+  pnpm --silent release:publish -- --mode production --release-id $releaseId --source-commit $approvedSourceCommit --receipt $preparation.receiptPath
+  if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
+} finally {
+  $plainPat = $null
+  if ($patPointer -ne [IntPtr]::Zero) {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($patPointer)
+  }
+  if ($null -ne $pat) { $pat.Dispose() }
+}
 pnpm release:validate -- --env-file '<PRIVATE_RELEASE_ENV>' --mode production --release-manifest '.ops-private/releases/v0.1.0-rc.1/apollo-release-manifest.json'
 ```
 
-State that `CR_PAT` is a classic PAT with `write:packages`, is never persisted
-in project files, and should be revoked/rotated independently. Record that
-current GitHub documentation reports Container Registry storage/bandwidth as
-free and public container pulls as anonymous, but the operator must recheck
-policy before future releases. Remove the failed Actions run from the active
-release gate while retaining it only as historical evidence in the ignored
-operator record.
+State that the PAT is a classic PAT with `write:packages`, is requested only
+after preparation, is never placed in the publisher environment or persisted
+in project files, and should be revoked/rotated independently. The plan must
+not depend on GitHub Actions or any billing feature. Remove the failed Actions
+run from the active release gate while retaining it only as historical evidence
+in the ignored operator record.
 
 Replace the API suite's workflow-source assertions with direct contracts for
 the shared catalog, operator CLI entry point, source-archive validation gate,

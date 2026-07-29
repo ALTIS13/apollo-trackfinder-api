@@ -118,11 +118,17 @@ release directory.
 The following is a future owner-operated procedure, not a command executed by
 this local proof. It requires a separate explicit owner approval for that
 specific publication action. Before running it, the owner must create a
-classic PAT with `write:packages` and place it only in the current PowerShell
-environment. It is never persisted in project files and must be revoked or
-rotated independently. The publisher accepts no credentials or registry
-options. Complete preparation before authentication, then keep authentication
-and publication inside the cleanup boundary:
+classic PAT with `write:packages`, but must not place it in the environment
+before preparation completes. It is never persisted in project files and must
+be revoked or rotated independently. The publisher accepts no credentials or
+registry options. Complete preparation before requesting the credential, then
+keep authentication and publication inside the cleanup boundary:
+
+The publisher's child allowlist intentionally preserves only the operating
+system paths required for Git, Docker, temporary storage, and Docker's existing
+credential store. Credential values and unrelated ambient variables are not
+forwarded. Publication regenerates the archive from the approved commit and
+uses that fresh archive as the only build input.
 
 ```powershell
 $approvedSourceCommit = '7008273fd7cedf33174bd51489e63f2a1b67c05c'
@@ -130,15 +136,25 @@ $releaseId = 'v0.1.0-rc.1'
 $preparation = pnpm --silent release:prepare -- --mode production --release-id $releaseId --source-commit $approvedSourceCommit | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Release preparation failed' }
 
+$pat = $null
+$patPointer = [IntPtr]::Zero
+$plainPat = $null
 try {
-  $env:CR_PAT | docker login ghcr.io -u ALTIS13 --password-stdin
+  $pat = Read-Host 'GHCR classic PAT' -AsSecureString
+  $patPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($pat)
+  $plainPat = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($patPointer)
+  $plainPat | docker login ghcr.io -u ALTIS13 --password-stdin
   if ($LASTEXITCODE -ne 0) { throw 'GHCR login failed' }
 
   pnpm --silent release:publish -- --mode production --release-id $releaseId --source-commit $approvedSourceCommit --receipt $preparation.receiptPath
   if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
 }
 finally {
-  Remove-Item Env:\CR_PAT -ErrorAction SilentlyContinue
+  $plainPat = $null
+  if ($patPointer -ne [IntPtr]::Zero) {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($patPointer)
+  }
+  if ($null -ne $pat) { $pat.Dispose() }
 }
 
 pnpm --silent release:validate -- --env-file '<PRIVATE_RELEASE_ENV>' --mode production --release-manifest '.ops-private/releases/v0.1.0-rc.1/apollo-release-manifest.json'
@@ -154,12 +170,14 @@ That visibility action and every later HomeNode rollout action remain separate
 approval gates; no production publish, tag, release, package setting, or
 Coolify pull proof is implied by this record.
 
-The focused fake-command publisher proof passed `71/71` in `10.96s`. The
-combined successful prepare/publication path records `52` commands: `15`
+The focused fake-command publisher proof passed `79/79`. The combined
+successful prepare/publication path records `55` commands: `15`
 source-preparation commands, then exact archive extraction, `11` pre-push tag
-inspections, one owned builder create, `11` Linux/amd64 builds with owned
+inspections, exact-name builder preflight, one owned builder create, `11`
+Linux/amd64 builds with owned
 metadata files, `11` immutable-tag digest inspections, and exact owned-builder
-inspect/removal. It covers `11` custom targets plus catalog-pinned Redis.
+inspect/removal/absence confirmation. It covers `11` custom targets plus
+catalog-pinned Redis.
 Preparation durably binds release/source identity, archive and tree hashes,
 protocol version, and image catalog; publication consumes that receipt once
 without running archived lifecycle or test commands. Every custom image uses
@@ -176,6 +194,8 @@ worker `186/2` tests and `9/1` files in `8.42s`; and root typecheck in `21.1s`.
 Generated ignored Platform/integrations `dist` roots were moved intact into
 ignored `.ops-private` quarantine after typecheck; they were not deleted or
 tracked. This local evidence does not authorize publication or rollout.
+The post-review final-tree supplement passed scripts `276/4` in `276.58s`, API
+release contract `21/21`, and root typecheck.
 
 Production mode requires the artifact and exact approved repositories. The
 separate `loopback-local-smoke` mode accepts only loopback repositories and no

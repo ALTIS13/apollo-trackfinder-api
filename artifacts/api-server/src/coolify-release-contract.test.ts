@@ -568,7 +568,7 @@ describe("Apollo operator image publication", () => {
       '"tar",\n      ["-xf", temporaryArchivePath, "-C", validationRoot]',
     );
     expect(publisher).toContain(
-      '"tar",\n      ["-xf", archivePath, "-C", buildRoot]',
+      '"tar",\n      ["-xf", regeneratedArchivePath, "-C", buildRoot]',
     );
     expect(publisher).toContain(
       "for (const validation of sourceValidationCommands)",
