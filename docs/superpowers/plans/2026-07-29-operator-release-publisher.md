@@ -355,7 +355,81 @@ git add package.json scripts/src/operator-release.ts scripts/src/operator-releas
 git commit -m "feat(release): publish immutable images locally"
 ```
 
-### Task 3: Remove Actions and rebind rollout documentation
+### Task 3: Stabilize the operator source-validation gate
+
+**Files:**
+
+- Modify: `scripts/src/backup-contract.test.ts`
+
+**Interfaces:**
+
+- Consumes: Task 2's complete `pnpm --filter @workspace/scripts test` source
+  gate.
+- Produces: deterministic backup-contract coverage that remains fail-closed but
+  does not fail solely because a Git Bash/Docker subprocess exceeds Vitest's
+  five-second default.
+
+- [ ] **Step 1: Record the existing RED evidence**
+
+Run:
+
+```powershell
+pnpm --filter @workspace/scripts test
+```
+
+Expected on the current checkpoint: the suite is non-green with varying
+five-second timeouts in unchanged parameterized backup/restore contract cases,
+while the remaining scripts tests pass.
+
+- [ ] **Step 2: Pin the Docker fixture and bound subprocess test timeouts**
+
+Use one exact PostgreSQL 16 fixture reference:
+
+```ts
+const postgres16Fixture =
+  "docker.io/library/postgres:16-bookworm@sha256:92620daddcd947f8d5ab5ba66e848702fe443d87fed30c4cea8e389fd78dfc55";
+const shellContractTimeoutMs = 30_000;
+const dockerContractTimeoutMs = 90_000;
+```
+
+Replace the mutable `postgres:16` mode-test image. Apply
+`shellContractTimeoutMs` only to parameterized restore/object-class cases that
+spawn Git Bash and have already exceeded the five-second default. Apply
+`dockerContractTimeoutMs` to the non-opt-in Linux mode Docker proof. Do not
+weaken assertions, skip tests, or enable the opt-in destructive restore proofs.
+
+- [ ] **Step 3: Prove the focused file is stable**
+
+Run the same file three times:
+
+```powershell
+1..3 | ForEach-Object {
+  pnpm --filter @workspace/scripts exec vitest run src/backup-contract.test.ts --maxWorkers=1
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+```
+
+Expected each run: `70 passed`, `2 skipped`, exit `0`.
+
+- [ ] **Step 4: Prove the complete scripts gate**
+
+Run:
+
+```powershell
+pnpm --filter @workspace/scripts test
+pnpm --filter @workspace/scripts run typecheck
+```
+
+Expected: all non-opt-in tests pass and typecheck exits `0`.
+
+- [ ] **Step 5: Commit Task 3**
+
+```powershell
+git add scripts/src/backup-contract.test.ts
+git commit -m "test(release): stabilize operator source gate"
+```
+
+### Task 4: Remove Actions and rebind rollout documentation
 
 **Files:**
 
@@ -409,7 +483,8 @@ Document this sequence:
 ```powershell
 $env:CR_PAT | docker login ghcr.io -u ALTIS13 --password-stdin
 Remove-Item Env:\CR_PAT
-pnpm release:publish -- --mode production --release-id v0.1.0-rc.1 --source-commit d0f74122d9e415d7cb9571be678188657f1ce7eb
+$approvedSourceCommit = git rev-parse HEAD
+pnpm release:publish -- --mode production --release-id v0.1.0-rc.1 --source-commit $approvedSourceCommit
 pnpm release:validate -- --env-file '<PRIVATE_RELEASE_ENV>' --mode production --release-manifest '.ops-private/releases/v0.1.0-rc.1/apollo-release-manifest.json'
 ```
 
@@ -442,14 +517,14 @@ git diff --check
 Expected: all tests/typechecks/format checks pass; no tracked release workflow
 or active workflow-produced guidance remains.
 
-- [ ] **Step 5: Commit Task 3**
+- [ ] **Step 5: Commit Task 4**
 
 ```powershell
 git add .github/workflows/apollo-release-images.yml IMPLEMENTATION_STATUS.md docs/operations/apollo-production-rollout.md docs/operations/homenode-coolify-preflight.md docs/operations/apollo-backup-restore.md artifacts/api-server/src/coolify-release-contract.test.ts artifacts/music-player/Dockerfile scripts/src/operator-release.test.ts
 git commit -m "docs(release): switch to operator publication"
 ```
 
-### Task 4: Exact local proof and release readiness record
+### Task 5: Exact local proof and release readiness record
 
 **Files:**
 
@@ -459,8 +534,7 @@ git commit -m "docs(release): switch to operator publication"
 
 **Interfaces:**
 
-- Consumes: completed publisher implementation and the exact validated source
-  `d0f74122d9e415d7cb9571be678188657f1ce7eb`.
+- Consumes: the final feature-branch checkpoint after Tasks 1-4.
 - Produces: local publisher proof without contacting GHCR or HomeNode.
 
 - [ ] **Step 1: Run deterministic fake-command contract proof**
@@ -499,12 +573,12 @@ Set status to `OPERATOR_PUBLISHER_LOCAL_VALIDATED`. State explicitly:
 
 - the publisher is ready but no production image has been pushed;
 - publication requires an owner-created classic PAT with `write:packages`;
-- the exact publication command targets `d0f7412`;
+- the exact publication command targets the final locally proven commit;
 - first package visibility must be changed to public before anonymous Coolify
   pull proof;
 - HomeNode rollout remains behind its existing explicit approval gates.
 
-- [ ] **Step 4: Commit Task 4**
+- [ ] **Step 4: Commit Task 5**
 
 ```powershell
 git add IMPLEMENTATION_STATUS.md docs/operations/apollo-production-rollout.md
