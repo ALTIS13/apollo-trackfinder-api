@@ -5,7 +5,7 @@ Last updated: 2026-07-29.
 ## Coolify production release package
 
 Status: `LOCAL_RELEASE_VALIDATED`. The exact local image source is
-`0f1e89ede85a07e6ac08a208328a08df29c1fcde`; this status does not claim a
+`d0f74122d9e415d7cb9571be678188657f1ce7eb`; this status does not claim a
 deployment, workflow dispatch, GHCR publication, or remote change.
 
 - The production package consists of
@@ -17,7 +17,7 @@ deployment, workflow dispatch, GHCR publication, or remote change.
   targets plus pinned Redis to a disposable local registry, resolved 12
   registry digests, validated a temporary non-zero digest env in explicit
   loopback mode, and started the exact two-stack package from commit
-  `0f1e89e`. Every build named an exact task-owned builder created from the
+  `d0f7412`. Every build named an exact task-owned builder created from the
   verified local Docker context; the adversarial persistent-remote-builder
   contract passed.
 - The live proof passed registration/bootstrap/login, invitation redemption,
@@ -41,7 +41,10 @@ deployment, workflow dispatch, GHCR publication, or remote change.
   host `80/443`; no Coolify/Traefik domain labels exist.
 - Malformed multiline admin secret files fail without disclosure. The admin
   nginx access log now omits the Basic Auth identity, closing the real
-  `package-11` disclosure found by the final log scan.
+  `package-11` disclosure found by the final log scan. The tracked credential
+  verifier also compares exact source and reconstructed byte counts, so an
+  embedded NUL or any other binary normalization fails silently before
+  credential equality can pass.
 - Production validation now requires the exact workflow artifact source commit,
   repository, digest, and immutable reference for every image and renders
   Compose from an isolated allowlist. The explicit local mode remains separate.
@@ -53,19 +56,24 @@ deployment, workflow dispatch, GHCR publication, or remote change.
   `18 placeholder_image_digest`, `1 release_artifact`, and
   `1 release_environment_value` errors, with `0 environment_contract` and no
   other category.
-- Fresh Task 3 verification passed production smoke `43/43` in `801.560s`,
-  pinned Caddy `10/10` in `12.134s`, PostgreSQL 16 and 17 encrypted restore
-  proofs at `1 passed / 71 skipped` in `32.203s` and `17.174s`, full scripts
-  `194 passed / 4 opt-in skipped`, and root typecheck. Product suites passed:
-  API `607 passed / 8 skipped`, Platform API `422 passed / 21 skipped`, search
-  `142 passed / 1 skipped`, integrations `106 passed / 10 skipped`, download
-  worker `186 passed / 2 skipped`, admin `218 passed`, and music player
-  `118 passed`. The full scripts gate includes the hostile rendered-environment
-  matrix and the tracked exact newline-free credential verifier.
+- Fresh binary-safe release verification passed production smoke `43/43` in
+  `987.59s`, pinned Caddy `10/10` in `16.30s`, PostgreSQL 16 and 17 encrypted
+  restore proofs at `1 passed / 71 skipped` in `19.08s` and `18.54s`, full
+  scripts `194 passed / 4 opt-in skipped` in `129.49s`, and root typecheck in
+  `18.4s`. Product suites passed: API `607 passed / 8 skipped` in `23.63s`,
+  Platform API `422 passed / 21 skipped` in `14.32s`, search
+  `142 passed / 1 skipped` in `8.26s`, integrations
+  `107 passed / 10 skipped` in `5.48s`, download worker
+  `186 passed / 2 skipped` in `8.45s`, admin `218 passed` in `11.07s`, and
+  music player `118 passed` in `6.28s`. The full scripts gate includes the
+  hostile rendered-environment matrix and the tracked exact newline-free,
+  binary-safe credential verifier.
 - Final owned-resource inventory is zero for task builders and cache, containers,
   networks, volumes, localhost image references, registry files, temporary
   secrets, repository `.tmp`, OS-temp owned roots, and durable pending/active
-  ownership records; no broad prune was used.
+  ownership records. One unrelated concurrently created ambient image and one
+  anonymous ambient volume matched no task ownership contract and were
+  preserved; no broad prune was used.
 - Local encrypted backup/restore evidence is separate:
   `pg16-disposable-proof-001` for PostgreSQL 16 Platform/TF and
   `pg17-integrations-disposable-proof-001` for PostgreSQL 17 integrations.

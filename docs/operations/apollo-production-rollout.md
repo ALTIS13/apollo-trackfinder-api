@@ -4,7 +4,7 @@ Status: `LOCAL_RELEASE_VALIDATED`
 
 This is an owner-reviewable rollout plan, not a deployment record. The final
 fix wave validated the exact package locally from source commit
-`0f1e89ede85a07e6ac08a208328a08df29c1fcde`. HomeNode, Coolify, the host
+`d0f74122d9e415d7cb9571be678188657f1ce7eb`. HomeNode, Coolify, the host
 Caddy configuration, UFW, DNS, GitHub settings, GHCR, remote databases, and
 remote volumes were not contacted or mutated.
 
@@ -86,23 +86,23 @@ disclosure.
 ## Image Evidence
 
 The local proof built all custom targets for Linux/amd64 from
-`0f1e89ede85a07e6ac08a208328a08df29c1fcde`, pushed them to a disposable
+`d0f74122d9e415d7cb9571be678188657f1ce7eb`, pushed them to a disposable
 loopback registry, and resolved these registry digests:
 
 | Release variable                         | Target                     | Local proof digest                                                        |
 | ---------------------------------------- | -------------------------- | ------------------------------------------------------------------------- |
-| `PLATFORM_API_IMAGE`                     | `platform-api`             | `sha256:0567da6b86658c45f35df5b6d165b9fe00cfb37465e796b3499a62cc250b6111` |
-| `PLATFORM_POSTGRES_IMAGE`                | `platform-postgres`        | `sha256:b114ca869273b1ab64082d4eb156239ba32112139a2767808317d3948588c8cf` |
+| `PLATFORM_API_IMAGE`                     | `platform-api`             | `sha256:60560f7030b5f172cd668f889dc54d7cdb0ab750a7fff6b1787d278e6e80b82e` |
+| `PLATFORM_POSTGRES_IMAGE`                | `platform-postgres`        | `sha256:b615aac17ef8704b9f059dc705ac1c7717ce752d350ab09636b08613777d8403` |
 | `PLATFORM_REDIS_IMAGE`, `TF_REDIS_IMAGE` | pinned Redis mirror        | `sha256:fe24fa2bcb59930f8863cf36a472df24efaccd8be4ee98ffe528f06d57d68dc2` |
-| `TF_ADMIN_IMAGE`                         | `tf-admin`                 | `sha256:a300dcad037dbebb4b478b72d1f250b6282938710ecb181a89e5e5974f5b94fa` |
-| `TF_API_IMAGE`                           | `tf-api`                   | `sha256:28c9f7fc7893394ba8561b1e9272238907534257932eb8085417ca6ee1d370b7` |
-| `TF_DOWNLOAD_REDIS_IMAGE`                | `tf-download-redis`        | `sha256:d141dca1f98cc7ab9ee3d373d9edcabe59e8b015f000e9cc578d30687e97bde8` |
-| `TF_DOWNLOAD_WORKER_IMAGE`               | `tf-download-worker`       | `sha256:277888042df5611e117a8b5993c2c743b61217e1ef06e4508d30f338094aab54` |
-| `TF_INTEGRATIONS_IMAGE`                  | `tf-integrations`          | `sha256:6d98f03a1aa01af94e959f232899ed5876df90c99ea073e21eeaff9973a4ecbf` |
-| `TF_INTEGRATIONS_POSTGRES_IMAGE`         | `tf-integrations-postgres` | `sha256:e815c3fb531db2cbd78a6af53ceba0992b40b19a604100876b2982cada2dcd14` |
-| `TF_POSTGRES_IMAGE`                      | `tf-postgres`              | `sha256:5c3567bad138eb88998ca7fd692c7a1bbe30289a144ca8dac2be8f6d5ea324c5` |
-| `TF_SEARCH_IMAGE`                        | `tf-search`                | `sha256:3513c488f40a8bc808553acfd5889aaff3aa946d3bd166ceba1808ef2cbc1798` |
-| `TF_WEB_IMAGE`                           | `tf-web`                   | `sha256:c5d06fd397271c4dedca67b184f37a46d7d4057787bea425c648b6387f9850b8` |
+| `TF_ADMIN_IMAGE`                         | `tf-admin`                 | `sha256:9414474af8533e4b70460126e5ea644f800113591c48c074742f553a1e3b9a09` |
+| `TF_API_IMAGE`                           | `tf-api`                   | `sha256:3330741dc8413704aea069a1070858d0075759c68a0d75444be7fb6e501959f1` |
+| `TF_DOWNLOAD_REDIS_IMAGE`                | `tf-download-redis`        | `sha256:199c9f5f2c8085a2fcf4c115bacb1ecd7eb454d64c84921302b172e9dfad1de6` |
+| `TF_DOWNLOAD_WORKER_IMAGE`               | `tf-download-worker`       | `sha256:873b6a95e3508fb232632c265e6007985aa8b0d067e6475bebef40ca05a0eae7` |
+| `TF_INTEGRATIONS_IMAGE`                  | `tf-integrations`          | `sha256:f2d4ac1f58afdb9e9bc776e9d8463bd49059d77b36ab62abfc9854e8234a1386` |
+| `TF_INTEGRATIONS_POSTGRES_IMAGE`         | `tf-integrations-postgres` | `sha256:04793e9c96c9aaacdf7840b21c421f4e0ea72405081cc4c6dc6e2b654ac5cadc` |
+| `TF_POSTGRES_IMAGE`                      | `tf-postgres`              | `sha256:e8e380cb07ccfe1d946bb72fcd752ccd31557986d5d360148cbc7a8223df719f` |
+| `TF_SEARCH_IMAGE`                        | `tf-search`                | `sha256:fc6234dfc9dd0c6ea5c34352e6710710e5e4113c25e61c9cdad4648740a844fe` |
+| `TF_WEB_IMAGE`                           | `tf-web`                   | `sha256:b279663a21e27158b0077e42b2cbacd2453282f5632f4c5c430b48b01d54a327` |
 
 The disposable registry and all references were removed. These digests are
 local evidence, not deployable GHCR references. An approved release workflow
@@ -295,7 +295,7 @@ Rollback order:
 ## Local Proof
 
 The opt-in production smoke at
-`0f1e89ede85a07e6ac08a208328a08df29c1fcde` created and explicitly selected a
+`d0f74122d9e415d7cb9571be678188657f1ce7eb` created and explicitly selected a
 task-owned Buildx builder from the verified local Docker context, built all
 custom targets, mirrored pinned Redis, validated a temporary non-zero digest
 env in explicit `loopback-local-smoke` mode, and started both exact manifests.
@@ -310,10 +310,12 @@ after a producer stop longer than 90 seconds. It restarted long-running
 services, proved persistence, ran the 12-case Caddy matrix through real
 upstreams, scanned logs for disposable values, and reported exact cleanup zero
 for builders, builder cache, containers, images, networks, volumes, registry
-files, and temporary secrets. The fresh smoke passed `43/43` in `801.560s`;
+files, and temporary secrets. The fresh smoke passed `43/43` in `987.59s`;
 the independent post-smoke inventory also returned zero for every task-owned
 container, network, volume, image reference, builder, cache, registry file,
-temporary path, and repository `.tmp` item.
+temporary path, and repository `.tmp` item. One unrelated concurrently created
+ambient image and one anonymous ambient volume matched no task ownership
+contract and were preserved; no broad prune was used.
 
 The checked-in `deploy/coolify/release.env.example` intentionally contains zero
 digests and a zero source commit. It was validated in explicit `production` mode
@@ -324,7 +326,15 @@ release artifact. The invocation fails closed with exactly `19 image_provenance`
 `18 placeholder_image_digest`, `1 release_artifact`, and
 `1 release_environment_value`, with `0 environment_contract` and no other
 category. It must never be used for deployment. Fresh supporting validation
-passed pinned Caddy `10/10` in `12.134s`, PostgreSQL 16 and 17 restore proofs
-at `1 passed / 71 skipped` in `32.203s` and `17.174s`, full scripts
-`194 passed / 4 opt-in skipped`, every required product suite, and root
-typecheck. No release workflow was dispatched.
+passed pinned Caddy `10/10` in `16.30s`, PostgreSQL 16 and 17 restore proofs
+at `1 passed / 71 skipped` in `19.08s` and `18.54s`, full scripts
+`194 passed / 4 opt-in skipped` in `129.49s`, API
+`607 passed / 8 skipped` in `23.63s`, Platform API
+`422 passed / 21 skipped` in `14.32s`, search
+`142 passed / 1 skipped` in `8.26s`, integrations
+`107 passed / 10 skipped` in `5.48s`, download worker
+`186 passed / 2 skipped` in `8.45s`, admin `218 passed` in `11.07s`, music
+player `118 passed` in `6.28s`, and root typecheck in `18.4s`. The scripts gate
+included both the hostile rendered-environment matrix and the binary-safe
+newline-free credential verifier with silent embedded-NUL rejection. No
+release workflow was dispatched.

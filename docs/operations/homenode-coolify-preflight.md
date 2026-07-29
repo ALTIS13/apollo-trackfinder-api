@@ -15,9 +15,9 @@ a remote change.
 The final fix wave validated the production manifests, exact provenance
 validator, custom image targets, file-backed secret contracts, application
 flows, persistence, and the complete Caddy matrix locally from
-`0f1e89ede85a07e6ac08a208328a08df29c1fcde`. The proof used a task-owned local
+`d0f74122d9e415d7cb9571be678188657f1ce7eb`. The proof used a task-owned local
 Buildx builder and only `127.0.0.1:18200..18203`, dispatched no workflow, and
-passed production smoke `43/43` in `801.560s` with exact cleanup zero. It also
+passed production smoke `43/43` in `987.59s` with exact cleanup zero. It also
 exercised the exact `baseline` profile
 one-shot contracts against a separate disposable database, restored granted
 search after restart, held a signed producer down beyond the 90-second stale
@@ -39,16 +39,21 @@ production validation against the downloaded release manifest. The complete
 rollout and rollback order is in
 `docs/operations/apollo-production-rollout.md`.
 
-Fresh supporting validation passed pinned Caddy `10/10` in `12.134s`,
+Fresh supporting validation passed pinned Caddy `10/10` in `16.30s`,
 PostgreSQL 16 and 17 encrypted restore proofs at
-`1 passed / 71 skipped` in `32.203s` and `17.174s`, full scripts
-`194 passed / 4 opt-in skipped`, API `607 passed / 8 skipped`, Platform API
-`422 passed / 21 skipped`, search `142 passed / 1 skipped`, integrations
-`106 passed / 10 skipped`, download worker `186 passed / 2 skipped`, admin
-`218 passed`, music player `118 passed`, and root typecheck. The scripts gate
+`1 passed / 71 skipped` in `19.08s` and `18.54s`, full scripts
+`194 passed / 4 opt-in skipped` in `129.49s`, API
+`607 passed / 8 skipped` in `23.63s`, Platform API
+`422 passed / 21 skipped` in `14.32s`, search
+`142 passed / 1 skipped` in `8.26s`, integrations
+`107 passed / 10 skipped` in `5.48s`, download worker
+`186 passed / 2 skipped` in `8.45s`, admin `218 passed` in `11.07s`, music
+player `118 passed` in `6.28s`, and root typecheck in `18.4s`. The scripts gate
 included the hostile rendered-environment matrix and the tracked exact
-newline-free credential verifier. The independent owned-resource inventory
-was zero, and no workflow, registry publication, retained-volume access, or
+newline-free, binary-safe credential verifier, including silent embedded-NUL
+rejection. The independent task-owned resource inventory was zero. One
+unrelated concurrently created ambient image and one anonymous ambient volume
+were preserved. No workflow, registry publication, retained-volume access, or
 remote mutation occurred.
 
 The preflight's remote observation remains read-only. The retained legacy class
