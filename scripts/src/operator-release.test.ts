@@ -1673,6 +1673,16 @@ describe("operator release CLI", () => {
     );
   });
 
+  it("pins the complete scripts source gate", async () => {
+    const scriptsPackageJson = JSON.parse(
+      await readFile(join(workspaceRoot, "scripts", "package.json"), "utf8"),
+    ) as { scripts?: Record<string, string> };
+
+    expect(scriptsPackageJson.scripts?.test).toBe(
+      "vitest run --maxWorkers=1 --testTimeout=10000",
+    );
+  });
+
   it("binds production publication guidance to the operator publisher", async () => {
     const releaseWorkflow = join(
       workspaceRoot,

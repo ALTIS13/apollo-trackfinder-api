@@ -524,7 +524,93 @@ git add .github/workflows/apollo-release-images.yml IMPLEMENTATION_STATUS.md doc
 git commit -m "docs(release): switch to operator publication"
 ```
 
-### Task 5: Exact local proof and release readiness record
+### Task 5: Stabilize the complete scripts source gate
+
+**Files:**
+
+- Modify: `scripts/package.json`
+- Modify: `scripts/src/operator-release.test.ts`
+- Modify: `docs/superpowers/plans/2026-07-29-operator-release-publisher.md`
+
+**Interfaces:**
+
+- Consumes: Task 2's exact `pnpm --filter @workspace/scripts test` source
+  validation command.
+- Produces: the same command with bounded package-local scheduling and timeout
+  defaults; no assertion, test row, or opt-in condition is removed.
+
+- [ ] **Step 1: Preserve the new RED evidence**
+
+Record the exact post-Task-4 failure:
+
+```text
+pnpm --filter @workspace/scripts test
+4 failed | 238 passed | 4 skipped
+```
+
+The failures occurred in four different synchronous Docker/Git Bash contract
+tests while files ran concurrently. Running the same package with
+`--maxWorkers=1` reduced the result to one different five-second timeout
+(`1 failed | 241 passed | 4 skipped`), proving serialization alone is
+insufficient. The already observed
+`pnpm --filter @workspace/scripts test -- --testTimeout 10000` run passed
+`242 passed | 4 skipped`, proving the five-second package default is also part
+of the failure mode.
+
+- [ ] **Step 2: Write the failing package-gate contract**
+
+Add one source contract in `scripts/src/operator-release.test.ts` requiring:
+
+```ts
+expect(scriptsPackageJson.scripts?.test).toBe(
+  "vitest run --maxWorkers=1 --testTimeout=10000",
+);
+```
+
+Run:
+
+```powershell
+pnpm --filter @workspace/scripts exec vitest run src/operator-release.test.ts
+```
+
+Expected: FAIL because `scripts/package.json` still uses `vitest run`.
+
+- [ ] **Step 3: Apply the minimal package-local fix**
+
+Set only the scripts package test command:
+
+```json
+"test": "vitest run --maxWorkers=1 --testTimeout=10000"
+```
+
+Do not change root/product package test commands, individual assertions,
+existing longer per-test timeouts, or opt-in restore proof conditions.
+
+- [ ] **Step 4: Prove the exact source gate repeatedly**
+
+Run the exact command three times:
+
+```powershell
+1..3 | ForEach-Object {
+  pnpm --filter @workspace/scripts test
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+pnpm --filter @workspace/scripts run typecheck
+pnpm exec prettier --check scripts/package.json scripts/src/operator-release.test.ts docs/superpowers/plans/2026-07-29-operator-release-publisher.md
+git diff --check
+```
+
+Expected each test run: all non-opt-in scripts tests pass with four existing
+opt-in skips. Typecheck, formatting, and diff checks exit `0`.
+
+- [ ] **Step 5: Commit Task 5**
+
+```powershell
+git add scripts/package.json scripts/src/operator-release.test.ts docs/superpowers/plans/2026-07-29-operator-release-publisher.md
+git commit -m "test(release): stabilize complete source gate"
+```
+
+### Task 6: Exact local proof and release readiness record
 
 **Files:**
 
@@ -534,7 +620,7 @@ git commit -m "docs(release): switch to operator publication"
 
 **Interfaces:**
 
-- Consumes: the final feature-branch checkpoint after Tasks 1-4.
+- Consumes: the final feature-branch checkpoint after Tasks 1-5.
 - Produces: local publisher proof without contacting GHCR or HomeNode.
 
 - [ ] **Step 1: Run deterministic fake-command contract proof**
@@ -578,7 +664,7 @@ Set status to `OPERATOR_PUBLISHER_LOCAL_VALIDATED`. State explicitly:
   pull proof;
 - HomeNode rollout remains behind its existing explicit approval gates.
 
-- [ ] **Step 4: Commit Task 5**
+- [ ] **Step 4: Commit Task 6**
 
 ```powershell
 git add IMPLEMENTATION_STATUS.md docs/operations/apollo-production-rollout.md
