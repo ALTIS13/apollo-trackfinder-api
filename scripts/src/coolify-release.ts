@@ -3,6 +3,34 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  approvedImageRepositories,
+  artifactImageNames,
+  operatorReleaseImageTargets,
+  pinnedRedisReference,
+  releaseImageCatalog,
+  releaseImageEnvironmentNames,
+  type ArtifactImageName,
+  type OperatorReleaseImageTarget,
+  type ReleaseArtifact,
+  type ReleaseArtifactImage,
+  type ReleaseImageCatalogEntry,
+} from "./release-images.js";
+
+export {
+  approvedImageRepositories,
+  artifactImageNames,
+  operatorReleaseImageTargets,
+  pinnedRedisReference,
+  releaseImageCatalog,
+  releaseImageEnvironmentNames,
+  type ArtifactImageName,
+  type OperatorReleaseImageTarget,
+  type ReleaseArtifact,
+  type ReleaseArtifactImage,
+  type ReleaseImageCatalogEntry,
+};
+
 export type ComposePort = {
   host_ip?: string;
   mode?: string;
@@ -101,19 +129,6 @@ export type ReleaseValidationInput = {
 };
 
 export type ReleaseValidationMode = "production" | "loopback-local-smoke";
-
-export type ReleaseArtifactImage = {
-  imageDigest: string;
-  imageReference: string;
-  name: string;
-  repository: string;
-};
-
-export type ReleaseArtifact = {
-  formatVersion: 1;
-  images: ReleaseArtifactImage[];
-  sourceCommit: string;
-};
 
 export type ReleaseValidationError = {
   code: string;
@@ -316,35 +331,6 @@ const deployedAtEnvironmentNames = [
 ] as const;
 const sourceCommitPattern = /^[a-f0-9]{40}$/;
 const zeroSourceCommit = "0".repeat(40);
-const artifactImageNames = [
-  "platform-api",
-  "platform-postgres",
-  "redis",
-  "tf-admin",
-  "tf-api",
-  "tf-download-redis",
-  "tf-download-worker",
-  "tf-integrations",
-  "tf-integrations-postgres",
-  "tf-postgres",
-  "tf-search",
-  "tf-web",
-] as const;
-type ArtifactImageName = (typeof artifactImageNames)[number];
-const approvedImageRepositories: Readonly<Record<ArtifactImageName, string>> = {
-  "platform-api": "ghcr.io/altis13/apollo-platform-api",
-  "platform-postgres": "ghcr.io/altis13/apollo-platform-postgres",
-  redis: "docker.io/library/redis",
-  "tf-admin": "ghcr.io/altis13/apollo-tf-admin",
-  "tf-api": "ghcr.io/altis13/apollo-tf-api",
-  "tf-download-redis": "ghcr.io/altis13/apollo-tf-download-redis",
-  "tf-download-worker": "ghcr.io/altis13/apollo-tf-download-worker",
-  "tf-integrations": "ghcr.io/altis13/apollo-tf-integrations",
-  "tf-integrations-postgres": "ghcr.io/altis13/apollo-tf-integrations-postgres",
-  "tf-postgres": "ghcr.io/altis13/apollo-tf-postgres",
-  "tf-search": "ghcr.io/altis13/apollo-tf-search",
-  "tf-web": "ghcr.io/altis13/apollo-tf-web",
-};
 const serviceArtifactImages: Readonly<Record<string, ArtifactImageName>> = {
   "platform-api": "platform-api",
   "platform-migrate": "platform-api",
@@ -364,23 +350,6 @@ const serviceArtifactImages: Readonly<Record<string, ArtifactImageName>> = {
   "tf-role-bootstrap": "tf-postgres",
   "tf-search": "tf-search",
   "tf-web": "tf-web",
-};
-const releaseImageEnvironmentNames: Readonly<
-  Record<string, ArtifactImageName>
-> = {
-  PLATFORM_API_IMAGE: "platform-api",
-  PLATFORM_POSTGRES_IMAGE: "platform-postgres",
-  PLATFORM_REDIS_IMAGE: "redis",
-  TF_ADMIN_IMAGE: "tf-admin",
-  TF_API_IMAGE: "tf-api",
-  TF_DOWNLOAD_REDIS_IMAGE: "tf-download-redis",
-  TF_DOWNLOAD_WORKER_IMAGE: "tf-download-worker",
-  TF_INTEGRATIONS_IMAGE: "tf-integrations",
-  TF_INTEGRATIONS_POSTGRES_IMAGE: "tf-integrations-postgres",
-  TF_POSTGRES_IMAGE: "tf-postgres",
-  TF_REDIS_IMAGE: "redis",
-  TF_SEARCH_IMAGE: "tf-search",
-  TF_WEB_IMAGE: "tf-web",
 };
 
 type NetworkContract = {

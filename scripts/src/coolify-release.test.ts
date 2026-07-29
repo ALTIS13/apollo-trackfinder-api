@@ -1527,7 +1527,7 @@ describe("validateCoolifyRelease", () => {
     );
   });
 
-  it("matches the release source commit and every immutable image to the workflow artifact", () => {
+  it("matches the release source commit and every immutable image to the operator release manifest", () => {
     const commitMismatch = exactInput();
     commitMismatch.releaseArtifact!.sourceCommit = "b".repeat(40);
     expect(errorCodes(commitMismatch)).toContain("source_commit_mismatch");
