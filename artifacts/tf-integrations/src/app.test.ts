@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { request as httpRequest } from "node:http";
+import { request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { createSignedBodySignature } from "@workspace/module-runtime-contract";
@@ -20,6 +20,19 @@ import { HmacInternalRequestAuthenticator } from "./internal-auth.js";
 const commandSecret = "c".repeat(32);
 const requestId = "10000000-0000-4000-8000-000000000001";
 const accountId = "20000000-0000-4000-8000-000000000002";
+const fetchBlockedPorts = new Set([
+  0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69,
+  77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119,
+  123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515,
+  526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990,
+  993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000,
+  6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
+]);
+
+function isFetchBlockedPort(port: number): boolean {
+  return fetchBlockedPorts.has(port);
+}
+
 const command: TfIntegrationsCommand = {
   schemaVersion: 1,
   requestId,
@@ -102,22 +115,36 @@ function app(
   });
 }
 
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) =>
+      error === undefined ? resolve() : reject(error),
+    );
+  });
+}
+
+async function listenForFetch(
+  instance: ReturnType<typeof createTfIntegrationsApp>,
+): Promise<{ readonly port: number; readonly server: Server }> {
+  for (;;) {
+    const server = instance.listen(0, "127.0.0.1");
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const { port } = server.address() as AddressInfo;
+    if (!isFetchBlockedPort(port)) return { port, server };
+    await closeServer(server);
+  }
+}
+
 async function request(
   instance: ReturnType<typeof createTfIntegrationsApp>,
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  const server = instance.listen(0, "127.0.0.1");
-  await new Promise<void>((resolve) => server.once("listening", resolve));
-  const { port } = server.address() as AddressInfo;
+  const { port, server } = await listenForFetch(instance);
   try {
     return await fetch(`http://127.0.0.1:${port}${path}`, init);
   } finally {
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) =>
-        error === undefined ? resolve() : reject(error),
-      );
-    });
+    await closeServer(server);
   }
 }
 
@@ -168,6 +195,11 @@ async function rawTargetRequest(
 }
 
 describe("TF integrations private HTTP runtime", () => {
+  it("classifies fetch-blocked listener ports", () => {
+    expect(isFetchBlockedPort(6000)).toBe(true);
+    expect(isFetchBlockedPort(49_152)).toBe(false);
+  });
+
   it("reports liveness independently from database readiness", async () => {
     const result = await request(
       app({
