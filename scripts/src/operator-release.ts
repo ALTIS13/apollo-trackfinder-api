@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { lstat, mkdir, open, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -59,6 +59,12 @@ export type OperatorReleaseDependencies = {
     args: readonly string[],
     options: { cwd: string; env?: NodeJS.ProcessEnv; timeoutMs?: number },
   ): Promise<OperatorReleaseCommandResult>;
+  publicationCheckpoint?(
+    checkpoint:
+      | "completion_written"
+      | "final_environment_written"
+      | "final_manifest_written",
+  ): Promise<void>;
   randomId(): string;
   temporaryRoot(): string;
 };
@@ -75,6 +81,7 @@ const sourceCommitPattern = /^[a-f0-9]{40}$/;
 const zeroSourceCommit = "0".repeat(40);
 const digestPattern = /^sha256:[a-f0-9]{64}$/;
 const zeroDigest = `sha256:${"0".repeat(64)}`;
+const sha256Pattern = /^[a-f0-9]{64}$/;
 const argumentFlags = new Set(["--mode", "--release-id", "--source-commit"]);
 const sourceRepository = "https://github.com/ALTIS13/Apollo.TF";
 const builderIdPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
@@ -433,6 +440,22 @@ function validateReleaseArtifact(artifact: ReleaseArtifact): void {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expectedKeys: readonly string[],
+): boolean {
+  const keys = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  return (
+    keys.length === expected.length &&
+    keys.every((key, index) => key === expected[index])
+  );
+}
+
 function renderReleaseEnvironment(artifact: ReleaseArtifact): string {
   const references = new Map(
     artifact.images.map(({ imageReference, name }) => [name, imageReference]),
@@ -466,6 +489,101 @@ function sha256(contents: string): string {
   return createHash("sha256").update(contents).digest("hex");
 }
 
+export function verifyOperatorReleaseEvidence(
+  manifestPath: string,
+): ReleaseArtifact {
+  try {
+    const resolvedManifestPath = resolve(manifestPath);
+    if (basename(resolvedManifestPath) !== "apollo-release-manifest.json") {
+      throw operatorError("invalid_release_manifest");
+    }
+    const releaseDirectory = dirname(resolvedManifestPath);
+    const releaseId = basename(releaseDirectory);
+    assertReleaseId(releaseId);
+
+    const completionPath = join(
+      releaseDirectory,
+      "apollo-release-complete.json",
+    );
+    const completionValue = JSON.parse(
+      readFileSync(completionPath, "utf8"),
+    ) as unknown;
+    if (
+      !isRecord(completionValue) ||
+      !hasExactKeys(completionValue, [
+        "environmentSha256",
+        "formatVersion",
+        "manifestSha256",
+        "releaseId",
+        "sourceCommit",
+      ]) ||
+      completionValue.formatVersion !== 1 ||
+      completionValue.releaseId !== releaseId ||
+      completionValue.sourceCommit === zeroSourceCommit ||
+      typeof completionValue.sourceCommit !== "string" ||
+      !sourceCommitPattern.test(completionValue.sourceCommit) ||
+      typeof completionValue.manifestSha256 !== "string" ||
+      !sha256Pattern.test(completionValue.manifestSha256) ||
+      typeof completionValue.environmentSha256 !== "string" ||
+      !sha256Pattern.test(completionValue.environmentSha256)
+    ) {
+      throw operatorError("invalid_release_manifest");
+    }
+
+    const manifestContents = readFileSync(resolvedManifestPath, "utf8");
+    const environmentContents = readFileSync(
+      join(releaseDirectory, "release-images.env"),
+      "utf8",
+    );
+    if (
+      sha256(manifestContents) !== completionValue.manifestSha256 ||
+      sha256(environmentContents) !== completionValue.environmentSha256
+    ) {
+      throw operatorError("invalid_release_manifest");
+    }
+
+    const artifactValue = JSON.parse(manifestContents) as unknown;
+    if (
+      !isRecord(artifactValue) ||
+      !hasExactKeys(artifactValue, [
+        "formatVersion",
+        "images",
+        "sourceCommit",
+      ]) ||
+      artifactValue.formatVersion !== 1 ||
+      typeof artifactValue.sourceCommit !== "string" ||
+      !Array.isArray(artifactValue.images) ||
+      artifactValue.images.some(
+        (image) =>
+          !isRecord(image) ||
+          !hasExactKeys(image, [
+            "imageDigest",
+            "imageReference",
+            "name",
+            "repository",
+          ]) ||
+          typeof image.imageDigest !== "string" ||
+          typeof image.imageReference !== "string" ||
+          typeof image.name !== "string" ||
+          typeof image.repository !== "string",
+      )
+    ) {
+      throw operatorError("invalid_release_manifest");
+    }
+    const artifact = artifactValue as ReleaseArtifact;
+    validateReleaseArtifact(artifact);
+    if (
+      artifact.sourceCommit !== completionValue.sourceCommit ||
+      environmentContents !== renderReleaseEnvironment(artifact)
+    ) {
+      throw operatorError("invalid_release_manifest");
+    }
+    return artifact;
+  } catch {
+    throw operatorError("invalid_release_manifest");
+  }
+}
+
 async function sha256File(path: string): Promise<string> {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(path)) {
@@ -479,6 +597,7 @@ async function writeReleaseOutput(
   releaseDirectory: string,
   releaseId: string,
   releaseArtifact: ReleaseArtifact,
+  publicationCheckpoint?: OperatorReleaseDependencies["publicationCheckpoint"],
 ): Promise<OperatorReleaseOutput> {
   const stagedManifestPath = join(
     stagingDirectory,
@@ -520,7 +639,9 @@ async function writeReleaseOutput(
   const completionPath = join(releaseDirectory, "apollo-release-complete.json");
   try {
     await writeDurableExclusive(manifestPath, manifestContents);
+    await publicationCheckpoint?.("final_manifest_written");
     await writeDurableExclusive(envFragmentPath, renderedEnvironment);
+    await publicationCheckpoint?.("final_environment_written");
     validateReleaseArtifact(
       JSON.parse(await readFile(manifestPath, "utf8")) as ReleaseArtifact,
     );
@@ -541,7 +662,15 @@ async function writeReleaseOutput(
         2,
       )}\n`,
     );
+    await publicationCheckpoint?.("completion_written");
   } catch {
+    for (const path of [completionPath, envFragmentPath, manifestPath]) {
+      try {
+        await rm(path, { force: true, recursive: true });
+      } catch {
+        // The completion marker is removed first so retained partials stay unusable.
+      }
+    }
     throw operatorError("artifact_validation_failed");
   }
 
@@ -816,6 +945,7 @@ export async function publishOperatorRelease(
       releaseDirectory,
       options.releaseId,
       releaseArtifact,
+      dependencies.publicationCheckpoint,
     );
   } catch (error) {
     primaryError = sanitizedOperatorError(error);

@@ -16,6 +16,7 @@ import {
   type ReleaseArtifactImage,
   type ReleaseImageCatalogEntry,
 } from "./release-images.js";
+import { verifyOperatorReleaseEvidence } from "./operator-release.js";
 
 export {
   approvedImageRepositories,
@@ -2194,15 +2195,8 @@ function parseCliArguments(argv: string[]): {
   return { envFile, mode: modeValue, releaseManifest };
 }
 
-function parseReleaseArtifact(path: string): ReleaseArtifact {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    throw new Error("invalid_release_manifest");
-  }
-  if (!isRecord(parsed)) throw new Error("invalid_release_manifest");
-  return parsed as ReleaseArtifact;
+export function loadCoolifyReleaseArtifact(path: string): ReleaseArtifact {
+  return verifyOperatorReleaseEvidence(path);
 }
 
 export function runCoolifyReleaseCli(argv: string[]): number {
@@ -2215,7 +2209,7 @@ export function runCoolifyReleaseCli(argv: string[]): number {
     const releaseArtifact =
       arguments_.releaseManifest === undefined
         ? undefined
-        : parseReleaseArtifact(
+        : loadCoolifyReleaseArtifact(
             resolve(repositoryRoot, arguments_.releaseManifest),
           );
     const stacks = [

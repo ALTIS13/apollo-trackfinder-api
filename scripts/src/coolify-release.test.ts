@@ -1,3 +1,8 @@
+import { createHash } from "node:crypto";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import * as coolifyReleaseModule from "./coolify-release.js";
@@ -5,6 +10,7 @@ import {
   validateCoolifyRelease,
   type ComposeSecretMount,
   type ComposeService,
+  type ReleaseArtifact,
   type ReleaseStackInput,
   type ReleaseValidationInput,
 } from "./coolify-release.js";
@@ -848,6 +854,159 @@ type ExactValidationInput = ReleaseValidationInput;
 function exactInput(): ExactValidationInput {
   return validInput() as ExactValidationInput;
 }
+
+const releaseEnvironmentOrder = [
+  "PLATFORM_POSTGRES_IMAGE",
+  "PLATFORM_REDIS_IMAGE",
+  "PLATFORM_API_IMAGE",
+  "TF_POSTGRES_IMAGE",
+  "TF_REDIS_IMAGE",
+  "TF_API_IMAGE",
+  "TF_WEB_IMAGE",
+  "TF_ADMIN_IMAGE",
+  "TF_SEARCH_IMAGE",
+  "TF_INTEGRATIONS_POSTGRES_IMAGE",
+  "TF_INTEGRATIONS_IMAGE",
+  "TF_DOWNLOAD_REDIS_IMAGE",
+  "TF_DOWNLOAD_WORKER_IMAGE",
+] as const;
+
+function sha256(contents: string): string {
+  return createHash("sha256").update(contents).digest("hex");
+}
+
+async function completeReleaseEvidenceFixture() {
+  const root = await mkdtemp(join(tmpdir(), "apollo-release-evidence-test-"));
+  const releaseId = "v0.1.0-evidence";
+  const releaseDirectory = join(root, releaseId);
+  await mkdir(releaseDirectory);
+  const input = exactInput();
+  const releaseArtifact = structuredClone(
+    input.releaseArtifact!,
+  ) as ReleaseArtifact;
+  const manifestContents = `${JSON.stringify(releaseArtifact, null, 2)}\n`;
+  const envContents = `${[
+    `RELEASE_SOURCE_COMMIT=${releaseArtifact.sourceCommit}`,
+    ...releaseEnvironmentOrder.map(
+      (name) => `${name}=${input.environment[name]}`,
+    ),
+  ].join("\n")}\n`;
+  const manifestPath = join(releaseDirectory, "apollo-release-manifest.json");
+  const envFragmentPath = join(releaseDirectory, "release-images.env");
+  const completionPath = join(releaseDirectory, "apollo-release-complete.json");
+  const completion = {
+    environmentSha256: sha256(envContents),
+    formatVersion: 1,
+    manifestSha256: sha256(manifestContents),
+    releaseId,
+    sourceCommit: releaseArtifact.sourceCommit,
+  };
+  await writeFile(manifestPath, manifestContents, "utf8");
+  await writeFile(envFragmentPath, envContents, "utf8");
+  await writeFile(
+    completionPath,
+    `${JSON.stringify(completion, null, 2)}\n`,
+    "utf8",
+  );
+  return {
+    completion,
+    completionPath,
+    envContents,
+    envFragmentPath,
+    manifestPath,
+    releaseArtifact,
+    root,
+  };
+}
+
+describe("operator release evidence consumption", () => {
+  it("accepts valid evidence and rejects partial, hash-mismatched, or reordered evidence", async () => {
+    const fixture = await completeReleaseEvidenceFixture();
+    try {
+      expect(
+        coolifyReleaseModule.loadCoolifyReleaseArtifact(fixture.manifestPath),
+      ).toEqual(fixture.releaseArtifact);
+
+      await rm(fixture.completionPath);
+      expect(() =>
+        coolifyReleaseModule.loadCoolifyReleaseArtifact(fixture.manifestPath),
+      ).toThrowError(/^invalid_release_manifest$/);
+
+      await writeFile(
+        fixture.completionPath,
+        `${JSON.stringify(
+          { ...fixture.completion, manifestSha256: "f".repeat(64) },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+      expect(() =>
+        coolifyReleaseModule.loadCoolifyReleaseArtifact(fixture.manifestPath),
+      ).toThrowError(/^invalid_release_manifest$/);
+
+      const reorderedEnvironment = fixture.envContents.split("\n");
+      [reorderedEnvironment[1], reorderedEnvironment[2]] = [
+        reorderedEnvironment[2]!,
+        reorderedEnvironment[1]!,
+      ];
+      const reorderedEnvironmentContents = reorderedEnvironment.join("\n");
+      await writeFile(
+        fixture.envFragmentPath,
+        reorderedEnvironmentContents,
+        "utf8",
+      );
+      await writeFile(
+        fixture.completionPath,
+        `${JSON.stringify(
+          {
+            ...fixture.completion,
+            environmentSha256: sha256(reorderedEnvironmentContents),
+          },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+      expect(() =>
+        coolifyReleaseModule.loadCoolifyReleaseArtifact(fixture.manifestPath),
+      ).toThrowError(/^invalid_release_manifest$/);
+    } finally {
+      await rm(fixture.root, { force: true, recursive: true });
+    }
+  });
+
+  it("sanitizes incomplete production evidence at the CLI boundary", async () => {
+    const fixture = await completeReleaseEvidenceFixture();
+    const output: string[] = [];
+    const write = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk) => {
+        output.push(String(chunk));
+        return true;
+      });
+    try {
+      await rm(fixture.completionPath);
+      expect(
+        coolifyReleaseModule.runCoolifyReleaseCli([
+          "--env-file",
+          fixture.envFragmentPath,
+          "--mode",
+          "production",
+          "--release-manifest",
+          fixture.manifestPath,
+        ]),
+      ).toBe(1);
+    } finally {
+      write.mockRestore();
+      await rm(fixture.root, { force: true, recursive: true });
+    }
+    expect(JSON.parse(output.join(""))).toEqual({
+      errors: [{ code: "invalid_release_manifest" }],
+      ok: false,
+    });
+  });
+});
 
 describe("validateCoolifyRelease", () => {
   it("returns only deterministic redacted release manifest fields", () => {

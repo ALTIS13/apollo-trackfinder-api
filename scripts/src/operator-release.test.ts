@@ -26,6 +26,7 @@ import {
   releaseImageCatalog as operatorReleaseImageCatalog,
   runOperatorReleaseCommand,
   runOperatorReleaseCli,
+  verifyOperatorReleaseEvidence,
   type OperatorReleaseCommandResult,
   type OperatorReleaseDependencies,
 } from "./operator-release.js";
@@ -76,6 +77,12 @@ async function publisherHarness(options?: {
     command: RecordedCommand,
     defaultResult: () => OperatorReleaseCommandResult,
   ) => OperatorReleaseCommandResult | Promise<OperatorReleaseCommandResult>;
+  publicationCheckpoint?: (
+    checkpoint:
+      | "completion_written"
+      | "final_environment_written"
+      | "final_manifest_written",
+  ) => Promise<void>;
   randomId?: () => string;
   temporaryRoot?: () => string;
 }) {
@@ -132,6 +139,7 @@ async function publisherHarness(options?: {
       };
       return options?.command?.(recorded, defaultResult) ?? defaultResult();
     },
+    publicationCheckpoint: options?.publicationCheckpoint,
     randomId: options?.randomId ?? (() => "task-2-owned"),
     temporaryRoot: options?.temporaryRoot ?? (() => temporaryRoot),
   };
@@ -1318,6 +1326,172 @@ describe("operator release publication", () => {
       await rm(harness.root, { force: true, recursive: true });
     }
   });
+
+  it("requires exact complete evidence with matching hashes, identity, and env order", async () => {
+    const harness = await publisherHarness();
+    try {
+      const output = await publishOperatorRelease(
+        {
+          mode: "production",
+          releaseId,
+          repositoryRoot: harness.repositoryRoot,
+          sourceCommit,
+        },
+        harness.dependencies,
+      );
+      const manifestContents = await readFile(output.manifestPath, "utf8");
+      const envContents = await readFile(output.envFragmentPath, "utf8");
+      const completionContents = await readFile(
+        harness.releaseCompletion,
+        "utf8",
+      );
+      const completion = JSON.parse(completionContents) as Record<
+        string,
+        unknown
+      >;
+
+      expect(verifyOperatorReleaseEvidence(output.manifestPath)).toEqual(
+        output.releaseArtifact,
+      );
+
+      await rm(harness.releaseCompletion);
+      expect(() =>
+        verifyOperatorReleaseEvidence(output.manifestPath),
+      ).toThrowError(/^invalid_release_manifest$/);
+      await writeFile(harness.releaseCompletion, completionContents, "utf8");
+
+      await writeFile(
+        harness.releaseCompletion,
+        `${JSON.stringify({ ...completion, unexpected: true }, null, 2)}\n`,
+        "utf8",
+      );
+      expect(() =>
+        verifyOperatorReleaseEvidence(output.manifestPath),
+      ).toThrowError(/^invalid_release_manifest$/);
+
+      await writeFile(
+        harness.releaseCompletion,
+        `${JSON.stringify(
+          { ...completion, releaseId: "v0.1.0-wrong" },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+      expect(() =>
+        verifyOperatorReleaseEvidence(output.manifestPath),
+      ).toThrowError(/^invalid_release_manifest$/);
+
+      await writeFile(
+        harness.releaseCompletion,
+        `${JSON.stringify(
+          { ...completion, sourceCommit: "b".repeat(40) },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+      expect(() =>
+        verifyOperatorReleaseEvidence(output.manifestPath),
+      ).toThrowError(/^invalid_release_manifest$/);
+
+      await writeFile(
+        harness.releaseCompletion,
+        `${JSON.stringify(
+          { ...completion, manifestSha256: "f".repeat(64) },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+      expect(() =>
+        verifyOperatorReleaseEvidence(output.manifestPath),
+      ).toThrowError(/^invalid_release_manifest$/);
+
+      const reorderedEnvironment = envContents.split("\n");
+      [reorderedEnvironment[1], reorderedEnvironment[2]] = [
+        reorderedEnvironment[2]!,
+        reorderedEnvironment[1]!,
+      ];
+      const reorderedEnvironmentContents = reorderedEnvironment.join("\n");
+      await writeFile(
+        output.envFragmentPath,
+        reorderedEnvironmentContents,
+        "utf8",
+      );
+      await writeFile(
+        harness.releaseCompletion,
+        `${JSON.stringify(
+          {
+            ...completion,
+            environmentSha256: sha256(reorderedEnvironmentContents),
+          },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+      expect(() =>
+        verifyOperatorReleaseEvidence(output.manifestPath),
+      ).toThrowError(/^invalid_release_manifest$/);
+
+      await writeFile(output.manifestPath, manifestContents, "utf8");
+      await writeFile(output.envFragmentPath, envContents, "utf8");
+      await writeFile(harness.releaseCompletion, completionContents, "utf8");
+      expect(verifyOperatorReleaseEvidence(output.manifestPath)).toEqual(
+        output.releaseArtifact,
+      );
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it.each([
+    "final_manifest_written",
+    "final_environment_written",
+    "completion_written",
+  ] as const)(
+    "removes consumable evidence after handled %s failure but retains the claim",
+    async (failedCheckpoint) => {
+      const harness = await publisherHarness({
+        async publicationCheckpoint(checkpoint) {
+          if (checkpoint === failedCheckpoint) {
+            throw new Error("sentinel-final-write-failure");
+          }
+        },
+      });
+      try {
+        const publish = () =>
+          publishOperatorRelease(
+            {
+              mode: "production",
+              releaseId,
+              repositoryRoot: harness.repositoryRoot,
+              sourceCommit,
+            },
+            harness.dependencies,
+          );
+
+        await expect(publish()).rejects.toThrowError(
+          /^artifact_validation_failed$/,
+        );
+        expect(await pathExists(harness.releaseOutput)).toBe(true);
+        await expectIncompleteReleaseEvidence(harness);
+        const dockerCommandCount = harness.commands.filter(
+          ({ executable }) => executable === "docker",
+        ).length;
+
+        await expect(publish()).rejects.toThrowError(/^release_output_exists$/);
+        expect(await pathExists(harness.releaseOutput)).toBe(true);
+        await expectIncompleteReleaseEvidence(harness);
+        expect(
+          harness.commands.filter(({ executable }) => executable === "docker"),
+        ).toHaveLength(dockerCommandCount);
+      } finally {
+        await rm(harness.root, { force: true, recursive: true });
+      }
+    },
+  );
 
   it("returns cleanup_failed after complete evidence when owned builder removal fails", async () => {
     const harness = await publisherHarness({
