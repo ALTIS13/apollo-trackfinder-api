@@ -2,6 +2,49 @@
 
 Last updated: 2026-07-29.
 
+## Operator-owned release publisher
+
+Status: `OPERATOR_PUBLISHER_LOCAL_VALIDATED`. The exact future publication
+source is `e48af528eae166c69db5485b2afa415bc31fa7a1`, not ambient or
+uncommitted `HEAD`. The publisher is locally proven, but no production image
+has been pushed, no GHCR login has occurred, and no GitHub or infrastructure
+setting has been changed.
+
+- The deterministic fake-command contract passed `47/47` in `2.24s`. Its
+  successful path records `51` commands: `11` pre-push tag inspections, one
+  task-owned builder create, `11` Linux/amd64 custom-image pushes, `11`
+  bounded digest inspections, and one task-owned builder removal. It validates
+  all `11` custom targets plus the pinned Redis artifact; it never supplies a
+  credential, token, password, secret, `prune`, or `--use` argument.
+- The proof verifies cleanup of the owned builder, staging directory, and
+  temporary archive/build roots on success and failure. It retains unrelated
+  collisions and rejects incomplete evidence. The completed manifest has only
+  `formatVersion`, `images`, and `sourceCommit`; its `12` images use only
+  `imageDigest`, `imageReference`, `name`, and `repository`. The generated
+  environment has `RELEASE_SOURCE_COMMIT` plus `13` ordered image variables
+  and one final LF.
+- The required full non-publishing matrix was run. Clean results were scripts
+  `243 passed / 4 skipped` in `261.96s`, API `603 passed / 8 skipped` in
+  `56.07s`, admin `218 passed` in `20.25s`, music player `118 passed` in
+  `10.04s`, search `142 passed / 1 skipped` in `6.67s`, download worker
+  `186 passed / 2 skipped` in `8.70s`, and root typecheck in `19.8s`.
+  Platform API and TF integrations were blocked by ignored `dist` test output
+  created during the local matrix: respectively `633 passed / 22 skipped` with
+  `21` stale-artifact failures and `168 passed / 20 skipped` with `10` stale-
+  artifact failures. No tracked source failure was recorded. The generated
+  directories were not removed because the local deletion policy rejected the
+  cleanup request; rerun those two exact commands from a clean ignored-output
+  state before treating the whole matrix as green.
+- Actual publication still requires an owner-created classic PAT with
+  `write:packages`, an external `docker login --password-stdin`, the exact
+  checkpoint command documented in the rollout runbook, and a separate explicit
+  owner approval for that publication action. After the first package is
+  published, its visibility must be made public before any anonymous Coolify
+  pull proof.
+- HomeNode, Coolify, Caddy, UFW, DNS, remote volumes, tags, releases, and
+  deployment remain behind their existing explicit approval gates. This local
+  proof did not access or mutate them.
+
 ## Coolify production release package
 
 Status: `LOCAL_RELEASE_VALIDATED`. The exact local image source is

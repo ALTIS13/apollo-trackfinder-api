@@ -1,12 +1,13 @@
 # Apollo Production Rollout
 
-Status: `LOCAL_RELEASE_VALIDATED`
+Status: `OPERATOR_PUBLISHER_LOCAL_VALIDATED`
 
 This is an owner-reviewable rollout plan, not a deployment record. The final
-fix wave validated the exact package locally from source commit
-`d0f74122d9e415d7cb9571be678188657f1ce7eb`. HomeNode, Coolify, the host
-Caddy configuration, UFW, DNS, GitHub settings, GHCR, remote databases, and
-remote volumes were not contacted or mutated.
+publisher proof validated the exact future publication source commit
+`e48af528eae166c69db5485b2afa415bc31fa7a1` locally. No production image has
+been pushed. HomeNode, Coolify, the host Caddy configuration, UFW, DNS,
+GitHub settings, GHCR, remote databases, and remote volumes were not contacted
+or mutated.
 
 ## Release Boundary
 
@@ -111,25 +112,46 @@ building the approved source commit and writes `apollo-release-manifest.json`,
 `release-images.env`, and its completion marker under the ignored private
 release directory.
 
-Before running the publisher, place `CR_PAT` only in the current PowerShell
-environment. It is a classic PAT with `write:packages`; it is never persisted
-in project files and must be revoked or rotated independently. The publisher
-accepts no credentials or registry options, so authenticate outside it:
+The following is a future owner-operated procedure, not a command executed by
+this local proof. It requires a separate explicit owner approval for that
+specific publication action. Before running it, the owner must create a
+classic PAT with `write:packages` and place it only in the current PowerShell
+environment. It is never persisted in project files and must be revoked or
+rotated independently. The publisher accepts no credentials or registry
+options, so authenticate outside it:
 
 ```powershell
 $env:CR_PAT | docker login ghcr.io -u ALTIS13 --password-stdin
 Remove-Item Env:\CR_PAT
-$approvedSourceCommit = git rev-parse HEAD
+$approvedSourceCommit = 'e48af528eae166c69db5485b2afa415bc31fa7a1'
 pnpm release:publish -- --mode production --release-id v0.1.0-rc.1 --source-commit $approvedSourceCommit
 pnpm release:validate -- --env-file '<PRIVATE_RELEASE_ENV>' --mode production --release-manifest '.ops-private/releases/v0.1.0-rc.1/apollo-release-manifest.json'
 ```
 
 Set `RELEASE_SOURCE_COMMIT` in the completed private release env to the same
-commit and validate it with the generated manifest. Current GitHub
-documentation reports Container Registry storage/bandwidth as free and states
-that public GHCR images allow anonymous HomeNode/Coolify pulls, with package
-visibility checked after first publication. The operator must recheck that
-policy before future releases.
+commit and validate it with the generated manifest. After the first package is
+published, the owner must explicitly change its visibility to public before an
+anonymous Coolify pull proof. That visibility action and every later HomeNode
+rollout action remain separate approval gates; no production publish, tag,
+release, package setting, or Coolify pull proof is implied by this record.
+
+The local fake-command publisher proof passed `47/47` in `2.24s`. It covers
+`11` custom Linux/amd64 targets plus pinned Redis, `51` successful-path
+commands, task-owned builder/staging/temporary-root cleanup, and a manifest
+with exact `formatVersion`/`images`/`sourceCommit` keys. Each of the `12`
+image entries has only `imageDigest`/`imageReference`/`name`/`repository`; the
+environment has `RELEASE_SOURCE_COMMIT`, `13` ordered image variables, and a
+final LF. No credential value is present in the artifact or environment.
+
+The final non-publishing matrix recorded scripts `243 passed / 4 skipped` in
+`261.96s`, API `603 passed / 8 skipped` in `56.07s`, admin `218 passed` in
+`20.25s`, music player `118 passed` in `10.04s`, search `142 passed / 1
+skipped` in `6.67s`, download worker `186 passed / 2 skipped` in `8.70s`, and
+root typecheck in `19.8s`. Platform API and TF integrations were not green
+because ignored `dist` tests generated during the matrix were discovered as
+stale modules (`21` and `10` failures respectively). Rerun their exact matrix
+commands from a clean ignored-output state before claiming a whole-matrix
+release gate; this does not change the publisher proof or authorize rollout.
 
 Production mode requires the artifact and exact approved repositories. The
 separate `loopback-local-smoke` mode accepts only loopback repositories and no
