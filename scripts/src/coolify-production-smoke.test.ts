@@ -8,17 +8,17 @@ import {
 import {
   access,
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
   rm,
-  rmdir,
   writeFile,
 } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -42,6 +42,10 @@ const socatImage =
   "docker.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e";
 const redisImage =
   "docker.io/library/redis:7-bookworm@sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b";
+const temporaryRootPrefix = "apollo-coolify-production-";
+const temporaryRootMarkerName = ".apollo-task5-owner";
+const temporaryRootRecordSuffix = ".apollo-task5-owner-record";
+const temporaryRootOwner = "apollo-task5-coolify-production-smoke";
 
 const productionTargets: readonly {
   readonly dockerfile: string;
@@ -251,11 +255,165 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-async function removeTaskCreatedParent(
-  path: string,
-  wasPresent: boolean,
-): Promise<void> {
-  if (!wasPresent) await rmdir(path);
+type OwnedTemporaryRoot = {
+  readonly birthtimeMs: number;
+  readonly dev: number;
+  readonly ino: number;
+  readonly recordPath: string;
+  readonly root: string;
+  readonly rootName: string;
+};
+
+function serializeTemporaryRootOwnership(
+  ownership: Omit<OwnedTemporaryRoot, "recordPath" | "root">,
+): string {
+  return `${JSON.stringify({
+    birthtimeMs: ownership.birthtimeMs,
+    dev: ownership.dev,
+    ino: ownership.ino,
+    owner: temporaryRootOwner,
+    rootName: ownership.rootName,
+    version: 1,
+  })}\n`;
+}
+
+function parseTemporaryRootOwnership(
+  raw: string,
+  expectedRootName: string,
+): Omit<OwnedTemporaryRoot, "recordPath" | "root"> {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("temporary root ownership record is invalid");
+  }
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("birthtimeMs" in value) ||
+    typeof value.birthtimeMs !== "number" ||
+    !Number.isFinite(value.birthtimeMs) ||
+    !("dev" in value) ||
+    typeof value.dev !== "number" ||
+    !Number.isFinite(value.dev) ||
+    !("ino" in value) ||
+    typeof value.ino !== "number" ||
+    !Number.isFinite(value.ino) ||
+    !("owner" in value) ||
+    value.owner !== temporaryRootOwner ||
+    !("rootName" in value) ||
+    value.rootName !== expectedRootName ||
+    !("version" in value) ||
+    value.version !== 1
+  ) {
+    throw new Error("temporary root ownership record is invalid");
+  }
+  return {
+    birthtimeMs: value.birthtimeMs,
+    dev: value.dev,
+    ino: value.ino,
+    rootName: value.rootName,
+  };
+}
+
+async function ownedTemporaryRootInventory(
+  parent: string,
+): Promise<readonly OwnedTemporaryRoot[]> {
+  let entries;
+  try {
+    entries = await readdir(parent, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const roots: OwnedTemporaryRoot[] = [];
+  for (const entry of entries) {
+    if (
+      !entry.name.startsWith(temporaryRootPrefix) ||
+      !entry.name.endsWith(temporaryRootRecordSuffix)
+    ) {
+      continue;
+    }
+    if (!entry.isFile()) {
+      throw new Error("temporary root ownership record is not a file");
+    }
+    const rootName = entry.name.slice(0, -temporaryRootRecordSuffix.length);
+    if (
+      !rootName.startsWith(temporaryRootPrefix) ||
+      basename(rootName) !== rootName
+    ) {
+      throw new Error("temporary root ownership record has an unsafe name");
+    }
+    const recordPath = join(parent, entry.name);
+    const parsed = parseTemporaryRootOwnership(
+      await readFile(recordPath, "utf8"),
+      rootName,
+    );
+    roots.push({
+      ...parsed,
+      recordPath,
+      root: join(parent, rootName),
+    });
+  }
+  return roots.sort((left, right) => left.root.localeCompare(right.root));
+}
+
+async function removeOwnedTemporaryRoots(parent: string): Promise<void> {
+  for (const ownership of await ownedTemporaryRootInventory(parent)) {
+    let rootState;
+    try {
+      rootState = await lstat(ownership.root);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (rootState !== undefined) {
+      if (
+        !rootState.isDirectory() ||
+        rootState.dev !== ownership.dev ||
+        rootState.ino !== ownership.ino ||
+        rootState.birthtimeMs !== ownership.birthtimeMs
+      ) {
+        throw new Error("temporary root identity no longer matches ownership");
+      }
+      await rm(ownership.root, { recursive: true });
+    }
+    await rm(ownership.recordPath);
+  }
+}
+
+async function prepareOwnedTemporaryRoot(parent: string): Promise<string> {
+  await removeOwnedTemporaryRoots(parent);
+  const root = await mkdtemp(join(parent, temporaryRootPrefix));
+  const rootState = await lstat(root);
+  const rootName = basename(root);
+  const ownership = {
+    birthtimeMs: rootState.birthtimeMs,
+    dev: rootState.dev,
+    ino: rootState.ino,
+    rootName,
+  };
+  const serializedOwnership = serializeTemporaryRootOwnership(ownership);
+  const recordPath = `${root}${temporaryRootRecordSuffix}`;
+  try {
+    await writeFile(recordPath, serializedOwnership, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    await writeFile(join(root, temporaryRootMarkerName), serializedOwnership, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    return root;
+  } catch (error) {
+    if (await pathExists(recordPath)) {
+      await removeOwnedTemporaryRoots(parent);
+    } else {
+      await rm(root, { force: true, recursive: true });
+    }
+    throw error;
+  }
 }
 
 function secret(bytes = 32): string {
@@ -1734,6 +1892,7 @@ async function cleanupAudit(
   runId: string,
   registry: string | undefined,
   root: string | undefined,
+  temporaryRootParent?: string,
 ): Promise<{
   readonly containers: number;
   readonly imageReferences: number;
@@ -1766,15 +1925,27 @@ async function cleanupAudit(
   const imageReferences = (
     await registryImageInventory(docker, registry)
   ).reduce((total, image) => total + image.references.length, 0);
+  const temporaryRoots =
+    temporaryRootParent === undefined
+      ? root !== undefined && (await pathExists(root))
+        ? [root]
+        : []
+      : await ownedTemporaryRootInventory(temporaryRootParent);
+  let registryFiles = 0;
+  for (const temporaryRoot of temporaryRoots) {
+    const rootPath =
+      typeof temporaryRoot === "string" ? temporaryRoot : temporaryRoot.root;
+    const registryPath = join(rootPath, "registry");
+    if (await pathExists(registryPath)) {
+      registryFiles += (await readdir(registryPath)).length;
+    }
+  }
   return {
     containers,
     imageReferences,
     networks,
-    registryFiles:
-      root !== undefined && (await pathExists(join(root, "registry")))
-        ? (await readdir(join(root, "registry"))).length
-        : 0,
-    temporarySecrets: root !== undefined && (await pathExists(root)) ? 1 : 0,
+    registryFiles,
+    temporarySecrets: temporaryRoots.length,
     volumes,
   };
 }
@@ -1872,10 +2043,9 @@ async function cleanupOwnedSmokeResources(options: {
     readonly volumes: readonly string[];
   };
   readonly registry: string | undefined;
-  readonly root: string | undefined;
+  readonly removeTemporaryRoots?: (parent: string) => Promise<void>;
   readonly runId: string;
-  readonly temporaryParent: string | undefined;
-  readonly temporaryParentWasPresent: boolean;
+  readonly temporaryRootParent: string | undefined;
 }): Promise<void> {
   const errors: unknown[] = [];
   const attempt = async (operation: () => Promise<unknown>) => {
@@ -1975,16 +2145,10 @@ async function cleanupOwnedSmokeResources(options: {
       });
     }
   }
-  if (options.root !== undefined) {
+  if (options.temporaryRootParent !== undefined) {
     await attempt(() =>
-      rm(options.root as string, { force: true, recursive: true }),
-    );
-  }
-  if (options.temporaryParent !== undefined) {
-    await attempt(() =>
-      removeTaskCreatedParent(
-        options.temporaryParent as string,
-        options.temporaryParentWasPresent,
+      (options.removeTemporaryRoots ?? removeOwnedTemporaryRoots)(
+        options.temporaryRootParent as string,
       ),
     );
   }
@@ -2009,7 +2173,7 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
   const fixedResourceOwnership = await assertFixedResourcesAbsent(docker);
 
   const runId = randomBytes(6).toString("hex");
-  const temporaryParent = join(repositoryRoot, ".tmp");
+  const temporaryRootParent = tmpdir();
   const registryContainer = `apollo-release-registry-${runId}`;
   const acquiredImages = new Map<string, boolean>();
   const localReferences: string[] = [];
@@ -2020,7 +2184,6 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
   let envFile: string | undefined;
   let registry: string | undefined;
   let registryPort: number | undefined;
-  let temporaryParentWasPresent = true;
   let secrets: Awaited<ReturnType<typeof prepareSecrets>> | undefined;
   let profileRawSecrets: readonly string[] = [];
   let platformEvidence:
@@ -2030,11 +2193,7 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
   const { audit: cleanup } = await runProductionSmokeLifecycle({
     acquireResources: async () => {
       stage = "resource-acquisition";
-      temporaryParentWasPresent = await pathExists(temporaryParent);
-      await mkdir(temporaryParent, { recursive: true });
-      root = await mkdtemp(
-        join(temporaryParent, `coolify-production-${runId}-`),
-      );
+      root = await prepareOwnedTemporaryRoot(temporaryRootParent);
       source = join(root, "source");
       registryData = join(root, "registry");
       envFile = join(root, "release.env");
@@ -2326,12 +2485,11 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
         envFile,
         fixedResourceOwnership,
         registry,
-        root,
         runId,
-        temporaryParent,
-        temporaryParentWasPresent,
+        temporaryRootParent,
       }),
-    audit: () => cleanupAudit(docker, runId, registry, root),
+    audit: () =>
+      cleanupAudit(docker, runId, registry, root, temporaryRootParent),
     isClean: (audit) => Object.values(audit).every((value) => value === 0),
     stage: () => stage,
   });
@@ -2784,10 +2942,8 @@ describe("Coolify production smoke contract", () => {
             envFile: "synthetic-release.env",
             fixedResourceOwnership,
             registry: undefined,
-            root: undefined,
             runId: state.runId,
-            temporaryParent: undefined,
-            temporaryParentWasPresent: true,
+            temporaryRootParent: undefined,
           }),
       }).catch((caught) => {
         error = caught;
@@ -2851,10 +3007,8 @@ describe("Coolify production smoke contract", () => {
           envFile: "synthetic-release.env",
           fixedResourceOwnership,
           registry: undefined,
-          root: undefined,
           runId: state.runId,
-          temporaryParent: undefined,
-          temporaryParentWasPresent: true,
+          temporaryRootParent: undefined,
         }),
     }).catch((caught) => {
       error = caught;
@@ -2895,20 +3049,129 @@ describe("Coolify production smoke contract", () => {
     ).toBe(false);
   });
 
-  it("removes only an empty temporary parent created by the task", async () => {
-    const created = join(tmpdir(), `apollo-created-${randomUUID()}`);
-    const preexisting = join(tmpdir(), `apollo-preexisting-${randomUUID()}`);
-    await mkdir(created);
-    await mkdir(preexisting);
+  it("recovers a marked temporary root on sequential retry without adopting unrelated state", async () => {
+    const temporaryRootParent = await mkdtemp(
+      join(tmpdir(), "apollo-contract-parent-"),
+    );
+    const unrelated = join(
+      temporaryRootParent,
+      "apollo-coolify-production-unrelated",
+    );
+    await mkdir(unrelated);
+    const state = createFakeSmokeDocker();
+    const fixedResourceOwnership = await assertFixedResourcesAbsent(
+      state.docker,
+    );
+    const noOp = async () => {};
+    let firstRoot: string | undefined;
+    let firstError: unknown;
     try {
-      await removeTaskCreatedParent(created, false);
-      await removeTaskCreatedParent(preexisting, true);
+      await runProductionSmokeLifecycle({
+        acquireResources: async () => {
+          firstRoot = await prepareOwnedTemporaryRoot(temporaryRootParent);
+          throw new Error("injected first-attempt acquisition failure");
+        },
+        audit: () =>
+          cleanupAudit(
+            state.docker,
+            state.runId,
+            undefined,
+            undefined,
+            temporaryRootParent,
+          ),
+        cleanup: () =>
+          cleanupOwnedSmokeResources({
+            acquiredImages: new Map(),
+            docker: state.docker,
+            envFile: undefined,
+            fixedResourceOwnership,
+            registry: undefined,
+            removeTemporaryRoots: async () => {
+              if (firstRoot === undefined) {
+                throw new Error("first temporary root was not acquired");
+              }
+              await rm(join(firstRoot, temporaryRootMarkerName));
+              throw new Error("injected temporary-root cleanup failure");
+            },
+            runId: state.runId,
+            temporaryRootParent,
+          }),
+        runApplicationFlows: noOp,
+        startCaddy: noOp,
+        startHelpers: noOp,
+        startPlatform: noOp,
+        startTf: noOp,
+      }).catch((caught) => {
+        firstError = caught;
+      });
 
-      expect(await pathExists(created)).toBe(false);
-      expect(await pathExists(preexisting)).toBe(true);
+      expect(flattenErrorMessages(firstError)).toContain(
+        "injected first-attempt acquisition failure",
+      );
+      expect(flattenErrorMessages(firstError)).toContain(
+        "injected temporary-root cleanup failure",
+      );
+      expect(flattenErrorMessages(firstError)).toContain(
+        "production smoke cleanup audit was nonzero",
+      );
+      expect(firstRoot).toBeDefined();
+      await expect(
+        cleanupAudit(
+          state.docker,
+          state.runId,
+          undefined,
+          undefined,
+          temporaryRootParent,
+        ),
+      ).resolves.toMatchObject({ temporarySecrets: 1 });
+
+      let secondRoot: string | undefined;
+      await expect(
+        runProductionSmokeLifecycle({
+          acquireResources: async () => {
+            secondRoot = await prepareOwnedTemporaryRoot(temporaryRootParent);
+          },
+          audit: () =>
+            cleanupAudit(
+              state.docker,
+              state.runId,
+              undefined,
+              undefined,
+              temporaryRootParent,
+            ),
+          cleanup: () =>
+            cleanupOwnedSmokeResources({
+              acquiredImages: new Map(),
+              docker: state.docker,
+              envFile: undefined,
+              fixedResourceOwnership,
+              registry: undefined,
+              runId: state.runId,
+              temporaryRootParent,
+            }),
+          runApplicationFlows: noOp,
+          startCaddy: noOp,
+          startHelpers: noOp,
+          startPlatform: noOp,
+          startTf: noOp,
+        }),
+      ).resolves.toMatchObject({
+        audit: {
+          containers: 0,
+          imageReferences: 0,
+          networks: 0,
+          registryFiles: 0,
+          temporarySecrets: 0,
+          volumes: 0,
+        },
+      });
+
+      expect(await pathExists(firstRoot as string)).toBe(false);
+      expect(await pathExists(secondRoot as string)).toBe(false);
+      expect(await pathExists(unrelated)).toBe(true);
+      expect(await pathExists(temporaryRootParent)).toBe(true);
     } finally {
-      await rm(created, { force: true, recursive: true });
-      await rm(preexisting, { force: true, recursive: true });
+      await rm(temporaryRootParent, { force: true, recursive: true });
     }
   });
 
