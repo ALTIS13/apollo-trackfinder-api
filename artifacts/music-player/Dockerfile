@@ -2,7 +2,7 @@ FROM docker.io/library/node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a9423
 
 WORKDIR /app
 
-RUN npm install -g pnpm
+RUN npm install -g pnpm@10.33.2
 
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json tsconfig.base.json tsconfig.json ./
 

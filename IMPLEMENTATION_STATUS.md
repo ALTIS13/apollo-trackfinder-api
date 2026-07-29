@@ -2,11 +2,63 @@
 
 Last updated: 2026-07-29.
 
+## Operator-owned release publisher
+
+Status: `OPERATOR_PUBLISHER_LOCAL_VALIDATED`. The exact future publication
+source is `9e04ca66a70e4a1563c6a75294d64b8d540959fb`, not ambient or
+uncommitted `HEAD`. The publisher is locally proven, but no production image
+has been pushed, no GHCR login has occurred, and no GitHub or infrastructure
+setting has been changed.
+
+- The focused fake-command publisher contract passed `79/79`.
+  Its combined successful prepare/publication path records `55` commands:
+  `15` source-preparation commands, then archive extraction, `11` pre-push tag
+  inspections, exact-name builder preflight, one task-owned builder create,
+  `11` Linux/amd64 builds with
+  owned metadata files, `11` immutable-tag digest inspections, and exact
+  task-owned builder inspect/removal/absence confirmation. It never supplies a credential, token,
+  password, secret, `prune`, `--use`, or registry override argument.
+- Preparation claims the release ID before source-gate work, validates the exact archived
+  source with an explicit child environment, and durably records a private
+  protocol-v2 receipt binding release/source identity, archive SHA-256,
+  validated tree SHA-256, and the complete image catalog. Publication consumes
+  that receipt once, rechecks archive/tree binding before Docker access, runs
+  no archived lifecycle or test command, and retains failed claims.
+- Every custom image records its Buildx metadata digest and requires the
+  immutable release tag to resolve to that digest with bounded
+  `250/500/1000/2000ms` backoff. The Redis evidence is derived from the exact
+  catalog pin. Manifest, environment, and marker are hash-checked inside one
+  sibling staging directory and published by one atomic directory rename.
+  Publication rejects pre-existing builder collisions, confirms owned-builder
+  removal, and cleans only owned temporary paths.
+- The complete nine-command non-publishing matrix passed consecutively
+  (counts are passed/skipped): scripts `268/4` in `256.92s`; Platform API
+  `422/21` tests and `18/6` files in `24.98s`; API `603/8` tests and `32/2`
+  files in `50.44s`; admin `218/0` in `19.10s`; music player `118/0` in
+  `11.84s`; search `142/1` in `6.91s`; integrations `107/10` across `14`
+  files in `7.39s`; download worker `186/2` tests and `9/1` files in `8.42s`;
+  and root typecheck in `21.1s`. Generated ignored Platform/integrations
+  `dist` roots were moved intact into ignored `.ops-private` quarantine after
+  typecheck; they were not deleted or tracked.
+- The post-review final-tree supplement passed scripts `276/4` in `276.58s`,
+  API release contract `21/21`, and root typecheck. It specifically covers
+  redirected claims, archive substitution, builder collision/reconciliation,
+  cleanup confirmation and precedence, plus repeated-signal behavior.
+- Actual publication still requires an owner-created classic PAT with
+  `write:packages`, an external `docker login --password-stdin`, the exact
+  checkpoint command documented in the rollout runbook, and a separate explicit
+  owner approval for that publication action. After the first package is
+  published, its visibility must be made public before any anonymous Coolify
+  pull proof.
+- HomeNode, Coolify, Caddy, UFW, DNS, remote volumes, tags, releases, and
+  deployment remain behind their existing explicit approval gates. This local
+  proof did not access or mutate them.
+
 ## Coolify production release package
 
 Status: `LOCAL_RELEASE_VALIDATED`. The exact local image source is
 `d0f74122d9e415d7cb9571be678188657f1ce7eb`; this status does not claim a
-deployment, workflow dispatch, GHCR publication, or remote change.
+deployment, operator publication, GHCR publication, or remote change.
 
 - The production package consists of
   `deploy/coolify/apollo-platform.compose.yml`,
@@ -45,8 +97,8 @@ deployment, workflow dispatch, GHCR publication, or remote change.
   verifier also compares exact source and reconstructed byte counts, so an
   embedded NUL or any other binary normalization fails silently before
   credential equality can pass.
-- Production validation now requires the exact workflow artifact source commit,
-  repository, digest, and immutable reference for every image and renders
+- Production validation now requires the completed operator manifest source
+  commit, repository, digest, and immutable reference for every image and renders
   Compose from an isolated allowlist. The explicit local mode remains separate.
   The checked-in env was validated in explicit `production` mode against the
   local ignored Task 3 zero-placeholder manifest at
@@ -84,8 +136,8 @@ deployment, workflow dispatch, GHCR publication, or remote change.
 - The observed legacy volume remains only `DETACHED_UNKNOWN`: unnamed,
   unmounted, unstarted, unmodified, and absent from tracked manifests.
 - The final fix wave did not contact or mutate HomeNode, Coolify, host Caddy,
-  UFW, DNS, GitHub settings/workflows, GHCR, any remote database/volume, or the
-  detached legacy volume. The release workflow was not dispatched.
+  UFW, DNS, GitHub settings, GHCR, any remote database/volume, or the detached
+  legacy volume. The operator publisher was not run.
 
 ## TF immutable migrations release candidate
 

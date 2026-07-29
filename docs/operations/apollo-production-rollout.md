@@ -1,12 +1,13 @@
 # Apollo Production Rollout
 
-Status: `LOCAL_RELEASE_VALIDATED`
+Status: `OPERATOR_PUBLISHER_LOCAL_VALIDATED`
 
 This is an owner-reviewable rollout plan, not a deployment record. The final
-fix wave validated the exact package locally from source commit
-`d0f74122d9e415d7cb9571be678188657f1ce7eb`. HomeNode, Coolify, the host
-Caddy configuration, UFW, DNS, GitHub settings, GHCR, remote databases, and
-remote volumes were not contacted or mutated.
+publisher proof validated the exact future publication source commit
+`9e04ca66a70e4a1563c6a75294d64b8d540959fb` locally. No production image has
+been pushed. HomeNode, Coolify, the host Caddy configuration, UFW, DNS,
+GitHub settings, GHCR, remote databases, and remote volumes were not contacted
+or mutated.
 
 ## Release Boundary
 
@@ -105,16 +106,96 @@ loopback registry, and resolved these registry digests:
 | `TF_WEB_IMAGE`                           | `tf-web`                   | `sha256:b279663a21e27158b0077e42b2cbacd2453282f5632f4c5c430b48b01d54a327` |
 
 The disposable registry and all references were removed. These digests are
-local evidence, not deployable GHCR references. An approved release workflow
-must build the same source commit and produce `apollo-release-manifest.json`
-with `formatVersion`, `sourceCommit`, and every exact logical name,
-repository, digest, and full immutable reference. Set
-`RELEASE_SOURCE_COMMIT` in the release env to that same commit, then validate
-the downloaded artifact and env together:
+local evidence, not deployable GHCR references. The operator-run publisher is
+the only active publication procedure. Its preparation command validates the
+exact archived source before authentication and persists a private receipt
+binding the release identity, source archive, validated source tree, and image
+catalog. Publication accepts only that receipt, revalidates the binding before
+registry access, and writes `apollo-release-manifest.json`,
+`release-images.env`, and its completion marker under the ignored private
+release directory.
 
-```sh
-pnpm release:validate -- --env-file '<RELEASE_ENV>' --mode production --release-manifest '<APOLLO_RELEASE_MANIFEST>'
+The following is a future owner-operated procedure, not a command executed by
+this local proof. It requires a separate explicit owner approval for that
+specific publication action. Before running it, the owner must create a
+classic PAT with `write:packages`, but must not place it in the environment
+before preparation completes. It is never persisted in project files and must
+be revoked or rotated independently. The publisher accepts no credentials or
+registry options. Complete preparation before requesting the credential, then
+keep authentication and publication inside the cleanup boundary:
+
+The publisher's child allowlist intentionally preserves only the operating
+system paths required for Git, Docker, temporary storage, and Docker's existing
+credential store. Credential values and unrelated ambient variables are not
+forwarded. Publication regenerates the archive from the approved commit and
+uses that fresh archive as the only build input.
+
+```powershell
+$approvedSourceCommit = '9e04ca66a70e4a1563c6a75294d64b8d540959fb'
+$releaseId = 'v0.1.0-rc.1'
+$preparation = pnpm --silent release:prepare -- --mode production --release-id $releaseId --source-commit $approvedSourceCommit | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw 'Release preparation failed' }
+
+$pat = $null
+$patPointer = [IntPtr]::Zero
+$plainPat = $null
+try {
+  $pat = Read-Host 'GHCR classic PAT' -AsSecureString
+  $patPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($pat)
+  $plainPat = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($patPointer)
+  $plainPat | docker login ghcr.io -u ALTIS13 --password-stdin
+  if ($LASTEXITCODE -ne 0) { throw 'GHCR login failed' }
+
+  pnpm --silent release:publish -- --mode production --release-id $releaseId --source-commit $approvedSourceCommit --receipt $preparation.receiptPath
+  if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
+}
+finally {
+  $plainPat = $null
+  if ($patPointer -ne [IntPtr]::Zero) {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($patPointer)
+  }
+  if ($null -ne $pat) { $pat.Dispose() }
+}
+
+pnpm --silent release:validate -- --env-file '<PRIVATE_RELEASE_ENV>' --mode production --release-manifest '.ops-private/releases/v0.1.0-rc.1/apollo-release-manifest.json'
+if ($LASTEXITCODE -ne 0) { throw 'Release validation failed' }
 ```
+
+Set `RELEASE_SOURCE_COMMIT` in the completed private release env to the same
+commit and validate it with the generated manifest. After the first package is
+published, the owner must explicitly change its visibility to public before an
+anonymous Coolify pull proof. Only public GHCR images allow anonymous HomeNode/Coolify pulls.
+Record package visibility checked after first publication before that proof.
+That visibility action and every later HomeNode rollout action remain separate
+approval gates; no production publish, tag, release, package setting, or
+Coolify pull proof is implied by this record.
+
+The focused fake-command publisher proof passed `79/79`. The combined
+successful prepare/publication path records `55` commands: `15`
+source-preparation commands, then exact archive extraction, `11` pre-push tag
+inspections, exact-name builder preflight, one owned builder create, `11`
+Linux/amd64 builds with owned
+metadata files, `11` immutable-tag digest inspections, and exact owned-builder
+inspect/removal/absence confirmation. It covers `11` custom targets plus
+catalog-pinned Redis.
+Preparation durably binds release/source identity, archive and tree hashes,
+protocol version, and image catalog; publication consumes that receipt once
+without running archived lifecycle or test commands. Every custom image uses
+its Buildx metadata digest, and manifest, environment, and marker become
+consumable only through one validated staging-directory rename. No credential
+value is present in commands, artifacts, or child environments.
+
+The complete nine-command non-publishing matrix passed consecutively (counts
+are passed/skipped): scripts `268/4` in `256.92s`; Platform API `422/21` tests
+and `18/6` files in `24.98s`; API `603/8` tests and `32/2` files in `50.44s`;
+admin `218/0` in `19.10s`; music player `118/0` in `11.84s`; search `142/1`
+in `6.91s`; TF integrations `107/10` across `14` files in `7.39s`; download
+worker `186/2` tests and `9/1` files in `8.42s`; and root typecheck in `21.1s`.
+Generated ignored Platform/integrations `dist` roots were moved intact into
+ignored `.ops-private` quarantine after typecheck; they were not deleted or
+tracked. This local evidence does not authorize publication or rollout.
+The post-review final-tree supplement passed scripts `276/4` in `276.58s`, API
+release contract `21/21`, and root typecheck.
 
 Production mode requires the artifact and exact approved repositories. The
 separate `loopback-local-smoke` mode accepts only loopback repositories and no
@@ -337,4 +418,4 @@ at `1 passed / 71 skipped` in `19.08s` and `18.54s`, full scripts
 player `118 passed` in `6.28s`, and root typecheck in `18.4s`. The scripts gate
 included both the hostile rendered-environment matrix and the binary-safe
 newline-free credential verifier with silent embedded-NUL rejection. No
-release workflow was dispatched.
+operator publication was run.

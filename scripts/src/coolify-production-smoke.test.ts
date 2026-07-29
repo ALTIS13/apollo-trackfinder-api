@@ -25,6 +25,11 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import {
+  operatorReleaseImageTargets,
+  pinnedRedisReference,
+} from "./release-images.js";
+
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
 const platformCompose = join(
   repositoryRoot,
@@ -42,8 +47,7 @@ const caddyImage =
   "docker.io/library/caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d";
 const socatImage =
   "docker.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e";
-const redisImage =
-  "docker.io/library/redis:7-bookworm@sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b";
+const redisImage = pinnedRedisReference;
 const nativeDockerImage =
   "docker.io/library/docker:29.1.3-dind@sha256:64d6ee47ea821c986467199baa162f5ac8cde3f57b719f18e23f3ed7a7444131";
 const temporaryRootPrefix = "apollo-coolify-production-";
@@ -53,67 +57,13 @@ const temporaryRootRecordStagingName = ".apollo-task5-owner-record-active";
 const temporaryRootOwner = "apollo-task5-coolify-production-smoke";
 const temporaryRootNamePattern = /^apollo-coolify-production-[0-9a-f]{32}$/;
 
-const productionTargets: readonly {
-  readonly dockerfile: string;
-  readonly image: string;
-  readonly target: string;
-}[] = [
-  {
-    dockerfile: "artifacts/platform-api/Dockerfile",
-    image: "platform-api",
-    target: "runtime",
-  },
-  {
-    dockerfile: "artifacts/platform-api/Dockerfile",
-    image: "platform-postgres",
-    target: "postgres-role-init",
-  },
-  {
-    dockerfile: "artifacts/api-server/Dockerfile",
-    image: "tf-api",
-    target: "runner",
-  },
-  {
-    dockerfile: "artifacts/api-server/Dockerfile",
-    image: "tf-postgres",
-    target: "postgres-role-init",
-  },
-  {
-    dockerfile: "artifacts/music-player/Dockerfile",
-    image: "tf-web",
-    target: "runner",
-  },
-  {
-    dockerfile: "artifacts/admin-dashboard/Dockerfile",
-    image: "tf-admin",
-    target: "default",
-  },
-  {
-    dockerfile: "artifacts/tf-search/Dockerfile",
-    image: "tf-search",
-    target: "runner",
-  },
-  {
-    dockerfile: "artifacts/tf-integrations/Dockerfile",
-    image: "tf-integrations",
-    target: "runner",
-  },
-  {
-    dockerfile: "artifacts/tf-integrations/Dockerfile",
-    image: "tf-integrations-postgres",
-    target: "postgres-role-init",
-  },
-  {
-    dockerfile: "artifacts/tf-download-worker/Dockerfile",
-    image: "tf-download-worker",
-    target: "runner",
-  },
-  {
-    dockerfile: "artifacts/tf-download-worker/Dockerfile",
-    image: "tf-download-redis",
-    target: "queue-redis",
-  },
-];
+const productionTargets = operatorReleaseImageTargets.map(
+  ({ dockerfile, name, target }) => ({
+    dockerfile,
+    image: name,
+    target,
+  }),
+);
 
 const fixedNetworks = [
   "apollo-platform-bridge-v1",
