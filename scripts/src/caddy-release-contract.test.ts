@@ -310,27 +310,81 @@ printf 'chown %s\n' "$*" >> "$APOLLO_COMMAND_LOG"
         stdout: "",
       });
 
-      const hostileCases = [
-        ["empty htpasswd", "", caddyEnvironment],
-        ["LF-terminated htpasswd", `${htpasswd}\n`, caddyEnvironment],
-        [
-          "mismatched Caddy username",
+      const commandMarker = join(root, "caddy-environment-command-marker");
+      const invalidUsername = "invalid user";
+      const invalidBcrypt = `$2x$12$${"A".repeat(53)}`;
+      const malformedPairHash = "not-a-bcrypt";
+      const hostileCases: Array<{
+        name: string;
+        htpasswd: string;
+        environment: string;
+        marker?: string;
+      }> = [
+        { name: "empty htpasswd", htpasswd: "", environment: caddyEnvironment },
+        {
+          name: "LF-terminated htpasswd",
+          htpasswd: `${htpasswd}\n`,
+          environment: caddyEnvironment,
+        },
+        {
+          name: "mismatched Caddy username",
           htpasswd,
-          `APOLLO_ADMIN_CADDY_USER='other-user'\n` +
+          environment:
+            `APOLLO_ADMIN_CADDY_USER='other-user'\n` +
             `APOLLO_ADMIN_CADDY_PASSWORD_HASH='${bcrypt}'\n`,
-        ],
-        [
-          "mismatched Caddy hash",
+        },
+        {
+          name: "mismatched Caddy hash",
           htpasswd,
-          `APOLLO_ADMIN_CADDY_USER='${username}'\n` +
+          environment:
+            `APOLLO_ADMIN_CADDY_USER='${username}'\n` +
             `APOLLO_ADMIN_CADDY_PASSWORD_HASH='$2a$12$${"B".repeat(53)}'\n`,
-        ],
-      ] as const;
-      for (const [name, hostileHtpasswd, hostileEnvironment] of hostileCases) {
+        },
+        {
+          name: "command-bearing Caddy environment",
+          htpasswd,
+          environment: `${caddyEnvironment}: > '${shellPath(commandMarker)}'\n`,
+          marker: commandMarker,
+        },
+        {
+          name: "syntactically malformed Caddy environment",
+          htpasswd,
+          environment:
+            `APOLLO_ADMIN_CADDY_USER='${username}'\n` +
+            `APOLLO_ADMIN_CADDY_PASSWORD_HASH='${bcrypt}\n`,
+        },
+        {
+          name: "Caddy environment with an extra line",
+          htpasswd,
+          environment: `${caddyEnvironment}UNEXPECTED='value'\n`,
+        },
+        {
+          name: "invalid username",
+          htpasswd: `${invalidUsername}:${bcrypt}`,
+          environment:
+            `APOLLO_ADMIN_CADDY_USER='${invalidUsername}'\n` +
+            `APOLLO_ADMIN_CADDY_PASSWORD_HASH='${bcrypt}'\n`,
+        },
+        {
+          name: "invalid bcrypt",
+          htpasswd: `${username}:${invalidBcrypt}`,
+          environment:
+            `APOLLO_ADMIN_CADDY_USER='${username}'\n` +
+            `APOLLO_ADMIN_CADDY_PASSWORD_HASH='${invalidBcrypt}'\n`,
+        },
+        {
+          name: "matching malformed pair",
+          htpasswd: `${username}:${malformedPairHash}`,
+          environment:
+            `APOLLO_ADMIN_CADDY_USER='${username}'\n` +
+            `APOLLO_ADMIN_CADDY_PASSWORD_HASH='${malformedPairHash}'\n`,
+        },
+      ];
+      for (const { name, htpasswd: hostileHtpasswd, environment, marker } of hostileCases) {
         const hostileHtpasswdFile = join(root, `${name}.htpasswd`);
         const hostileEnvironmentFile = join(root, `${name}.env`);
         writeFileSync(hostileHtpasswdFile, hostileHtpasswd, { mode: 0o400 });
-        writeFileSync(hostileEnvironmentFile, hostileEnvironment, {
+        writeFileSync(hostileEnvironmentFile, environment, {
           mode: 0o640,
         });
 
@@ -338,7 +392,15 @@ printf 'chown %s\n' "$*" >> "$APOLLO_COMMAND_LOG"
         expect(rejected.status, name).not.toBe(0);
         expect(rejected.stdout, name).toBe("");
         expect(rejected.stderr, name).toBe("");
-        for (const secret of [username, bcrypt, password]) {
+        if (marker) expect(existsSync(marker), name).toBe(false);
+        for (const secret of [
+          username,
+          bcrypt,
+          password,
+          invalidUsername,
+          invalidBcrypt,
+          malformedPairHash,
+        ]) {
           expect(`${rejected.stdout}${rejected.stderr}`, name).not.toContain(
             secret,
           );
@@ -357,7 +419,7 @@ printf 'chown %s\n' "$*" >> "$APOLLO_COMMAND_LOG"
     } finally {
       rmSync(root, { force: true, recursive: true });
     }
-  });
+  }, 30_000);
 
   it.each([
     ["prior env present", true, "present"],

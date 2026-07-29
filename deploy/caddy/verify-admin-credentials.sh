@@ -12,14 +12,41 @@ nginx_hash=
 if IFS=: read -r nginx_user nginx_hash < "$htpasswd_file"; then
   exit 1
 fi
-[ -n "$nginx_user" ] && [ -n "$nginx_hash" ] || exit 1
 case "$nginx_hash" in *:*) exit 1 ;; esac
+printf '%s\n' "$nginx_user" |
+  grep -Eq '^[A-Za-z0-9_.@-]{1,128}$' || exit 1
+printf '%s\n' "$nginx_hash" |
+  grep -Eq '^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$' || exit 1
 
-unset APOLLO_ADMIN_CADDY_USER APOLLO_ADMIN_CADDY_PASSWORD_HASH
-set -a
-. "$caddy_environment_file"
-set +a
-[ "${APOLLO_ADMIN_CADDY_USER+x}" = x ]
-[ "${APOLLO_ADMIN_CADDY_PASSWORD_HASH+x}" = x ]
-[ "$nginx_user" = "$APOLLO_ADMIN_CADDY_USER" ]
-[ "$nginx_hash" = "$APOLLO_ADMIN_CADDY_PASSWORD_HASH" ]
+[ "$(wc -l < "$caddy_environment_file")" -eq 2 ] || exit 1
+caddy_user_line=
+caddy_hash_line=
+{
+  IFS= read -r caddy_user_line || exit 1
+  IFS= read -r caddy_hash_line || exit 1
+} < "$caddy_environment_file"
+
+user_prefix="APOLLO_ADMIN_CADDY_USER='"
+hash_prefix="APOLLO_ADMIN_CADDY_PASSWORD_HASH='"
+quote="'"
+case "$caddy_user_line" in
+  "$user_prefix"*"$quote")
+    caddy_user=${caddy_user_line#"$user_prefix"}
+    caddy_user=${caddy_user%"$quote"}
+    ;;
+  *) exit 1 ;;
+esac
+case "$caddy_hash_line" in
+  "$hash_prefix"*"$quote")
+    caddy_hash=${caddy_hash_line#"$hash_prefix"}
+    caddy_hash=${caddy_hash%"$quote"}
+    ;;
+  *) exit 1 ;;
+esac
+
+printf '%s\n' "$caddy_user" |
+  grep -Eq '^[A-Za-z0-9_.@-]{1,128}$' || exit 1
+printf '%s\n' "$caddy_hash" |
+  grep -Eq '^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$' || exit 1
+[ "$nginx_user" = "$caddy_user" ]
+[ "$nginx_hash" = "$caddy_hash" ]
