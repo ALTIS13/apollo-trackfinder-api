@@ -147,11 +147,14 @@ The final non-publishing matrix recorded scripts `243 passed / 4 skipped` in
 `261.96s`, API `603 passed / 8 skipped` in `56.07s`, admin `218 passed` in
 `20.25s`, music player `118 passed` in `10.04s`, search `142 passed / 1
 skipped` in `6.67s`, download worker `186 passed / 2 skipped` in `8.70s`, and
-root typecheck in `19.8s`. Platform API and TF integrations were not green
-because ignored `dist` tests generated during the matrix were discovered as
-stale modules (`21` and `10` failures respectively). Rerun their exact matrix
-commands from a clean ignored-output state before claiming a whole-matrix
-release gate; this does not change the publisher proof or authorize rollout.
+root typecheck in `19.8s`. The complete nine-command non-publishing matrix is
+green after clean-source exact reruns: Platform API passed `422 passed / 21
+skipped` across `18` files with `6` skipped in `28.22s`, and TF integrations
+passed `107 passed / 10 skipped` across `14` files in `5.60s`. The two
+Git-ignored, untracked generated-output directories were moved intact to
+ignored `.ops-private` quarantine after the local deletion policy rejected
+recursive removal; they were not deleted. This local evidence does not
+authorize publication or rollout.
 
 Production mode requires the artifact and exact approved repositories. The
 separate `loopback-local-smoke` mode accepts only loopback repositories and no
