@@ -359,6 +359,11 @@ printf 'chown %s\n' "$*" >> "$APOLLO_COMMAND_LOG"
           environment: `${caddyEnvironment}UNEXPECTED='value'\n`,
         },
         {
+          name: "Caddy environment with an unterminated extra line",
+          htpasswd,
+          environment: `${caddyEnvironment}UNEXPECTED='value'`,
+        },
+        {
           name: "invalid username",
           htpasswd: `${invalidUsername}:${bcrypt}`,
           environment:

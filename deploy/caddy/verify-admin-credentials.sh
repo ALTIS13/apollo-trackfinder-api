@@ -25,6 +25,8 @@ caddy_hash_line=
   IFS= read -r caddy_user_line || exit 1
   IFS= read -r caddy_hash_line || exit 1
 } < "$caddy_environment_file"
+[ "$(wc -c < "$caddy_environment_file")" -eq \
+  "$(printf '%s\n%s\n' "$caddy_user_line" "$caddy_hash_line" | wc -c)" ] || exit 1
 
 user_prefix="APOLLO_ADMIN_CADDY_USER='"
 hash_prefix="APOLLO_ADMIN_CADDY_PASSWORD_HASH='"
