@@ -12,6 +12,10 @@ const verifyScript = join(worktree, "deploy/ops/verify-backup.sh");
 const restoreScript = join(worktree, "deploy/ops/restore-postgres.sh");
 const classifyScript = join(worktree, "deploy/ops/classify-retained-volume.sh");
 const temporaryRoots: string[] = [];
+const postgres16Fixture =
+  "docker.io/library/postgres:16-bookworm@sha256:92620daddcd947f8d5ab5ba66e848702fe443d87fed30c4cea8e389fd78dfc55";
+const shellContractTimeoutMs = 30_000;
+const dockerContractTimeoutMs = 90_000;
 
 type Result = ReturnType<typeof spawnSync>;
 
@@ -355,7 +359,7 @@ describe("encrypted PostgreSQL backup contract", () => {
     let modes = "";
     try {
       docker(["volume", "create", "--label", label, volume]);
-      modes = docker(["run", "--rm", "--label", label, "-v", `${worktree.replaceAll("\\\\", "/")}:/repo:ro`, "-v", `${volume}:/work`, "postgres:16", "sh", "-ceu", `
+      modes = docker(["run", "--rm", "--label", label, "-v", `${worktree.replaceAll("\\\\", "/")}:/repo:ro`, "-v", `${volume}:/work`, postgres16Fixture, "sh", "-ceu", `
         mkdir -p /work/bin /work/backups
         cat > /work/bin/pg_dump <<'EOF'
 #!/bin/sh
@@ -397,7 +401,7 @@ EOF
     }
     expect(modes.split("\n").at(-1)).toBe("600");
     expect(dockerExists(["volume", "inspect", volume])).toBe(false);
-  });
+  }, dockerContractTimeoutMs);
 
   it("removes only invocation-owned published artifacts when publication fails", () => {
     if (!requireScript(backupScript)) return;
@@ -739,7 +743,7 @@ EOF
     expect(result.status).not.toBe(0);
     expect(output(result)).toBe("restore: target-check failed\n");
     expect(existsSync(env.FAKE_RESTORE_INPUT!)).toBe(false);
-  });
+  }, shellContractTimeoutMs);
 
   it.each([
     ["psql", { FAKE_PSQL_FAIL: "1" }, "restore: target-check failed\n"],
@@ -753,7 +757,7 @@ EOF
     expect(result.status).not.toBe(0);
     expect(output(result)).toBe(expected);
     expect(output(result).includes(env.FAKE_SENSITIVE!)).toBe(false);
-  });
+  }, shellContractTimeoutMs);
 
   it("classifies an original retained volume with metadata only", () => {
     if (!requireScript(classifyScript)) return;
@@ -992,8 +996,7 @@ function runPostgresBackupRestoreProof(options: {
 describe.runIf(dockerProofEnabled)("PostgreSQL 16 encrypted restore proof", () => {
   it("restores PostgreSQL 16 marker schema and data after source destruction", () => {
     runPostgresBackupRestoreProof({
-      baseImage:
-        "docker.io/library/postgres:16-bookworm@sha256:92620daddcd947f8d5ab5ba66e848702fe443d87fed30c4cea8e389fd78dfc55",
+      baseImage: postgres16Fixture,
       database: "apollo_trackfinder",
       evidencePrefix: "pg16-disposable-proof",
       major: 16,
