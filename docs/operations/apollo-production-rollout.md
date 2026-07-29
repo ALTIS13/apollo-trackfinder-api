@@ -4,7 +4,7 @@ Status: `OPERATOR_PUBLISHER_LOCAL_VALIDATED`
 
 This is an owner-reviewable rollout plan, not a deployment record. The final
 publisher proof validated the exact future publication source commit
-`e48af528eae166c69db5485b2afa415bc31fa7a1` locally. No production image has
+`7008273fd7cedf33174bd51489e63f2a1b67c05c` locally. No production image has
 been pushed. HomeNode, Coolify, the host Caddy configuration, UFW, DNS,
 GitHub settings, GHCR, remote databases, and remote volumes were not contacted
 or mutated.
@@ -125,7 +125,7 @@ options. Complete preparation before authentication, then keep authentication
 and publication inside the cleanup boundary:
 
 ```powershell
-$approvedSourceCommit = 'e48af528eae166c69db5485b2afa415bc31fa7a1'
+$approvedSourceCommit = '7008273fd7cedf33174bd51489e63f2a1b67c05c'
 $releaseId = 'v0.1.0-rc.1'
 $preparation = pnpm --silent release:prepare -- --mode production --release-id $releaseId --source-commit $approvedSourceCommit | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Release preparation failed' }
@@ -154,26 +154,28 @@ That visibility action and every later HomeNode rollout action remain separate
 approval gates; no production publish, tag, release, package setting, or
 Coolify pull proof is implied by this record.
 
-The local fake-command publisher proof passed `47/47` in `2.24s`. It covers
-`11` custom Linux/amd64 targets plus pinned Redis, `51` successful-path
-commands, task-owned builder/staging/temporary-root cleanup, and a manifest
-with exact `formatVersion`/`images`/`sourceCommit` keys. Each of the `12`
-image entries has only `imageDigest`/`imageReference`/`name`/`repository`; the
-environment has `RELEASE_SOURCE_COMMIT`, `13` ordered image variables, and a
-final LF. No credential value is present in the artifact or environment.
+The focused fake-command publisher proof passed `71/71` in `10.96s`. The
+combined successful prepare/publication path records `52` commands: `15`
+source-preparation commands, then exact archive extraction, `11` pre-push tag
+inspections, one owned builder create, `11` Linux/amd64 builds with owned
+metadata files, `11` immutable-tag digest inspections, and exact owned-builder
+inspect/removal. It covers `11` custom targets plus catalog-pinned Redis.
+Preparation durably binds release/source identity, archive and tree hashes,
+protocol version, and image catalog; publication consumes that receipt once
+without running archived lifecycle or test commands. Every custom image uses
+its Buildx metadata digest, and manifest, environment, and marker become
+consumable only through one validated staging-directory rename. No credential
+value is present in commands, artifacts, or child environments.
 
-The final non-publishing matrix recorded scripts `243 passed / 4 skipped` in
-`261.96s`, API `603 passed / 8 skipped` in `56.07s`, admin `218 passed` in
-`20.25s`, music player `118 passed` in `10.04s`, search `142 passed / 1
-skipped` in `6.67s`, download worker `186 passed / 2 skipped` in `8.70s`, and
-root typecheck in `19.8s`. The complete nine-command non-publishing matrix is
-green after clean-source exact reruns: Platform API passed `422 passed / 21
-skipped` across `18` files with `6` skipped in `28.22s`, and TF integrations
-passed `107 passed / 10 skipped` across `14` files in `5.60s`. The two
-Git-ignored, untracked generated-output directories were moved intact to
-ignored `.ops-private` quarantine after the local deletion policy rejected
-recursive removal; they were not deleted. This local evidence does not
-authorize publication or rollout.
+The complete nine-command non-publishing matrix passed consecutively (counts
+are passed/skipped): scripts `268/4` in `256.92s`; Platform API `422/21` tests
+and `18/6` files in `24.98s`; API `603/8` tests and `32/2` files in `50.44s`;
+admin `218/0` in `19.10s`; music player `118/0` in `11.84s`; search `142/1`
+in `6.91s`; TF integrations `107/10` across `14` files in `7.39s`; download
+worker `186/2` tests and `9/1` files in `8.42s`; and root typecheck in `21.1s`.
+Generated ignored Platform/integrations `dist` roots were moved intact into
+ignored `.ops-private` quarantine after typecheck; they were not deleted or
+tracked. This local evidence does not authorize publication or rollout.
 
 Production mode requires the artifact and exact approved repositories. The
 separate `loopback-local-smoke` mode accepts only loopback repositories and no

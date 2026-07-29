@@ -5,35 +5,39 @@ Last updated: 2026-07-29.
 ## Operator-owned release publisher
 
 Status: `OPERATOR_PUBLISHER_LOCAL_VALIDATED`. The exact future publication
-source is `e48af528eae166c69db5485b2afa415bc31fa7a1`, not ambient or
+source is `7008273fd7cedf33174bd51489e63f2a1b67c05c`, not ambient or
 uncommitted `HEAD`. The publisher is locally proven, but no production image
 has been pushed, no GHCR login has occurred, and no GitHub or infrastructure
 setting has been changed.
 
-- The deterministic fake-command contract passed `47/47` in `2.24s`. Its
-  successful path records `51` commands: `11` pre-push tag inspections, one
-  task-owned builder create, `11` Linux/amd64 custom-image pushes, `11`
-  bounded digest inspections, and one task-owned builder removal. It validates
-  all `11` custom targets plus the pinned Redis artifact; it never supplies a
-  credential, token, password, secret, `prune`, or `--use` argument.
-- The proof verifies cleanup of the owned builder, staging directory, and
-  temporary archive/build roots on success and failure. It retains unrelated
-  collisions and rejects incomplete evidence. The completed manifest has only
-  `formatVersion`, `images`, and `sourceCommit`; its `12` images use only
-  `imageDigest`, `imageReference`, `name`, and `repository`. The generated
-  environment has `RELEASE_SOURCE_COMMIT` plus `13` ordered image variables
-  and one final LF.
-- The required full non-publishing matrix was run. Clean results were scripts
-  `243 passed / 4 skipped` in `261.96s`, API `603 passed / 8 skipped` in
-  `56.07s`, admin `218 passed` in `20.25s`, music player `118 passed` in
-  `10.04s`, search `142 passed / 1 skipped` in `6.67s`, download worker
-  `186 passed / 2 skipped` in `8.70s`, and root typecheck in `19.8s`. The
-  complete nine-command non-publishing matrix is green: clean-source reruns
-  passed Platform API `422 passed / 21 skipped` across `18` files with `6`
-  skipped in `28.22s`, and TF integrations `107 passed / 10 skipped` across
-  `14` files in `5.60s`. The two Git-ignored, untracked generated-output
-  directories were moved intact to ignored `.ops-private` quarantine after the
-  local deletion policy rejected recursive removal; they were not deleted.
+- The focused fake-command publisher contract passed `71/71` in `10.96s`.
+  Its combined successful prepare/publication path records `52` commands:
+  `15` source-preparation commands, then archive extraction, `11` pre-push tag
+  inspections, one task-owned builder create, `11` Linux/amd64 builds with
+  owned metadata files, `11` immutable-tag digest inspections, and exact
+  task-owned builder inspect/removal. It never supplies a credential, token,
+  password, secret, `prune`, `--use`, or registry override argument.
+- Preparation claims the release ID before work, validates the exact archived
+  source with an explicit child environment, and durably records a private
+  protocol-v2 receipt binding release/source identity, archive SHA-256,
+  validated tree SHA-256, and the complete image catalog. Publication consumes
+  that receipt once, rechecks archive/tree binding before Docker access, runs
+  no archived lifecycle or test command, and retains failed claims.
+- Every custom image records its Buildx metadata digest and requires the
+  immutable release tag to resolve to that digest with bounded
+  `250/500/1000/2000ms` backoff. The Redis evidence is derived from the exact
+  catalog pin. Manifest, environment, and marker are hash-checked inside one
+  sibling staging directory and published by one atomic directory rename.
+  Cleanup reconciles only the claimed builder and owned temporary paths.
+- The complete nine-command non-publishing matrix passed consecutively
+  (counts are passed/skipped): scripts `268/4` in `256.92s`; Platform API
+  `422/21` tests and `18/6` files in `24.98s`; API `603/8` tests and `32/2`
+  files in `50.44s`; admin `218/0` in `19.10s`; music player `118/0` in
+  `11.84s`; search `142/1` in `6.91s`; integrations `107/10` across `14`
+  files in `7.39s`; download worker `186/2` tests and `9/1` files in `8.42s`;
+  and root typecheck in `21.1s`. Generated ignored Platform/integrations
+  `dist` roots were moved intact into ignored `.ops-private` quarantine after
+  typecheck; they were not deleted or tracked.
 - Actual publication still requires an owner-created classic PAT with
   `write:packages`, an external `docker login --password-stdin`, the exact
   checkpoint command documented in the rollout runbook, and a separate explicit
