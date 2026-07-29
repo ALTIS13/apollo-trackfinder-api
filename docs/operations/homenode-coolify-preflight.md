@@ -2,7 +2,7 @@
 
 Date: 2026-07-29
 
-Status: `LOCAL_RELEASE_VALIDATED`
+Status: `RELEASE_PUBLICATION_BLOCKED`
 
 This document records the public release constraints proven before the first
 Apollo Platform and Apollo TF deployment. Exact host inventory, capacity,
@@ -10,14 +10,29 @@ listeners, versions, routes, and candidate upstreams remain in the ignored
 private operator record. This is not a deployment record and does not authorize
 a remote change.
 
+## Current publication gate
+
+Immutable workflow run
+[`30444730031`](https://github.com/ALTIS13/Apollo.TF/actions/runs/30444730031)
+targeted merged `main` commit
+`1a5677cad90195e681a5887a2b7fefe0777407db`. GitHub rejected the validate job
+before runner allocation because of an account-level Actions execution gate.
+No workflow step ran, no image or manifest was published, and no HomeNode state
+changed. That dispatch SHA differs from the exact locally proven image source
+`d0f7412`. Clear the account gate, then obtain explicit approval to publish
+`v0.1.0-rc.1` at `d0f7412`, or repeat the complete proof for a newer source.
+Do not create any HomeNode resource or secret before a successful manifest is
+validated.
+
 ## Local package closure
 
 The final fix wave validated the production manifests, exact provenance
 validator, custom image targets, file-backed secret contracts, application
 flows, persistence, and the complete Caddy matrix locally from
 `d0f74122d9e415d7cb9571be678188657f1ce7eb`. The proof used a task-owned local
-Buildx builder and only `127.0.0.1:18200..18203`, dispatched no workflow, and
-passed production smoke `43/43` in `987.59s` with exact cleanup zero. It also
+Buildx builder and only `127.0.0.1:18200..18203`; that local proof itself
+dispatched no workflow and passed production smoke `43/43` in `987.59s` with
+exact cleanup zero. It also
 exercised the exact `baseline` profile
 one-shot contracts against a separate disposable database, restored granted
 search after restart, held a signed producer down beyond the 90-second stale

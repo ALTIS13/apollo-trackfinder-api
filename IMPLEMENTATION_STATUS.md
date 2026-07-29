@@ -2,11 +2,35 @@
 
 Last updated: 2026-07-29.
 
+## Immutable release publication
+
+Status: `BLOCKED_GITHUB_ACTIONS`. Workflow run
+[`30444730031`](https://github.com/ALTIS13/Apollo.TF/actions/runs/30444730031)
+was dispatched from merged `main` commit
+`1a5677cad90195e681a5887a2b7fefe0777407db`.
+
+- An account-level GitHub Actions execution gate prevented runner allocation
+  for `Validate source`. The job executed zero steps and consumed zero billable
+  milliseconds; all image-build jobs and the manifest job were skipped.
+- No GHCR image, release manifest, GitHub setting, HomeNode service, Coolify
+  resource, Caddy route, UFW rule, DNS record, database, or volume was changed.
+- The rejected dispatch targeted merge commit `1a5677c`, while the approved
+  image source remains exact commit `d0f7412`; no step ran, so it produced no
+  conflicting release artifact. The next release action is to clear the GitHub
+  Actions account gate and obtain explicit publication approval for
+  `v0.1.0-rc.1` pointing to `d0f7412`, or to rebind the complete release proof
+  to a newer source before dispatch. Local proof images are not a production
+  substitute for the required workflow manifest.
+- A fresh read-only HomeNode check found Caddy, Docker, and UFW active, all
+  observed existing containers running, `18200..18220` unused, and the current
+  Caddyfile valid. Existing services and configuration were not changed.
+
 ## Coolify production release package
 
 Status: `LOCAL_RELEASE_VALIDATED`. The exact local image source is
 `d0f74122d9e415d7cb9571be678188657f1ce7eb`; this status does not claim a
-deployment, workflow dispatch, GHCR publication, or remote change.
+deployment, successful workflow execution, GHCR publication, or remote
+infrastructure change.
 
 - The production package consists of
   `deploy/coolify/apollo-platform.compose.yml`,
@@ -83,9 +107,9 @@ deployment, workflow dispatch, GHCR publication, or remote change.
   still require explicit owner approval.
 - The observed legacy volume remains only `DETACHED_UNKNOWN`: unnamed,
   unmounted, unstarted, unmodified, and absent from tracked manifests.
-- The final fix wave did not contact or mutate HomeNode, Coolify, host Caddy,
-  UFW, DNS, GitHub settings/workflows, GHCR, any remote database/volume, or the
-  detached legacy volume. The release workflow was not dispatched.
+- The final fix wave did not mutate HomeNode, Coolify, host Caddy, UFW, DNS,
+  GitHub settings, GHCR, any remote database/volume, or the detached legacy
+  volume. The later publication attempt is recorded separately above.
 
 ## TF immutable migrations release candidate
 

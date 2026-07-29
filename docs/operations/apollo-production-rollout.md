@@ -1,12 +1,20 @@
 # Apollo Production Rollout
 
-Status: `LOCAL_RELEASE_VALIDATED`
+Status: `RELEASE_PUBLICATION_BLOCKED`
 
 This is an owner-reviewable rollout plan, not a deployment record. The final
 fix wave validated the exact package locally from source commit
-`d0f74122d9e415d7cb9571be678188657f1ce7eb`. HomeNode, Coolify, the host
-Caddy configuration, UFW, DNS, GitHub settings, GHCR, remote databases, and
-remote volumes were not contacted or mutated.
+`d0f74122d9e415d7cb9571be678188657f1ce7eb`. Immutable workflow run
+[`30444730031`](https://github.com/ALTIS13/Apollo.TF/actions/runs/30444730031)
+was then dispatched from merged `main` commit
+`1a5677cad90195e681a5887a2b7fefe0777407db`, but GitHub rejected the validate
+job before runner allocation because of an account-level Actions execution
+gate. No workflow step ran, no GHCR image or manifest was produced, and
+HomeNode, Coolify, the host Caddy configuration, UFW, DNS, remote databases,
+and remote volumes were not mutated. Do not rerun that merge-SHA dispatch as
+the approved release: clear the account gate and publish a single owner-approved
+`v0.1.0-rc.1` tag at exact source `d0f7412`, or repeat the complete proof for a
+newer source first.
 
 ## Release Boundary
 
