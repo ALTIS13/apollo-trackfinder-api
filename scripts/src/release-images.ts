@@ -171,3 +171,27 @@ export const pinnedRedisReference = releaseImageCatalog.find(
     { kind: "external" }
   > => entry.kind === "external",
 )!.reference;
+
+const pinnedRedisDigestSeparator = pinnedRedisReference.lastIndexOf("@");
+const pinnedRedisTagSeparator = pinnedRedisReference.lastIndexOf(
+  ":",
+  pinnedRedisDigestSeparator,
+);
+export const pinnedRedisRepository = pinnedRedisReference.slice(
+  0,
+  pinnedRedisTagSeparator,
+);
+export const pinnedRedisDigest = pinnedRedisReference.slice(
+  pinnedRedisDigestSeparator + 1,
+);
+export const pinnedRedisImmutableReference = `${pinnedRedisRepository}@${pinnedRedisDigest}`;
+
+if (
+  pinnedRedisTagSeparator < 0 ||
+  pinnedRedisDigestSeparator < pinnedRedisTagSeparator ||
+  !/^[a-z0-9.-]+(?::\d+)?\/[a-z0-9._/-]+$/.test(pinnedRedisRepository) ||
+  !/^sha256:[a-f0-9]{64}$/.test(pinnedRedisDigest) ||
+  /^sha256:0{64}$/.test(pinnedRedisDigest)
+) {
+  throw new Error("invalid pinned Redis reference");
+}

@@ -525,8 +525,11 @@ describe("Apollo operator image publication", () => {
       readonly scripts?: Record<string, string>;
     };
 
+    expect(packageJson.scripts?.["release:prepare"]).toBe(
+      "pnpm --filter @workspace/scripts exec tsx src/operator-release.ts prepare",
+    );
     expect(packageJson.scripts?.["release:publish"]).toBe(
-      "node --experimental-strip-types -- scripts/src/operator-release.ts",
+      "pnpm --filter @workspace/scripts exec tsx src/operator-release.ts publish",
     );
     expect(publisher).toContain('} from "./release-images.js";');
     expect(publisher).toContain("operatorReleaseImageTargets");
@@ -562,11 +565,17 @@ describe("Apollo operator image publication", () => {
 
     expect(publisher).toContain('"git",\n      [\n        "archive",');
     expect(publisher).toContain(
-      '"tar",\n      ["-xf", archivePath, "-C", validationRoot]',
+      '"tar",\n      ["-xf", temporaryArchivePath, "-C", validationRoot]',
+    );
+    expect(publisher).toContain(
+      '"tar",\n      ["-xf", archivePath, "-C", buildRoot]',
     );
     expect(publisher).toContain(
       "for (const validation of sourceValidationCommands)",
     );
+    expect(publisher).toContain("receipt.sourceTreeSha256");
+    expect(publisher).toContain('"--metadata-file",\n          metadataPath');
+    expect(publisher).toContain("inspectedDigest !== buildDigest");
     expect(publisher).toContain('"--provenance",\n          "mode=max"');
     expect(publisher).toContain('"--sbom",\n          "true"');
     expect(publisher).toContain(
@@ -582,7 +591,7 @@ describe("Apollo operator image publication", () => {
       "const digestPattern = /^sha256:[a-f0-9]{64}$/;",
     );
     expect(publisher).toContain(
-      "imageReference: `${target.repository}@${digest}`",
+      "imageReference: `${target.repository}@${buildDigest}`",
     );
   });
 });

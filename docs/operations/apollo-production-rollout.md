@@ -107,8 +107,11 @@ loopback registry, and resolved these registry digests:
 
 The disposable registry and all references were removed. These digests are
 local evidence, not deployable GHCR references. The operator-run publisher is
-the only active publication procedure. It validates the source archive before
-building the approved source commit and writes `apollo-release-manifest.json`,
+the only active publication procedure. Its preparation command validates the
+exact archived source before authentication and persists a private receipt
+binding the release identity, source archive, validated source tree, and image
+catalog. Publication accepts only that receipt, revalidates the binding before
+registry access, and writes `apollo-release-manifest.json`,
 `release-images.env`, and its completion marker under the ignored private
 release directory.
 
@@ -118,22 +121,38 @@ specific publication action. Before running it, the owner must create a
 classic PAT with `write:packages` and place it only in the current PowerShell
 environment. It is never persisted in project files and must be revoked or
 rotated independently. The publisher accepts no credentials or registry
-options, so authenticate outside it:
+options. Complete preparation before authentication, then keep authentication
+and publication inside the cleanup boundary:
 
 ```powershell
-$env:CR_PAT | docker login ghcr.io -u ALTIS13 --password-stdin
-Remove-Item Env:\CR_PAT
 $approvedSourceCommit = 'e48af528eae166c69db5485b2afa415bc31fa7a1'
-pnpm release:publish -- --mode production --release-id v0.1.0-rc.1 --source-commit $approvedSourceCommit
-pnpm release:validate -- --env-file '<PRIVATE_RELEASE_ENV>' --mode production --release-manifest '.ops-private/releases/v0.1.0-rc.1/apollo-release-manifest.json'
+$releaseId = 'v0.1.0-rc.1'
+$preparation = pnpm --silent release:prepare -- --mode production --release-id $releaseId --source-commit $approvedSourceCommit | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw 'Release preparation failed' }
+
+try {
+  $env:CR_PAT | docker login ghcr.io -u ALTIS13 --password-stdin
+  if ($LASTEXITCODE -ne 0) { throw 'GHCR login failed' }
+
+  pnpm --silent release:publish -- --mode production --release-id $releaseId --source-commit $approvedSourceCommit --receipt $preparation.receiptPath
+  if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
+}
+finally {
+  Remove-Item Env:\CR_PAT -ErrorAction SilentlyContinue
+}
+
+pnpm --silent release:validate -- --env-file '<PRIVATE_RELEASE_ENV>' --mode production --release-manifest '.ops-private/releases/v0.1.0-rc.1/apollo-release-manifest.json'
+if ($LASTEXITCODE -ne 0) { throw 'Release validation failed' }
 ```
 
 Set `RELEASE_SOURCE_COMMIT` in the completed private release env to the same
 commit and validate it with the generated manifest. After the first package is
 published, the owner must explicitly change its visibility to public before an
-anonymous Coolify pull proof. That visibility action and every later HomeNode
-rollout action remain separate approval gates; no production publish, tag,
-release, package setting, or Coolify pull proof is implied by this record.
+anonymous Coolify pull proof. Only public GHCR images allow anonymous HomeNode/Coolify pulls.
+Record package visibility checked after first publication before that proof.
+That visibility action and every later HomeNode rollout action remain separate
+approval gates; no production publish, tag, release, package setting, or
+Coolify pull proof is implied by this record.
 
 The local fake-command publisher proof passed `47/47` in `2.24s`. It covers
 `11` custom Linux/amd64 targets plus pinned Redis, `51` successful-path

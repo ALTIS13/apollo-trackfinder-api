@@ -7,7 +7,10 @@ import {
   approvedImageRepositories,
   artifactImageNames,
   operatorReleaseImageTargets,
+  pinnedRedisDigest,
+  pinnedRedisImmutableReference,
   pinnedRedisReference,
+  pinnedRedisRepository,
   releaseImageCatalog,
   releaseImageEnvironmentNames,
   type ArtifactImageName,
@@ -22,7 +25,10 @@ export {
   approvedImageRepositories,
   artifactImageNames,
   operatorReleaseImageTargets,
+  pinnedRedisDigest,
+  pinnedRedisImmutableReference,
   pinnedRedisReference,
+  pinnedRedisRepository,
   releaseImageCatalog,
   releaseImageEnvironmentNames,
   type ArtifactImageName,
@@ -1214,7 +1220,11 @@ function validateReleaseArtifact(
     if (
       value.repository !== approvedImageRepositories[value.name] ||
       parsed?.repository !== value.repository ||
-      parsed.digest !== value.imageDigest
+      parsed.digest !== value.imageDigest ||
+      (value.name === "redis" &&
+        (value.repository !== pinnedRedisRepository ||
+          value.imageDigest !== pinnedRedisDigest ||
+          value.imageReference !== pinnedRedisImmutableReference))
     ) {
       addError(
         errors,
@@ -1255,6 +1265,12 @@ function validateReleaseImages(
     if (input.mode === "production") {
       if (parsed.repository !== approvedImageRepositories[imageName]) {
         addError(errors, "image_repository", { field: "environment" });
+      }
+      if (
+        imageName === "redis" &&
+        reference !== pinnedRedisImmutableReference
+      ) {
+        addError(errors, "image_provenance", { field: "environment" });
       }
       if (artifactReferences.get(imageName) !== reference) {
         addError(errors, "image_provenance", { field: "environment" });
@@ -2242,7 +2258,7 @@ export function runCoolifyReleaseCli(argv: string[]): number {
       ok: false,
       errors: [sanitizeCoolifyReleaseError(error)],
     };
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    process.stderr.write(`${JSON.stringify(result)}\n`);
     return 1;
   }
 }

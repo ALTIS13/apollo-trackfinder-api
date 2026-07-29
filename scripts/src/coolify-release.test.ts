@@ -115,6 +115,8 @@ const imageDigests = Object.fromEntries(
     `sha256:${(index + 1).toString(16).repeat(64)}`,
   ]),
 ) as Record<ImageName, string>;
+imageDigests.redis =
+  "sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b";
 
 const exactNetworks: Readonly<
   Record<
@@ -619,8 +621,7 @@ function exactPlainEnvironment(
     },
     "tf-integrations": {
       APOLLO_API_VERSION: releaseEnvironment["TF_INTEGRATIONS_VERSION"]!,
-      APOLLO_DEPLOYED_AT:
-        releaseEnvironment["TF_INTEGRATIONS_DEPLOYED_AT"]!,
+      APOLLO_DEPLOYED_AT: releaseEnvironment["TF_INTEGRATIONS_DEPLOYED_AT"]!,
       NODE_ENV: "production",
       PORT: "8080",
       TF_INTEGRATIONS_HEARTBEAT_ALLOW_INSECURE_HTTP: "true",
@@ -732,7 +733,10 @@ function serviceMap(
   releaseEnvironment: Readonly<Record<string, string>>,
 ): Record<string, ComposeService> {
   return Object.fromEntries(
-    names.map((name) => [name, serviceFixture(stackName, name, releaseEnvironment)]),
+    names.map((name) => [
+      name,
+      serviceFixture(stackName, name, releaseEnvironment),
+    ]),
   );
 }
 
@@ -978,11 +982,18 @@ describe("operator release evidence consumption", () => {
 
   it("sanitizes incomplete production evidence at the CLI boundary", async () => {
     const fixture = await completeReleaseEvidenceFixture();
-    const output: string[] = [];
-    const write = vi
+    const stderr: string[] = [];
+    const stdout: string[] = [];
+    const writeError = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+    const writeOutput = vi
       .spyOn(process.stdout, "write")
       .mockImplementation((chunk) => {
-        output.push(String(chunk));
+        stdout.push(String(chunk));
         return true;
       });
     try {
@@ -998,10 +1009,12 @@ describe("operator release evidence consumption", () => {
         ]),
       ).toBe(1);
     } finally {
-      write.mockRestore();
+      writeError.mockRestore();
+      writeOutput.mockRestore();
       await rm(fixture.root, { force: true, recursive: true });
     }
-    expect(JSON.parse(output.join(""))).toEqual({
+    expect(stdout).toEqual([]);
+    expect(JSON.parse(stderr.join(""))).toEqual({
       errors: [{ code: "invalid_release_manifest" }],
       ok: false,
     });
@@ -1066,26 +1079,10 @@ describe("validateCoolifyRelease", () => {
     ["apollo-platform", "platform-api", "APOLLO_ISSUER"],
     ["apollo-platform", "platform-api", "APOLLO_ALLOWED_ORIGINS"],
     ["apollo-platform", "platform-api", "NODE_ENV"],
-    [
-      "apollo-tf",
-      "tf-integrations",
-      "TF_INTEGRATIONS_HEARTBEAT_API_ORIGIN",
-    ],
-    [
-      "apollo-tf",
-      "tf-integrations",
-      "TF_INTEGRATIONS_SPOTIFY_CALLBACK_URI",
-    ],
-    [
-      "apollo-tf",
-      "tf-search",
-      "TF_SEARCH_HEARTBEAT_ALLOW_INSECURE_HTTP",
-    ],
-    [
-      "apollo-tf",
-      "tf-download-worker",
-      "TF_DOWNLOAD_HEARTBEAT_API_ORIGIN",
-    ],
+    ["apollo-tf", "tf-integrations", "TF_INTEGRATIONS_HEARTBEAT_API_ORIGIN"],
+    ["apollo-tf", "tf-integrations", "TF_INTEGRATIONS_SPOTIFY_CALLBACK_URI"],
+    ["apollo-tf", "tf-search", "TF_SEARCH_HEARTBEAT_ALLOW_INSECURE_HTTP"],
+    ["apollo-tf", "tf-download-worker", "TF_DOWNLOAD_HEARTBEAT_API_ORIGIN"],
     ["apollo-tf", "tf-api", "APOLLO_PLATFORM_API_ORIGIN"],
     ["apollo-tf", "tf-api", "APOLLO_PLATFORM_ISSUER"],
     ["apollo-tf", "tf-api", "APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP"],
@@ -1699,6 +1696,24 @@ describe("validateCoolifyRelease", () => {
     expect(errorCodes(imageMismatch)).toContain("image_provenance");
   });
 
+  it("requires the exact catalog-pinned Redis digest across artifact, environment, and services", () => {
+    const input = exactInput();
+    const tamperedDigest = `sha256:${"f".repeat(64)}`;
+    const tamperedReference = `docker.io/library/redis@${tamperedDigest}`;
+    const redis = input.releaseArtifact!.images.find(
+      ({ name }) => name === "redis",
+    )!;
+    redis.imageDigest = tamperedDigest;
+    redis.imageReference = tamperedReference;
+    input.environment.PLATFORM_REDIS_IMAGE = tamperedReference;
+    input.environment.TF_REDIS_IMAGE = tamperedReference;
+    input.stacks[0].compose.services["platform-redis"]!.image =
+      tamperedReference;
+    input.stacks[1].compose.services["tf-redis"]!.image = tamperedReference;
+
+    expect(errorCodes(input)).toContain("image_provenance");
+  });
+
   it("requires the complete exact release artifact image inventory in production", () => {
     const missing = exactInput();
     missing.releaseArtifact!.images.pop();
@@ -1812,11 +1827,18 @@ describe("validator process boundaries", () => {
     "/private/posix-sentinel/release.env",
     "C:\\Users\\windows-sentinel\\release.env",
   ])("does not disclose a sentinel env path through the CLI", (path) => {
-    const output: string[] = [];
-    const write = vi
+    const stderr: string[] = [];
+    const stdout: string[] = [];
+    const writeError = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+    const writeOutput = vi
       .spyOn(process.stdout, "write")
       .mockImplementation((chunk) => {
-        output.push(String(chunk));
+        stdout.push(String(chunk));
         return true;
       });
     try {
@@ -1829,12 +1851,14 @@ describe("validator process boundaries", () => {
         ]),
       ).toBe(1);
     } finally {
-      write.mockRestore();
+      writeError.mockRestore();
+      writeOutput.mockRestore();
     }
-    expect(JSON.parse(output.join(""))).toEqual({
+    expect(stdout).toEqual([]);
+    expect(JSON.parse(stderr.join(""))).toEqual({
       errors: [{ code: "release_error" }],
       ok: false,
     });
-    expect(output.join("")).not.toContain("sentinel");
+    expect(stderr.join("")).not.toContain("sentinel");
   });
 });

@@ -1,16 +1,30 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, readFileSync } from "node:fs";
-import { lstat, mkdir, open, readFile, rm } from "node:fs/promises";
+import { constants, createReadStream, readFileSync } from "node:fs";
+import {
+  copyFile,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  readlink,
+  rename,
+  rm,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { setTimeout as sleepTimer } from "node:timers/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   approvedImageRepositories,
   artifactImageNames,
   operatorReleaseImageTargets,
+  pinnedRedisDigest,
+  pinnedRedisImmutableReference,
   pinnedRedisReference,
+  pinnedRedisRepository,
   releaseImageCatalog,
   releaseImageEnvironmentNames,
   type ArtifactImageName,
@@ -22,7 +36,10 @@ export {
   approvedImageRepositories,
   artifactImageNames,
   operatorReleaseImageTargets,
+  pinnedRedisDigest,
+  pinnedRedisImmutableReference,
   pinnedRedisReference,
+  pinnedRedisRepository,
   releaseImageCatalog,
   releaseImageEnvironmentNames,
   type ArtifactImageName,
@@ -41,10 +58,23 @@ export type OperatorReleaseOptions = {
   repositoryRoot: string;
 };
 
+export type OperatorReleasePublicationOptions = OperatorReleaseOptions & {
+  receiptPath: string;
+  signal?: AbortSignal;
+};
+
 export type OperatorReleaseOutput = {
   envFragmentPath: string;
   manifestPath: string;
   releaseArtifact: ReleaseArtifact;
+};
+
+export type OperatorReleasePreparationOutput = {
+  archiveSha256: string;
+  receiptPath: string;
+  releaseId: string;
+  sourceCommit: string;
+  sourceTreeSha256: string;
 };
 
 export type OperatorReleaseCommandResult = {
@@ -54,18 +84,25 @@ export type OperatorReleaseCommandResult = {
 };
 
 export type OperatorReleaseDependencies = {
+  atomicRename(from: string, to: string): Promise<void>;
   command(
     executable: string,
     args: readonly string[],
-    options: { cwd: string; env?: NodeJS.ProcessEnv; timeoutMs?: number },
+    options: {
+      cwd: string;
+      env?: NodeJS.ProcessEnv;
+      signal?: AbortSignal;
+      timeoutMs?: number;
+    },
   ): Promise<OperatorReleaseCommandResult>;
   publicationCheckpoint?(
     checkpoint:
-      | "completion_written"
-      | "final_environment_written"
-      | "final_manifest_written",
+      | "staged_completion_written"
+      | "staged_environment_written"
+      | "staged_manifest_written",
   ): Promise<void>;
   randomId(): string;
+  sleep(milliseconds: number, signal?: AbortSignal): Promise<void>;
   temporaryRoot(): string;
 };
 
@@ -83,12 +120,13 @@ const digestPattern = /^sha256:[a-f0-9]{64}$/;
 const zeroDigest = `sha256:${"0".repeat(64)}`;
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const argumentFlags = new Set(["--mode", "--release-id", "--source-commit"]);
+const publicationArgumentFlags = new Set([...argumentFlags, "--receipt"]);
 const sourceRepository = "https://github.com/ALTIS13/Apollo.TF";
 const builderIdPattern = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const absentManifestPattern = /(?:manifest unknown|not found)/i;
-const windowsShimArgumentPattern = /^[A-Za-z0-9@._=:/-]+$/;
 const windowsShimExecutables = new Set(["corepack", "pnpm"]);
 const digestAttempts = 5;
+const digestBackoffMilliseconds = [250, 500, 1_000, 2_000] as const;
 const publicOperatorErrorCodes = new Set([
   "artifact_validation_failed",
   "builder_create_failed",
@@ -99,9 +137,13 @@ const publicOperatorErrorCodes = new Set([
   "invalid_arguments",
   "invalid_release_id",
   "invalid_release_mode",
+  "invalid_release_receipt",
   "invalid_source_commit",
+  "publication_cancelled",
   "release_error",
+  "release_claim_exists",
   "release_output_exists",
+  "release_receipt_reused",
   "release_tag_check_failed",
   "release_tag_exists",
   "source_validation_failed",
@@ -121,24 +163,37 @@ const releaseEnvironmentOrder = [
   "TF_DOWNLOAD_REDIS_IMAGE",
   "TF_DOWNLOAD_WORKER_IMAGE",
 ] as const;
+const corepackDistributionRoot = join(
+  dirname(process.execPath),
+  "node_modules",
+  "corepack",
+  "dist",
+);
+const corepackCliPath = join(corepackDistributionRoot, "corepack.js");
+const pnpmCliPath = join(corepackDistributionRoot, "pnpm.js");
 const sourceValidationCommands: readonly {
   args: readonly string[];
-  executable: "corepack" | "pnpm";
+  executable: string;
   timeoutMs: number;
 }[] = [
-  { args: ["enable"], executable: "corepack", timeoutMs: 60_000 },
   {
-    args: ["install", "--frozen-lockfile"],
-    executable: "pnpm",
+    args: [corepackCliPath, "enable"],
+    executable: process.execPath,
+    timeoutMs: 60_000,
+  },
+  {
+    args: [pnpmCliPath, "install", "--frozen-lockfile"],
+    executable: process.execPath,
     timeoutMs: 10 * 60_000,
   },
   {
-    args: ["--filter", "@workspace/scripts", "test"],
-    executable: "pnpm",
+    args: [pnpmCliPath, "--filter", "@workspace/scripts", "test"],
+    executable: process.execPath,
     timeoutMs: 20 * 60_000,
   },
   {
     args: [
+      pnpmCliPath,
       "--filter",
       "@workspace/platform-api",
       "exec",
@@ -146,11 +201,12 @@ const sourceValidationCommands: readonly {
       "run",
       "--maxWorkers=2",
     ],
-    executable: "pnpm",
+    executable: process.execPath,
     timeoutMs: 20 * 60_000,
   },
   {
     args: [
+      pnpmCliPath,
       "--filter",
       "@workspace/api-server",
       "exec",
@@ -158,11 +214,12 @@ const sourceValidationCommands: readonly {
       "run",
       "--maxWorkers=1",
     ],
-    executable: "pnpm",
+    executable: process.execPath,
     timeoutMs: 20 * 60_000,
   },
   {
     args: [
+      pnpmCliPath,
       "--filter",
       "@workspace/admin-dashboard",
       "exec",
@@ -170,11 +227,12 @@ const sourceValidationCommands: readonly {
       "run",
       "--maxWorkers=2",
     ],
-    executable: "pnpm",
+    executable: process.execPath,
     timeoutMs: 20 * 60_000,
   },
   {
     args: [
+      pnpmCliPath,
       "--filter",
       "@workspace/music-player",
       "exec",
@@ -182,11 +240,12 @@ const sourceValidationCommands: readonly {
       "run",
       "--maxWorkers=2",
     ],
-    executable: "pnpm",
+    executable: process.execPath,
     timeoutMs: 20 * 60_000,
   },
   {
     args: [
+      pnpmCliPath,
       "--filter",
       "@workspace/tf-search",
       "exec",
@@ -194,11 +253,12 @@ const sourceValidationCommands: readonly {
       "run",
       "--maxWorkers=2",
     ],
-    executable: "pnpm",
+    executable: process.execPath,
     timeoutMs: 20 * 60_000,
   },
   {
     args: [
+      pnpmCliPath,
       "--filter",
       "@workspace/tf-integrations",
       "exec",
@@ -206,11 +266,12 @@ const sourceValidationCommands: readonly {
       "run",
       "--maxWorkers=2",
     ],
-    executable: "pnpm",
+    executable: process.execPath,
     timeoutMs: 20 * 60_000,
   },
   {
     args: [
+      pnpmCliPath,
       "--filter",
       "@workspace/tf-download-worker",
       "exec",
@@ -218,12 +279,12 @@ const sourceValidationCommands: readonly {
       "run",
       "--maxWorkers=2",
     ],
-    executable: "pnpm",
+    executable: process.execPath,
     timeoutMs: 20 * 60_000,
   },
   {
-    args: ["run", "typecheck"],
-    executable: "pnpm",
+    args: [pnpmCliPath, "run", "typecheck"],
+    executable: process.execPath,
     timeoutMs: 20 * 60_000,
   },
 ];
@@ -231,20 +292,20 @@ const sourceValidationCommands: readonly {
 export function runOperatorReleaseCommand(
   executable: string,
   args: readonly string[],
-  options: { cwd: string; env?: NodeJS.ProcessEnv; timeoutMs?: number },
+  options: {
+    cwd: string;
+    env?: NodeJS.ProcessEnv;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  },
 ): Promise<OperatorReleaseCommandResult> {
   let spawnedExecutable = executable;
   let spawnedArgs = [...args];
   if (process.platform === "win32" && windowsShimExecutables.has(executable)) {
-    if (args.some((argument) => !windowsShimArgumentPattern.test(argument))) {
-      return Promise.resolve({ status: -1, stderr: "", stdout: "" });
-    }
-    spawnedExecutable = "cmd.exe";
+    spawnedExecutable = process.execPath;
     spawnedArgs = [
-      "/d",
-      "/s",
-      "/c",
-      `${executable}.cmd${args.length === 0 ? "" : ` ${args.join(" ")}`}`,
+      executable === "corepack" ? corepackCliPath : pnpmCliPath,
+      ...args,
     ];
   }
 
@@ -261,6 +322,7 @@ export function runOperatorReleaseCommand(
       cwd: options.cwd,
       env: options.env,
       shell: false,
+      signal: options.signal,
       timeout: options.timeoutMs,
       windowsHide: true,
     });
@@ -282,11 +344,210 @@ export function runOperatorReleaseCommand(
 }
 
 const defaultOperatorReleaseDependencies: OperatorReleaseDependencies = {
+  atomicRename: rename,
   command: runOperatorReleaseCommand,
   randomId: randomUUID,
+  sleep: async (milliseconds, signal) => {
+    await sleepTimer(milliseconds, undefined, { signal });
+  },
   temporaryRoot: () =>
     join(tmpdir(), `apollo-operator-release-${randomUUID()}`),
 };
+
+export async function prepareOperatorRelease(
+  options: OperatorReleaseOptions,
+  dependencies: OperatorReleaseDependencies = defaultOperatorReleaseDependencies,
+): Promise<OperatorReleasePreparationOutput> {
+  if (options.mode !== "production") {
+    throw operatorError("invalid_release_mode");
+  }
+  assertReleaseId(options.releaseId);
+  if (
+    !sourceCommitPattern.test(options.sourceCommit) ||
+    options.sourceCommit === zeroSourceCommit
+  ) {
+    throw operatorError("invalid_source_commit");
+  }
+
+  const environment = isolatedOperatorEnvironment();
+  const claimDirectory = operatorReleaseClaimDirectory(
+    options.repositoryRoot,
+    options.releaseId,
+  );
+  const receiptPath = join(claimDirectory, "prepare-receipt.json");
+  const releaseDirectory = operatorReleaseOutputDirectory(
+    options.repositoryRoot,
+    options.releaseId,
+  );
+  let output: OperatorReleasePreparationOutput | undefined;
+  let primaryError: Error | undefined;
+  let temporaryRoot: string | undefined;
+  let temporaryRootOwned = false;
+
+  try {
+    const worktree = await checkedCommand(
+      dependencies,
+      "dirty_worktree",
+      "git",
+      ["status", "--porcelain=v1", "--untracked-files=all"],
+      {
+        cwd: options.repositoryRoot,
+        env: environment,
+        timeoutMs: 60_000,
+      },
+    );
+    if (worktree.stdout.trim() !== "") throw operatorError("dirty_worktree");
+    await checkedCommand(
+      dependencies,
+      "invalid_source_commit",
+      "git",
+      ["cat-file", "-e", `${options.sourceCommit}^{commit}`],
+      {
+        cwd: options.repositoryRoot,
+        env: environment,
+        timeoutMs: 60_000,
+      },
+    );
+    if (await pathExists(releaseDirectory)) {
+      throw operatorError("release_output_exists");
+    }
+
+    await mkdir(dirname(claimDirectory), { mode: 0o700, recursive: true });
+    try {
+      await mkdir(claimDirectory, { mode: 0o700 });
+    } catch (error) {
+      if (
+        (error as NodeJS.ErrnoException).code === "EEXIST" ||
+        (await pathExists(claimDirectory))
+      ) {
+        throw operatorError("release_claim_exists");
+      }
+      throw error;
+    }
+    await writeDurableExclusive(
+      join(claimDirectory, "claim.json"),
+      `${JSON.stringify(
+        {
+          formatVersion: 1,
+          protocolVersion: 2,
+          releaseId: options.releaseId,
+          sourceCommit: options.sourceCommit,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    temporaryRoot = dependencies.temporaryRoot();
+    const validationRoot = join(temporaryRoot, "validation-source");
+    const temporaryArchivePath = join(temporaryRoot, "source.tar");
+    await mkdir(temporaryRoot);
+    temporaryRootOwned = true;
+    await mkdir(validationRoot);
+
+    await checkedCommand(
+      dependencies,
+      "source_validation_failed",
+      "git",
+      [
+        "archive",
+        "--format=tar",
+        "--output",
+        temporaryArchivePath,
+        options.sourceCommit,
+      ],
+      {
+        cwd: options.repositoryRoot,
+        env: environment,
+        timeoutMs: 5 * 60_000,
+      },
+    );
+    const archiveSha256 = await sha256File(temporaryArchivePath);
+    await checkedCommand(
+      dependencies,
+      "source_validation_failed",
+      "tar",
+      ["-xf", temporaryArchivePath, "-C", validationRoot],
+      {
+        cwd: options.repositoryRoot,
+        env: environment,
+        timeoutMs: 5 * 60_000,
+      },
+    );
+    const sourceTreeSha256 = await sha256Directory(validationRoot);
+    for (const validation of sourceValidationCommands) {
+      await checkedCommand(
+        dependencies,
+        "source_validation_failed",
+        validation.executable,
+        validation.args,
+        {
+          cwd: validationRoot,
+          env: environment,
+          timeoutMs: validation.timeoutMs,
+        },
+      );
+    }
+    if ((await sha256File(temporaryArchivePath)) !== archiveSha256) {
+      throw operatorError("source_validation_failed");
+    }
+
+    const claimedArchivePath = join(claimDirectory, "source.tar");
+    await copyFile(
+      temporaryArchivePath,
+      claimedArchivePath,
+      constants.COPYFILE_EXCL,
+    );
+    const archiveHandle = await open(claimedArchivePath, "r+");
+    try {
+      await archiveHandle.sync();
+    } finally {
+      await archiveHandle.close();
+    }
+    if ((await sha256File(claimedArchivePath)) !== archiveSha256) {
+      throw operatorError("source_validation_failed");
+    }
+    await writeDurableExclusive(
+      receiptPath,
+      `${JSON.stringify(
+        {
+          archiveFile: "source.tar",
+          archiveSha256,
+          formatVersion: 1,
+          imageCatalog: releaseImageCatalog,
+          protocolVersion: 2,
+          releaseId: options.releaseId,
+          sourceCommit: options.sourceCommit,
+          sourceTreeSha256,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    output = {
+      archiveSha256,
+      receiptPath,
+      releaseId: options.releaseId,
+      sourceCommit: options.sourceCommit,
+      sourceTreeSha256,
+    };
+  } catch (error) {
+    primaryError = sanitizedOperatorError(error);
+  }
+
+  let cleanupFailed = false;
+  if (temporaryRootOwned) {
+    try {
+      await rm(temporaryRoot!, { force: true, recursive: true });
+    } catch {
+      cleanupFailed = true;
+    }
+  }
+  if (primaryError !== undefined) throw primaryError;
+  if (cleanupFailed) throw operatorError("cleanup_failed");
+  if (output === undefined) throw operatorError("release_error");
+  return output;
+}
 
 function assertReleaseId(releaseId: string): void {
   if (!releaseIdPattern.test(releaseId)) {
@@ -299,6 +560,14 @@ export function parseOperatorReleaseArguments(argv: readonly string[]): {
   releaseId: string;
   sourceCommit: string;
 } {
+  const values = parsePairwiseArguments(argv, argumentFlags);
+  return parseReleaseIdentity(values);
+}
+
+function parsePairwiseArguments(
+  argv: readonly string[],
+  allowedFlags: ReadonlySet<string>,
+): Map<string, string> {
   const values = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 2) {
     const flag = argv[index];
@@ -306,7 +575,7 @@ export function parseOperatorReleaseArguments(argv: readonly string[]): {
     if (
       flag === undefined ||
       value === undefined ||
-      !argumentFlags.has(flag) ||
+      !allowedFlags.has(flag) ||
       values.has(flag) ||
       value.startsWith("--")
     ) {
@@ -314,10 +583,17 @@ export function parseOperatorReleaseArguments(argv: readonly string[]): {
     }
     values.set(flag, value);
   }
-  if (values.size !== argumentFlags.size) {
+  if (values.size !== allowedFlags.size) {
     throw new Error("invalid_arguments");
   }
+  return values;
+}
 
+function parseReleaseIdentity(values: ReadonlyMap<string, string>): {
+  mode: OperatorReleaseMode;
+  releaseId: string;
+  sourceCommit: string;
+} {
   const mode = values.get("--mode");
   if (mode !== "production") {
     throw new Error("invalid_release_mode");
@@ -339,12 +615,37 @@ export function parseOperatorReleaseArguments(argv: readonly string[]): {
   return { mode, releaseId, sourceCommit };
 }
 
+export function parseOperatorReleasePublicationArguments(
+  argv: readonly string[],
+): {
+  mode: OperatorReleaseMode;
+  receiptPath: string;
+  releaseId: string;
+  sourceCommit: string;
+} {
+  const values = parsePairwiseArguments(argv, publicationArgumentFlags);
+  const identity = parseReleaseIdentity(values);
+  const receiptPath = values.get("--receipt");
+  if (receiptPath === undefined || receiptPath.trim() === "") {
+    throw operatorError("invalid_arguments");
+  }
+  return { ...identity, receiptPath };
+}
+
 export function operatorReleaseOutputDirectory(
   repositoryRoot: string,
   releaseId: string,
 ): string {
   assertReleaseId(releaseId);
   return resolve(repositoryRoot, ".ops-private", "releases", releaseId);
+}
+
+export function operatorReleaseClaimDirectory(
+  repositoryRoot: string,
+  releaseId: string,
+): string {
+  assertReleaseId(releaseId);
+  return resolve(repositoryRoot, ".ops-private", "release-claims", releaseId);
 }
 
 function operatorError(code: string): Error {
@@ -368,19 +669,60 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+function isolatedOperatorEnvironment(
+  ambient: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {
+    CI: "1",
+    COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+  };
+  for (const name of [
+    "APPDATA",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LOCALAPPDATA",
+    "PATH",
+    "Path",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USERPROFILE",
+  ]) {
+    const value = ambient[name];
+    if (value !== undefined) environment[name] = value;
+  }
+  return environment;
+}
+
+function throwIfCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) throw operatorError("publication_cancelled");
+}
+
 async function checkedCommand(
   dependencies: OperatorReleaseDependencies,
   code: string,
   executable: string,
   args: readonly string[],
-  options: { cwd: string; timeoutMs?: number },
+  options: {
+    cwd: string;
+    env?: NodeJS.ProcessEnv;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  },
 ): Promise<OperatorReleaseCommandResult> {
+  throwIfCancelled(options.signal);
   let result: OperatorReleaseCommandResult;
   try {
     result = await dependencies.command(executable, args, options);
   } catch {
+    throwIfCancelled(options.signal);
     throw operatorError(code);
   }
+  throwIfCancelled(options.signal);
   if (result.status !== 0) throw operatorError(code);
   return result;
 }
@@ -390,24 +732,40 @@ function parseDigest(stdout: string): string | undefined {
   return digestPattern.test(value) && value !== zeroDigest ? value : undefined;
 }
 
+async function readBuildMetadataDigest(path: string): Promise<string> {
+  try {
+    const value = JSON.parse(await readFile(path, "utf8")) as unknown;
+    if (!isRecord(value)) throw operatorError("image_build_failed");
+    const digest = value["containerimage.digest"];
+    if (
+      typeof digest !== "string" ||
+      !digestPattern.test(digest) ||
+      digest === zeroDigest
+    ) {
+      throw operatorError("image_build_failed");
+    }
+    return digest;
+  } catch {
+    throw operatorError("image_build_failed");
+  }
+}
+
 function pinnedRedisArtifactImage(): ReleaseArtifactImage {
   const entry = releaseImageCatalog.find(
     (candidate) => candidate.kind === "external",
   );
   if (entry === undefined) throw operatorError("artifact_validation_failed");
-  const separator = pinnedRedisReference.lastIndexOf("@");
-  const digest = pinnedRedisReference.slice(separator + 1);
   if (
-    separator < 0 ||
-    !pinnedRedisReference.startsWith(`${entry.repository}:`) ||
-    !digestPattern.test(digest) ||
-    digest === zeroDigest
+    entry.repository !== pinnedRedisRepository ||
+    !pinnedRedisReference.startsWith(`${pinnedRedisRepository}:`) ||
+    !digestPattern.test(pinnedRedisDigest) ||
+    pinnedRedisDigest === zeroDigest
   ) {
     throw operatorError("artifact_validation_failed");
   }
   return {
-    imageDigest: digest,
-    imageReference: `${entry.repository}@${digest}`,
+    imageDigest: pinnedRedisDigest,
+    imageReference: pinnedRedisImmutableReference,
     name: entry.name,
     repository: entry.repository,
   };
@@ -432,7 +790,11 @@ function validateReleaseArtifact(artifact: ReleaseArtifact): void {
           image.repository ||
         !digestPattern.test(image.imageDigest) ||
         image.imageDigest === zeroDigest ||
-        image.imageReference !== `${image.repository}@${image.imageDigest}`
+        image.imageReference !== `${image.repository}@${image.imageDigest}` ||
+        (image.name === "redis" &&
+          (image.repository !== pinnedRedisRepository ||
+            image.imageDigest !== pinnedRedisDigest ||
+            image.imageReference !== pinnedRedisImmutableReference))
       );
     })
   ) {
@@ -592,97 +954,178 @@ async function sha256File(path: string): Promise<string> {
   return hash.digest("hex");
 }
 
+async function sha256Directory(root: string): Promise<string> {
+  const hash = createHash("sha256");
+  hash.update("apollo-source-tree-v1\0");
+
+  const visit = async (directory: string, prefix: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort(({ name: left }, { name: right }) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    );
+    for (const entry of entries) {
+      const relativeName =
+        prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        hash.update(`directory\0${relativeName}\0`);
+        await visit(path, relativeName);
+      } else if (entry.isFile()) {
+        hash.update(`file\0${relativeName}\0`);
+        for await (const chunk of createReadStream(path)) hash.update(chunk);
+        hash.update("\0");
+      } else if (entry.isSymbolicLink()) {
+        hash.update(`symlink\0${relativeName}\0${await readlink(path)}\0`);
+      } else {
+        throw operatorError("source_validation_failed");
+      }
+    }
+  };
+
+  await visit(root, "");
+  return hash.digest("hex");
+}
+
 async function writeReleaseOutput(
   stagingDirectory: string,
   releaseDirectory: string,
   releaseId: string,
   releaseArtifact: ReleaseArtifact,
-  publicationCheckpoint?: OperatorReleaseDependencies["publicationCheckpoint"],
+  dependencies: OperatorReleaseDependencies,
 ): Promise<OperatorReleaseOutput> {
   const stagedManifestPath = join(
     stagingDirectory,
     "apollo-release-manifest.json",
   );
   const stagedEnvFragmentPath = join(stagingDirectory, "release-images.env");
+  const stagedCompletionPath = join(
+    stagingDirectory,
+    "apollo-release-complete.json",
+  );
   const manifestContents = `${JSON.stringify(releaseArtifact, null, 2)}\n`;
   const renderedEnvironment = renderReleaseEnvironment(releaseArtifact);
+  const completionContents = `${JSON.stringify(
+    {
+      environmentSha256: sha256(renderedEnvironment),
+      formatVersion: 1,
+      manifestSha256: sha256(manifestContents),
+      releaseId,
+      sourceCommit: releaseArtifact.sourceCommit,
+    },
+    null,
+    2,
+  )}\n`;
   try {
     await writeDurableExclusive(stagedManifestPath, manifestContents);
+    await dependencies.publicationCheckpoint?.("staged_manifest_written");
     await writeDurableExclusive(stagedEnvFragmentPath, renderedEnvironment);
-
+    await dependencies.publicationCheckpoint?.("staged_environment_written");
+    await writeDurableExclusive(stagedCompletionPath, completionContents);
+    await dependencies.publicationCheckpoint?.("staged_completion_written");
     validateReleaseArtifact(
       JSON.parse(await readFile(stagedManifestPath, "utf8")) as ReleaseArtifact,
     );
+    const completion = JSON.parse(
+      await readFile(stagedCompletionPath, "utf8"),
+    ) as unknown;
     if (
-      (await readFile(stagedEnvFragmentPath, "utf8")) !== renderedEnvironment
+      (await readFile(stagedManifestPath, "utf8")) !== manifestContents ||
+      (await readFile(stagedEnvFragmentPath, "utf8")) !== renderedEnvironment ||
+      !isRecord(completion) ||
+      !hasExactKeys(completion, [
+        "environmentSha256",
+        "formatVersion",
+        "manifestSha256",
+        "releaseId",
+        "sourceCommit",
+      ]) ||
+      completion.environmentSha256 !== sha256(renderedEnvironment) ||
+      completion.formatVersion !== 1 ||
+      completion.manifestSha256 !== sha256(manifestContents) ||
+      completion.releaseId !== releaseId ||
+      completion.sourceCommit !== releaseArtifact.sourceCommit
     ) {
       throw operatorError("artifact_validation_failed");
     }
-  } catch {
-    throw operatorError("artifact_validation_failed");
-  }
-
-  try {
-    await mkdir(releaseDirectory, { mode: 0o700 });
-  } catch (error) {
-    if (
-      (error as NodeJS.ErrnoException).code === "EEXIST" ||
-      (await pathExists(releaseDirectory))
-    ) {
+    if (await pathExists(releaseDirectory)) {
       throw operatorError("release_output_exists");
     }
-    throw operatorError("artifact_validation_failed");
-  }
-
-  const manifestPath = join(releaseDirectory, "apollo-release-manifest.json");
-  const envFragmentPath = join(releaseDirectory, "release-images.env");
-  const completionPath = join(releaseDirectory, "apollo-release-complete.json");
-  try {
-    await writeDurableExclusive(manifestPath, manifestContents);
-    await publicationCheckpoint?.("final_manifest_written");
-    await writeDurableExclusive(envFragmentPath, renderedEnvironment);
-    await publicationCheckpoint?.("final_environment_written");
-    validateReleaseArtifact(
-      JSON.parse(await readFile(manifestPath, "utf8")) as ReleaseArtifact,
-    );
-    if ((await readFile(envFragmentPath, "utf8")) !== renderedEnvironment) {
-      throw operatorError("artifact_validation_failed");
-    }
-    await writeDurableExclusive(
-      completionPath,
-      `${JSON.stringify(
-        {
-          environmentSha256: sha256(renderedEnvironment),
-          formatVersion: 1,
-          manifestSha256: sha256(manifestContents),
-          releaseId,
-          sourceCommit: releaseArtifact.sourceCommit,
-        },
-        null,
-        2,
-      )}\n`,
-    );
-    await publicationCheckpoint?.("completion_written");
-  } catch {
-    for (const path of [completionPath, envFragmentPath, manifestPath]) {
-      try {
-        await rm(path, { force: true, recursive: true });
-      } catch {
-        // The completion marker is removed first so retained partials stay unusable.
-      }
+    await dependencies.atomicRename(stagingDirectory, releaseDirectory);
+  } catch (error) {
+    if (error instanceof Error && error.message === "release_output_exists") {
+      throw error;
     }
     throw operatorError("artifact_validation_failed");
   }
 
   return {
-    envFragmentPath,
-    manifestPath,
+    envFragmentPath: join(releaseDirectory, "release-images.env"),
+    manifestPath: join(releaseDirectory, "apollo-release-manifest.json"),
     releaseArtifact,
   };
 }
 
+type OperatorReleaseReceipt = {
+  archiveFile: "source.tar";
+  archiveSha256: string;
+  formatVersion: 1;
+  imageCatalog: unknown;
+  protocolVersion: 2;
+  releaseId: string;
+  sourceCommit: string;
+  sourceTreeSha256: string;
+};
+
+async function loadOperatorReleaseReceipt(
+  options: OperatorReleasePublicationOptions,
+  claimDirectory: string,
+): Promise<OperatorReleaseReceipt> {
+  try {
+    const expectedReceiptPath = join(claimDirectory, "prepare-receipt.json");
+    if (resolve(options.receiptPath) !== expectedReceiptPath) {
+      throw operatorError("invalid_release_receipt");
+    }
+    const receiptStat = await lstat(expectedReceiptPath);
+    if (!receiptStat.isFile() || receiptStat.isSymbolicLink()) {
+      throw operatorError("invalid_release_receipt");
+    }
+    const value = JSON.parse(
+      await readFile(expectedReceiptPath, "utf8"),
+    ) as unknown;
+    if (
+      !isRecord(value) ||
+      !hasExactKeys(value, [
+        "archiveFile",
+        "archiveSha256",
+        "formatVersion",
+        "imageCatalog",
+        "protocolVersion",
+        "releaseId",
+        "sourceCommit",
+        "sourceTreeSha256",
+      ]) ||
+      value.archiveFile !== "source.tar" ||
+      typeof value.archiveSha256 !== "string" ||
+      !sha256Pattern.test(value.archiveSha256) ||
+      value.formatVersion !== 1 ||
+      JSON.stringify(value.imageCatalog) !==
+        JSON.stringify(releaseImageCatalog) ||
+      value.protocolVersion !== 2 ||
+      value.releaseId !== options.releaseId ||
+      value.sourceCommit !== options.sourceCommit ||
+      typeof value.sourceTreeSha256 !== "string" ||
+      !sha256Pattern.test(value.sourceTreeSha256)
+    ) {
+      throw operatorError("invalid_release_receipt");
+    }
+    return value as OperatorReleaseReceipt;
+  } catch {
+    throw operatorError("invalid_release_receipt");
+  }
+}
+
 export async function publishOperatorRelease(
-  options: OperatorReleaseOptions,
+  options: OperatorReleasePublicationOptions,
   dependencies: OperatorReleaseDependencies = defaultOperatorReleaseDependencies,
 ): Promise<OperatorReleaseOutput> {
   if (options.mode !== "production") {
@@ -700,8 +1143,12 @@ export async function publishOperatorRelease(
     options.repositoryRoot,
     options.releaseId,
   );
+  const claimDirectory = operatorReleaseClaimDirectory(
+    options.repositoryRoot,
+    options.releaseId,
+  );
+  const environment = isolatedOperatorEnvironment();
   let archivePath: string | undefined;
-  let archiveSha256: string | undefined;
   let buildRoot: string | undefined;
   let builderName: string | undefined;
   let builderRemovalRequired = false;
@@ -711,82 +1158,57 @@ export async function publishOperatorRelease(
   let releaseStagingOwned = false;
   let temporaryRoot: string | undefined;
   let temporaryRootOwned = false;
-  let validationRoot: string | undefined;
 
   try {
-    const worktree = await checkedCommand(
-      dependencies,
-      "dirty_worktree",
-      "git",
-      ["status", "--porcelain=v1", "--untracked-files=all"],
-      { cwd: options.repositoryRoot, timeoutMs: 60_000 },
-    );
-    if (worktree.stdout.trim() !== "") throw operatorError("dirty_worktree");
+    throwIfCancelled(options.signal);
+    const receipt = await loadOperatorReleaseReceipt(options, claimDirectory);
+    archivePath = join(claimDirectory, receipt.archiveFile);
+    try {
+      const archiveStat = await lstat(archivePath);
+      if (
+        !archiveStat.isFile() ||
+        archiveStat.isSymbolicLink() ||
+        (await sha256File(archivePath)) !== receipt.archiveSha256
+      ) {
+        throw operatorError("invalid_release_receipt");
+      }
+    } catch {
+      throw operatorError("invalid_release_receipt");
+    }
 
-    await checkedCommand(
-      dependencies,
-      "invalid_source_commit",
-      "git",
-      ["cat-file", "-e", `${options.sourceCommit}^{commit}`],
-      { cwd: options.repositoryRoot, timeoutMs: 60_000 },
-    );
+    try {
+      throwIfCancelled(options.signal);
+      await writeDurableExclusive(
+        join(claimDirectory, "publication-started.json"),
+        `${JSON.stringify(
+          {
+            formatVersion: 1,
+            protocolVersion: 2,
+            releaseId: options.releaseId,
+            sourceCommit: options.sourceCommit,
+          },
+          null,
+          2,
+        )}\n`,
+      );
+    } catch (error) {
+      if (
+        (error as NodeJS.ErrnoException).code === "EEXIST" ||
+        (await pathExists(join(claimDirectory, "publication-started.json")))
+      ) {
+        throw operatorError("release_receipt_reused");
+      }
+      throw operatorError("invalid_release_receipt");
+    }
     if (await pathExists(releaseDirectory)) {
       throw operatorError("release_output_exists");
     }
 
     temporaryRoot = dependencies.temporaryRoot();
-    validationRoot = join(temporaryRoot, "validation-source");
     buildRoot = join(temporaryRoot, "build-source");
-    archivePath = join(temporaryRoot, "source.tar");
     try {
       await mkdir(temporaryRoot);
       temporaryRootOwned = true;
-      await mkdir(validationRoot);
-    } catch {
-      throw operatorError("source_validation_failed");
-    }
-    await checkedCommand(
-      dependencies,
-      "source_validation_failed",
-      "git",
-      [
-        "archive",
-        "--format=tar",
-        "--output",
-        archivePath,
-        options.sourceCommit,
-      ],
-      { cwd: options.repositoryRoot, timeoutMs: 5 * 60_000 },
-    );
-    try {
-      archiveSha256 = await sha256File(archivePath);
-    } catch {
-      throw operatorError("source_validation_failed");
-    }
-    await checkedCommand(
-      dependencies,
-      "source_validation_failed",
-      "tar",
-      ["-xf", archivePath, "-C", validationRoot],
-      { cwd: options.repositoryRoot, timeoutMs: 5 * 60_000 },
-    );
-    for (const validation of sourceValidationCommands) {
-      await checkedCommand(
-        dependencies,
-        "source_validation_failed",
-        validation.executable,
-        validation.args,
-        { cwd: validationRoot, timeoutMs: validation.timeoutMs },
-      );
-    }
-    try {
-      if ((await sha256File(archivePath)) !== archiveSha256) {
-        throw operatorError("source_validation_failed");
-      }
-    } catch {
-      throw operatorError("source_validation_failed");
-    }
-    try {
       await mkdir(buildRoot);
     } catch {
       throw operatorError("source_validation_failed");
@@ -796,10 +1218,22 @@ export async function publishOperatorRelease(
       "source_validation_failed",
       "tar",
       ["-xf", archivePath, "-C", buildRoot],
-      { cwd: options.repositoryRoot, timeoutMs: 5 * 60_000 },
+      {
+        cwd: options.repositoryRoot,
+        env: environment,
+        signal: options.signal,
+        timeoutMs: 5 * 60_000,
+      },
     );
+    if (
+      (await sha256File(archivePath)) !== receipt.archiveSha256 ||
+      (await sha256Directory(buildRoot)) !== receipt.sourceTreeSha256
+    ) {
+      throw operatorError("invalid_release_receipt");
+    }
 
     for (const target of operatorReleaseImageTargets) {
+      throwIfCancelled(options.signal);
       let inspection: OperatorReleaseCommandResult;
       try {
         inspection = await dependencies.command(
@@ -812,11 +1246,18 @@ export async function publishOperatorRelease(
             "--format",
             "{{json .Manifest.Digest}}",
           ],
-          { cwd: buildRoot, timeoutMs: 60_000 },
+          {
+            cwd: buildRoot,
+            env: environment,
+            signal: options.signal,
+            timeoutMs: 60_000,
+          },
         );
       } catch {
+        throwIfCancelled(options.signal);
         throw operatorError("release_tag_check_failed");
       }
+      throwIfCancelled(options.signal);
       if (inspection.status === 0) throw operatorError("release_tag_exists");
       if (!absentManifestPattern.test(inspection.stderr)) {
         throw operatorError("release_tag_check_failed");
@@ -837,6 +1278,25 @@ export async function publishOperatorRelease(
       dirname(releaseDirectory),
       `.${options.releaseId}.staging-${runId}`,
     );
+    try {
+      await writeDurableExclusive(
+        join(claimDirectory, "builder-claim.json"),
+        `${JSON.stringify(
+          {
+            builderName,
+            formatVersion: 1,
+            protocolVersion: 2,
+            releaseId: options.releaseId,
+            sourceCommit: options.sourceCommit,
+          },
+          null,
+          2,
+        )}\n`,
+      );
+    } catch {
+      throw operatorError("builder_create_failed");
+    }
+    builderRemovalRequired = true;
     await checkedCommand(
       dependencies,
       "builder_create_failed",
@@ -849,11 +1309,23 @@ export async function publishOperatorRelease(
         "--driver",
         "docker-container",
       ],
-      { cwd: buildRoot, timeoutMs: 5 * 60_000 },
+      {
+        cwd: buildRoot,
+        env: environment,
+        signal: options.signal,
+        timeoutMs: 5 * 60_000,
+      },
     );
-    builderRemovalRequired = true;
 
+    const metadataRoot = join(temporaryRoot, "build-metadata");
+    try {
+      await mkdir(metadataRoot);
+    } catch {
+      throw operatorError("image_build_failed");
+    }
+    const buildDigests = new Map<string, string>();
     for (const target of operatorReleaseImageTargets) {
+      const metadataPath = join(metadataRoot, `${target.name}.json`);
       await checkedCommand(
         dependencies,
         "image_build_failed",
@@ -881,18 +1353,32 @@ export async function publishOperatorRelease(
           target.target,
           "--tag",
           `${target.repository}:${options.releaseId}`,
+          "--metadata-file",
+          metadataPath,
           "--push",
           buildRoot,
         ],
-        { cwd: buildRoot, timeoutMs: 60 * 60_000 },
+        {
+          cwd: buildRoot,
+          env: environment,
+          signal: options.signal,
+          timeoutMs: 60 * 60_000,
+        },
+      );
+      buildDigests.set(
+        target.name,
+        await readBuildMetadataDigest(metadataPath),
       );
     }
 
     const images: ReleaseArtifactImage[] = [];
     for (const target of operatorReleaseImageTargets) {
       const reference = `${target.repository}:${options.releaseId}`;
-      let digest: string | undefined;
+      const buildDigest = buildDigests.get(target.name);
+      if (buildDigest === undefined) throw operatorError("image_build_failed");
+      let resolved = false;
       for (let attempt = 0; attempt < digestAttempts; attempt += 1) {
+        throwIfCancelled(options.signal);
         let inspection: OperatorReleaseCommandResult;
         try {
           inspection = await dependencies.command(
@@ -905,20 +1391,44 @@ export async function publishOperatorRelease(
               "--format",
               "{{json .Manifest.Digest}}",
             ],
-            { cwd: buildRoot, timeoutMs: 60_000 },
+            {
+              cwd: buildRoot,
+              env: environment,
+              signal: options.signal,
+              timeoutMs: 60_000,
+            },
           );
         } catch {
+          throwIfCancelled(options.signal);
           inspection = { status: -1, stderr: "", stdout: "" };
         }
-        if (inspection.status === 0) digest = parseDigest(inspection.stdout);
-        if (digest !== undefined) break;
+        const inspectedDigest =
+          inspection.status === 0 ? parseDigest(inspection.stdout) : undefined;
+        if (inspectedDigest !== undefined) {
+          if (inspectedDigest !== buildDigest) {
+            throw operatorError("digest_resolution_failed");
+          }
+          resolved = true;
+          break;
+        }
+        if (attempt < digestAttempts - 1) {
+          try {
+            await dependencies.sleep(
+              digestBackoffMilliseconds[attempt]!,
+              options.signal,
+            );
+          } catch {
+            throwIfCancelled(options.signal);
+            throw operatorError("digest_resolution_failed");
+          }
+        }
       }
-      if (digest === undefined) {
+      if (!resolved) {
         throw operatorError("digest_resolution_failed");
       }
       images.push({
-        imageDigest: digest,
-        imageReference: `${target.repository}@${digest}`,
+        imageDigest: buildDigest,
+        imageReference: `${target.repository}@${buildDigest}`,
         name: target.name,
         repository: target.repository,
       });
@@ -945,7 +1455,7 @@ export async function publishOperatorRelease(
       releaseDirectory,
       options.releaseId,
       releaseArtifact,
-      dependencies.publicationCheckpoint,
+      dependencies,
     );
   } catch (error) {
     primaryError = sanitizedOperatorError(error);
@@ -961,12 +1471,27 @@ export async function publishOperatorRelease(
   }
   if (builderRemovalRequired) {
     try {
-      const removal = await dependencies.command(
+      const inspection = await dependencies.command(
         "docker",
-        ["buildx", "rm", builderName!],
-        { cwd: buildRoot!, timeoutMs: 5 * 60_000 },
+        ["buildx", "inspect", builderName!],
+        {
+          cwd: buildRoot!,
+          env: environment,
+          timeoutMs: 5 * 60_000,
+        },
       );
-      if (removal.status !== 0) cleanupFailed = true;
+      if (inspection.status === 0) {
+        const removal = await dependencies.command(
+          "docker",
+          ["buildx", "rm", builderName!],
+          {
+            cwd: buildRoot!,
+            env: environment,
+            timeoutMs: 5 * 60_000,
+          },
+        );
+        if (removal.status !== 0) cleanupFailed = true;
+      }
     } catch {
       cleanupFailed = true;
     }
@@ -986,7 +1511,7 @@ export async function publishOperatorRelease(
 }
 
 const defaultOperatorReleaseCliIo: OperatorReleaseCliIo = {
-  repositoryRoot: process.cwd(),
+  repositoryRoot: fileURLToPath(new URL("../..", import.meta.url)),
   stderr: (value) => {
     process.stderr.write(value);
   },
@@ -1000,16 +1525,30 @@ function publicErrorCode(error: unknown): string {
 }
 
 export async function runOperatorReleaseCli(
+  operation: "prepare" | "publish",
   argv: readonly string[],
   dependencies: OperatorReleaseDependencies = defaultOperatorReleaseDependencies,
   io: OperatorReleaseCliIo = defaultOperatorReleaseCliIo,
+  signal?: AbortSignal,
 ): Promise<number> {
   try {
-    const parsed = parseOperatorReleaseArguments(argv);
-    const output = await publishOperatorRelease(
-      { ...parsed, repositoryRoot: io.repositoryRoot },
-      dependencies,
-    );
+    const output =
+      operation === "prepare"
+        ? await prepareOperatorRelease(
+            {
+              ...parseOperatorReleaseArguments(argv),
+              repositoryRoot: io.repositoryRoot,
+            },
+            dependencies,
+          )
+        : await publishOperatorRelease(
+            {
+              ...parseOperatorReleasePublicationArguments(argv),
+              repositoryRoot: io.repositoryRoot,
+              signal,
+            },
+            dependencies,
+          );
     io.stdout(`${JSON.stringify(output)}\n`);
     return 0;
   } catch (error) {
@@ -1023,7 +1562,28 @@ if (
   entryPath !== undefined &&
   import.meta.url === pathToFileURL(resolve(entryPath)).href
 ) {
-  void runOperatorReleaseCli(process.argv.slice(2)).then((status) => {
-    process.exitCode = status;
-  });
+  const operation = process.argv[2];
+  if (operation !== "prepare" && operation !== "publish") {
+    process.stderr.write(`${JSON.stringify({ error: "invalid_arguments" })}\n`);
+    process.exitCode = 1;
+  } else {
+    const cancellation = new AbortController();
+    const cancel = (): void => cancellation.abort();
+    process.once("SIGINT", cancel);
+    process.once("SIGTERM", cancel);
+    void runOperatorReleaseCli(
+      operation,
+      process.argv.slice(3),
+      defaultOperatorReleaseDependencies,
+      defaultOperatorReleaseCliIo,
+      cancellation.signal,
+    )
+      .then((status) => {
+        process.exitCode = status;
+      })
+      .finally(() => {
+        process.removeListener("SIGINT", cancel);
+        process.removeListener("SIGTERM", cancel);
+      });
+  }
 }
