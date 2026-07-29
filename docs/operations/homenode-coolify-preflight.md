@@ -12,20 +12,25 @@ a remote change.
 
 ## Local package closure
 
-Task 5 validated the production manifests, digest validator, custom image
-targets, file-backed secret contracts, application flows, persistence, and
-Caddy routes locally from
-`044c80adeffa7999063498472410bd57707265d5`. The proof used only
-`127.0.0.1:18200..18203`, dispatched no workflow, and left exact cleanup zero.
-It also exercised the exact `baseline` profile one-shot contracts against a
-separate disposable database, restored granted search after restart, and held
-a signed producer down beyond the 90-second stale deadline before proving
-`healthy -> unknown -> healthy` recovery.
+The final fix wave validated the production manifests, exact provenance
+validator, custom image targets, file-backed secret contracts, application
+flows, persistence, and the complete Caddy matrix locally from
+`fae7f7ae4760d1f8d09e5a4236d6e8af4d60a817`. The proof used a task-owned local
+Buildx builder and only `127.0.0.1:18200..18203`, dispatched no workflow, and
+left exact cleanup zero. It also exercised the exact `baseline` profile
+one-shot contracts against a separate disposable database, restored granted
+search after restart, held a signed producer down beyond the 90-second stale
+deadline before proving `healthy -> unknown -> healthy` recovery, and proved
+the shared dashboard token with both real consumer UIDs on disposable native
+Linux.
 
 The checked-in release env remains intentionally non-deployable. It fails with
-only `placeholder_image_digest`; an approved release must replace every image
-with a workflow-produced immutable digest. The complete rollout and rollback
-order is in `docs/operations/apollo-production-rollout.md`.
+allowlisted image-provenance, placeholder-digest, and release-environment
+categories. An approved release must replace every image with a
+workflow-produced immutable reference, set the exact source commit, and pass
+production validation against the downloaded release manifest. The complete
+rollout and rollback order is in
+`docs/operations/apollo-production-rollout.md`.
 
 The preflight's remote observation remains read-only. The retained legacy class
 is recorded only as `DETACHED_UNKNOWN`; it remains unnamed, unmounted,
@@ -91,11 +96,15 @@ Local package blockers are closed. The following still block remote mutation:
 
 1. Owner approval for the exact `apollo-platform` and `apollo-tf` resources,
    secret files, image digest map, and rollback map.
-2. Native-Linux proof that every bind-backed secret has the exact declared
-   owner and mode and is readable only by its intended service.
-3. A dedicated encrypted production backup destination plus a recorded
-   production backup/restore evidence ID. Local evidence
-   `TASK4-77b2e21-89` does not authorize production writes.
+2. Target-native-Linux proof that every bind-backed secret has the exact
+   declared owner and mode and is readable only by its intended service. The
+   disposable local proof passed, but does not substitute for target metadata.
+3. A dedicated encrypted production backup destination plus recorded
+   production backup/restore evidence for PostgreSQL 16 Platform/TF and
+   PostgreSQL 17 integrations. Local evidence
+   `pg16-disposable-proof-001` and
+   `pg17-integrations-disposable-proof-001` does not authorize production
+   writes.
 4. Immediate recheck of listeners, disk, memory, existing service health, and
    rollback-image availability.
 5. Explicit owner approval before each resource creation, migration, Caddy
@@ -103,8 +112,8 @@ Local package blockers are closed. The following still block remote mutation:
 
 The apex route stays reserved. The owner must explicitly approve the TF
 topology dashboard as the `admin.apollot.ru` owner before that hostname is cut
-over; Task 5 proves its two-layer secret/token boundary locally but does not
-grant that approval.
+over; the final local proof covers its paired Caddy/nginx credential and shared
+token boundaries but does not grant that approval.
 
 ## Approval and rollout order
 

@@ -5,7 +5,7 @@ Last updated: 2026-07-29.
 ## Coolify production release package
 
 Status: `LOCAL_RELEASE_VALIDATED`. The exact local image source is
-`044c80adeffa7999063498472410bd57707265d5`; this status does not claim a
+`fae7f7ae4760d1f8d09e5a4236d6e8af4d60a817`; this status does not claim a
 deployment, workflow dispatch, GHCR publication, or remote change.
 
 - The production package consists of
@@ -15,8 +15,11 @@ deployment, workflow dispatch, GHCR publication, or remote change.
   `deploy/caddy/apollo.caddyfile`.
 - The opt-in production smoke built and pushed all 11 custom Linux/amd64
   targets plus pinned Redis to a disposable local registry, resolved 12
-  registry digests, validated a temporary non-zero digest env, and started the
-  exact two-stack package from commit `044c80a`.
+  registry digests, validated a temporary non-zero digest env in explicit
+  loopback mode, and started the exact two-stack package from commit
+  `fae7f7a`. Every build named an exact task-owned builder created from the
+  verified local Docker context; the adversarial persistent-remote-builder
+  contract passed.
 - The live proof passed registration/bootstrap/login, invitation redemption,
   entitlement revoke/grant, real Platform-to-TF OAuth, degraded and restored
   granted search, queued download/cancel, signed heartbeat
@@ -24,30 +27,46 @@ deployment, workflow dispatch, GHCR publication, or remote change.
   the exact profiled `tf-role-bootstrap` and `tf-baseline` one-shots against a
   separate disposable database, admin Basic Auth/dashboard token, web health,
   service restarts, and persistent state.
+- Before production container creation, a disposable native-Linux Docker daemon
+  proved that root `tf-admin` and UID `10001` `tf-api` read the same host
+  dashboard-token source owned `10001:10001` mode `0400`. No retained volume
+  was used.
 - Pinned Caddy `2.10.2-alpine` validated and routed
   `api.apollot.ru`, `api.tf.apollot.ru`, `tf.apollot.ru`, and
-  `admin.apollot.ru` to exact loopback ports `18200..18203`. Caddy remains the
-  sole future owner of host `80/443`; no Coolify/Traefik domain labels exist.
+  `admin.apollot.ru` to exact loopback ports `18200..18203`. The live matrix
+  covered all four routes in none/wrong/approved Authorization states,
+  including admin `401/401/200`, real upstream nginx acceptance, every required
+  security header, and no `Server` header. Caddy and nginx consume one
+  generated username/bcrypt source. Caddy remains the sole future owner of
+  host `80/443`; no Coolify/Traefik domain labels exist.
 - Malformed multiline admin secret files fail without disclosure. The admin
   nginx access log now omits the Basic Auth identity, closing the real
   `package-11` disclosure found by the final log scan.
-- The checked-in env fails closed with exactly 18
-  `placeholder_image_digest` errors. The generated local env validated before
-  either stack started and was removed afterward.
-- Both Docker opt-ins pass: production package `33/33`, Caddy contract `7/7`.
-  Final owned-resource inventory is zero for containers, networks, volumes,
-  localhost image references, registry files, temporary secrets, repository
-  `.tmp`, OS-temp owned roots, and durable pending/active ownership records;
-  no broad prune was used.
-- Local backup/restore evidence is `TASK4-77b2e21-89`. Production evidence is
-  `NOT_RECORDED`, native-Linux secret ownership remains to be proved on the
-  target, and every remote resource/migration/Caddy/hostname action still
-  requires explicit owner approval.
+- Production validation now requires the exact workflow artifact source commit,
+  repository, digest, and immutable reference for every image and renders
+  Compose from an isolated allowlist. The explicit local mode remains separate.
+  The checked-in env fails closed with `19 image_provenance`,
+  `18 placeholder_image_digest`, and `1 release_environment_value` errors.
+- Final verification passed production smoke `43/43`, pinned Caddy `10/10`,
+  hostile validator `52/52`, workflow provenance `25/25`, full scripts
+  `175 passed / 4 opt-in skipped`, all required product suites, and root
+  typecheck.
+- Final owned-resource inventory is zero for task builders and cache, containers,
+  networks, volumes, localhost image references, registry files, temporary
+  secrets, repository `.tmp`, OS-temp owned roots, and durable pending/active
+  ownership records; no broad prune was used.
+- Local encrypted backup/restore evidence is separate:
+  `pg16-disposable-proof-001` for PostgreSQL 16 Platform/TF and
+  `pg17-integrations-disposable-proof-001` for PostgreSQL 17 integrations.
+  Atomic release claims prevent concurrent overwrite/deletion and preserve
+  quarantined failures. Production evidence is `NOT_RECORDED`; target-native
+  secret ownership and every remote resource/migration/Caddy/hostname action
+  still require explicit owner approval.
 - The observed legacy volume remains only `DETACHED_UNKNOWN`: unnamed,
   unmounted, unstarted, unmodified, and absent from tracked manifests.
-- Task 5 did not contact or mutate HomeNode, Coolify, host Caddy, UFW, DNS,
-  GitHub settings/workflows, GHCR, any remote database/volume, or the detached
-  legacy volume. The release workflow was not dispatched.
+- The final fix wave did not contact or mutate HomeNode, Coolify, host Caddy,
+  UFW, DNS, GitHub settings/workflows, GHCR, any remote database/volume, or the
+  detached legacy volume. The release workflow was not dispatched.
 
 ## TF immutable migrations release candidate
 

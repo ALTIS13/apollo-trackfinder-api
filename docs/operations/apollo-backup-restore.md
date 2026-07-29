@@ -5,20 +5,32 @@ This gate is local-only. It must pass before a production migration or any appro
 ## Supported Runtime
 
 Run the operator scripts on native Linux with a POSIX-compatible `/bin/sh`,
-PostgreSQL 16 client tools, `age` 1.2.1-compatible encryption, and
-GNU-compatible `mktemp`, `sha256sum`, `stat`, `chmod`, and `mv` behavior.
-`mktemp` must support a destination-local template and `sha256sum` must emit
-and verify the GNU checksum format consumed by the gate. This is not a generic
-BSD/macOS portability claim.
+`age` 1.2.1-compatible encryption, and GNU-compatible `mktemp`, `sha256sum`,
+`stat`, `chmod`, `ln`, and `mv` behavior. `mktemp` must support a
+destination-local template and `sha256sum` must emit and verify the GNU
+checksum format consumed by the gate. This is not a generic BSD/macOS
+portability claim.
 
-Local disposable proof evidence is `TASK4-77b2e21-89`. Production
-backup/restore evidence is `NOT_RECORDED`; the local ID does not approve a
-production migration or data write.
+Use the exact client/server major matrix:
+
+| Stack                    | Database                 | `pg_dump` and server major |
+| ------------------------ | ------------------------ | -------------------------- |
+| `apollo-platform`        | `apollo_platform`        | PostgreSQL 16              |
+| `apollo-tf`              | `apollo_trackfinder`     | PostgreSQL 16              |
+| `apollo-tf-integrations` | `apollo_tf_integrations` | PostgreSQL 17              |
+
+The scripts check the exact `pg_dump` major and `SHOW server_version_num`
+before backup work. Cross-major evidence is rejected. Current separate local
+disposable proof IDs are `pg16-disposable-proof-001` and
+`pg17-integrations-disposable-proof-001`, both from source
+`fae7f7ae4760d1f8d09e5a4236d6e8af4d60a817`. Production backup/restore
+evidence is `NOT_RECORDED`; neither local ID approves a production migration
+or data write.
 
 ## Custody and Destination
 
 1. Create the encrypted backup destination with owner-only permissions before the maintenance window. The destination is supplied as `APOLLO_BACKUP_DESTINATION`; it is not created by the backup script.
-2. Place the age recipient under independent recipient custody. Set it only through `APOLLO_BACKUP_AGE_RECIPIENT`. Do not put an identity, recipient, password, database URL, or destination path in a release manifest, command argument, ticket, or report.
+2. Place the age recipient under independent recipient custody and set it through `APOLLO_BACKUP_AGE_RECIPIENT`. Credentials, PostgreSQL passwords, database URLs, and age identities never enter argv. The public age recipient is passed to `age -r`, and destination-derived paths are passed to local child utilities, so those non-secret values are visible in local process metadata. Do not put any of them in a release manifest, ticket, log, or report.
 3. Supply the PostgreSQL password only through `PGPASSFILE`. The scripts accept separate host, port, database, and user values; they do not accept a database URL or password argument.
 4. Keep encrypted backups for `7 daily`, `4 weekly`, and `6 monthly` retention points. Deleting an encrypted backup requires the same retention decision record.
 
@@ -34,7 +46,18 @@ The stack and database pair must be one of these exact identities:
 
 Set `APOLLO_BACKUP_PGHOST`, `APOLLO_BACKUP_PGPORT`, `APOLLO_BACKUP_PGDATABASE`, `APOLLO_BACKUP_PGUSER`, `APOLLO_BACKUP_STACK`, and an immutable `APOLLO_BACKUP_RELEASE_ID`. Then run `deploy/ops/backup-postgres.sh` without arguments.
 
-The script runs custom-format `pg_dump` directly into `age -r`. It writes only an encrypted `.dump.age`, a SHA-256 `.sha256`, and redacted `.json` metadata. It creates temporary files within the destination, atomically renames final files, applies `0600`, removes partial output on failure, and reports only a stage name.
+The script first atomically creates a destination-local release-ID claim. Any
+existing active, complete, quarantined, concurrent, or stale claim fails closed
+and remains for operator review. A claim is never reused after completion.
+
+The script runs custom-format `pg_dump` directly into `age -r`. It writes only
+an encrypted `.dump.age`, a SHA-256 `.sha256`, and redacted `.json` metadata.
+Final paths are published with no-overwrite hard links under the owned claim.
+The invocation records owned inodes and removes a final path on failure only
+when it is still the same inode; it never deletes or overwrites another
+invocation's evidence. Failed owned claims become `quarantined`, successful
+claims become `complete`, files use `0600`, and error output contains only the
+failed stage.
 
 ## Restore Evidence
 
@@ -50,7 +73,13 @@ address, database URL, or any credential in the evidence record.
 
 ## Retained-Volume Quarantine
 
-Use `deploy/ops/classify-retained-volume.sh` only with an operator-supplied volume identifier. It reads Docker metadata and emits `DETACHED_UNKNOWN`, `ATTACHED_BLOCKED`, or `FRESH_RELEASE_VOLUME`; it never starts PostgreSQL. Unknown legacy data may advance only after an encrypted backup and restore against a cloned disposable volume under separate approval.
+Use `deploy/ops/classify-retained-volume.sh` only with an operator-supplied
+volume identifier. It reads Docker metadata and emits only
+`DETACHED_UNKNOWN` or `ATTACHED_BLOCKED`; it never starts PostgreSQL.
+Metadata-only inspection cannot prove that a detached volume is empty or
+fresh, and no static label is accepted as such proof. Unknown legacy data may
+advance only after an encrypted backup and restore against a cloned disposable
+volume under separate approval.
 
 The currently discovered legacy class is `DETACHED_UNKNOWN`. Its private name
 is not tracked. It remains unnamed, unmounted, unstarted, unmodified, and
