@@ -11,8 +11,10 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -45,7 +47,9 @@ const redisImage =
 const temporaryRootPrefix = "apollo-coolify-production-";
 const temporaryRootMarkerName = ".apollo-task5-owner";
 const temporaryRootRecordSuffix = ".apollo-task5-owner-record";
+const temporaryRootRecordStagingName = ".apollo-task5-owner-record-active";
 const temporaryRootOwner = "apollo-task5-coolify-production-smoke";
+const temporaryRootNamePattern = /^apollo-coolify-production-[0-9a-f]{32}$/;
 
 const productionTargets: readonly {
   readonly dockerfile: string;
@@ -255,17 +259,46 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-type OwnedTemporaryRoot = {
+async function pathExistsForAudit(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+type PendingOwnedTemporaryRoot = {
+  readonly recordPath: string;
+  readonly root: string;
+  readonly rootName: string;
+  readonly state: "pending";
+};
+
+type ActiveOwnedTemporaryRoot = {
   readonly birthtimeMs: number;
   readonly dev: number;
   readonly ino: number;
   readonly recordPath: string;
   readonly root: string;
   readonly rootName: string;
+  readonly state: "active";
 };
 
-function serializeTemporaryRootOwnership(
-  ownership: Omit<OwnedTemporaryRoot, "recordPath" | "root">,
+type OwnedTemporaryRoot = ActiveOwnedTemporaryRoot | PendingOwnedTemporaryRoot;
+
+function serializePendingTemporaryRootOwnership(rootName: string): string {
+  return `${JSON.stringify({
+    owner: temporaryRootOwner,
+    rootName,
+    state: "pending",
+    version: 2,
+  })}\n`;
+}
+
+function serializeActiveTemporaryRootOwnership(
+  ownership: Omit<ActiveOwnedTemporaryRoot, "recordPath" | "root" | "state">,
 ): string {
   return `${JSON.stringify({
     birthtimeMs: ownership.birthtimeMs,
@@ -273,14 +306,17 @@ function serializeTemporaryRootOwnership(
     ino: ownership.ino,
     owner: temporaryRootOwner,
     rootName: ownership.rootName,
-    version: 1,
+    state: "active",
+    version: 2,
   })}\n`;
 }
 
 function parseTemporaryRootOwnership(
   raw: string,
   expectedRootName: string,
-): Omit<OwnedTemporaryRoot, "recordPath" | "root"> {
+):
+  | Omit<ActiveOwnedTemporaryRoot, "recordPath" | "root">
+  | Omit<PendingOwnedTemporaryRoot, "recordPath" | "root"> {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -290,6 +326,37 @@ function parseTemporaryRootOwnership(
   if (
     typeof value !== "object" ||
     value === null ||
+    !("owner" in value) ||
+    value.owner !== temporaryRootOwner ||
+    !("rootName" in value) ||
+    value.rootName !== expectedRootName
+  ) {
+    throw new Error("temporary root ownership record is invalid");
+  }
+
+  if (
+    "version" in value &&
+    value.version === 2 &&
+    "state" in value &&
+    value.state === "pending" &&
+    temporaryRootNamePattern.test(expectedRootName)
+  ) {
+    return {
+      rootName: expectedRootName,
+      state: "pending",
+    };
+  }
+
+  const isVersionTwoActive =
+    "version" in value &&
+    value.version === 2 &&
+    "state" in value &&
+    value.state === "active" &&
+    temporaryRootNamePattern.test(expectedRootName);
+  const isLegacyActive =
+    "version" in value && value.version === 1 && !("state" in value);
+  if (
+    (!isVersionTwoActive && !isLegacyActive) ||
     !("birthtimeMs" in value) ||
     typeof value.birthtimeMs !== "number" ||
     !Number.isFinite(value.birthtimeMs) ||
@@ -298,21 +365,17 @@ function parseTemporaryRootOwnership(
     !Number.isFinite(value.dev) ||
     !("ino" in value) ||
     typeof value.ino !== "number" ||
-    !Number.isFinite(value.ino) ||
-    !("owner" in value) ||
-    value.owner !== temporaryRootOwner ||
-    !("rootName" in value) ||
-    value.rootName !== expectedRootName ||
-    !("version" in value) ||
-    value.version !== 1
+    !Number.isFinite(value.ino)
   ) {
     throw new Error("temporary root ownership record is invalid");
   }
+
   return {
     birthtimeMs: value.birthtimeMs,
     dev: value.dev,
     ino: value.ino,
-    rootName: value.rootName,
+    rootName: expectedRootName,
+    state: "active",
   };
 }
 
@@ -367,50 +430,93 @@ async function removeOwnedTemporaryRoots(parent: string): Promise<void> {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     if (rootState !== undefined) {
+      if (!rootState.isDirectory()) {
+        throw new Error("temporary root identity no longer matches ownership");
+      }
       if (
-        !rootState.isDirectory() ||
-        rootState.dev !== ownership.dev ||
-        rootState.ino !== ownership.ino ||
-        rootState.birthtimeMs !== ownership.birthtimeMs
+        ownership.state === "active" &&
+        (rootState.dev !== ownership.dev ||
+          rootState.ino !== ownership.ino ||
+          rootState.birthtimeMs !== ownership.birthtimeMs)
       ) {
         throw new Error("temporary root identity no longer matches ownership");
       }
       await rm(ownership.root, { recursive: true });
+      try {
+        await lstat(ownership.root);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          await rm(ownership.recordPath);
+          continue;
+        }
+        throw error;
+      }
+      throw new Error("temporary root survived verified deletion");
     }
     await rm(ownership.recordPath);
   }
 }
 
-async function prepareOwnedTemporaryRoot(parent: string): Promise<string> {
-  await removeOwnedTemporaryRoots(parent);
-  const root = await mkdtemp(join(parent, temporaryRootPrefix));
-  const rootState = await lstat(root);
-  const rootName = basename(root);
-  const ownership = {
-    birthtimeMs: rootState.birthtimeMs,
-    dev: rootState.dev,
-    ino: rootState.ino,
-    rootName,
-  };
-  const serializedOwnership = serializeTemporaryRootOwnership(ownership);
-  const recordPath = `${root}${temporaryRootRecordSuffix}`;
+async function writeDurableExclusive(path: string, contents: string) {
+  const handle = await open(path, "wx", 0o600);
   try {
-    await writeFile(recordPath, serializedOwnership, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
+    await handle.writeFile(contents, { encoding: "utf8" });
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function prepareOwnedTemporaryRoot(
+  parent: string,
+  options: {
+    readonly afterRootCreationBeforeActiveRecord?: (ownership: {
+      readonly recordPath: string;
+      readonly root: string;
+      readonly rootName: string;
+    }) => Promise<void>;
+    readonly removeOwnedRoots?: (parent: string) => Promise<void>;
+  } = {},
+): Promise<string> {
+  await removeOwnedTemporaryRoots(parent);
+  const rootName = `${temporaryRootPrefix}${randomBytes(16).toString("hex")}`;
+  const root = join(parent, rootName);
+  const recordPath = `${root}${temporaryRootRecordSuffix}`;
+  const pendingOwnership = serializePendingTemporaryRootOwnership(rootName);
+  try {
+    await writeDurableExclusive(recordPath, pendingOwnership);
+    await mkdir(root, { mode: 0o700 });
+    await options.afterRootCreationBeforeActiveRecord?.({
+      recordPath,
+      root,
+      rootName,
     });
-    await writeFile(join(root, temporaryRootMarkerName), serializedOwnership, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
+    const rootState = await lstat(root);
+    if (!rootState.isDirectory()) {
+      throw new Error("temporary root creation did not produce a directory");
+    }
+    const activeOwnership = serializeActiveTemporaryRootOwnership({
+      birthtimeMs: rootState.birthtimeMs,
+      dev: rootState.dev,
+      ino: rootState.ino,
+      rootName,
     });
+    const activeRecordStagingPath = join(root, temporaryRootRecordStagingName);
+    await writeDurableExclusive(activeRecordStagingPath, activeOwnership);
+    await rename(activeRecordStagingPath, recordPath);
+    await writeDurableExclusive(
+      join(root, temporaryRootMarkerName),
+      activeOwnership,
+    );
     return root;
   } catch (error) {
-    if (await pathExists(recordPath)) {
-      await removeOwnedTemporaryRoots(parent);
-    } else {
-      await rm(root, { force: true, recursive: true });
+    try {
+      await (options.removeOwnedRoots ?? removeOwnedTemporaryRoots)(parent);
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "temporary root preparation failed",
+      );
     }
     throw error;
   }
@@ -1925,17 +2031,21 @@ async function cleanupAudit(
   const imageReferences = (
     await registryImageInventory(docker, registry)
   ).reduce((total, image) => total + image.references.length, 0);
-  const temporaryRoots =
-    temporaryRootParent === undefined
-      ? root !== undefined && (await pathExists(root))
-        ? [root]
-        : []
-      : await ownedTemporaryRootInventory(temporaryRootParent);
+  const temporaryRootPaths = new Set<string>();
+  if (root !== undefined && (await pathExistsForAudit(root))) {
+    temporaryRootPaths.add(resolve(root));
+  }
+  if (temporaryRootParent !== undefined) {
+    for (const ownership of await ownedTemporaryRootInventory(
+      temporaryRootParent,
+    )) {
+      temporaryRootPaths.add(resolve(ownership.root));
+    }
+  }
+  const temporaryRoots = [...temporaryRootPaths].sort();
   let registryFiles = 0;
   for (const temporaryRoot of temporaryRoots) {
-    const rootPath =
-      typeof temporaryRoot === "string" ? temporaryRoot : temporaryRoot.root;
-    const registryPath = join(rootPath, "registry");
+    const registryPath = join(temporaryRoot, "registry");
     if (await pathExists(registryPath)) {
       registryFiles += (await readdir(registryPath)).length;
     }
@@ -3049,7 +3159,207 @@ describe("Coolify production smoke contract", () => {
     ).toBe(false);
   });
 
-  it("recovers a marked temporary root on sequential retry without adopting unrelated state", async () => {
+  it("recovers a pending temporary root by its exact safe generated name", async () => {
+    const temporaryRootParent = await mkdtemp(
+      join(tmpdir(), "apollo-contract-parent-"),
+    );
+    const rootName = `${temporaryRootPrefix}${"1".repeat(32)}`;
+    const root = join(temporaryRootParent, rootName);
+    const recordPath = `${root}${temporaryRootRecordSuffix}`;
+    const unrelated = join(
+      temporaryRootParent,
+      `${temporaryRootPrefix}${"f".repeat(32)}`,
+    );
+    try {
+      await writeFile(
+        recordPath,
+        `${JSON.stringify({
+          owner: temporaryRootOwner,
+          rootName,
+          state: "pending",
+          version: 2,
+        })}\n`,
+        { encoding: "utf8", flag: "wx", mode: 0o600 },
+      );
+      await mkdir(root);
+      await mkdir(unrelated);
+
+      await removeOwnedTemporaryRoots(temporaryRootParent);
+
+      expect(await pathExists(root)).toBe(false);
+      expect(await pathExists(recordPath)).toBe(false);
+      expect(await pathExists(unrelated)).toBe(true);
+    } finally {
+      await rm(temporaryRootParent, { force: true, recursive: true });
+    }
+  });
+
+  it("publishes an identity-bound active record before returning a temporary root", async () => {
+    const temporaryRootParent = await mkdtemp(
+      join(tmpdir(), "apollo-contract-parent-"),
+    );
+    const state = createFakeSmokeDocker();
+    try {
+      const root = await prepareOwnedTemporaryRoot(temporaryRootParent);
+      const inventory = await ownedTemporaryRootInventory(temporaryRootParent);
+
+      expect(inventory).toHaveLength(1);
+      expect(inventory[0]).toMatchObject({
+        root,
+        state: "active",
+      });
+      expect(
+        JSON.parse(await readFile(join(root, temporaryRootMarkerName), "utf8")),
+      ).toMatchObject({
+        state: "active",
+        version: 2,
+      });
+      await expect(
+        cleanupAudit(
+          state.docker,
+          state.runId,
+          undefined,
+          undefined,
+          temporaryRootParent,
+        ),
+      ).resolves.toMatchObject({ temporarySecrets: 1 });
+
+      await removeOwnedTemporaryRoots(temporaryRootParent);
+      expect(await pathExists(root)).toBe(false);
+      expect(await ownedTemporaryRootInventory(temporaryRootParent)).toEqual(
+        [],
+      );
+    } finally {
+      await rm(temporaryRootParent, { force: true, recursive: true });
+    }
+  });
+
+  it("preserves an active root and ownership record when identity does not match", async () => {
+    const temporaryRootParent = await mkdtemp(
+      join(tmpdir(), "apollo-contract-parent-"),
+    );
+    const rootName = `${temporaryRootPrefix}${"2".repeat(32)}`;
+    const root = join(temporaryRootParent, rootName);
+    const recordPath = `${root}${temporaryRootRecordSuffix}`;
+    try {
+      await mkdir(root);
+      const rootState = await lstat(root);
+      await writeFile(
+        recordPath,
+        `${JSON.stringify({
+          birthtimeMs: rootState.birthtimeMs + 1_000,
+          dev: rootState.dev,
+          ino: rootState.ino,
+          owner: temporaryRootOwner,
+          rootName,
+          state: "active",
+          version: 2,
+        })}\n`,
+        { encoding: "utf8", flag: "wx", mode: 0o600 },
+      );
+
+      await expect(
+        removeOwnedTemporaryRoots(temporaryRootParent),
+      ).rejects.toThrow("temporary root identity no longer matches ownership");
+      expect(await pathExists(root)).toBe(true);
+      expect(await pathExists(recordPath)).toBe(true);
+    } finally {
+      await rm(temporaryRootParent, { force: true, recursive: true });
+    }
+  });
+
+  it("reconciles multiple pending and active records without adopting a lookalike", async () => {
+    const temporaryRootParent = await mkdtemp(
+      join(tmpdir(), "apollo-contract-parent-"),
+    );
+    const pendingName = `${temporaryRootPrefix}${"3".repeat(32)}`;
+    const pendingRoot = join(temporaryRootParent, pendingName);
+    const pendingRecord = `${pendingRoot}${temporaryRootRecordSuffix}`;
+    const activeName = `${temporaryRootPrefix}${"4".repeat(32)}`;
+    const activeRoot = join(temporaryRootParent, activeName);
+    const activeRecord = `${activeRoot}${temporaryRootRecordSuffix}`;
+    const unrelated = join(
+      temporaryRootParent,
+      `${temporaryRootPrefix}${"e".repeat(32)}`,
+    );
+    const state = createFakeSmokeDocker();
+    try {
+      await mkdir(pendingRoot);
+      await writeFile(
+        pendingRecord,
+        `${JSON.stringify({
+          owner: temporaryRootOwner,
+          rootName: pendingName,
+          state: "pending",
+          version: 2,
+        })}\n`,
+        { encoding: "utf8", flag: "wx", mode: 0o600 },
+      );
+      await mkdir(activeRoot);
+      const activeState = await lstat(activeRoot);
+      await writeFile(
+        activeRecord,
+        `${JSON.stringify({
+          birthtimeMs: activeState.birthtimeMs,
+          dev: activeState.dev,
+          ino: activeState.ino,
+          owner: temporaryRootOwner,
+          rootName: activeName,
+          state: "active",
+          version: 2,
+        })}\n`,
+        { encoding: "utf8", flag: "wx", mode: 0o600 },
+      );
+      await mkdir(unrelated);
+
+      await expect(
+        cleanupAudit(
+          state.docker,
+          state.runId,
+          undefined,
+          undefined,
+          temporaryRootParent,
+        ),
+      ).resolves.toMatchObject({ temporarySecrets: 2 });
+      await removeOwnedTemporaryRoots(temporaryRootParent);
+
+      expect(await pathExists(pendingRoot)).toBe(false);
+      expect(await pathExists(pendingRecord)).toBe(false);
+      expect(await pathExists(activeRoot)).toBe(false);
+      expect(await pathExists(activeRecord)).toBe(false);
+      expect(await pathExists(unrelated)).toBe(true);
+    } finally {
+      await rm(temporaryRootParent, { force: true, recursive: true });
+    }
+  });
+
+  it("audits a known current root even when its ownership record is missing", async () => {
+    const temporaryRootParent = await mkdtemp(
+      join(tmpdir(), "apollo-contract-parent-"),
+    );
+    const root = join(
+      temporaryRootParent,
+      `${temporaryRootPrefix}${"5".repeat(32)}`,
+    );
+    const state = createFakeSmokeDocker();
+    try {
+      await mkdir(root);
+
+      await expect(
+        cleanupAudit(
+          state.docker,
+          state.runId,
+          undefined,
+          root,
+          temporaryRootParent,
+        ),
+      ).resolves.toMatchObject({ temporarySecrets: 1 });
+    } finally {
+      await rm(temporaryRootParent, { force: true, recursive: true });
+    }
+  });
+
+  it("recovers a pending temporary root on sequential retry without adopting unrelated state", async () => {
     const temporaryRootParent = await mkdtemp(
       join(tmpdir(), "apollo-contract-parent-"),
     );
@@ -3064,12 +3374,26 @@ describe("Coolify production smoke contract", () => {
     );
     const noOp = async () => {};
     let firstRoot: string | undefined;
+    let firstPendingRecord: Record<string, unknown> | undefined;
     let firstError: unknown;
     try {
       await runProductionSmokeLifecycle({
         acquireResources: async () => {
-          firstRoot = await prepareOwnedTemporaryRoot(temporaryRootParent);
-          throw new Error("injected first-attempt acquisition failure");
+          await prepareOwnedTemporaryRoot(temporaryRootParent, {
+            afterRootCreationBeforeActiveRecord: async ({
+              recordPath,
+              root,
+            }) => {
+              firstRoot = root;
+              firstPendingRecord = JSON.parse(
+                await readFile(recordPath, "utf8"),
+              ) as Record<string, unknown>;
+              throw new Error("injected pre-active publication failure");
+            },
+            removeOwnedRoots: async () => {
+              throw new Error("injected preparation cleanup failure");
+            },
+          });
         },
         audit: () =>
           cleanupAudit(
@@ -3087,10 +3411,6 @@ describe("Coolify production smoke contract", () => {
             fixedResourceOwnership,
             registry: undefined,
             removeTemporaryRoots: async () => {
-              if (firstRoot === undefined) {
-                throw new Error("first temporary root was not acquired");
-              }
-              await rm(join(firstRoot, temporaryRootMarkerName));
               throw new Error("injected temporary-root cleanup failure");
             },
             runId: state.runId,
@@ -3106,7 +3426,10 @@ describe("Coolify production smoke contract", () => {
       });
 
       expect(flattenErrorMessages(firstError)).toContain(
-        "injected first-attempt acquisition failure",
+        "injected pre-active publication failure",
+      );
+      expect(flattenErrorMessages(firstError)).toContain(
+        "injected preparation cleanup failure",
       );
       expect(flattenErrorMessages(firstError)).toContain(
         "injected temporary-root cleanup failure",
@@ -3115,12 +3438,18 @@ describe("Coolify production smoke contract", () => {
         "production smoke cleanup audit was nonzero",
       );
       expect(firstRoot).toBeDefined();
+      expect(firstPendingRecord).toEqual({
+        owner: temporaryRootOwner,
+        rootName: basename(firstRoot as string),
+        state: "pending",
+        version: 2,
+      });
       await expect(
         cleanupAudit(
           state.docker,
           state.runId,
           undefined,
-          undefined,
+          firstRoot,
           temporaryRootParent,
         ),
       ).resolves.toMatchObject({ temporarySecrets: 1 });
