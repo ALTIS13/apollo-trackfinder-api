@@ -1,4 +1,14 @@
-import { resolve } from "node:path";
+import {
+  lstat,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
@@ -11,7 +21,11 @@ import {
   operatorReleaseOutputDirectory,
   parseOperatorReleaseArguments,
   pinnedRedisReference as operatorPinnedRedisReference,
+  publishOperatorRelease,
   releaseImageCatalog as operatorReleaseImageCatalog,
+  runOperatorReleaseCli,
+  type OperatorReleaseCommandResult,
+  type OperatorReleaseDependencies,
 } from "./operator-release.js";
 import {
   artifactImageNames,
@@ -42,6 +56,122 @@ const exactArtifactImageNames: readonly [
   "tf-download-redis",
   "redis",
 ] = artifactImageNames;
+
+const sourceCommit = "a".repeat(40);
+const releaseId = "v0.1.0-rc.1";
+const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
+const digestFor = (index: number): string =>
+  `sha256:${String(index + 1).padStart(64, "0")}`;
+
+type RecordedCommand = {
+  args: readonly string[];
+  cwd: string;
+  executable: string;
+};
+
+async function publisherHarness(options?: {
+  command?: (
+    command: RecordedCommand,
+    defaultResult: () => OperatorReleaseCommandResult,
+  ) => OperatorReleaseCommandResult | Promise<OperatorReleaseCommandResult>;
+  randomId?: () => string;
+  temporaryRoot?: () => string;
+}) {
+  const root = await mkdtemp(join(tmpdir(), "apollo-operator-release-test-"));
+  const repositoryRoot = join(root, "repository");
+  const temporaryRoot = join(root, "owned-temporary-root");
+  const commands: RecordedCommand[] = [];
+  const publishedTags = new Set<string>();
+  await mkdir(repositoryRoot);
+
+  const dependencies: OperatorReleaseDependencies = {
+    async command(executable, args, commandOptions) {
+      const recorded = {
+        args: [...args],
+        cwd: commandOptions.cwd,
+        executable,
+      };
+      commands.push(recorded);
+      const defaultResult = (): OperatorReleaseCommandResult => {
+        if (
+          executable === "docker" &&
+          args[0] === "buildx" &&
+          args[1] === "imagetools" &&
+          args[2] === "inspect"
+        ) {
+          const reference = args[3] ?? "";
+          const targetIndex = operatorReleaseImageTargets.findIndex(
+            ({ repository }) => reference.startsWith(`${repository}:`),
+          );
+          return publishedTags.has(reference)
+            ? {
+                status: 0,
+                stderr: "",
+                stdout: `${JSON.stringify(digestFor(targetIndex))}\n`,
+              }
+            : { status: 1, stderr: "manifest unknown", stdout: "" };
+        }
+        if (
+          executable === "docker" &&
+          args[0] === "buildx" &&
+          args[1] === "build"
+        ) {
+          publishedTags.add(args[args.indexOf("--tag") + 1] ?? "");
+        }
+        return { status: 0, stderr: "", stdout: "" };
+      };
+      return options?.command?.(recorded, defaultResult) ?? defaultResult();
+    },
+    randomId: options?.randomId ?? (() => "task-2-owned"),
+    temporaryRoot: options?.temporaryRoot ?? (() => temporaryRoot),
+  };
+
+  return {
+    commands,
+    dependencies,
+    publishedTags,
+    releaseOutput: join(repositoryRoot, ".ops-private", "releases", releaseId),
+    releaseStaging: join(
+      repositoryRoot,
+      ".ops-private",
+      "releases",
+      `.${releaseId}.staging-task-2-owned`,
+    ),
+    repositoryRoot,
+    root,
+    sourceRoot: join(temporaryRoot, "source"),
+    temporaryRoot,
+  };
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException).code === "ENOENT" ||
+      (error as NodeJS.ErrnoException).code === "ENOTDIR"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function expectIncompleteReleaseEvidence(
+  harness: Awaited<ReturnType<typeof publisherHarness>>,
+): Promise<void> {
+  expect(
+    await pathExists(
+      join(harness.releaseOutput, "apollo-release-manifest.json"),
+    ),
+  ).toBe(false);
+  expect(
+    await pathExists(join(harness.releaseOutput, "release-images.env")),
+  ).toBe(false);
+  expect(await pathExists(harness.releaseStaging)).toBe(false);
+}
 
 describe("operator release arguments", () => {
   it("parses the production publisher contract", () => {
@@ -359,4 +489,833 @@ describe("operator release inventory", () => {
       ).toThrowError(/^invalid_release_id$/);
     },
   );
+});
+
+describe("operator release publication", () => {
+  it("checks the worktree and source commit before claiming an archive root", async () => {
+    let temporaryRootCalls = 0;
+    const harness = await publisherHarness({
+      command(command, defaultResult) {
+        if (command.executable === "git" && command.args[0] === "cat-file") {
+          return {
+            status: 1,
+            stderr: "sentinel-private-invalid-commit",
+            stdout: "",
+          };
+        }
+        return defaultResult();
+      },
+      temporaryRoot() {
+        temporaryRootCalls += 1;
+        throw new Error("archive root requested before source validation");
+      },
+    });
+    try {
+      await expect(
+        publishOperatorRelease(
+          {
+            mode: "production",
+            releaseId,
+            repositoryRoot: harness.repositoryRoot,
+            sourceCommit,
+          },
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^invalid_source_commit$/);
+      expect(
+        harness.commands.map(({ args, executable }) => [executable, ...args]),
+      ).toEqual([
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        ["git", "cat-file", "-e", `${sourceCommit}^{commit}`],
+      ]);
+      expect(temporaryRootCalls).toBe(0);
+      expect(
+        harness.commands.some(({ executable }) => executable === "docker"),
+      ).toBe(false);
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects release-tag reuse before requesting or creating a builder", async () => {
+    let randomIdCalls = 0;
+    const harness = await publisherHarness({
+      randomId() {
+        randomIdCalls += 1;
+        throw new Error("builder identity requested for a reused release tag");
+      },
+    });
+    const existingTarget = operatorReleaseImageTargets[0]!;
+    harness.publishedTags.add(`${existingTarget.repository}:${releaseId}`);
+    try {
+      await expect(
+        publishOperatorRelease(
+          {
+            mode: "production",
+            releaseId,
+            repositoryRoot: harness.repositoryRoot,
+            sourceCommit,
+          },
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^release_tag_exists$/);
+      expect(randomIdCalls).toBe(0);
+      expect(
+        harness.commands.filter(
+          ({ args, executable }) =>
+            executable === "docker" &&
+            args[0] === "buildx" &&
+            args[1] === "imagetools" &&
+            args[2] === "inspect",
+        ),
+      ).toHaveLength(1);
+      expect(
+        harness.commands.some(
+          ({ args, executable }) =>
+            executable === "docker" &&
+            args[0] === "buildx" &&
+            (args[1] === "create" || args[1] === "build" || args[1] === "rm"),
+        ),
+      ).toBe(false);
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("does not remove a builder when creation never established ownership", async () => {
+    const harness = await publisherHarness({
+      command(command, defaultResult) {
+        if (
+          command.executable === "docker" &&
+          command.args[0] === "buildx" &&
+          command.args[1] === "create"
+        ) {
+          return {
+            status: 1,
+            stderr: "sentinel-private-builder-collision",
+            stdout: "",
+          };
+        }
+        return defaultResult();
+      },
+    });
+    try {
+      await expect(
+        publishOperatorRelease(
+          {
+            mode: "production",
+            releaseId,
+            repositoryRoot: harness.repositoryRoot,
+            sourceCommit,
+          },
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^builder_create_failed$/);
+      expect(
+        harness.commands.some(
+          ({ args, executable }) =>
+            executable === "docker" && args[0] === "buildx" && args[1] === "rm",
+        ),
+      ).toBe(false);
+      expect(await pathExists(harness.temporaryRoot)).toBe(false);
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("sanitizes unexpected dependency failures from the publication API", async () => {
+    const harness = await publisherHarness({
+      temporaryRoot() {
+        throw new Error("private_secret_value");
+      },
+    });
+    try {
+      await expect(
+        publishOperatorRelease(
+          {
+            mode: "production",
+            releaseId,
+            repositoryRoot: harness.repositoryRoot,
+            sourceCommit,
+          },
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^release_error$/);
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("validates the archived commit before publishing every custom image with an owned builder", async () => {
+    const harness = await publisherHarness();
+    try {
+      const output = await publishOperatorRelease(
+        {
+          mode: "production",
+          releaseId,
+          repositoryRoot: harness.repositoryRoot,
+          sourceCommit,
+        },
+        harness.dependencies,
+      );
+
+      const commandLines = harness.commands.map(
+        ({ args, executable }) => [executable, ...args] as const,
+      );
+      const builderName = "apollo-release-task-2-owned";
+      const builderCreateIndex = commandLines.findIndex(
+        (line) =>
+          line[0] === "docker" && line[1] === "buildx" && line[2] === "create",
+      );
+      const registryInspections = harness.commands.filter(
+        ({ args, executable }) =>
+          executable === "docker" &&
+          args[0] === "buildx" &&
+          args[1] === "imagetools" &&
+          args[2] === "inspect",
+      );
+      const pushedDigestInspections = harness.commands
+        .slice(builderCreateIndex + 1)
+        .filter(
+          ({ args, executable }) =>
+            executable === "docker" &&
+            args[0] === "buildx" &&
+            args[1] === "imagetools" &&
+            args[2] === "inspect",
+        );
+      const expectedCustomTags = operatorReleaseImageTargets.map(
+        ({ repository }) => `${repository}:${releaseId}`,
+      );
+      const builds = harness.commands.filter(
+        ({ args, executable }) =>
+          executable === "docker" &&
+          args[0] === "buildx" &&
+          args[1] === "build",
+      );
+      const validationCommands = [
+        ["corepack", "enable"],
+        ["pnpm", "install", "--frozen-lockfile"],
+        ["pnpm", "--filter", "@workspace/scripts", "test"],
+        [
+          "pnpm",
+          "--filter",
+          "@workspace/platform-api",
+          "exec",
+          "vitest",
+          "run",
+          "--maxWorkers=2",
+        ],
+        [
+          "pnpm",
+          "--filter",
+          "@workspace/api-server",
+          "exec",
+          "vitest",
+          "run",
+          "--maxWorkers=1",
+        ],
+        [
+          "pnpm",
+          "--filter",
+          "@workspace/admin-dashboard",
+          "exec",
+          "vitest",
+          "run",
+          "--maxWorkers=2",
+        ],
+        [
+          "pnpm",
+          "--filter",
+          "@workspace/music-player",
+          "exec",
+          "vitest",
+          "run",
+          "--maxWorkers=2",
+        ],
+        [
+          "pnpm",
+          "--filter",
+          "@workspace/tf-search",
+          "exec",
+          "vitest",
+          "run",
+          "--maxWorkers=2",
+        ],
+        [
+          "pnpm",
+          "--filter",
+          "@workspace/tf-integrations",
+          "exec",
+          "vitest",
+          "run",
+          "--maxWorkers=2",
+        ],
+        [
+          "pnpm",
+          "--filter",
+          "@workspace/tf-download-worker",
+          "exec",
+          "vitest",
+          "run",
+          "--maxWorkers=2",
+        ],
+        ["pnpm", "run", "typecheck"],
+      ];
+
+      expect(commandLines.slice(0, 4)).toEqual([
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        ["git", "cat-file", "-e", `${sourceCommit}^{commit}`],
+        [
+          "git",
+          "archive",
+          "--format=tar",
+          "--output",
+          join(harness.temporaryRoot, "source.tar"),
+          sourceCommit,
+        ],
+        [
+          "tar",
+          "-xf",
+          join(harness.temporaryRoot, "source.tar"),
+          "-C",
+          harness.sourceRoot,
+        ],
+      ]);
+      expect(commandLines.slice(4, 4 + validationCommands.length)).toEqual(
+        validationCommands,
+      );
+      expect(
+        harness.commands
+          .slice(4, 4 + validationCommands.length)
+          .every(({ cwd }) => cwd === harness.sourceRoot),
+      ).toBe(true);
+      expect(
+        harness.commands
+          .slice(0, builderCreateIndex)
+          .filter(({ executable }) => executable === "docker"),
+      ).toHaveLength(11);
+      expect(builderCreateIndex).toBe(4 + validationCommands.length + 11);
+      expect(commandLines[builderCreateIndex]).toEqual([
+        "docker",
+        "buildx",
+        "create",
+        "--name",
+        builderName,
+        "--driver",
+        "docker-container",
+      ]);
+
+      expect(builds).toHaveLength(11);
+      for (const [index, build] of builds.entries()) {
+        const target = operatorReleaseImageTargets[index];
+        expect(build.cwd).toBe(harness.sourceRoot);
+        expect(build.args).toEqual([
+          "buildx",
+          "build",
+          "--builder",
+          builderName,
+          "--platform",
+          "linux/amd64",
+          "--provenance",
+          "mode=max",
+          "--sbom",
+          "true",
+          "--label",
+          "org.opencontainers.image.source=https://github.com/ALTIS13/Apollo.TF",
+          "--label",
+          `org.opencontainers.image.revision=${sourceCommit}`,
+          "--label",
+          `org.opencontainers.image.version=${releaseId}`,
+          "--file",
+          join(harness.sourceRoot, target!.dockerfile),
+          "--target",
+          target!.target,
+          "--tag",
+          `${target!.repository}:${releaseId}`,
+          "--push",
+          harness.sourceRoot,
+        ]);
+      }
+      expect(registryInspections).toHaveLength(22);
+      expect(pushedDigestInspections).toHaveLength(11);
+      expect(
+        registryInspections
+          .slice(0, operatorReleaseImageTargets.length)
+          .map(({ args }) => args[3]),
+      ).toEqual(expectedCustomTags);
+      expect(pushedDigestInspections.map(({ args }) => args[3])).toEqual(
+        expectedCustomTags,
+      );
+      expect(
+        commandLines.filter(
+          (line) =>
+            line[0] === "docker" && line[1] === "buildx" && line[2] === "rm",
+        ),
+      ).toEqual([["docker", "buildx", "rm", builderName]]);
+      expect(commandLines.flat().join("\n")).not.toMatch(
+        /(?:credential|password|secret|token)/i,
+      );
+      expect(commandLines.flat()).not.toContain("prune");
+      expect(commandLines.flat()).not.toContain("--use");
+      expect(commandLines.flat()).not.toContain(pinnedRedisReference);
+      expect(commandLines.flat().join("\n")).not.toContain(
+        "docker.io/library/redis",
+      );
+
+      const manifest = JSON.parse(
+        await readFile(output.manifestPath, "utf8"),
+      ) as typeof output.releaseArtifact;
+      expect(manifest).toEqual(output.releaseArtifact);
+      expect(manifest.images.map(({ name }) => name)).toEqual(
+        [...exactArtifactImageNames].sort(),
+      );
+      expect(manifest.images.find(({ name }) => name === "redis")).toEqual({
+        imageDigest:
+          "sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b",
+        imageReference:
+          "docker.io/library/redis@sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b",
+        name: "redis",
+        repository: "docker.io/library/redis",
+      });
+      expect(await readFile(output.envFragmentPath, "utf8")).toBe(
+        [
+          `RELEASE_SOURCE_COMMIT=${sourceCommit}`,
+          `PLATFORM_POSTGRES_IMAGE=ghcr.io/altis13/apollo-platform-postgres@${digestFor(1)}`,
+          "PLATFORM_REDIS_IMAGE=docker.io/library/redis@sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b",
+          `PLATFORM_API_IMAGE=ghcr.io/altis13/apollo-platform-api@${digestFor(0)}`,
+          `TF_POSTGRES_IMAGE=ghcr.io/altis13/apollo-tf-postgres@${digestFor(3)}`,
+          "TF_REDIS_IMAGE=docker.io/library/redis@sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b",
+          `TF_API_IMAGE=ghcr.io/altis13/apollo-tf-api@${digestFor(2)}`,
+          `TF_WEB_IMAGE=ghcr.io/altis13/apollo-tf-web@${digestFor(4)}`,
+          `TF_ADMIN_IMAGE=ghcr.io/altis13/apollo-tf-admin@${digestFor(5)}`,
+          `TF_SEARCH_IMAGE=ghcr.io/altis13/apollo-tf-search@${digestFor(6)}`,
+          `TF_INTEGRATIONS_POSTGRES_IMAGE=ghcr.io/altis13/apollo-tf-integrations-postgres@${digestFor(8)}`,
+          `TF_INTEGRATIONS_IMAGE=ghcr.io/altis13/apollo-tf-integrations@${digestFor(7)}`,
+          `TF_DOWNLOAD_REDIS_IMAGE=ghcr.io/altis13/apollo-tf-download-redis@${digestFor(10)}`,
+          `TF_DOWNLOAD_WORKER_IMAGE=ghcr.io/altis13/apollo-tf-download-worker@${digestFor(9)}`,
+          "",
+        ].join("\n"),
+      );
+      await expect(readFile(harness.temporaryRoot, "utf8")).rejects.toThrow();
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("stops before registry inspection when the archived source gate fails", async () => {
+    const harness = await publisherHarness({
+      command(command, defaultResult) {
+        if (
+          command.executable === "pnpm" &&
+          command.args.includes("@workspace/api-server")
+        ) {
+          return {
+            status: 1,
+            stderr: "sentinel-private-source-failure",
+            stdout: "",
+          };
+        }
+        return defaultResult();
+      },
+    });
+    try {
+      await expect(
+        publishOperatorRelease(
+          {
+            mode: "production",
+            releaseId,
+            repositoryRoot: harness.repositoryRoot,
+            sourceCommit,
+          },
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^source_validation_failed$/);
+      expect(
+        harness.commands.some(({ executable }) => executable === "docker"),
+      ).toBe(false);
+      expect(JSON.stringify(harness.commands)).not.toContain(
+        "sentinel-private-source-failure",
+      );
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("keeps build 6 as the primary failure and refuses the partially published release on retry", async () => {
+    let buildCount = 0;
+    const harness = await publisherHarness({
+      command(command, defaultResult) {
+        if (
+          command.executable === "docker" &&
+          command.args[0] === "buildx" &&
+          command.args[1] === "build"
+        ) {
+          buildCount += 1;
+          if (buildCount === 6) {
+            return {
+              status: 1,
+              stderr: "sentinel-private-build-failure",
+              stdout: "",
+            };
+          }
+        }
+        if (
+          command.executable === "docker" &&
+          command.args[0] === "buildx" &&
+          command.args[1] === "rm"
+        ) {
+          return {
+            status: 1,
+            stderr: "sentinel-private-cleanup-failure",
+            stdout: "",
+          };
+        }
+        return defaultResult();
+      },
+    });
+    const publish = () =>
+      publishOperatorRelease(
+        {
+          mode: "production",
+          releaseId,
+          repositoryRoot: harness.repositoryRoot,
+          sourceCommit,
+        },
+        harness.dependencies,
+      );
+    try {
+      await expect(publish()).rejects.toThrowError(/^image_build_failed$/);
+      expect(buildCount).toBe(6);
+      expect(harness.publishedTags.size).toBe(5);
+      await expectIncompleteReleaseEvidence(harness);
+      expect(await pathExists(harness.temporaryRoot)).toBe(false);
+
+      await expect(publish()).rejects.toThrowError(/^release_tag_exists$/);
+      expect(buildCount).toBe(6);
+      expect(
+        harness.commands.filter(
+          ({ args, executable }) =>
+            executable === "docker" &&
+            args[0] === "buildx" &&
+            args[1] === "create",
+        ),
+      ).toHaveLength(1);
+      expect(
+        harness.commands
+          .filter(
+            ({ args, executable }) =>
+              executable === "docker" &&
+              args[0] === "buildx" &&
+              args[1] === "rm",
+          )
+          .map(({ args }) => args),
+      ).toEqual([["buildx", "rm", "apollo-release-task-2-owned"]]);
+      await expectIncompleteReleaseEvidence(harness);
+      expect(await pathExists(harness.temporaryRoot)).toBe(false);
+      expect(JSON.stringify(harness.commands)).not.toContain(
+        "sentinel-private",
+      );
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("fails closed when pushed-digest inspection 12 exhausts bounded retries", async () => {
+    let failedDigestInspections = 0;
+    const firstReference = `${operatorReleaseImageTargets[0]!.repository}:${releaseId}`;
+    const harness = await publisherHarness({
+      command(command, defaultResult) {
+        if (
+          command.executable === "docker" &&
+          command.args[0] === "buildx" &&
+          command.args[1] === "imagetools" &&
+          command.args[2] === "inspect" &&
+          command.args[3] === firstReference &&
+          failedDigestInspections > 0
+        ) {
+          failedDigestInspections += 1;
+          return { status: 1, stderr: "manifest unknown", stdout: "" };
+        }
+        const result = defaultResult();
+        if (
+          command.executable === "docker" &&
+          command.args[0] === "buildx" &&
+          command.args[1] === "imagetools" &&
+          command.args[2] === "inspect" &&
+          command.args[3] === firstReference &&
+          result.status === 0
+        ) {
+          failedDigestInspections = 1;
+          return { status: 1, stderr: "manifest unknown", stdout: "" };
+        }
+        return result;
+      },
+    });
+    try {
+      await expect(
+        publishOperatorRelease(
+          {
+            mode: "production",
+            releaseId,
+            repositoryRoot: harness.repositoryRoot,
+            sourceCommit,
+          },
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^digest_resolution_failed$/);
+      expect(failedDigestInspections).toBe(5);
+      expect(
+        harness.commands.filter(
+          ({ args, executable }) =>
+            executable === "docker" &&
+            args[0] === "buildx" &&
+            args[1] === "imagetools" &&
+            args[2] === "inspect",
+        ),
+      ).toHaveLength(16);
+      await expectIncompleteReleaseEvidence(harness);
+      expect(await pathExists(harness.temporaryRoot)).toBe(false);
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("claims an exclusive staging directory before publishing evidence", async () => {
+    const harness = await publisherHarness();
+    const sentinelPath = join(harness.releaseStaging, "unrelated-sentinel");
+    await mkdir(harness.releaseStaging, { recursive: true });
+    await writeFile(sentinelPath, "unrelated\n", "utf8");
+    try {
+      await expect(
+        publishOperatorRelease(
+          {
+            mode: "production",
+            releaseId,
+            repositoryRoot: harness.repositoryRoot,
+            sourceCommit,
+          },
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^artifact_validation_failed$/);
+      expect(await readFile(sentinelPath, "utf8")).toBe("unrelated\n");
+      expect(
+        await pathExists(
+          join(harness.releaseOutput, "apollo-release-manifest.json"),
+        ),
+      ).toBe(false);
+      expect(
+        await pathExists(join(harness.releaseOutput, "release-images.env")),
+      ).toBe(false);
+      expect(await pathExists(harness.temporaryRoot)).toBe(false);
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("removes owned staging after an output rename collision without removing the collision", async () => {
+    let collisionCreated = false;
+    let releaseOutput = "";
+    const lastReference = `${
+      operatorReleaseImageTargets.at(-1)!.repository
+    }:${releaseId}`;
+    const harness = await publisherHarness({
+      async command(command, defaultResult) {
+        const result = defaultResult();
+        if (
+          !collisionCreated &&
+          command.executable === "docker" &&
+          command.args[0] === "buildx" &&
+          command.args[1] === "imagetools" &&
+          command.args[2] === "inspect" &&
+          command.args[3] === lastReference &&
+          result.status === 0
+        ) {
+          await mkdir(dirname(releaseOutput), { recursive: true });
+          await writeFile(releaseOutput, "unrelated-collision\n", "utf8");
+          collisionCreated = true;
+        }
+        return result;
+      },
+    });
+    releaseOutput = harness.releaseOutput;
+    try {
+      await expect(
+        publishOperatorRelease(
+          {
+            mode: "production",
+            releaseId,
+            repositoryRoot: harness.repositoryRoot,
+            sourceCommit,
+          },
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^artifact_validation_failed$/);
+      expect(collisionCreated).toBe(true);
+      expect(await readFile(harness.releaseOutput, "utf8")).toBe(
+        "unrelated-collision\n",
+      );
+      await expectIncompleteReleaseEvidence(harness);
+      expect(await pathExists(harness.temporaryRoot)).toBe(false);
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("returns cleanup_failed after complete evidence when owned builder removal fails", async () => {
+    const harness = await publisherHarness({
+      command(command, defaultResult) {
+        if (
+          command.executable === "docker" &&
+          command.args[0] === "buildx" &&
+          command.args[1] === "rm"
+        ) {
+          return {
+            status: 1,
+            stderr: "sentinel-private-cleanup-only-failure",
+            stdout: "",
+          };
+        }
+        return defaultResult();
+      },
+    });
+    try {
+      await expect(
+        publishOperatorRelease(
+          {
+            mode: "production",
+            releaseId,
+            repositoryRoot: harness.repositoryRoot,
+            sourceCommit,
+          },
+          harness.dependencies,
+        ),
+      ).rejects.toThrowError(/^cleanup_failed$/);
+      expect(
+        JSON.parse(
+          await readFile(
+            join(harness.releaseOutput, "apollo-release-manifest.json"),
+            "utf8",
+          ),
+        ),
+      ).toMatchObject({ sourceCommit });
+      expect(
+        await readFile(
+          join(harness.releaseOutput, "release-images.env"),
+          "utf8",
+        ),
+      ).toContain(`RELEASE_SOURCE_COMMIT=${sourceCommit}\n`);
+      expect(await pathExists(harness.releaseStaging)).toBe(false);
+      expect(await pathExists(harness.temporaryRoot)).toBe(false);
+      expect(
+        harness.commands
+          .filter(
+            ({ args, executable }) =>
+              executable === "docker" &&
+              args[0] === "buildx" &&
+              args[1] === "rm",
+          )
+          .map(({ args }) => args),
+      ).toEqual([["buildx", "rm", "apollo-release-task-2-owned"]]);
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+});
+
+describe("operator release CLI", () => {
+  it("publishes through injected dependencies and emits one JSON success record", async () => {
+    const harness = await publisherHarness();
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    try {
+      await expect(
+        runOperatorReleaseCli(
+          [
+            "--mode",
+            "production",
+            "--release-id",
+            releaseId,
+            "--source-commit",
+            sourceCommit,
+          ],
+          harness.dependencies,
+          {
+            repositoryRoot: harness.repositoryRoot,
+            stderr: (value) => stderr.push(value),
+            stdout: (value) => stdout.push(value),
+          },
+        ),
+      ).resolves.toBe(0);
+      expect(stderr).toEqual([]);
+      expect(stdout).toHaveLength(1);
+      expect(JSON.parse(stdout[0]!)).toMatchObject({
+        envFragmentPath: join(harness.releaseOutput, "release-images.env"),
+        manifestPath: join(
+          harness.releaseOutput,
+          "apollo-release-manifest.json",
+        ),
+        releaseArtifact: { sourceCommit },
+      });
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("returns nonzero JSON errors without rejected values or command output", async () => {
+    const harness = await publisherHarness({
+      command(command, defaultResult) {
+        if (
+          command.executable === "pnpm" &&
+          command.args.includes("@workspace/api-server")
+        ) {
+          return {
+            status: 1,
+            stderr: "sentinel-private-cli-failure",
+            stdout: "",
+          };
+        }
+        return defaultResult();
+      },
+    });
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    try {
+      await expect(
+        runOperatorReleaseCli(
+          [
+            "--mode",
+            "production",
+            "--release-id",
+            releaseId,
+            "--source-commit",
+            sourceCommit,
+          ],
+          harness.dependencies,
+          {
+            repositoryRoot: harness.repositoryRoot,
+            stderr: (value) => stderr.push(value),
+            stdout: (value) => stdout.push(value),
+          },
+        ),
+      ).resolves.toBe(1);
+      expect(stdout).toEqual([]);
+      expect(stderr).toEqual([
+        `${JSON.stringify({ error: "source_validation_failed" })}\n`,
+      ]);
+      expect(stderr.join("")).not.toContain("sentinel-private");
+      expect(await pathExists(harness.temporaryRoot)).toBe(false);
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
+
+  it("exposes the complete publisher through the root package script", async () => {
+    const packageJson = JSON.parse(
+      await readFile(join(workspaceRoot, "package.json"), "utf8"),
+    ) as { scripts?: Record<string, string> };
+
+    expect(packageJson.scripts?.["release:publish"]).toBe(
+      "node --experimental-strip-types -- scripts/src/operator-release.ts",
+    );
+  });
 });
