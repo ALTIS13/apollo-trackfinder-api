@@ -123,7 +123,9 @@ const integrationSecrets = [
   "tf_integrations_heartbeat_secret",
 ] as const;
 
-let templates: Readonly<Record<(typeof composePaths)[number][0], ComposeTemplate>>;
+let templates: Readonly<
+  Record<(typeof composePaths)[number][0], ComposeTemplate>
+>;
 
 function service(template: ComposeTemplate, name: string): ComposeService {
   const value = template.services[name];
@@ -148,10 +150,7 @@ function secretNames(value: ComposeService["secrets"]): readonly string[] {
   );
 }
 
-function expectedSecretMount(
-  name: string,
-  owner = "10001",
-): ComposeSecret {
+function expectedSecretMount(name: string, owner = "10001"): ComposeSecret {
   return {
     source: name,
     target: name,
@@ -197,8 +196,9 @@ function normalizedIntegrationServices(
 
 beforeAll(async () => {
   const [root, nested] = await Promise.all(
-    composePaths.map(async ([, path]) =>
-      parse(await readFile(path, "utf8")) as ComposeTemplate,
+    composePaths.map(
+      async ([, path]) =>
+        parse(await readFile(path, "utf8")) as ComposeTemplate,
     ),
   );
   templates = { root, nested };
@@ -237,9 +237,7 @@ describe("tf-integrations deployment contract", () => {
           target: "runtime",
         },
       });
-      expect(template.volumes).toHaveProperty(
-        "tf-integrations-postgres-data",
-      );
+      expect(template.volumes).toHaveProperty("tf-integrations-postgres-data");
     }
     expect(normalizedIntegrationServices(root)).toEqual(
       normalizedIntegrationServices(nested),
@@ -259,9 +257,10 @@ describe("tf-integrations deployment contract", () => {
       expect(template.networks?.["tf-integrations-control"]).toEqual({
         internal: true,
       });
-      expect(
-        servicesOnNetwork(template, "tf-integrations-control"),
-      ).toEqual(["api", "tf-integrations"]);
+      expect(servicesOnNetwork(template, "tf-integrations-control")).toEqual([
+        "api",
+        "tf-integrations",
+      ]);
     }
   });
 
@@ -275,8 +274,9 @@ describe("tf-integrations deployment contract", () => {
         "tf-integrations-migrate",
         "tf-integrations-postgres",
       ]);
-      expect(networkNames(service(template, "tf-integrations").networks)).not
-        .toEqual(expect.arrayContaining(["tf-data", "tf-edge"]));
+      expect(
+        networkNames(service(template, "tf-integrations").networks),
+      ).not.toEqual(expect.arrayContaining(["tf-data", "tf-edge"]));
     }
   });
 
@@ -331,9 +331,7 @@ describe("tf-integrations deployment contract", () => {
             typeof entry !== "string" &&
             entry.source?.startsWith("tf_integrations_"),
         ),
-      ).toEqual([
-        expectedSecretMount("tf_integrations_internal_auth_secret"),
-      ]);
+      ).toEqual([expectedSecretMount("tf_integrations_internal_auth_secret")]);
       expect(module.environment).toMatchObject({
         APOLLO_API_VERSION: "${TF_INTEGRATIONS_VERSION:-unknown}",
         APOLLO_DEPLOYED_AT: "${TF_INTEGRATIONS_DEPLOYED_AT:-}",
@@ -404,17 +402,11 @@ describe("tf-integrations deployment contract", () => {
       ).toEqual([]);
       expect(
         Object.keys(module.environment ?? {})
-          .filter(
-            (name) => name !== "TF_INTEGRATIONS_DATABASE_URL_FILE",
-          )
+          .filter((name) => name !== "TF_INTEGRATIONS_DATABASE_URL_FILE")
           .filter((name) => forbiddenEnvironment.test(name)),
       ).toEqual([]);
       expect(networkNames(module.networks)).not.toEqual(
-        expect.arrayContaining([
-          "tf-data",
-          "tf-edge",
-          "tf-search-control",
-        ]),
+        expect.arrayContaining(["tf-data", "tf-edge", "tf-search-control"]),
       );
     }
   });
@@ -429,9 +421,7 @@ describe("tf-integrations deployment contract", () => {
         expect(current.init).toBe(true);
         expect(current.cap_drop).toEqual(["ALL"]);
         expect(current.security_opt).toEqual(["no-new-privileges:true"]);
-        expect(current.tmpfs).toEqual([
-          "/tmp:rw,noexec,nosuid,size=16m",
-        ]);
+        expect(current.tmpfs).toEqual(["/tmp:rw,noexec,nosuid,size=16m"]);
         expect(current.pids_limit).toBeGreaterThan(0);
       }
       expect(module.healthcheck).toMatchObject({
@@ -454,11 +444,15 @@ describe("tf-integrations deployment contract", () => {
       readFile(startupScriptPath, "utf8"),
       readFile(roleInitScriptPath, "utf8"),
     ]);
-    expect(dockerfile).toContain("FROM postgres:17-bookworm AS postgres-role-init");
-    expect(dockerfile.match(/^FROM node:[^\s]+ AS (?:builder|runtime)$/gm)).toEqual([
-      "FROM node:24-bookworm-slim AS builder",
-      "FROM node:24-bookworm-slim AS runtime",
-    ]);
+    const postgresImage =
+      "docker.io/library/postgres:17-bookworm@" +
+      "sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394";
+    const nodeImage =
+      "docker.io/library/node:24-bookworm-slim@" +
+      "sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d";
+    expect(dockerfile).toContain(`FROM ${postgresImage} AS postgres-role-init`);
+    expect(dockerfile).toContain(`FROM ${nodeImage} AS builder`);
+    expect(dockerfile).toContain(`FROM ${nodeImage} AS runtime`);
     expect(dockerfile).not.toContain("node:20");
     expect(buildScript).toContain('target: "node24"');
     expect(dockerfile).toContain("USER 10001:10001");
@@ -467,7 +461,9 @@ describe("tf-integrations deployment contract", () => {
       'ENTRYPOINT ["/app/bin/start-integrations.sh"]',
     );
     expect(startup).toContain("TF_INTEGRATIONS_TOKEN_KEYRING_FILE");
-    expect(startup).not.toMatch(/\b(?:echo|printf)\b.*(?:secret|database_url)/i);
+    expect(startup).not.toMatch(
+      /\b(?:echo|printf)\b.*(?:secret|database_url)/i,
+    );
     expect(roleInit).toContain("apollo_tf_integrations_migrator");
     expect(roleInit).toContain("apollo_tf_integrations_runtime");
     expect(roleInit).toContain("\\getenv migrator_password");
@@ -482,10 +478,7 @@ describe("tf-integrations deployment contract", () => {
       const module = service(template, "tf-integrations");
       const api = service(template, "api");
 
-      expect(migrate.command).toEqual([
-        "node",
-        "/app/dist/migrate.mjs",
-      ]);
+      expect(migrate.command).toEqual(["node", "/app/dist/migrate.mjs"]);
       expect(migrate.restart).toBe("no");
       expect(migrate.depends_on).toEqual({
         "tf-integrations-postgres": { condition: "service_healthy" },

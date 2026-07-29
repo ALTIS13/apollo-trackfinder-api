@@ -1,14 +1,64 @@
 # HomeNode and Coolify release preflight
 
-Date: 2026-07-27
+Date: 2026-07-29
 
-Status: `READ_ONLY_COMPLETE`
+Status: `LOCAL_RELEASE_VALIDATED`
 
 This document records the public release constraints proven before the first
 Apollo Platform and Apollo TF deployment. Exact host inventory, capacity,
 listeners, versions, routes, and candidate upstreams remain in the ignored
 private operator record. This is not a deployment record and does not authorize
 a remote change.
+
+## Local package closure
+
+The final fix wave validated the production manifests, exact provenance
+validator, custom image targets, file-backed secret contracts, application
+flows, persistence, and the complete Caddy matrix locally from
+`d0f74122d9e415d7cb9571be678188657f1ce7eb`. The proof used a task-owned local
+Buildx builder and only `127.0.0.1:18200..18203`, dispatched no workflow, and
+passed production smoke `43/43` in `987.59s` with exact cleanup zero. It also
+exercised the exact `baseline` profile
+one-shot contracts against a separate disposable database, restored granted
+search after restart, held a signed producer down beyond the 90-second stale
+deadline before proving `healthy -> unknown -> healthy` recovery, and proved
+the shared dashboard token with both real consumer UIDs on disposable native
+Linux.
+
+The checked-in release env remains intentionally non-deployable. It was
+validated in explicit `production` mode against the local ignored Task 3
+zero-placeholder manifest at
+`.superpowers/sdd/2026-07-29-release-contract-closure/placeholder-release-manifest.json`.
+That manifest is a local ignored proof input, not a deployable or tracked
+release artifact. The invocation fails with exactly `19 image_provenance`,
+`18 placeholder_image_digest`, `1 release_artifact`, and
+`1 release_environment_value`, with `0 environment_contract` and no other
+category. An approved release must replace every image with a
+workflow-produced immutable reference, set the exact source commit, and pass
+production validation against the downloaded release manifest. The complete
+rollout and rollback order is in
+`docs/operations/apollo-production-rollout.md`.
+
+Fresh supporting validation passed pinned Caddy `10/10` in `16.30s`,
+PostgreSQL 16 and 17 encrypted restore proofs at
+`1 passed / 71 skipped` in `19.08s` and `18.54s`, full scripts
+`194 passed / 4 opt-in skipped` in `129.49s`, API
+`607 passed / 8 skipped` in `23.63s`, Platform API
+`422 passed / 21 skipped` in `14.32s`, search
+`142 passed / 1 skipped` in `8.26s`, integrations
+`107 passed / 10 skipped` in `5.48s`, download worker
+`186 passed / 2 skipped` in `8.45s`, admin `218 passed` in `11.07s`, music
+player `118 passed` in `6.28s`, and root typecheck in `18.4s`. The scripts gate
+included the hostile rendered-environment matrix and the tracked exact
+newline-free, binary-safe credential verifier, including silent embedded-NUL
+rejection. The independent task-owned resource inventory was zero. One
+unrelated concurrently created ambient image and one anonymous ambient volume
+were preserved. No workflow, registry publication, retained-volume access, or
+remote mutation occurred.
+
+The preflight's remote observation remains read-only. The retained legacy class
+is recorded only as `DETACHED_UNKNOWN`; it remains unnamed, unmounted,
+unstarted, and unmodified.
 
 ## Proven boundary
 
@@ -37,7 +87,8 @@ creation. All published application ports bind to `127.0.0.1`, never
 ## Coolify deployment shape
 
 The intended deployment shape uses two independently versioned Docker Compose
-resources. Independent rollback is a release blocker and is not yet proven:
+resources. Independent local start, restart, persistence, and teardown are
+proven; remote rollback still requires an approved digest map:
 
 1. `apollo-platform`
    - Platform PostgreSQL
@@ -49,9 +100,8 @@ resources. Independent rollback is a release blocker and is not yet proven:
    - integrations PostgreSQL and one-shot migration
    - download queue Redis
    - TF API, search, integrations, download worker, and web
-   - only API and web receive candidate loopback publications
-   - the existing TF topology dashboard remains deployment-optional and private
-     until the admin hostname/authentication decision is approved
+   - API, web, and the authenticated TF topology dashboard receive only the
+     exact loopback publications `18201`, `18202`, and `18203`
 
 Run these as Raw Docker Compose resources without control-plane domains or proxy
 router labels. The existing ingress remains the only public boundary. Database,
@@ -64,47 +114,30 @@ module needs an owner-approved private route or exact HTTPS origin; it must not
 receive Platform/TF database, browser session, Docker, SSH, Coolify, Caddy, or
 UFW credentials.
 
-## Release blockers
+## Remote rollout gates
 
-The following are required before any owner-approved remote mutation:
+Local package blockers are closed. The following still block remote mutation:
 
-1. Move TF schema initialization out of API startup into a dedicated one-shot
-   `tf-migrate` service with immutable migration history. The current
-   `CREATE TABLE IF NOT EXISTS` startup routine is not a production migration
-   or rollback contract.
-2. Produce Coolify-specific Compose manifests with mandatory operator-selected
-   loopback ports, no development defaults, no `build` entries, and only
-   immutable image references.
-3. Remove operator/admin credentials from container environment and deliver all
-   runtime credentials through the existing `/run/secrets/*` boundary.
-4. Prove the selected Coolify secret-to-file mechanism on rootful native Linux
-   for runtime UID/GID `10001:10001` and database UID/GID `999:999`. Compose
-   `uid`/`gid`/`mode` declarations alone are not ownership evidence for
-   bind-backed file secrets.
-5. Allocate explicit CPU, memory, PID, graceful-stop, log-size, and
-   log-retention limits for both stacks.
-6. Create a dedicated encrypted Apollo backup destination and pass a disposable
-   PostgreSQL restore test before the first production migration. The preflight
-   found no provisioned Apollo backup path.
-7. Render and validate an operator-owned Caddy rollout artifact with exact
-   hostname-to-loopback mappings, backup, validation, smoke, and rollback
-   steps. It must include separate operator protection for
-   `admin.apollot.ru` and must not change unrelated routes.
-8. Complete a dry-run deployment with the exact production manifests and
-   canary secrets on disposable native-Linux infrastructure.
-9. Recheck listeners, disk, memory, existing container health, and rollback
-   image availability immediately before approval.
+1. Owner approval for the exact `apollo-platform` and `apollo-tf` resources,
+   secret files, image digest map, and rollback map.
+2. Target-native-Linux proof that every bind-backed secret has the exact
+   declared owner and mode and is readable only by its intended service. The
+   disposable local proof passed, but does not substitute for target metadata.
+3. A dedicated encrypted production backup destination plus recorded
+   production backup/restore evidence for PostgreSQL 16 Platform/TF and
+   PostgreSQL 17 integrations. Local evidence
+   `pg16-disposable-proof-001` and
+   `pg17-integrations-disposable-proof-001` does not authorize production
+   writes.
+4. Immediate recheck of listeners, disk, memory, existing service health, and
+   rollback-image availability.
+5. Explicit owner approval before each resource creation, migration, Caddy
+   reload, hostname cutover, rollback, or data restoration.
 
-The Apollo portal and Platform operator UI declared by the release architecture
-are not present in the current Platform Compose stack. The apex route stays
-reserved until the portal is implemented and validated. The existing TF
-topology dashboard does not replace the Platform registration, invitation,
-account, and entitlement administration UI.
-
-`admin.apollot.ru` has no approved owning UI yet. Its cutover remains blocked
-until the owner explicitly assigns the hostname to either the Platform operator
-UI or the TF topology UI and the selected application has a complete
-operator-authentication policy.
+The apex route stays reserved. The owner must explicitly approve the TF
+topology dashboard as the `admin.apollot.ru` owner before that hostname is cut
+over; the final local proof covers its paired Caddy/nginx credential and shared
+token boundaries but does not grant that approval.
 
 ## Approval and rollout order
 

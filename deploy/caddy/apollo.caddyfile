@@ -1,0 +1,40 @@
+(apollo_security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+}
+
+api.apollot.ru {
+	import apollo_security_headers
+	reverse_proxy 127.0.0.1:18200
+}
+
+api.tf.apollot.ru {
+	import apollo_security_headers
+	reverse_proxy 127.0.0.1:18201
+}
+
+tf.apollot.ru {
+	import apollo_security_headers
+	reverse_proxy 127.0.0.1:18202
+}
+
+admin.apollot.ru {
+	route {
+		import apollo_security_headers
+		basic_auth {
+			{$APOLLO_ADMIN_CADDY_USER} {$APOLLO_ADMIN_CADDY_PASSWORD_HASH}
+		}
+		reverse_proxy 127.0.0.1:18203
+	}
+
+	handle_errors 401 {
+		import apollo_security_headers
+		header WWW-Authenticate "Basic realm=\"restricted\""
+		respond 401
+	}
+}

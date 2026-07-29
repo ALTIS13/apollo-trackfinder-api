@@ -1919,8 +1919,8 @@ describe("TF deployment identity contract", () => {
       readFile(apiRoleBootstrapScript, "utf8"),
     ]);
 
-    expect(dockerfile).toContain(
-      "FROM postgres:16-bookworm AS postgres-role-init",
+    expect(dockerfile).toMatch(
+      /^FROM docker\.io\/library\/postgres:16-bookworm@sha256:[a-f0-9]{64} AS postgres-role-init$/m,
     );
     expect(dockerfile).toContain(
       "COPY artifacts/api-server/container/init-roles.sh /usr/local/bin/bootstrap-tf-roles.sh",
@@ -2159,6 +2159,20 @@ describe("TF deployment identity contract", () => {
     ).join("\n");
     expect(bundle).toContain(apiOrigin);
   }, 60_000);
+
+  it("serves an exact health response without weakening the TF web SPA fallback", async () => {
+    const dockerfile = await readFile(musicPlayerDockerfile, "utf8");
+
+    expect(dockerfile).toMatch(
+      /location = \/healthz \{\\n\\\s+access_log off;\\n\\\s+default_type text\/plain;\\n\\\s+return 200 "ok\\\\n";\\n\\\s+\}/,
+    );
+    expect(dockerfile).toContain(
+      "HEALTHCHECK CMD wget -qO- http://127.0.0.1/healthz || exit 1",
+    );
+    expect(dockerfile).toMatch(
+      /location \/ \{\\n\\\s+try_files \$uri \$uri\/ \/index\.html;\\n\\\s+\}/,
+    );
+  });
 
   it("loads the bounded heartbeat key map from its configured file without replacing the database contract", async () => {
     const heartbeatSecret = "h".repeat(32);

@@ -1,9 +1,9 @@
-FROM postgres:17-bookworm AS postgres-role-init
+FROM docker.io/library/postgres:17-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394 AS postgres-role-init
 
 COPY artifacts/tf-integrations/container/init-roles.sh /docker-entrypoint-initdb.d/010-tf-integrations-roles.sh
 RUN chmod 0555 /docker-entrypoint-initdb.d/010-tf-integrations-roles.sh
 
-FROM node:24-bookworm-slim AS builder
+FROM docker.io/library/node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS builder
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
@@ -27,7 +27,7 @@ COPY artifacts/tf-integrations ./artifacts/tf-integrations
 RUN pnpm --dir artifacts/tf-integrations build
 RUN pnpm --filter @workspace/tf-integrations deploy --prod --legacy /runtime
 
-FROM node:24-bookworm-slim AS runtime
+FROM docker.io/library/node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS runtime
 
 RUN groupadd --gid 10001 tf-integrations \
   && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin tf-integrations
@@ -48,3 +48,5 @@ EXPOSE 8080
 USER 10001:10001
 ENTRYPOINT ["/app/bin/start-integrations.sh"]
 CMD ["node", "/app/dist/index.mjs"]
+
+FROM runtime AS runner

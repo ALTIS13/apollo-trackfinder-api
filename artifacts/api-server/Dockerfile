@@ -1,4 +1,4 @@
-FROM postgres:16-bookworm AS secret-reader-builder
+FROM docker.io/library/postgres:16-bookworm@sha256:92620daddcd947f8d5ab5ba66e848702fe443d87fed30c4cea8e389fd78dfc55 AS secret-reader-builder
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends gcc libc6-dev \
@@ -12,7 +12,7 @@ RUN mkdir -p /out \
     -Wl,-z,relro,-z,now \
     -o /out/read-bounded-secret /src/read-bounded-secret.c
 
-FROM postgres:16-bookworm AS postgres-role-init
+FROM docker.io/library/postgres:16-bookworm@sha256:92620daddcd947f8d5ab5ba66e848702fe443d87fed30c4cea8e389fd78dfc55 AS postgres-role-init
 
 COPY --from=secret-reader-builder /out/read-bounded-secret /usr/local/bin/read-bounded-secret
 
@@ -24,7 +24,7 @@ RUN chmod 0555 \
   /usr/local/bin/bootstrap-tf-roles.sh \
   /docker-entrypoint-initdb.d/010-tf-roles.sh
 
-FROM node:20-bookworm-slim AS builder
+FROM docker.io/library/node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
@@ -65,7 +65,7 @@ RUN pnpm install --frozen-lockfile --filter @workspace/api-server...
 
 RUN pnpm --filter @workspace/api-server run build
 
-FROM node:20-bookworm-slim AS runner
+FROM docker.io/library/node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS runner
 
 ARG YT_DLP_VERSION=2026.7.4
 ARG YT_DLP_SHA256=f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266

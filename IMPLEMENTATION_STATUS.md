@@ -1,6 +1,91 @@
 # Apollo TF implementation status
 
-Last updated: 2026-07-28.
+Last updated: 2026-07-29.
+
+## Coolify production release package
+
+Status: `LOCAL_RELEASE_VALIDATED`. The exact local image source is
+`d0f74122d9e415d7cb9571be678188657f1ce7eb`; this status does not claim a
+deployment, workflow dispatch, GHCR publication, or remote change.
+
+- The production package consists of
+  `deploy/coolify/apollo-platform.compose.yml`,
+  `deploy/coolify/apollo-tf.compose.yml`, the fail-closed
+  `deploy/coolify/release.env.example`, and
+  `deploy/caddy/apollo.caddyfile`.
+- The opt-in production smoke built and pushed all 11 custom Linux/amd64
+  targets plus pinned Redis to a disposable local registry, resolved 12
+  registry digests, validated a temporary non-zero digest env in explicit
+  loopback mode, and started the exact two-stack package from commit
+  `d0f7412`. Every build named an exact task-owned builder created from the
+  verified local Docker context; the adversarial persistent-remote-builder
+  contract passed.
+- The live proof passed registration/bootstrap/login, invitation redemption,
+  entitlement revoke/grant, real Platform-to-TF OAuth, degraded and restored
+  granted search, queued download/cancel, signed heartbeat
+  `healthy -> unknown -> healthy` after a producer stop longer than 90 seconds,
+  the exact profiled `tf-role-bootstrap` and `tf-baseline` one-shots against a
+  separate disposable database, admin Basic Auth/dashboard token, web health,
+  service restarts, and persistent state.
+- Before production container creation, a disposable native-Linux Docker daemon
+  proved that root `tf-admin` and UID `10001` `tf-api` read the same host
+  dashboard-token source owned `10001:10001` mode `0400`. No retained volume
+  was used.
+- Pinned Caddy `2.10.2-alpine` validated and routed
+  `api.apollot.ru`, `api.tf.apollot.ru`, `tf.apollot.ru`, and
+  `admin.apollot.ru` to exact loopback ports `18200..18203`. The live matrix
+  covered all four routes in none/wrong/approved Authorization states,
+  including admin `401/401/200`, real upstream nginx acceptance, every required
+  security header, and no `Server` header. Caddy and nginx consume one
+  generated username/bcrypt source. Caddy remains the sole future owner of
+  host `80/443`; no Coolify/Traefik domain labels exist.
+- Malformed multiline admin secret files fail without disclosure. The admin
+  nginx access log now omits the Basic Auth identity, closing the real
+  `package-11` disclosure found by the final log scan. The tracked credential
+  verifier also compares exact source and reconstructed byte counts, so an
+  embedded NUL or any other binary normalization fails silently before
+  credential equality can pass.
+- Production validation now requires the exact workflow artifact source commit,
+  repository, digest, and immutable reference for every image and renders
+  Compose from an isolated allowlist. The explicit local mode remains separate.
+  The checked-in env was validated in explicit `production` mode against the
+  local ignored Task 3 zero-placeholder manifest at
+  `.superpowers/sdd/2026-07-29-release-contract-closure/placeholder-release-manifest.json`.
+  That manifest is a local ignored proof input, not a deployable or tracked
+  release artifact. The invocation fails closed with `19 image_provenance`,
+  `18 placeholder_image_digest`, `1 release_artifact`, and
+  `1 release_environment_value` errors, with `0 environment_contract` and no
+  other category.
+- Fresh binary-safe release verification passed production smoke `43/43` in
+  `987.59s`, pinned Caddy `10/10` in `16.30s`, PostgreSQL 16 and 17 encrypted
+  restore proofs at `1 passed / 71 skipped` in `19.08s` and `18.54s`, full
+  scripts `194 passed / 4 opt-in skipped` in `129.49s`, and root typecheck in
+  `18.4s`. Product suites passed: API `607 passed / 8 skipped` in `23.63s`,
+  Platform API `422 passed / 21 skipped` in `14.32s`, search
+  `142 passed / 1 skipped` in `8.26s`, integrations
+  `107 passed / 10 skipped` in `5.48s`, download worker
+  `186 passed / 2 skipped` in `8.45s`, admin `218 passed` in `11.07s`, and
+  music player `118 passed` in `6.28s`. The full scripts gate includes the
+  hostile rendered-environment matrix and the tracked exact newline-free,
+  binary-safe credential verifier.
+- Final owned-resource inventory is zero for task builders and cache, containers,
+  networks, volumes, localhost image references, registry files, temporary
+  secrets, repository `.tmp`, OS-temp owned roots, and durable pending/active
+  ownership records. One unrelated concurrently created ambient image and one
+  anonymous ambient volume matched no task ownership contract and were
+  preserved; no broad prune was used.
+- Local encrypted backup/restore evidence is separate:
+  `pg16-disposable-proof-001` for PostgreSQL 16 Platform/TF and
+  `pg17-integrations-disposable-proof-001` for PostgreSQL 17 integrations.
+  Atomic release claims prevent concurrent overwrite/deletion and preserve
+  quarantined failures. Production evidence is `NOT_RECORDED`; target-native
+  secret ownership and every remote resource/migration/Caddy/hostname action
+  still require explicit owner approval.
+- The observed legacy volume remains only `DETACHED_UNKNOWN`: unnamed,
+  unmounted, unstarted, unmodified, and absent from tracked manifests.
+- The final fix wave did not contact or mutate HomeNode, Coolify, host Caddy,
+  UFW, DNS, GitHub settings/workflows, GHCR, any remote database/volume, or the
+  detached legacy volume. The release workflow was not dispatched.
 
 ## TF immutable migrations release candidate
 

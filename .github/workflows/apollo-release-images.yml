@@ -1,0 +1,207 @@
+name: Apollo immutable release images
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: apollo-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate source
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Validate source
+        run: |
+          pnpm --filter @workspace/scripts test
+          pnpm --filter @workspace/platform-api exec vitest run --maxWorkers=2
+          pnpm --filter @workspace/api-server exec vitest run --maxWorkers=1
+          pnpm --filter @workspace/admin-dashboard exec vitest run --maxWorkers=2
+          pnpm --filter @workspace/music-player exec vitest run --maxWorkers=2
+          pnpm --filter @workspace/tf-search exec vitest run --maxWorkers=2
+          pnpm --filter @workspace/tf-integrations exec vitest run --maxWorkers=2
+          pnpm --filter @workspace/tf-download-worker exec vitest run --maxWorkers=2
+          pnpm run typecheck
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: validate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: platform-api
+            dockerfile: artifacts/platform-api/Dockerfile
+            target: runtime
+            image: ghcr.io/altis13/apollo-platform-api
+          - name: platform-postgres
+            dockerfile: artifacts/platform-api/Dockerfile
+            target: postgres-role-init
+            image: ghcr.io/altis13/apollo-platform-postgres
+          - name: tf-api
+            dockerfile: artifacts/api-server/Dockerfile
+            target: runner
+            image: ghcr.io/altis13/apollo-tf-api
+          - name: tf-postgres
+            dockerfile: artifacts/api-server/Dockerfile
+            target: postgres-role-init
+            image: ghcr.io/altis13/apollo-tf-postgres
+          - name: tf-web
+            dockerfile: artifacts/music-player/Dockerfile
+            target: runner
+            image: ghcr.io/altis13/apollo-tf-web
+          - name: tf-admin
+            dockerfile: artifacts/admin-dashboard/Dockerfile
+            target: default
+            image: ghcr.io/altis13/apollo-tf-admin
+          - name: tf-search
+            dockerfile: artifacts/tf-search/Dockerfile
+            target: runner
+            image: ghcr.io/altis13/apollo-tf-search
+          - name: tf-integrations
+            dockerfile: artifacts/tf-integrations/Dockerfile
+            target: runner
+            image: ghcr.io/altis13/apollo-tf-integrations
+          - name: tf-integrations-postgres
+            dockerfile: artifacts/tf-integrations/Dockerfile
+            target: postgres-role-init
+            image: ghcr.io/altis13/apollo-tf-integrations-postgres
+          - name: tf-download-worker
+            dockerfile: artifacts/tf-download-worker/Dockerfile
+            target: runner
+            image: ghcr.io/altis13/apollo-tf-download-worker
+          - name: tf-download-redis
+            dockerfile: artifacts/tf-download-worker/Dockerfile
+            target: queue-redis
+            image: ghcr.io/altis13/apollo-tf-download-redis
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push immutable image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ matrix.image }}:${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+      - name: Record resulting digest
+        run: |
+          digest='${{ steps.build.outputs.digest }}'
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s@%s\n' '${{ matrix.image }}' "$digest"
+
+  manifest:
+    name: Build redacted release manifest
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: read
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Capture immutable digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          images=(
+            "platform-api ghcr.io/altis13/apollo-platform-api ${GITHUB_SHA}"
+            "platform-postgres ghcr.io/altis13/apollo-platform-postgres ${GITHUB_SHA}"
+            "redis docker.io/library/redis 7-bookworm"
+            "tf-admin ghcr.io/altis13/apollo-tf-admin ${GITHUB_SHA}"
+            "tf-api ghcr.io/altis13/apollo-tf-api ${GITHUB_SHA}"
+            "tf-download-redis ghcr.io/altis13/apollo-tf-download-redis ${GITHUB_SHA}"
+            "tf-download-worker ghcr.io/altis13/apollo-tf-download-worker ${GITHUB_SHA}"
+            "tf-integrations ghcr.io/altis13/apollo-tf-integrations ${GITHUB_SHA}"
+            "tf-integrations-postgres ghcr.io/altis13/apollo-tf-integrations-postgres ${GITHUB_SHA}"
+            "tf-postgres ghcr.io/altis13/apollo-tf-postgres ${GITHUB_SHA}"
+            "tf-search ghcr.io/altis13/apollo-tf-search ${GITHUB_SHA}"
+            "tf-web ghcr.io/altis13/apollo-tf-web ${GITHUB_SHA}"
+          )
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          : > apollo-release-images.jsonl
+          for item in "${images[@]}"; do
+            read -r name image tag <<<"$item"
+            digest=
+            for attempt in 1 2 3 4 5; do
+              digest="$(
+                docker buildx imagetools inspect \
+                  "$image:$tag" \
+                  --format '{{json .Manifest.Digest}}' 2>/dev/null |
+                  tr -d '"'
+              )" || true
+              if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                break
+              fi
+              digest=
+              if [[ "$attempt" == "5" ]]; then
+                printf '%s\n' \
+                  'GHCR manifest digest unavailable after 5 attempts' >&2
+                exit 1
+              fi
+              sleep "$attempt"
+            done
+            jq -cn \
+              --arg name "$name" \
+              --arg repository "$image" \
+              --arg imageDigest "$digest" \
+              --arg imageReference "$image@$digest" \
+              '{name: $name, repository: $repository, imageDigest: $imageDigest, imageReference: $imageReference}' \
+              >> apollo-release-images.jsonl
+          done
+          jq -s \
+            --arg sourceCommit "$GITHUB_SHA" \
+            '{formatVersion: 1, sourceCommit: $sourceCommit, images: sort_by(.name)}' \
+            apollo-release-images.jsonl \
+            > apollo-release-manifest.json
+      - name: Upload release manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: apollo-release-manifest
+          path: apollo-release-manifest.json
+          if-no-files-found: error
+          retention-days: 30

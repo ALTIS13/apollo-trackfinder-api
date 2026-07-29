@@ -1,4 +1,4 @@
-FROM node:20-bookworm-slim AS builder
+FROM docker.io/library/node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
@@ -25,7 +25,7 @@ COPY artifacts/tf-search ./artifacts/tf-search
 RUN pnpm install --frozen-lockfile --filter @workspace/tf-search... \
   && pnpm --filter @workspace/tf-search run build
 
-FROM node:20-bookworm-slim AS runner
+FROM docker.io/library/node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS runner
 
 ARG YT_DLP_VERSION=2026.7.4
 ARG YT_DLP_SHA256=f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266

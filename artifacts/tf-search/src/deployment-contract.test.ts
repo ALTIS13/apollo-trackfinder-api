@@ -319,6 +319,9 @@ describe("tf-search deployment contract", () => {
         TF_SEARCH_ALLOW_INSECURE_HTTP: "true",
       });
       expect(Object.keys(template.secrets ?? {}).sort()).toEqual([
+        "admin_access_password",
+        "admin_access_user",
+        "admin_dashboard_token",
         "tf_admin_database_url",
         "tf_client_secret",
         "tf_download_heartbeat_secret",

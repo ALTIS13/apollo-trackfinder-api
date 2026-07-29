@@ -504,8 +504,11 @@ try {
       "utf8",
     );
 
-    expect(dockerfile).toMatch(/FROM node:20-bookworm-slim AS builder/);
-    expect(dockerfile).toMatch(/FROM node:20-bookworm-slim AS runtime/);
+    const nodeImage =
+      "docker.io/library/node:20-bookworm-slim@" +
+      "sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0";
+    expect(dockerfile).toContain(`FROM ${nodeImage} AS builder`);
+    expect(dockerfile).toContain(`FROM ${nodeImage} AS runtime`);
     expect(dockerfile).toMatch(/USER 10001:10001/);
     expect(dockerfile).toContain("/app/migrations");
     expect(dockerfile).toContain("argon2");

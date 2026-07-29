@@ -5,6 +5,7 @@ import {
   adminRequestTelemetry,
   createAdminDashboardSnapshot,
 } from "../lib/admin-telemetry.js";
+import { loadAdminDashboardToken } from "../lib/admin-dashboard-token.js";
 import { moduleHeartbeatService } from "../lib/module-heartbeat.js";
 
 const DATABASE_PROBE_TIMEOUT_MS = 1_000;
@@ -111,7 +112,7 @@ export function createAdminRouter(
   const router = Router();
   const configuredToken =
     options.token === undefined
-      ? process.env["ADMIN_DASHBOARD_TOKEN"]
+      ? loadAdminDashboardToken(process.env)
       : options.token;
   const loadSnapshot = options.loadSnapshot ?? loadRuntimeSnapshot;
 

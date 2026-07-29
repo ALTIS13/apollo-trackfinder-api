@@ -1,0 +1,749 @@
+name: apollo-tf
+
+x-runtime: &runtime
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 20s
+  pids_limit: 128
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 512M
+        pids: 128
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+x-job: &job
+  init: true
+  restart: "no"
+  stop_grace_period: 20s
+  pids_limit: 64
+  deploy:
+    resources:
+      limits:
+        cpus: "0.5"
+        memory: 256M
+        pids: 64
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+services:
+  tf-postgres:
+    <<: *runtime
+    image: ${TF_POSTGRES_IMAGE:?}
+    environment:
+      POSTGRES_DB: apollo_trackfinder
+      POSTGRES_PASSWORD_FILE: /run/secrets/tf_postgres_admin_password
+      POSTGRES_USER: postgres
+    secrets:
+      - source: tf_postgres_admin_password
+        target: tf_postgres_admin_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: tf_migrator_password
+        target: tf_migrator_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: tf_runtime_password
+        target: tf_runtime_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+    volumes:
+      - tf-postgres-data:/var/lib/postgresql/data
+    networks:
+      - tf-data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -h 127.0.0.1 -U postgres -d apollo_trackfinder
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  tf-role-bootstrap:
+    <<: *job
+    profiles: ["baseline"]
+    image: ${TF_POSTGRES_IMAGE:?}
+    user: "999:999"
+    group_add:
+      - "10002"
+    read_only: true
+    entrypoint:
+      - /usr/local/bin/bootstrap-tf-roles.sh
+    environment:
+      TF_ROLE_BOOTSTRAP_DATABASE_URL_FILE: /run/secrets/tf_admin_database_url
+    secrets:
+      - source: tf_admin_database_url
+        target: tf_admin_database_url
+        uid: "0"
+        gid: "10002"
+        mode: "0440"
+      - source: tf_migrator_password
+        target: tf_migrator_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: tf_runtime_password
+        target: tf_runtime_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      tf-postgres:
+        condition: service_healthy
+
+  tf-migrate:
+    <<: *job
+    image: ${TF_API_IMAGE:?}
+    user: "10001:10001"
+    read_only: true
+    entrypoint:
+      - node
+      - artifacts/api-server/dist/migrate.mjs
+    environment:
+      TF_MIGRATOR_DATABASE_URL_FILE: /run/secrets/tf_migrator_database_url
+    secrets:
+      - source: tf_migrator_database_url
+        target: tf_migrator_database_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      tf-postgres:
+        condition: service_healthy
+
+  tf-baseline:
+    <<: *job
+    profiles: ["baseline"]
+    image: ${TF_API_IMAGE:?}
+    user: "10001:10001"
+    group_add:
+      - "10002"
+    read_only: true
+    entrypoint:
+      - node
+      - artifacts/api-server/dist/migrate.mjs
+      - --baseline-existing-startup-schema
+    environment:
+      TF_BASELINE_DATABASE_URL_FILE: /run/secrets/tf_admin_database_url
+    secrets:
+      - source: tf_admin_database_url
+        target: tf_admin_database_url
+        uid: "0"
+        gid: "10002"
+        mode: "0440"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      tf-role-bootstrap:
+        condition: service_completed_successfully
+
+  tf-redis:
+    <<: *runtime
+    image: ${TF_REDIS_IMAGE:?}
+    user: "999:999"
+    read_only: true
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - tf-redis-data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  tf-integrations-postgres:
+    <<: *runtime
+    image: ${TF_INTEGRATIONS_POSTGRES_IMAGE:?}
+    environment:
+      POSTGRES_DB: apollo_tf_integrations
+      POSTGRES_PASSWORD_FILE: /run/secrets/tf_integrations_postgres_admin_password
+      POSTGRES_USER: postgres
+    secrets:
+      - source: tf_integrations_postgres_admin_password
+        target: tf_integrations_postgres_admin_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: tf_integrations_migrator_password
+        target: tf_integrations_migrator_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+      - source: tf_integrations_runtime_password
+        target: tf_integrations_runtime_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+    volumes:
+      - tf-integrations-postgres-data:/var/lib/postgresql/data
+    networks:
+      - tf-integrations-data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -h 127.0.0.1 -U postgres -d apollo_tf_integrations
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  tf-integrations-migrate:
+    <<: *job
+    image: ${TF_INTEGRATIONS_IMAGE:?}
+    user: "10001:10001"
+    read_only: true
+    command: ["node", "/app/dist/migrate.mjs"]
+    environment:
+      TF_INTEGRATIONS_DATABASE_URL_FILE: /run/secrets/tf_integrations_migrator_database_url
+    secrets:
+      - source: tf_integrations_migrator_database_url
+        target: tf_integrations_migrator_database_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-integrations-data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      tf-integrations-postgres:
+        condition: service_healthy
+
+  tf-integrations:
+    <<: *runtime
+    image: ${TF_INTEGRATIONS_IMAGE:?}
+    user: "10001:10001"
+    read_only: true
+    environment:
+      APOLLO_API_VERSION: ${TF_INTEGRATIONS_VERSION:?}
+      APOLLO_DEPLOYED_AT: ${TF_INTEGRATIONS_DEPLOYED_AT:?}
+      NODE_ENV: production
+      PORT: "8080"
+      TF_INTEGRATIONS_DATABASE_URL_FILE: /run/secrets/tf_integrations_runtime_database_url
+      TF_INTEGRATIONS_HEARTBEAT_ALLOW_INSECURE_HTTP: "true"
+      TF_INTEGRATIONS_HEARTBEAT_API_ORIGIN: http://tf-api:8080
+      TF_INTEGRATIONS_HEARTBEAT_SECRET_FILE: /run/secrets/tf_integrations_heartbeat_secret
+      TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_integrations_internal_auth_secret
+      TF_INTEGRATIONS_SPOTIFY_CALLBACK_URI: ${TF_API_PUBLIC_ORIGIN:?}/api/spotify/callback
+      TF_INTEGRATIONS_SPOTIFY_CLIENT_ID_FILE: /run/secrets/tf_integrations_spotify_client_id
+      TF_INTEGRATIONS_SPOTIFY_CLIENT_SECRET_FILE: /run/secrets/tf_integrations_spotify_client_secret
+      TF_INTEGRATIONS_TOKEN_KEYRING_FILE: /run/secrets/tf_integrations_token_keyring
+    secrets:
+      - source: tf_integrations_runtime_database_url
+        target: tf_integrations_runtime_database_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_integrations_token_keyring
+        target: tf_integrations_token_keyring
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_integrations_spotify_client_id
+        target: tf_integrations_spotify_client_id
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_integrations_spotify_client_secret
+        target: tf_integrations_spotify_client_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_integrations_internal_auth_secret
+        target: tf_integrations_internal_auth_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_integrations_heartbeat_secret
+        target: tf_integrations_heartbeat_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      tf-integrations-control:
+        gw_priority: 0
+      tf-integrations-data:
+        gw_priority: 0
+      tf-integrations-egress:
+        gw_priority: 1
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      tf-integrations-migrate:
+        condition: service_completed_successfully
+      tf-integrations-postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:8080/readyz').then(r=>{if(!r.ok)process.exit(1)})
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  tf-search:
+    <<: *runtime
+    image: ${TF_SEARCH_IMAGE:?}
+    user: "10001:10001"
+    read_only: true
+    environment:
+      APOLLO_API_VERSION: ${TF_SEARCH_VERSION:?}
+      APOLLO_DEPLOYED_AT: ${TF_SEARCH_DEPLOYED_AT:?}
+      NODE_ENV: production
+      PORT: "8080"
+      TF_SEARCH_HEARTBEAT_ALLOW_INSECURE_HTTP: "true"
+      TF_SEARCH_HEARTBEAT_API_ORIGIN: http://tf-api:8080
+      TF_SEARCH_HEARTBEAT_SECRET_FILE: /run/secrets/tf_search_heartbeat_secret
+      TF_SEARCH_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_search_internal_auth_secret
+    secrets:
+      - source: tf_search_internal_auth_secret
+        target: tf_search_internal_auth_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_search_heartbeat_secret
+        target: tf_search_heartbeat_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+      - /tmp/yt-dlp:rw,noexec,nosuid,size=64m
+    networks:
+      tf-search-control:
+        gw_priority: 0
+      tf-search-egress:
+        gw_priority: 1
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:8080/readyz').then(r=>{if(!r.ok)process.exit(1)})
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  tf-download-redis:
+    <<: *runtime
+    image: ${TF_DOWNLOAD_REDIS_IMAGE:?}
+    user: "999:999"
+    read_only: true
+    environment:
+      TF_DOWNLOAD_QUEUE_PASSWORD_FILE: /run/secrets/tf_download_queue_password
+    secrets:
+      - source: tf_download_queue_password
+        target: tf_download_queue_password
+        uid: "999"
+        gid: "999"
+        mode: "0400"
+    volumes:
+      - tf-download-redis-data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks:
+      - tf-download-queue
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/queue-redis-health.sh"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  tf-download-worker:
+    <<: *runtime
+    image: ${TF_DOWNLOAD_WORKER_IMAGE:?}
+    user: "10001:10001"
+    read_only: true
+    stop_grace_period: 45s
+    pids_limit: 256
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+          pids: 256
+    environment:
+      APOLLO_API_VERSION: ${TF_DOWNLOAD_VERSION:?}
+      APOLLO_DEPLOYED_AT: ${TF_DOWNLOAD_DEPLOYED_AT:?}
+      NODE_ENV: production
+      PORT: "8080"
+      TF_DOWNLOAD_HEARTBEAT_ALLOW_INSECURE_HTTP: "true"
+      TF_DOWNLOAD_HEARTBEAT_API_ORIGIN: http://tf-api:8080
+      TF_DOWNLOAD_HEARTBEAT_SECRET_FILE: /run/secrets/tf_download_heartbeat_secret
+      TF_DOWNLOAD_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_download_internal_auth_secret
+      TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true"
+      TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: /run/secrets/tf_download_queue_redis_url
+      TF_DOWNLOAD_STORAGE_ROOT: /var/lib/apollo-tf/downloads
+    secrets:
+      - source: tf_download_queue_redis_url
+        target: tf_download_queue_redis_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_download_internal_auth_secret
+        target: tf_download_internal_auth_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_download_heartbeat_secret
+        target: tf_download_heartbeat_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+    volumes:
+      - tf-downloads:/var/lib/apollo-tf/downloads
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    networks:
+      tf-download-queue:
+        gw_priority: 0
+      tf-download-control:
+        gw_priority: 0
+      tf-download-egress:
+        gw_priority: 1
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      tf-download-redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:8080/readyz').then(r=>{if(!r.ok)process.exit(1)})
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  tf-api:
+    <<: *runtime
+    image: ${TF_API_IMAGE:?}
+    user: "10001:10001"
+    read_only: true
+    ports:
+      - "127.0.0.1:${TF_API_PORT:?}:8080"
+    environment:
+      ADMIN_DASHBOARD_TOKEN_FILE: /run/secrets/admin_dashboard_token
+      APOLLO_API_VERSION: ${TF_API_VERSION:?}
+      APOLLO_DEPLOYED_AT: ${TF_DEPLOYED_AT:?}
+      APOLLO_MODULE_HEARTBEAT_KEYS_FILE: /run/secrets/tf_module_heartbeat_keys
+      APOLLO_PLATFORM_API_ORIGIN: http://platform-api:8080
+      APOLLO_PLATFORM_ISSUER: ${PLATFORM_PUBLIC_ORIGIN:?}
+      APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP: "true"
+      APOLLO_TF_AUTH_REDIS_URL: redis://tf-redis:6379/1
+      APOLLO_TF_CALLBACK_URL: ${TF_API_PUBLIC_ORIGIN:?}/api/auth/callback
+      APOLLO_TF_CLIENT_ID: apollo-tf-api
+      APOLLO_TF_CLIENT_SECRET_FILE: /run/secrets/tf_client_secret
+      APOLLO_TF_WEB_ORIGIN: ${TF_PUBLIC_ORIGIN:?}
+      DATABASE_URL_FILE: /run/secrets/tf_runtime_database_url
+      NODE_ENV: production
+      PORT: "8080"
+      REDIS_URL: redis://tf-redis:6379/0
+      SERVER_URL: ${TF_API_PUBLIC_ORIGIN:?}
+      TF_DOWNLOAD_QUEUE_ALLOW_INSECURE_REDIS: "true"
+      TF_DOWNLOAD_QUEUE_REDIS_URL_FILE: /run/secrets/tf_download_queue_redis_url
+      TF_DOWNLOAD_WORKER_ALLOW_INSECURE_HTTP: "true"
+      TF_DOWNLOAD_WORKER_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_download_internal_auth_secret
+      TF_DOWNLOAD_WORKER_ORIGIN: http://tf-download-worker:8080
+      TF_INTEGRATIONS_ALLOW_INSECURE_HTTP: "true"
+      TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_integrations_internal_auth_secret
+      TF_INTEGRATIONS_ORIGIN: http://tf-integrations:8080
+      TF_SEARCH_ALLOW_INSECURE_HTTP: "true"
+      TF_SEARCH_INTERNAL_AUTH_SECRET_FILE: /run/secrets/tf_search_internal_auth_secret
+      TF_SEARCH_ORIGIN: http://tf-search:8080
+      WEB_URL: ${TF_PUBLIC_ORIGIN:?}
+    secrets:
+      - source: admin_dashboard_token
+        target: admin_dashboard_token
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_client_secret
+        target: tf_client_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_runtime_database_url
+        target: tf_runtime_database_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_integrations_internal_auth_secret
+        target: tf_integrations_internal_auth_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_download_queue_redis_url
+        target: tf_download_queue_redis_url
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_download_internal_auth_secret
+        target: tf_download_internal_auth_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_module_heartbeat_keys
+        target: tf_module_heartbeat_keys
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: tf_search_internal_auth_secret
+        target: tf_search_internal_auth_secret
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    networks:
+      - platform-bridge
+      - tf-data
+      - tf-edge
+      - tf-integrations-control
+      - tf-search-control
+      - tf-download-queue
+      - tf-download-control
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      tf-postgres:
+        condition: service_healthy
+      tf-migrate:
+        condition: service_completed_successfully
+      tf-redis:
+        condition: service_healthy
+      tf-integrations:
+        condition: service_healthy
+      tf-search:
+        condition: service_healthy
+      tf-download-redis:
+        condition: service_healthy
+      tf-download-worker:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:8080/api/readyz').then(r=>{if(!r.ok)process.exit(1)})
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 8s
+
+  tf-web:
+    <<: *runtime
+    image: ${TF_WEB_IMAGE:?}
+    ports:
+      - "127.0.0.1:${TF_WEB_PORT:?}:80"
+    networks:
+      - tf-edge
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  tf-admin:
+    <<: *runtime
+    image: ${TF_ADMIN_IMAGE:?}
+    ports:
+      - "127.0.0.1:${TF_ADMIN_PORT:?}:80"
+    environment:
+      ADMIN_ACCESS_HTPASSWD_FILE: /run/secrets/admin_access_htpasswd
+      ADMIN_DASHBOARD_TOKEN_FILE: /run/secrets/admin_dashboard_token
+      APOLLO_API_UPSTREAM: http://tf-api:8080
+    secrets:
+      - source: admin_dashboard_token
+        target: admin_dashboard_token
+        uid: "10001"
+        gid: "10001"
+        mode: "0400"
+      - source: admin_access_htpasswd
+        target: admin_access_htpasswd
+        uid: "0"
+        gid: "0"
+        mode: "0400"
+    networks:
+      - tf-edge
+    depends_on:
+      tf-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+secrets:
+  admin_access_htpasswd:
+    file: ${TF_ADMIN_CREDENTIAL_DIRECTORY:?}/admin_access_htpasswd
+  admin_dashboard_token:
+    file: ${TF_SECRET_DIRECTORY:?}/admin_dashboard_token
+  tf_admin_database_url:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_admin_database_url
+  tf_client_secret:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_client_secret
+  tf_download_heartbeat_secret:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_download_heartbeat_secret
+  tf_download_internal_auth_secret:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_download_internal_auth_secret
+  tf_download_queue_password:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_download_queue_password
+  tf_download_queue_redis_url:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_download_queue_redis_url
+  tf_integrations_heartbeat_secret:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_heartbeat_secret
+  tf_integrations_internal_auth_secret:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_internal_auth_secret
+  tf_integrations_migrator_database_url:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_migrator_database_url
+  tf_integrations_migrator_password:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_migrator_password
+  tf_integrations_postgres_admin_password:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_postgres_admin_password
+  tf_integrations_runtime_database_url:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_runtime_database_url
+  tf_integrations_runtime_password:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_runtime_password
+  tf_integrations_spotify_client_id:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_spotify_client_id
+  tf_integrations_spotify_client_secret:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_spotify_client_secret
+  tf_integrations_token_keyring:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_integrations_token_keyring
+  tf_migrator_database_url:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_migrator_database_url
+  tf_migrator_password:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_migrator_password
+  tf_module_heartbeat_keys:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_module_heartbeat_keys
+  tf_postgres_admin_password:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_postgres_admin_password
+  tf_runtime_database_url:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_runtime_database_url
+  tf_runtime_password:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_runtime_password
+  tf_search_heartbeat_secret:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_search_heartbeat_secret
+  tf_search_internal_auth_secret:
+    file: ${TF_SECRET_DIRECTORY:?}/tf_search_internal_auth_secret
+
+volumes:
+  tf-postgres-data:
+    name: apollo-tf-postgres-v1
+  tf-redis-data:
+    name: apollo-tf-redis-v1
+  tf-integrations-postgres-data:
+    name: apollo-tf-integrations-postgres-v1
+  tf-download-redis-data:
+    name: apollo-tf-download-redis-v1
+  tf-downloads:
+    name: apollo-tf-downloads-v1
+
+networks:
+  platform-bridge:
+    name: apollo-platform-bridge-v1
+    external: true
+  tf-data:
+    name: apollo-tf-data-v1
+    internal: true
+  tf-edge:
+    name: apollo-tf-edge-v1
+  tf-integrations-control:
+    name: apollo-tf-integrations-control-v1
+    internal: true
+  tf-integrations-data:
+    name: apollo-tf-integrations-data-v1
+    internal: true
+  tf-integrations-egress:
+    name: apollo-tf-integrations-egress-v1
+  tf-search-control:
+    name: apollo-tf-search-control-v1
+    internal: true
+  tf-search-egress:
+    name: apollo-tf-search-egress-v1
+  tf-download-queue:
+    name: apollo-tf-download-queue-v1
+    internal: true
+  tf-download-control:
+    name: apollo-tf-download-control-v1
+    internal: true
+  tf-download-egress:
+    name: apollo-tf-download-egress-v1

@@ -588,11 +588,7 @@ export async function parseTfAuthRuntimeConfig(
     ) {
       throw new Error("invalid bridge flag");
     }
-    const allowPrivateHttpTransport =
-      bridgeFlag === "true" && nodeEnv === "development";
-    if (bridgeFlag === "true" && !allowPrivateHttpTransport) {
-      throw new Error("invalid bridge mode");
-    }
+    const allowPrivateHttpTransport = bridgeFlag === "true";
     const apiOrigin = parseApiOrigin(
       environment.APOLLO_PLATFORM_API_ORIGIN ?? issuer.origin,
       issuer,
@@ -624,6 +620,7 @@ export async function parseTfAuthRuntimeConfig(
     let bridgePkceVerifier: string | undefined;
     if (verifierFile !== undefined) {
       if (
+        nodeEnv !== "development" ||
         !allowPrivateHttpTransport ||
         apiOrigin !== "http://platform-api:8080"
       ) {
