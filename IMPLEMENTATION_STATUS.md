@@ -5,7 +5,7 @@ Last updated: 2026-07-29.
 ## Operator-owned release publisher
 
 Status: `OPERATOR_PUBLISHER_LOCAL_VALIDATED`. The exact future publication
-source is `7008273fd7cedf33174bd51489e63f2a1b67c05c`, not ambient or
+source is `9e04ca66a70e4a1563c6a75294d64b8d540959fb`, not ambient or
 uncommitted `HEAD`. The publisher is locally proven, but no production image
 has been pushed, no GHCR login has occurred, and no GitHub or infrastructure
 setting has been changed.

@@ -4,7 +4,7 @@ Status: `OPERATOR_PUBLISHER_LOCAL_VALIDATED`
 
 This is an owner-reviewable rollout plan, not a deployment record. The final
 publisher proof validated the exact future publication source commit
-`7008273fd7cedf33174bd51489e63f2a1b67c05c` locally. No production image has
+`9e04ca66a70e4a1563c6a75294d64b8d540959fb` locally. No production image has
 been pushed. HomeNode, Coolify, the host Caddy configuration, UFW, DNS,
 GitHub settings, GHCR, remote databases, and remote volumes were not contacted
 or mutated.
@@ -131,7 +131,7 @@ forwarded. Publication regenerates the archive from the approved commit and
 uses that fresh archive as the only build input.
 
 ```powershell
-$approvedSourceCommit = '7008273fd7cedf33174bd51489e63f2a1b67c05c'
+$approvedSourceCommit = '9e04ca66a70e4a1563c6a75294d64b8d540959fb'
 $releaseId = 'v0.1.0-rc.1'
 $preparation = pnpm --silent release:prepare -- --mode production --release-id $releaseId --source-commit $approvedSourceCommit | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Release preparation failed' }
