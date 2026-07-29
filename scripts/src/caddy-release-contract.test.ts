@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
@@ -314,9 +315,14 @@ printf 'chown %s\n' "$*" >> "$APOLLO_COMMAND_LOG"
       const invalidUsername = "invalid user";
       const invalidBcrypt = `$2x$12$${"A".repeat(53)}`;
       const malformedPairHash = "not-a-bcrypt";
+      const nulContaminatedBcrypt = Buffer.concat([
+        Buffer.from(`${username}:${bcrypt.slice(0, 30)}`),
+        Buffer.from([0]),
+        Buffer.from(bcrypt.slice(30)),
+      ]);
       const hostileCases: Array<{
         name: string;
-        htpasswd: string;
+        htpasswd: string | Buffer;
         environment: string;
         marker?: string;
       }> = [
@@ -383,6 +389,11 @@ printf 'chown %s\n' "$*" >> "$APOLLO_COMMAND_LOG"
           environment:
             `APOLLO_ADMIN_CADDY_USER='${username}'\n` +
             `APOLLO_ADMIN_CADDY_PASSWORD_HASH='${malformedPairHash}'\n`,
+        },
+        {
+          name: "NUL-contaminated bcrypt",
+          htpasswd: nulContaminatedBcrypt,
+          environment: caddyEnvironment,
         },
       ];
       for (const { name, htpasswd: hostileHtpasswd, environment, marker } of hostileCases) {

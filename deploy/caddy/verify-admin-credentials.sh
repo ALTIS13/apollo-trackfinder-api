@@ -12,6 +12,12 @@ nginx_hash=
 if IFS=: read -r nginx_user nginx_hash < "$htpasswd_file"; then
   exit 1
 fi
+htpasswd_bytes=$(wc -c < "$htpasswd_file" | tr -d '[:space:]')
+parsed_bytes=$(printf '%s:%s' "$nginx_user" "$nginx_hash" |
+  wc -c | tr -d '[:space:]')
+case "$htpasswd_bytes" in ''|*[!0-9]*) exit 1 ;; esac
+case "$parsed_bytes" in ''|*[!0-9]*) exit 1 ;; esac
+[ "$htpasswd_bytes" = "$parsed_bytes" ] || exit 1
 case "$nginx_hash" in *:*) exit 1 ;; esac
 printf '%s\n' "$nginx_user" |
   grep -Eq '^[A-Za-z0-9_.@-]{1,128}$' || exit 1
