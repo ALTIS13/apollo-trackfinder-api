@@ -80,7 +80,32 @@ describe("Apollo Caddy release include", () => {
     ]) {
       expect(source).toContain(header);
     }
-    expect(source.match(/import apollo_security_headers/g)).toHaveLength(4);
+    expect(source.match(/import apollo_security_headers/g)).toHaveLength(5);
+  });
+
+  it("runs admin security headers before authentication and proxy responses", () => {
+    const source = caddyfile();
+    const admin = source.slice(source.indexOf("admin.apollot.ru"));
+    const route = admin.match(/route\s*\{([\s\S]*?)^\s*\}\s*^\}/m)?.[1];
+    const headerIndex = route?.indexOf("import apollo_security_headers") ?? -1;
+    const authenticationIndex = route?.indexOf("basic_auth") ?? -1;
+    const proxyIndex = route?.indexOf("reverse_proxy") ?? -1;
+
+    expect(route).toBeDefined();
+    expect(headerIndex).toBeGreaterThanOrEqual(0);
+    expect(authenticationIndex).toBeGreaterThanOrEqual(0);
+    expect(proxyIndex).toBeGreaterThanOrEqual(0);
+    expect(headerIndex).toBeLessThan(authenticationIndex);
+    expect(authenticationIndex).toBeLessThan(proxyIndex);
+  });
+
+  it("renders admin authentication failures through the security header handler", () => {
+    const source = caddyfile();
+    const admin = source.slice(source.indexOf("admin.apollot.ru"));
+
+    expect(admin).toMatch(
+      /handle_errors\s+401\s*\{[\s\S]*?import\s+apollo_security_headers[\s\S]*?header\s+WWW-Authenticate\s+"Basic realm=\\"restricted\\""\s*[\s\S]*?respond\s+401\s*\}/,
+    );
   });
 
   it("uses native WebSocket-compatible reverse proxy defaults without unrelated imports or credential literals", () => {
@@ -90,6 +115,7 @@ describe("Apollo Caddy release include", () => {
     );
 
     expect(imports).toEqual([
+      "apollo_security_headers",
       "apollo_security_headers",
       "apollo_security_headers",
       "apollo_security_headers",
@@ -148,9 +174,13 @@ describe("Apollo Caddy release include", () => {
       for (const directory of [sourceDirectory, generationParent, bin]) {
         mkdirSync(directory);
       }
-      writeFileSync(join(sourceDirectory, "admin_access_user"), `${username}\n`, {
-        mode: 0o600,
-      });
+      writeFileSync(
+        join(sourceDirectory, "admin_access_user"),
+        `${username}\n`,
+        {
+          mode: 0o600,
+        },
+      );
       writeFileSync(
         join(sourceDirectory, "admin_access_password"),
         `${password}\n`,

@@ -22,6 +22,7 @@ export type ComposeSecretMount = {
 export type ComposeVolumeMount =
   | string
   | {
+      read_only?: boolean;
       source?: string;
       target?: string;
       type?: string;
@@ -30,6 +31,8 @@ export type ComposeVolumeMount =
 
 export type ComposeService = {
   build?: unknown;
+  cap_add?: string[];
+  cap_drop?: string[];
   deploy?: {
     resources?: {
       limits?: {
@@ -39,21 +42,38 @@ export type ComposeService = {
       };
     };
   };
+  depends_on?: Record<
+    string,
+    { condition?: string; required?: boolean; restart?: boolean }
+  >;
+  devices?: unknown[];
   environment?: Record<string, string>;
+  group_add?: string[];
   healthcheck?: Record<string, unknown>;
   image?: string;
+  ipc?: string;
   init?: boolean;
   labels?: Record<string, string> | string[];
   logging?: {
     driver?: string;
     options?: Record<string, string>;
   };
+  network_mode?: string;
   networks?: Record<string, unknown> | string[];
+  pid?: string;
   pids_limit?: number;
   ports?: ComposePort[];
+  privileged?: boolean;
+  profiles?: string[];
+  read_only?: boolean;
   restart?: string;
   secrets?: ComposeSecretMount[];
+  security_opt?: string[];
   stop_grace_period?: string;
+  sysctls?: Record<string, string>;
+  tmpfs?: string[];
+  user?: string;
+  uts?: string;
   volumes?: ComposeVolumeMount[];
 };
 
@@ -63,7 +83,7 @@ export type ComposeDocument = {
     string,
     { external?: boolean; internal?: boolean; name?: string }
   >;
-  secrets?: Record<string, { file?: string }>;
+  secrets?: Record<string, { file?: string; name?: string }>;
   services: Record<string, ComposeService>;
   volumes?: Record<string, { name?: string }>;
 };
@@ -75,7 +95,24 @@ export type ReleaseStackInput = {
 
 export type ReleaseValidationInput = {
   environment: Record<string, string>;
+  mode: ReleaseValidationMode;
+  releaseArtifact?: ReleaseArtifact;
   stacks: ReleaseStackInput[];
+};
+
+export type ReleaseValidationMode = "production" | "loopback-local-smoke";
+
+export type ReleaseArtifactImage = {
+  imageDigest: string;
+  imageReference: string;
+  name: string;
+  repository: string;
+};
+
+export type ReleaseArtifact = {
+  formatVersion: 1;
+  images: ReleaseArtifactImage[];
+  sourceCommit: string;
 };
 
 export type ReleaseValidationError = {
@@ -128,9 +165,7 @@ const sensitiveEnvironmentAllowlist: Readonly<Record<string, Set<string>>> = {
   ]),
   "platform-migrate": new Set(["MIGRATOR_DATABASE_URL_FILE"]),
   "platform-postgres": new Set(["POSTGRES_PASSWORD_FILE"]),
-  "tf-admin": new Set([
-    "ADMIN_DASHBOARD_TOKEN_FILE",
-  ]),
+  "tf-admin": new Set(["ADMIN_DASHBOARD_TOKEN_FILE"]),
   "tf-api": new Set([
     "ADMIN_DASHBOARD_TOKEN_FILE",
     "APOLLO_TF_AUTH_REDIS_URL",
@@ -208,6 +243,466 @@ const expectedServiceNames: Readonly<
     "tf-search",
     "tf-web",
   ],
+};
+const expectedReleaseEnvironmentNames = [
+  "PLATFORM_ALLOWED_ORIGINS",
+  "PLATFORM_API_IMAGE",
+  "PLATFORM_API_PORT",
+  "PLATFORM_API_VERSION",
+  "PLATFORM_DEPLOYED_AT",
+  "PLATFORM_POSTGRES_IMAGE",
+  "PLATFORM_PUBLIC_ORIGIN",
+  "PLATFORM_REDIS_IMAGE",
+  "PLATFORM_SECRET_DIRECTORY",
+  "RELEASE_SOURCE_COMMIT",
+  "TF_ADMIN_CREDENTIAL_DIRECTORY",
+  "TF_ADMIN_IMAGE",
+  "TF_ADMIN_PORT",
+  "TF_ADMIN_PUBLIC_ORIGIN",
+  "TF_API_IMAGE",
+  "TF_API_PORT",
+  "TF_API_PUBLIC_ORIGIN",
+  "TF_API_VERSION",
+  "TF_DEPLOYED_AT",
+  "TF_DOWNLOAD_DEPLOYED_AT",
+  "TF_DOWNLOAD_REDIS_IMAGE",
+  "TF_DOWNLOAD_VERSION",
+  "TF_DOWNLOAD_WORKER_IMAGE",
+  "TF_INTEGRATIONS_DEPLOYED_AT",
+  "TF_INTEGRATIONS_IMAGE",
+  "TF_INTEGRATIONS_POSTGRES_IMAGE",
+  "TF_INTEGRATIONS_VERSION",
+  "TF_POSTGRES_IMAGE",
+  "TF_PUBLIC_ORIGIN",
+  "TF_REDIS_IMAGE",
+  "TF_SEARCH_DEPLOYED_AT",
+  "TF_SEARCH_IMAGE",
+  "TF_SEARCH_VERSION",
+  "TF_SECRET_DIRECTORY",
+  "TF_WEB_IMAGE",
+  "TF_WEB_PORT",
+] as const;
+const expectedReleaseValues: Readonly<Record<string, string>> = {
+  PLATFORM_ALLOWED_ORIGINS: "https://apollot.ru,https://admin.apollot.ru",
+  PLATFORM_API_PORT: "18200",
+  PLATFORM_PUBLIC_ORIGIN: "https://api.apollot.ru",
+  TF_ADMIN_PORT: "18203",
+  TF_ADMIN_PUBLIC_ORIGIN: "https://admin.apollot.ru",
+  TF_API_PORT: "18201",
+  TF_API_PUBLIC_ORIGIN: "https://api.tf.apollot.ru",
+  TF_PUBLIC_ORIGIN: "https://tf.apollot.ru",
+  TF_WEB_PORT: "18202",
+};
+const publicOriginEnvironmentNames = new Set([
+  "PLATFORM_ALLOWED_ORIGINS",
+  "PLATFORM_PUBLIC_ORIGIN",
+  "TF_ADMIN_PUBLIC_ORIGIN",
+  "TF_API_PUBLIC_ORIGIN",
+  "TF_PUBLIC_ORIGIN",
+]);
+const versionEnvironmentNames = [
+  "PLATFORM_API_VERSION",
+  "TF_API_VERSION",
+  "TF_DOWNLOAD_VERSION",
+  "TF_INTEGRATIONS_VERSION",
+  "TF_SEARCH_VERSION",
+] as const;
+const deployedAtEnvironmentNames = [
+  "PLATFORM_DEPLOYED_AT",
+  "TF_DEPLOYED_AT",
+  "TF_DOWNLOAD_DEPLOYED_AT",
+  "TF_INTEGRATIONS_DEPLOYED_AT",
+  "TF_SEARCH_DEPLOYED_AT",
+] as const;
+const sourceCommitPattern = /^[a-f0-9]{40}$/;
+const zeroSourceCommit = "0".repeat(40);
+const artifactImageNames = [
+  "platform-api",
+  "platform-postgres",
+  "redis",
+  "tf-admin",
+  "tf-api",
+  "tf-download-redis",
+  "tf-download-worker",
+  "tf-integrations",
+  "tf-integrations-postgres",
+  "tf-postgres",
+  "tf-search",
+  "tf-web",
+] as const;
+type ArtifactImageName = (typeof artifactImageNames)[number];
+const approvedImageRepositories: Readonly<Record<ArtifactImageName, string>> = {
+  "platform-api": "ghcr.io/altis13/apollo-platform-api",
+  "platform-postgres": "ghcr.io/altis13/apollo-platform-postgres",
+  redis: "docker.io/library/redis",
+  "tf-admin": "ghcr.io/altis13/apollo-tf-admin",
+  "tf-api": "ghcr.io/altis13/apollo-tf-api",
+  "tf-download-redis": "ghcr.io/altis13/apollo-tf-download-redis",
+  "tf-download-worker": "ghcr.io/altis13/apollo-tf-download-worker",
+  "tf-integrations": "ghcr.io/altis13/apollo-tf-integrations",
+  "tf-integrations-postgres": "ghcr.io/altis13/apollo-tf-integrations-postgres",
+  "tf-postgres": "ghcr.io/altis13/apollo-tf-postgres",
+  "tf-search": "ghcr.io/altis13/apollo-tf-search",
+  "tf-web": "ghcr.io/altis13/apollo-tf-web",
+};
+const serviceArtifactImages: Readonly<Record<string, ArtifactImageName>> = {
+  "platform-api": "platform-api",
+  "platform-migrate": "platform-api",
+  "platform-postgres": "platform-postgres",
+  "platform-redis": "redis",
+  "tf-admin": "tf-admin",
+  "tf-api": "tf-api",
+  "tf-baseline": "tf-api",
+  "tf-download-redis": "tf-download-redis",
+  "tf-download-worker": "tf-download-worker",
+  "tf-integrations": "tf-integrations",
+  "tf-integrations-migrate": "tf-integrations",
+  "tf-integrations-postgres": "tf-integrations-postgres",
+  "tf-migrate": "tf-api",
+  "tf-postgres": "tf-postgres",
+  "tf-redis": "redis",
+  "tf-role-bootstrap": "tf-postgres",
+  "tf-search": "tf-search",
+  "tf-web": "tf-web",
+};
+const releaseImageEnvironmentNames: Readonly<
+  Record<string, ArtifactImageName>
+> = {
+  PLATFORM_API_IMAGE: "platform-api",
+  PLATFORM_POSTGRES_IMAGE: "platform-postgres",
+  PLATFORM_REDIS_IMAGE: "redis",
+  TF_ADMIN_IMAGE: "tf-admin",
+  TF_API_IMAGE: "tf-api",
+  TF_DOWNLOAD_REDIS_IMAGE: "tf-download-redis",
+  TF_DOWNLOAD_WORKER_IMAGE: "tf-download-worker",
+  TF_INTEGRATIONS_IMAGE: "tf-integrations",
+  TF_INTEGRATIONS_POSTGRES_IMAGE: "tf-integrations-postgres",
+  TF_POSTGRES_IMAGE: "tf-postgres",
+  TF_REDIS_IMAGE: "redis",
+  TF_SEARCH_IMAGE: "tf-search",
+  TF_WEB_IMAGE: "tf-web",
+};
+
+type NetworkContract = {
+  external?: boolean;
+  internal?: boolean;
+  name: string;
+};
+const expectedNetworks: Readonly<
+  Record<ReleaseStackInput["name"], Readonly<Record<string, NetworkContract>>>
+> = {
+  "apollo-platform": {
+    "platform-bridge": {
+      internal: true,
+      name: "apollo-platform-bridge-v1",
+    },
+    "platform-data": { internal: true, name: "apollo-platform-data-v1" },
+    "platform-edge": { name: "apollo-platform-edge-v1" },
+  },
+  "apollo-tf": {
+    "platform-bridge": {
+      external: true,
+      name: "apollo-platform-bridge-v1",
+    },
+    "tf-data": { internal: true, name: "apollo-tf-data-v1" },
+    "tf-download-control": {
+      internal: true,
+      name: "apollo-tf-download-control-v1",
+    },
+    "tf-download-egress": { name: "apollo-tf-download-egress-v1" },
+    "tf-download-queue": {
+      internal: true,
+      name: "apollo-tf-download-queue-v1",
+    },
+    "tf-edge": { name: "apollo-tf-edge-v1" },
+    "tf-integrations-control": {
+      internal: true,
+      name: "apollo-tf-integrations-control-v1",
+    },
+    "tf-integrations-data": {
+      internal: true,
+      name: "apollo-tf-integrations-data-v1",
+    },
+    "tf-integrations-egress": {
+      name: "apollo-tf-integrations-egress-v1",
+    },
+    "tf-search-control": {
+      internal: true,
+      name: "apollo-tf-search-control-v1",
+    },
+    "tf-search-egress": { name: "apollo-tf-search-egress-v1" },
+  },
+};
+const expectedVolumes: Readonly<
+  Record<ReleaseStackInput["name"], Readonly<Record<string, { name: string }>>>
+> = {
+  "apollo-platform": {
+    "platform-postgres-data": { name: "apollo-platform-postgres-v1" },
+    "platform-redis-data": { name: "apollo-platform-redis-v1" },
+  },
+  "apollo-tf": {
+    "tf-download-redis-data": { name: "apollo-tf-download-redis-v1" },
+    "tf-downloads": { name: "apollo-tf-downloads-v1" },
+    "tf-integrations-postgres-data": {
+      name: "apollo-tf-integrations-postgres-v1",
+    },
+    "tf-postgres-data": { name: "apollo-tf-postgres-v1" },
+    "tf-redis-data": { name: "apollo-tf-redis-v1" },
+  },
+};
+const expectedServiceNetworks: Readonly<
+  Record<string, Readonly<Record<string, number | undefined>>>
+> = {
+  "platform-api": {
+    "platform-bridge": undefined,
+    "platform-data": undefined,
+    "platform-edge": undefined,
+  },
+  "platform-migrate": { "platform-data": undefined },
+  "platform-postgres": { "platform-data": undefined },
+  "platform-redis": { "platform-data": undefined },
+  "tf-admin": { "tf-edge": undefined },
+  "tf-api": {
+    "platform-bridge": undefined,
+    "tf-data": undefined,
+    "tf-download-control": undefined,
+    "tf-download-queue": undefined,
+    "tf-edge": undefined,
+    "tf-integrations-control": undefined,
+    "tf-search-control": undefined,
+  },
+  "tf-baseline": { "tf-data": undefined },
+  "tf-download-redis": { "tf-download-queue": undefined },
+  "tf-download-worker": {
+    "tf-download-control": undefined,
+    "tf-download-egress": 1,
+    "tf-download-queue": undefined,
+  },
+  "tf-integrations": {
+    "tf-integrations-control": undefined,
+    "tf-integrations-data": undefined,
+    "tf-integrations-egress": 1,
+  },
+  "tf-integrations-migrate": { "tf-integrations-data": undefined },
+  "tf-integrations-postgres": { "tf-integrations-data": undefined },
+  "tf-migrate": { "tf-data": undefined },
+  "tf-postgres": { "tf-data": undefined },
+  "tf-redis": { "tf-data": undefined },
+  "tf-role-bootstrap": { "tf-data": undefined },
+  "tf-search": {
+    "tf-search-control": undefined,
+    "tf-search-egress": 1,
+  },
+  "tf-web": { "tf-edge": undefined },
+};
+type PersistentMountContract = {
+  source: string;
+  target: string;
+};
+const expectedPersistentMounts: Readonly<
+  Record<string, readonly PersistentMountContract[]>
+> = {
+  "platform-api": [],
+  "platform-migrate": [],
+  "platform-postgres": [
+    {
+      source: "platform-postgres-data",
+      target: "/var/lib/postgresql/data",
+    },
+  ],
+  "platform-redis": [{ source: "platform-redis-data", target: "/data" }],
+  "tf-admin": [],
+  "tf-api": [],
+  "tf-baseline": [],
+  "tf-download-redis": [{ source: "tf-download-redis-data", target: "/data" }],
+  "tf-download-worker": [
+    { source: "tf-downloads", target: "/var/lib/apollo-tf/downloads" },
+  ],
+  "tf-integrations": [],
+  "tf-integrations-migrate": [],
+  "tf-integrations-postgres": [
+    {
+      source: "tf-integrations-postgres-data",
+      target: "/var/lib/postgresql/data",
+    },
+  ],
+  "tf-migrate": [],
+  "tf-postgres": [
+    { source: "tf-postgres-data", target: "/var/lib/postgresql/data" },
+  ],
+  "tf-redis": [{ source: "tf-redis-data", target: "/data" }],
+  "tf-role-bootstrap": [],
+  "tf-search": [],
+  "tf-web": [],
+};
+type DependencyContract = {
+  condition: string;
+  required: boolean;
+};
+const expectedDependencies: Readonly<
+  Record<string, Readonly<Record<string, DependencyContract>>>
+> = {
+  "platform-api": {
+    "platform-migrate": {
+      condition: "service_completed_successfully",
+      required: true,
+    },
+    "platform-redis": { condition: "service_healthy", required: true },
+  },
+  "platform-migrate": {
+    "platform-postgres": { condition: "service_healthy", required: true },
+  },
+  "platform-postgres": {},
+  "platform-redis": {},
+  "tf-admin": {
+    "tf-api": { condition: "service_healthy", required: true },
+  },
+  "tf-api": {
+    "tf-download-redis": { condition: "service_healthy", required: true },
+    "tf-download-worker": { condition: "service_healthy", required: true },
+    "tf-integrations": { condition: "service_healthy", required: true },
+    "tf-migrate": {
+      condition: "service_completed_successfully",
+      required: true,
+    },
+    "tf-postgres": { condition: "service_healthy", required: true },
+    "tf-redis": { condition: "service_healthy", required: true },
+    "tf-search": { condition: "service_healthy", required: true },
+  },
+  "tf-baseline": {
+    "tf-role-bootstrap": {
+      condition: "service_completed_successfully",
+      required: true,
+    },
+  },
+  "tf-download-redis": {},
+  "tf-download-worker": {
+    "tf-download-redis": { condition: "service_healthy", required: true },
+  },
+  "tf-integrations": {
+    "tf-integrations-migrate": {
+      condition: "service_completed_successfully",
+      required: true,
+    },
+    "tf-integrations-postgres": {
+      condition: "service_healthy",
+      required: true,
+    },
+  },
+  "tf-integrations-migrate": {
+    "tf-integrations-postgres": {
+      condition: "service_healthy",
+      required: true,
+    },
+  },
+  "tf-integrations-postgres": {},
+  "tf-migrate": {
+    "tf-postgres": { condition: "service_healthy", required: true },
+  },
+  "tf-postgres": {},
+  "tf-redis": {},
+  "tf-role-bootstrap": {
+    "tf-postgres": { condition: "service_healthy", required: true },
+  },
+  "tf-search": {},
+  "tf-web": {},
+};
+const expectedProfiles: Readonly<Record<string, readonly string[]>> = {
+  "platform-api": [],
+  "platform-migrate": [],
+  "platform-postgres": [],
+  "platform-redis": [],
+  "tf-admin": [],
+  "tf-api": [],
+  "tf-baseline": ["baseline"],
+  "tf-download-redis": [],
+  "tf-download-worker": [],
+  "tf-integrations": [],
+  "tf-integrations-migrate": [],
+  "tf-integrations-postgres": [],
+  "tf-migrate": [],
+  "tf-postgres": [],
+  "tf-redis": [],
+  "tf-role-bootstrap": ["baseline"],
+  "tf-search": [],
+  "tf-web": [],
+};
+type SecurityContract = {
+  capDrop: readonly string[];
+  groupAdd: readonly string[];
+  readOnly: boolean | undefined;
+  securityOpt: readonly string[];
+  tmpfs: readonly string[];
+  user: string | undefined;
+};
+function hardenedSecurity(
+  user: string,
+  tmpfs: readonly string[],
+  groupAdd: readonly string[] = [],
+): SecurityContract {
+  return {
+    capDrop: ["ALL"],
+    groupAdd,
+    readOnly: true,
+    securityOpt: ["no-new-privileges:true"],
+    tmpfs,
+    user,
+  };
+}
+const defaultSecurity: SecurityContract = {
+  capDrop: [],
+  groupAdd: [],
+  readOnly: undefined,
+  securityOpt: [],
+  tmpfs: [],
+  user: undefined,
+};
+const expectedSecurity: Readonly<Record<string, SecurityContract>> = {
+  "platform-api": hardenedSecurity("10001:10001", [
+    "/tmp:rw,noexec,nosuid,size=16m",
+  ]),
+  "platform-migrate": hardenedSecurity("10001:10001", [
+    "/tmp:rw,noexec,nosuid,size=16m",
+  ]),
+  "platform-postgres": defaultSecurity,
+  "platform-redis": hardenedSecurity("999:999", [
+    "/tmp:rw,noexec,nosuid,size=16m",
+  ]),
+  "tf-admin": defaultSecurity,
+  "tf-api": hardenedSecurity("10001:10001", ["/tmp:rw,noexec,nosuid,size=32m"]),
+  "tf-baseline": hardenedSecurity(
+    "10001:10001",
+    ["/tmp:rw,noexec,nosuid,size=16m"],
+    ["10002"],
+  ),
+  "tf-download-redis": hardenedSecurity("999:999", [
+    "/tmp:rw,noexec,nosuid,size=16m",
+  ]),
+  "tf-download-worker": hardenedSecurity("10001:10001", [
+    "/tmp:rw,noexec,nosuid,size=64m",
+  ]),
+  "tf-integrations": hardenedSecurity("10001:10001", [
+    "/tmp:rw,noexec,nosuid,size=16m",
+  ]),
+  "tf-integrations-migrate": hardenedSecurity("10001:10001", [
+    "/tmp:rw,noexec,nosuid,size=16m",
+  ]),
+  "tf-integrations-postgres": defaultSecurity,
+  "tf-migrate": hardenedSecurity("10001:10001", [
+    "/tmp:rw,noexec,nosuid,size=16m",
+  ]),
+  "tf-postgres": defaultSecurity,
+  "tf-redis": hardenedSecurity("999:999", ["/tmp:rw,noexec,nosuid,size=16m"]),
+  "tf-role-bootstrap": hardenedSecurity(
+    "999:999",
+    ["/tmp:rw,noexec,nosuid,size=16m"],
+    ["10002"],
+  ),
+  "tf-search": hardenedSecurity("10001:10001", [
+    "/tmp:rw,noexec,nosuid,size=32m",
+    "/tmp/yt-dlp:rw,noexec,nosuid,size=64m",
+  ]),
+  "tf-web": defaultSecurity,
 };
 const longRunningServices = new Set([
   "platform-api",
@@ -434,6 +929,441 @@ function sortErrors(
   );
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function exactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return (
+    actual.length === wanted.length &&
+    actual.every((name, index) => name === wanted[index])
+  );
+}
+
+function exactStringArray(
+  actual: readonly string[] | undefined,
+  expected: readonly string[],
+): boolean {
+  const observed = [...(actual ?? [])].sort();
+  const wanted = [...expected].sort();
+  return (
+    observed.length === wanted.length &&
+    observed.every((value, index) => value === wanted[index])
+  );
+}
+
+function validDirectory(value: string | undefined): boolean {
+  return (
+    value !== undefined &&
+    /^(?:\/|[A-Za-z]:\/)/.test(value) &&
+    !value.includes("\\") &&
+    !value.split("/").includes("..") &&
+    !value.endsWith("/")
+  );
+}
+
+function isValidSourceCommit(value: string | undefined): value is string {
+  return (
+    value !== undefined &&
+    sourceCommitPattern.test(value) &&
+    value !== zeroSourceCommit
+  );
+}
+
+type ParsedImage = {
+  digest: string;
+  repository: string;
+};
+
+function parseImmutableImage(
+  image: string | undefined,
+): ParsedImage | undefined {
+  if (image === undefined || image.includes("${") || image.includes(":-")) {
+    return undefined;
+  }
+  const match = image.match(
+    /^(?<repository>[a-z0-9.-]+(?::\d+)?\/[a-z0-9._/-]+)@(?<digest>sha256:[a-f0-9]{64})$/,
+  );
+  if (
+    match?.groups?.repository === undefined ||
+    match.groups.digest === undefined ||
+    match.groups.digest === zeroDigest
+  ) {
+    return undefined;
+  }
+  return {
+    digest: match.groups.digest,
+    repository: match.groups.repository,
+  };
+}
+
+function validateReleaseEnvironment(
+  input: ReleaseValidationInput,
+  errors: ReleaseValidationError[],
+): void {
+  if (input.mode !== "production" && input.mode !== "loopback-local-smoke") {
+    addError(errors, "invalid_validation_mode");
+  }
+  if (!exactKeys(input.environment, expectedReleaseEnvironmentNames)) {
+    addError(errors, "release_environment_keys", { field: "environment" });
+  }
+  for (const [name, expected] of Object.entries(expectedReleaseValues)) {
+    if (input.environment[name] === expected) continue;
+    addError(
+      errors,
+      publicOriginEnvironmentNames.has(name)
+        ? "invalid_public_origin"
+        : "release_environment_value",
+      { field: "environment" },
+    );
+  }
+  for (const name of versionEnvironmentNames) {
+    if (/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(input.environment[name] ?? "")) {
+      continue;
+    }
+    addError(errors, "release_environment_value", { field: "environment" });
+  }
+  for (const name of deployedAtEnvironmentNames) {
+    const value = input.environment[name] ?? "";
+    if (
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value) &&
+      Number.isFinite(Date.parse(value))
+    ) {
+      continue;
+    }
+    addError(errors, "release_environment_value", { field: "environment" });
+  }
+  if (!isValidSourceCommit(input.environment.RELEASE_SOURCE_COMMIT)) {
+    addError(errors, "release_environment_value", { field: "environment" });
+  }
+
+  const platformDirectory = input.environment.PLATFORM_SECRET_DIRECTORY;
+  const tfDirectory = input.environment.TF_SECRET_DIRECTORY;
+  const adminDirectory = input.environment.TF_ADMIN_CREDENTIAL_DIRECTORY;
+  if (
+    !validDirectory(platformDirectory) ||
+    !validDirectory(tfDirectory) ||
+    !validDirectory(adminDirectory)
+  ) {
+    addError(errors, "release_environment_value", { field: "environment" });
+  }
+  if (
+    input.mode === "production" &&
+    (platformDirectory !== "/var/lib/apollo-platform/secrets" ||
+      tfDirectory !== "/var/lib/apollo-tf/secrets" ||
+      !/^\/var\/lib\/apollo-tf\/admin-credentials\/[A-Za-z0-9._-]+$/.test(
+        adminDirectory ?? "",
+      ) ||
+      adminDirectory?.endsWith("/replace-with-generation") === true)
+  ) {
+    addError(errors, "release_environment_value", { field: "environment" });
+  }
+}
+
+function isArtifactImageName(value: string): value is ArtifactImageName {
+  return (artifactImageNames as readonly string[]).includes(value);
+}
+
+function validateReleaseArtifact(
+  input: ReleaseValidationInput,
+  errors: ReleaseValidationError[],
+): Map<ArtifactImageName, string> {
+  const references = new Map<ArtifactImageName, string>();
+  const artifact = input.releaseArtifact as unknown;
+  if (input.mode === "loopback-local-smoke") {
+    if (artifact !== undefined) addError(errors, "release_artifact");
+    return references;
+  }
+  if (
+    !isRecord(artifact) ||
+    !exactKeys(artifact, ["formatVersion", "images", "sourceCommit"]) ||
+    artifact.formatVersion !== 1 ||
+    !Array.isArray(artifact.images) ||
+    typeof artifact.sourceCommit !== "string" ||
+    !isValidSourceCommit(artifact.sourceCommit)
+  ) {
+    addError(errors, "release_artifact");
+    return references;
+  }
+  if (artifact.sourceCommit !== input.environment.RELEASE_SOURCE_COMMIT) {
+    addError(errors, "source_commit_mismatch");
+  }
+
+  const observedNames = new Set<string>();
+  for (const value of artifact.images) {
+    if (
+      !isRecord(value) ||
+      !exactKeys(value, [
+        "imageDigest",
+        "imageReference",
+        "name",
+        "repository",
+      ]) ||
+      typeof value.name !== "string" ||
+      !isArtifactImageName(value.name) ||
+      observedNames.has(value.name) ||
+      typeof value.repository !== "string" ||
+      typeof value.imageDigest !== "string" ||
+      typeof value.imageReference !== "string"
+    ) {
+      addError(errors, "release_artifact");
+      continue;
+    }
+    observedNames.add(value.name);
+    const parsed = parseImmutableImage(value.imageReference);
+    if (
+      value.repository !== approvedImageRepositories[value.name] ||
+      parsed?.repository !== value.repository ||
+      parsed.digest !== value.imageDigest
+    ) {
+      addError(
+        errors,
+        value.repository !== approvedImageRepositories[value.name]
+          ? "release_artifact"
+          : "image_provenance",
+      );
+      continue;
+    }
+    references.set(value.name, value.imageReference);
+  }
+  if (
+    observedNames.size !== artifactImageNames.length ||
+    artifactImageNames.some((name) => !observedNames.has(name))
+  ) {
+    addError(errors, "release_artifact");
+  }
+  return references;
+}
+
+function validateReleaseImages(
+  input: ReleaseValidationInput,
+  artifactReferences: ReadonlyMap<ArtifactImageName, string>,
+  errors: ReleaseValidationError[],
+): Map<ArtifactImageName, string> {
+  const expectedReferences = new Map<ArtifactImageName, string>();
+  let loopbackAuthority: string | undefined;
+
+  for (const [environmentName, imageName] of Object.entries(
+    releaseImageEnvironmentNames,
+  )) {
+    const reference = input.environment[environmentName];
+    const parsed = parseImmutableImage(reference);
+    if (parsed === undefined) {
+      addError(errors, "image_provenance", { field: "environment" });
+      continue;
+    }
+    if (input.mode === "production") {
+      if (parsed.repository !== approvedImageRepositories[imageName]) {
+        addError(errors, "image_repository", { field: "environment" });
+      }
+      if (artifactReferences.get(imageName) !== reference) {
+        addError(errors, "image_provenance", { field: "environment" });
+      }
+    } else if (input.mode === "loopback-local-smoke") {
+      const match = parsed.repository.match(
+        /^(?<authority>(?:127\.0\.0\.1|localhost):[1-9][0-9]{0,4})\/(?<name>[a-z0-9-]+)$/,
+      );
+      const port = Number(match?.groups?.authority?.split(":").at(-1));
+      if (
+        match?.groups?.authority === undefined ||
+        match.groups.name !== imageName ||
+        !Number.isInteger(port) ||
+        port > 65_535
+      ) {
+        addError(errors, "image_repository", { field: "environment" });
+      } else if (
+        loopbackAuthority !== undefined &&
+        loopbackAuthority !== match.groups.authority
+      ) {
+        addError(errors, "image_repository", { field: "environment" });
+      } else {
+        loopbackAuthority = match.groups.authority;
+      }
+    }
+    const existing = expectedReferences.get(imageName);
+    if (existing !== undefined && existing !== reference) {
+      addError(errors, "image_provenance", { field: "environment" });
+    } else {
+      expectedReferences.set(imageName, reference);
+    }
+  }
+  return expectedReferences;
+}
+
+function validateResourceDefinitions(
+  stack: ReleaseStackInput,
+  errors: ReleaseValidationError[],
+): void {
+  const networks = stack.compose.networks ?? {};
+  const expectedNetworkDefinitions = expectedNetworks[stack.name];
+  if (!exactKeys(networks, Object.keys(expectedNetworkDefinitions))) {
+    addError(errors, "network_contract", { stack: stack.name });
+  }
+  for (const [name, expected] of Object.entries(expectedNetworkDefinitions)) {
+    const actual = networks[name];
+    const actualRecord = actual as Record<string, unknown> | undefined;
+    const ipam = actualRecord?.ipam;
+    if (
+      actual === undefined ||
+      Object.keys(actual).some(
+        (key) => !["external", "internal", "ipam", "name"].includes(key),
+      ) ||
+      (ipam !== undefined &&
+        (!isRecord(ipam) || Object.keys(ipam).length !== 0)) ||
+      actual.name !== expected.name ||
+      actual.internal !== expected.internal ||
+      actual.external !== expected.external
+    ) {
+      addError(errors, "network_contract", { stack: stack.name });
+    }
+  }
+
+  const volumes = stack.compose.volumes ?? {};
+  const expectedVolumeDefinitions = expectedVolumes[stack.name];
+  if (!exactKeys(volumes, Object.keys(expectedVolumeDefinitions))) {
+    addError(errors, "volume_contract", { stack: stack.name });
+  }
+  for (const [name, expected] of Object.entries(expectedVolumeDefinitions)) {
+    if (
+      volumes[name]?.name !== expected.name ||
+      (volumes[name] !== undefined &&
+        !exactKeys(volumes[name] as Record<string, unknown>, ["name"]))
+    ) {
+      addError(errors, "volume_contract", { stack: stack.name });
+    }
+  }
+}
+
+function serviceNetworkContractMatches(
+  service: ComposeService,
+  expected: Readonly<Record<string, number | undefined>>,
+): boolean {
+  const actual = service.networks;
+  if (Array.isArray(actual)) {
+    return (
+      exactStringArray(actual, Object.keys(expected)) &&
+      Object.values(expected).every((priority) => priority === undefined)
+    );
+  }
+  const values = actual ?? {};
+  if (!exactKeys(values, Object.keys(expected))) return false;
+  return Object.entries(expected).every(([name, priority]) => {
+    const value = values[name];
+    if (value === null || value === undefined) return priority === undefined;
+    if (!isRecord(value)) return false;
+    if (!exactKeys(value, priority === undefined ? [] : ["gw_priority"])) {
+      return false;
+    }
+    return (
+      (value.gw_priority === undefined
+        ? undefined
+        : Number(value.gw_priority)) === priority
+    );
+  });
+}
+
+function normalizePersistentMount(
+  value: ComposeVolumeMount,
+): PersistentMountContract | undefined {
+  if (typeof value === "string") {
+    const parts = value.split(":");
+    if (parts.length < 2 || parts.length > 3) return undefined;
+    return { source: parts[0] ?? "", target: parts[1] ?? "" };
+  }
+  if (
+    value.type !== "volume" ||
+    typeof value.source !== "string" ||
+    typeof value.target !== "string" ||
+    !exactKeys(value as Record<string, unknown>, [
+      "source",
+      "target",
+      "type",
+      "volume",
+    ]) ||
+    !isRecord(value.volume) ||
+    Object.keys(value.volume).length !== 0
+  ) {
+    return undefined;
+  }
+  return { source: value.source, target: value.target };
+}
+
+function persistentMountContractMatches(
+  service: ComposeService,
+  expected: readonly PersistentMountContract[],
+): boolean {
+  const actual = (service.volumes ?? []).map(normalizePersistentMount);
+  if (actual.some((value) => value === undefined)) return false;
+  const observed = (actual as PersistentMountContract[])
+    .map(({ source, target }) => `${source}\u0000${target}`)
+    .sort();
+  const wanted = expected
+    .map(({ source, target }) => `${source}\u0000${target}`)
+    .sort();
+  return (
+    observed.length === wanted.length &&
+    observed.every((value, index) => value === wanted[index])
+  );
+}
+
+function dependencyContractMatches(
+  service: ComposeService,
+  expected: Readonly<Record<string, DependencyContract>>,
+): boolean {
+  const actual = service.depends_on ?? {};
+  if (!exactKeys(actual, Object.keys(expected))) return false;
+  return Object.entries(expected).every(([name, contract]) => {
+    const dependency = actual[name];
+    return (
+      dependency?.condition === contract.condition &&
+      dependency.required === contract.required &&
+      dependency.restart === undefined
+    );
+  });
+}
+
+function securityContractMatches(
+  service: ComposeService,
+  expected: SecurityContract,
+): boolean {
+  return (
+    service.user === expected.user &&
+    service.read_only === expected.readOnly &&
+    exactStringArray(service.cap_drop, expected.capDrop) &&
+    exactStringArray(service.security_opt, expected.securityOpt) &&
+    exactStringArray(service.tmpfs, expected.tmpfs) &&
+    exactStringArray(service.group_add, expected.groupAdd) &&
+    service.cap_add === undefined &&
+    service.devices === undefined &&
+    service.ipc === undefined &&
+    service.network_mode === undefined &&
+    service.pid === undefined &&
+    service.privileged === undefined &&
+    service.sysctls === undefined &&
+    service.uts === undefined
+  );
+}
+
+function expectedSecretPath(
+  stackName: ReleaseStackInput["name"],
+  source: string,
+  environment: Readonly<Record<string, string>>,
+): string {
+  if (source === "admin_access_htpasswd") {
+    return `${environment.TF_ADMIN_CREDENTIAL_DIRECTORY}/admin_access_htpasswd`;
+  }
+  const directory =
+    stackName === "apollo-platform"
+      ? environment.PLATFORM_SECRET_DIRECTORY
+      : environment.TF_SECRET_DIRECTORY;
+  return `${directory}/${source}`;
+}
+
 function networkKeys(service: ComposeService): string[] {
   if (Array.isArray(service.networks)) return [...service.networks];
   return Object.keys(service.networks ?? {});
@@ -453,15 +1383,16 @@ function validateImage(
     return undefined;
   }
   const match = image.match(digestPattern);
-  if (
-    match?.groups?.digest === undefined ||
-    (!image.includes("/") && !image.startsWith("redis@"))
-  ) {
+  if (match?.groups?.digest === undefined) {
     addError(errors, "mutable_image", context);
     return undefined;
   }
   if (match.groups.digest === zeroDigest) {
     addError(errors, "placeholder_image_digest", context);
+    return undefined;
+  }
+  if (parseImmutableImage(image) === undefined) {
+    addError(errors, "mutable_image", context);
     return undefined;
   }
   return match.groups.digest;
@@ -732,6 +1663,13 @@ export function validateCoolifyRelease(
     { networks: Set<string>; volumes: Set<string> }
   >();
   const stacksByName = new Map<ReleaseStackInput["name"], ReleaseStackInput>();
+  validateReleaseEnvironment(input, errors);
+  const artifactReferences = validateReleaseArtifact(input, errors);
+  const expectedImageReferences = validateReleaseImages(
+    input,
+    artifactReferences,
+    errors,
+  );
 
   for (const name of Object.keys(input.environment).sort()) {
     if (secretLikeName.test(name) && !allowedReleaseSecretLikeNames.has(name)) {
@@ -765,6 +1703,7 @@ export function validateCoolifyRelease(
     if (stack.compose.name !== stack.name) {
       addError(errors, "stack_name", { stack: stack.name });
     }
+    validateResourceDefinitions(stack, errors);
     const expectedServices = new Set(expectedServiceNames[stackName]);
     const actualServiceNames = Object.keys(stack.compose.services);
     for (const serviceName of expectedServices) {
@@ -787,8 +1726,23 @@ export function validateCoolifyRelease(
     const expectedDefinitions = expectedSecretDefinitionNames(stackName);
     const actualDefinitions = new Set(Object.keys(stack.compose.secrets ?? {}));
     for (const source of expectedDefinitions) {
+      const definition = stack.compose.secrets?.[source];
       if (!actualDefinitions.has(source)) {
         addError(errors, "missing_secret_definition", {
+          stack: stackName,
+          field: "secrets",
+        });
+      } else if (
+        definition?.file !==
+          expectedSecretPath(stackName, source, input.environment) ||
+        !exactKeys(
+          definition as Record<string, unknown>,
+          definition?.name === undefined ? ["file"] : ["file", "name"],
+        ) ||
+        (definition.name !== undefined &&
+          definition.name !== `${stackName}_${source}`)
+      ) {
+        addError(errors, "secret_definition_path", {
           stack: stackName,
           field: "secrets",
         });
@@ -816,6 +1770,21 @@ export function validateCoolifyRelease(
       if (service === undefined) continue;
       const context = { stack: stackName, service: serviceName };
       const digest = validateImage(service.image, errors, context);
+      const parsedImage = parseImmutableImage(service.image);
+      const imageName = serviceArtifactImages[serviceName];
+      if (
+        parsedImage !== undefined &&
+        input.mode === "production" &&
+        parsedImage.repository !== approvedImageRepositories[imageName]
+      ) {
+        addError(errors, "image_repository", context);
+      }
+      if (
+        imageName === undefined ||
+        service.image !== expectedImageReferences.get(imageName)
+      ) {
+        addError(errors, "image_provenance", context);
+      }
       if (service.build !== undefined) {
         addError(errors, "build_entry", context);
       }
@@ -850,6 +1819,44 @@ export function validateCoolifyRelease(
         errors,
         context,
       );
+
+      if (
+        !serviceNetworkContractMatches(
+          service,
+          expectedServiceNetworks[serviceName] ?? {},
+        )
+      ) {
+        addError(errors, "service_network_contract", context);
+      }
+      if (
+        !persistentMountContractMatches(
+          service,
+          expectedPersistentMounts[serviceName] ?? [],
+        )
+      ) {
+        addError(errors, "persistent_mount_contract", context);
+      }
+      if (
+        !dependencyContractMatches(
+          service,
+          expectedDependencies[serviceName] ?? {},
+        )
+      ) {
+        addError(errors, "dependency_contract", context);
+      }
+      if (
+        !exactStringArray(service.profiles, expectedProfiles[serviceName] ?? [])
+      ) {
+        addError(errors, "profile_contract", context);
+      }
+      if (
+        !securityContractMatches(
+          service,
+          expectedSecurity[serviceName] ?? defaultSecurity,
+        )
+      ) {
+        addError(errors, "security_contract", context);
+      }
 
       for (const network of networkKeys(service)) {
         if (stack.compose.networks?.[network] === undefined) {
@@ -952,6 +1959,37 @@ function parseEnvironment(path: string): Record<string, string> {
   return environment;
 }
 
+const composeAmbientEnvironmentAllowlist = [
+  "COMSPEC",
+  "ComSpec",
+  "HOME",
+  "PATH",
+  "PATHEXT",
+  "Path",
+  "ProgramFiles",
+  "ProgramW6432",
+  "SystemRoot",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "USERPROFILE",
+  "WINDIR",
+] as const;
+
+export function isolatedComposeEnvironment(
+  environment: Record<string, string>,
+  ambient: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const isolated: NodeJS.ProcessEnv = {};
+  for (const name of composeAmbientEnvironmentAllowlist) {
+    if (ambient[name] !== undefined) isolated[name] = ambient[name];
+  }
+  for (const [name, value] of Object.entries(environment)) {
+    isolated[name] = value;
+  }
+  return isolated;
+}
+
 function renderCompose(
   repositoryRoot: string,
   envFile: string,
@@ -976,7 +2014,7 @@ function renderCompose(
     {
       cwd: repositoryRoot,
       encoding: "utf8",
-      env: { ...process.env, ...environment },
+      env: isolatedComposeEnvironment(environment),
       windowsHide: true,
     },
   );
@@ -987,16 +2025,92 @@ function renderCompose(
   };
 }
 
+const simpleCliErrorCodes = new Set([
+  "invalid_arguments",
+  "invalid_release_environment",
+  "invalid_release_manifest",
+  "invalid_validation_mode",
+  "missing_env_file",
+  "missing_release_manifest",
+]);
+
+export function sanitizeCoolifyReleaseError(
+  error: unknown,
+): ReleaseValidationError {
+  if (!(error instanceof Error)) return { code: "release_error" };
+  if (simpleCliErrorCodes.has(error.message)) {
+    return { code: error.message };
+  }
+  const composeFailure = error.message.match(
+    /^compose_render_failed:(apollo-platform|apollo-tf)$/,
+  );
+  if (composeFailure?.[1] !== undefined) {
+    return { code: "compose_render_failed", stack: composeFailure[1] };
+  }
+  return { code: "release_error" };
+}
+
+function parseCliArguments(argv: string[]): {
+  envFile: string;
+  mode: ReleaseValidationMode;
+  releaseManifest?: string;
+} {
+  const values = new Map<string, string>();
+  const allowed = new Set(["--env-file", "--mode", "--release-manifest"]);
+  for (let index = 0; index < argv.length; index += 2) {
+    const flag = argv[index];
+    const value = argv[index + 1];
+    if (
+      flag === undefined ||
+      value === undefined ||
+      !allowed.has(flag) ||
+      values.has(flag) ||
+      value.startsWith("--")
+    ) {
+      throw new Error("invalid_arguments");
+    }
+    values.set(flag, value);
+  }
+  const envFile = values.get("--env-file");
+  if (envFile === undefined) throw new Error("missing_env_file");
+  const modeValue = values.get("--mode");
+  if (modeValue !== "production" && modeValue !== "loopback-local-smoke") {
+    throw new Error("invalid_validation_mode");
+  }
+  const releaseManifest = values.get("--release-manifest");
+  if (modeValue === "production" && releaseManifest === undefined) {
+    throw new Error("missing_release_manifest");
+  }
+  if (modeValue === "loopback-local-smoke" && releaseManifest !== undefined) {
+    throw new Error("invalid_arguments");
+  }
+  return { envFile, mode: modeValue, releaseManifest };
+}
+
+function parseReleaseArtifact(path: string): ReleaseArtifact {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw new Error("invalid_release_manifest");
+  }
+  if (!isRecord(parsed)) throw new Error("invalid_release_manifest");
+  return parsed as ReleaseArtifact;
+}
+
 export function runCoolifyReleaseCli(argv: string[]): number {
   try {
-    const envFlag = argv.indexOf("--env-file");
-    const envArgument = envFlag >= 0 ? argv[envFlag + 1] : undefined;
-    if (envArgument === undefined) throw new Error("missing_env_file");
-
+    const arguments_ = parseCliArguments(argv);
     const sourcePath = fileURLToPath(import.meta.url);
     const repositoryRoot = resolve(dirname(sourcePath), "../..");
-    const envFile = resolve(repositoryRoot, envArgument);
+    const envFile = resolve(repositoryRoot, arguments_.envFile);
     const environment = parseEnvironment(envFile);
+    const releaseArtifact =
+      arguments_.releaseManifest === undefined
+        ? undefined
+        : parseReleaseArtifact(
+            resolve(repositoryRoot, arguments_.releaseManifest),
+          );
     const stacks = [
       renderCompose(
         repositoryRoot,
@@ -1014,15 +2128,18 @@ export function runCoolifyReleaseCli(argv: string[]): number {
         ["baseline"],
       ),
     ];
-    const result = validateCoolifyRelease({ environment, stacks });
+    const result = validateCoolifyRelease({
+      environment,
+      mode: arguments_.mode,
+      releaseArtifact,
+      stacks,
+    });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return result.ok ? 0 : 1;
   } catch (error) {
-    const message = error instanceof Error ? error.message : "release_error";
-    const [code, stack] = message.split(":", 2);
     const result: ReleaseValidationResult = {
       ok: false,
-      errors: [{ code, ...(stack === undefined ? {} : { stack }) }],
+      errors: [sanitizeCoolifyReleaseError(error)],
     };
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return 1;

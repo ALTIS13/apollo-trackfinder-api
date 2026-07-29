@@ -48,12 +48,12 @@ services:
       - -c
       - |
         file=/run/secrets/admin_dashboard_token
-        test -f "$file" && test -r "$file"
-        size="$(wc -c < "$file")"
-        case "$size" in ""|*[!0-9]*) exit 1 ;; esac
-        test "$size" -ge 32 && test "$size" -le 4096
-        ! grep -q "$(printf '\r')" "$file"
-        test "$(wc -l < "$file" | tr -d ' ')" = 0
+        test -f "$$file" && test -r "$$file"
+        size="$$(wc -c < "$$file")"
+        case "$$size" in ""|*[!0-9]*) exit 1 ;; esac
+        test "$$size" -ge 32 && test "$$size" -le 4096
+        ! grep -q "$$(printf '\r')" "$$file"
+        test "$$(wc -l < "$$file" | tr -d ' ')" = 0
     secrets:
       - source: admin_dashboard_token
         target: admin_dashboard_token
@@ -62,8 +62,6 @@ services:
         mode: "0400"
     security_opt:
       - no-new-privileges:true
-    cap_drop:
-      - ALL
 secrets:
   admin_dashboard_token:
     file: ${APOLLO_ADMIN_DASHBOARD_TOKEN_FILE:?}

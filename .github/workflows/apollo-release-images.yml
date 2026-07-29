@@ -149,26 +149,28 @@ jobs:
         run: |
           set -euo pipefail
           images=(
-            "platform-api ghcr.io/altis13/apollo-platform-api"
-            "platform-postgres ghcr.io/altis13/apollo-platform-postgres"
-            "tf-admin ghcr.io/altis13/apollo-tf-admin"
-            "tf-api ghcr.io/altis13/apollo-tf-api"
-            "tf-download-redis ghcr.io/altis13/apollo-tf-download-redis"
-            "tf-download-worker ghcr.io/altis13/apollo-tf-download-worker"
-            "tf-integrations ghcr.io/altis13/apollo-tf-integrations"
-            "tf-integrations-postgres ghcr.io/altis13/apollo-tf-integrations-postgres"
-            "tf-postgres ghcr.io/altis13/apollo-tf-postgres"
-            "tf-search ghcr.io/altis13/apollo-tf-search"
-            "tf-web ghcr.io/altis13/apollo-tf-web"
+            "platform-api ghcr.io/altis13/apollo-platform-api ${GITHUB_SHA}"
+            "platform-postgres ghcr.io/altis13/apollo-platform-postgres ${GITHUB_SHA}"
+            "redis docker.io/library/redis 7-bookworm"
+            "tf-admin ghcr.io/altis13/apollo-tf-admin ${GITHUB_SHA}"
+            "tf-api ghcr.io/altis13/apollo-tf-api ${GITHUB_SHA}"
+            "tf-download-redis ghcr.io/altis13/apollo-tf-download-redis ${GITHUB_SHA}"
+            "tf-download-worker ghcr.io/altis13/apollo-tf-download-worker ${GITHUB_SHA}"
+            "tf-integrations ghcr.io/altis13/apollo-tf-integrations ${GITHUB_SHA}"
+            "tf-integrations-postgres ghcr.io/altis13/apollo-tf-integrations-postgres ${GITHUB_SHA}"
+            "tf-postgres ghcr.io/altis13/apollo-tf-postgres ${GITHUB_SHA}"
+            "tf-search ghcr.io/altis13/apollo-tf-search ${GITHUB_SHA}"
+            "tf-web ghcr.io/altis13/apollo-tf-web ${GITHUB_SHA}"
           )
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
           : > apollo-release-images.jsonl
           for item in "${images[@]}"; do
-            read -r name image <<<"$item"
+            read -r name image tag <<<"$item"
             digest=
             for attempt in 1 2 3 4 5; do
               digest="$(
                 docker buildx imagetools inspect \
-                  "$image:${GITHUB_SHA}" \
+                  "$image:$tag" \
                   --format '{{json .Manifest.Digest}}' 2>/dev/null |
                   tr -d '"'
               )" || true
@@ -185,11 +187,15 @@ jobs:
             done
             jq -cn \
               --arg name "$name" \
+              --arg repository "$image" \
               --arg imageDigest "$digest" \
-              '{name: $name, imageDigest: $imageDigest}' \
+              --arg imageReference "$image@$digest" \
+              '{name: $name, repository: $repository, imageDigest: $imageDigest, imageReference: $imageReference}' \
               >> apollo-release-images.jsonl
           done
-          jq -s '{images: sort_by(.name)}' \
+          jq -s \
+            --arg sourceCommit "$GITHUB_SHA" \
+            '{formatVersion: 1, sourceCommit: $sourceCommit, images: sort_by(.name)}' \
             apollo-release-images.jsonl \
             > apollo-release-manifest.json
       - name: Upload release manifest

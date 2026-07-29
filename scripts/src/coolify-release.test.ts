@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import * as coolifyReleaseModule from "./coolify-release.js";
 import {
   validateCoolifyRelease,
   type ComposeSecretMount,
@@ -8,8 +9,6 @@ import {
   type ReleaseValidationInput,
 } from "./coolify-release.js";
 
-const platformDigest = `sha256:${"1".repeat(64)}`;
-const tfDigest = `sha256:${"2".repeat(64)}`;
 const platformServices = [
   "platform-api",
   "platform-migrate",
@@ -58,6 +57,334 @@ const publishedPorts: Readonly<
   "tf-api": { published: 18201, target: 8080 },
   "tf-web": { published: 18202, target: 80 },
   "tf-admin": { published: 18203, target: 80 },
+};
+const sourceCommit = "a".repeat(40);
+const imageNames = [
+  "platform-api",
+  "platform-postgres",
+  "redis",
+  "tf-admin",
+  "tf-api",
+  "tf-download-redis",
+  "tf-download-worker",
+  "tf-integrations",
+  "tf-integrations-postgres",
+  "tf-postgres",
+  "tf-search",
+  "tf-web",
+] as const;
+type ImageName = (typeof imageNames)[number];
+
+const serviceImageNames: Readonly<Record<ServiceName, ImageName>> = {
+  "platform-api": "platform-api",
+  "platform-migrate": "platform-api",
+  "platform-postgres": "platform-postgres",
+  "platform-redis": "redis",
+  "tf-admin": "tf-admin",
+  "tf-api": "tf-api",
+  "tf-baseline": "tf-api",
+  "tf-download-redis": "tf-download-redis",
+  "tf-download-worker": "tf-download-worker",
+  "tf-integrations": "tf-integrations",
+  "tf-integrations-migrate": "tf-integrations",
+  "tf-integrations-postgres": "tf-integrations-postgres",
+  "tf-migrate": "tf-api",
+  "tf-postgres": "tf-postgres",
+  "tf-redis": "redis",
+  "tf-role-bootstrap": "tf-postgres",
+  "tf-search": "tf-search",
+  "tf-web": "tf-web",
+};
+const imageRepositories = Object.fromEntries(
+  imageNames.map((name) => [
+    name,
+    name === "redis"
+      ? "docker.io/library/redis"
+      : `ghcr.io/altis13/apollo-${name}`,
+  ]),
+) as Record<ImageName, string>;
+const imageDigests = Object.fromEntries(
+  imageNames.map((name, index) => [
+    name,
+    `sha256:${(index + 1).toString(16).repeat(64)}`,
+  ]),
+) as Record<ImageName, string>;
+
+const exactNetworks: Readonly<
+  Record<
+    ReleaseStackInput["name"],
+    Record<string, { external?: boolean; internal?: boolean; name: string }>
+  >
+> = {
+  "apollo-platform": {
+    "platform-bridge": {
+      internal: true,
+      name: "apollo-platform-bridge-v1",
+    },
+    "platform-data": { internal: true, name: "apollo-platform-data-v1" },
+    "platform-edge": { name: "apollo-platform-edge-v1" },
+  },
+  "apollo-tf": {
+    "platform-bridge": {
+      external: true,
+      name: "apollo-platform-bridge-v1",
+    },
+    "tf-data": { internal: true, name: "apollo-tf-data-v1" },
+    "tf-download-control": {
+      internal: true,
+      name: "apollo-tf-download-control-v1",
+    },
+    "tf-download-egress": { name: "apollo-tf-download-egress-v1" },
+    "tf-download-queue": {
+      internal: true,
+      name: "apollo-tf-download-queue-v1",
+    },
+    "tf-edge": { name: "apollo-tf-edge-v1" },
+    "tf-integrations-control": {
+      internal: true,
+      name: "apollo-tf-integrations-control-v1",
+    },
+    "tf-integrations-data": {
+      internal: true,
+      name: "apollo-tf-integrations-data-v1",
+    },
+    "tf-integrations-egress": {
+      name: "apollo-tf-integrations-egress-v1",
+    },
+    "tf-search-control": {
+      internal: true,
+      name: "apollo-tf-search-control-v1",
+    },
+    "tf-search-egress": { name: "apollo-tf-search-egress-v1" },
+  },
+};
+const exactVolumes: Readonly<
+  Record<ReleaseStackInput["name"], Record<string, { name: string }>>
+> = {
+  "apollo-platform": {
+    "platform-postgres-data": { name: "apollo-platform-postgres-v1" },
+    "platform-redis-data": { name: "apollo-platform-redis-v1" },
+  },
+  "apollo-tf": {
+    "tf-download-redis-data": { name: "apollo-tf-download-redis-v1" },
+    "tf-downloads": { name: "apollo-tf-downloads-v1" },
+    "tf-integrations-postgres-data": {
+      name: "apollo-tf-integrations-postgres-v1",
+    },
+    "tf-postgres-data": { name: "apollo-tf-postgres-v1" },
+    "tf-redis-data": { name: "apollo-tf-redis-v1" },
+  },
+};
+const exactServiceNetworks: Readonly<
+  Record<ServiceName, Record<string, { gw_priority?: number } | null>>
+> = {
+  "platform-api": {
+    "platform-bridge": null,
+    "platform-data": null,
+    "platform-edge": null,
+  },
+  "platform-migrate": { "platform-data": null },
+  "platform-postgres": { "platform-data": null },
+  "platform-redis": { "platform-data": null },
+  "tf-admin": { "tf-edge": null },
+  "tf-api": {
+    "platform-bridge": null,
+    "tf-data": null,
+    "tf-download-control": null,
+    "tf-download-queue": null,
+    "tf-edge": null,
+    "tf-integrations-control": null,
+    "tf-search-control": null,
+  },
+  "tf-baseline": { "tf-data": null },
+  "tf-download-redis": { "tf-download-queue": null },
+  "tf-download-worker": {
+    "tf-download-control": null,
+    "tf-download-egress": { gw_priority: 1 },
+    "tf-download-queue": null,
+  },
+  "tf-integrations": {
+    "tf-integrations-control": null,
+    "tf-integrations-data": null,
+    "tf-integrations-egress": { gw_priority: 1 },
+  },
+  "tf-integrations-migrate": { "tf-integrations-data": null },
+  "tf-integrations-postgres": { "tf-integrations-data": null },
+  "tf-migrate": { "tf-data": null },
+  "tf-postgres": { "tf-data": null },
+  "tf-redis": { "tf-data": null },
+  "tf-role-bootstrap": { "tf-data": null },
+  "tf-search": {
+    "tf-search-control": null,
+    "tf-search-egress": { gw_priority: 1 },
+  },
+  "tf-web": { "tf-edge": null },
+};
+const exactPersistentMounts: Readonly<
+  Record<ServiceName, readonly [string, string][]>
+> = {
+  "platform-api": [],
+  "platform-migrate": [],
+  "platform-postgres": [["platform-postgres-data", "/var/lib/postgresql/data"]],
+  "platform-redis": [["platform-redis-data", "/data"]],
+  "tf-admin": [],
+  "tf-api": [],
+  "tf-baseline": [],
+  "tf-download-redis": [["tf-download-redis-data", "/data"]],
+  "tf-download-worker": [["tf-downloads", "/var/lib/apollo-tf/downloads"]],
+  "tf-integrations": [],
+  "tf-integrations-migrate": [],
+  "tf-integrations-postgres": [
+    ["tf-integrations-postgres-data", "/var/lib/postgresql/data"],
+  ],
+  "tf-migrate": [],
+  "tf-postgres": [["tf-postgres-data", "/var/lib/postgresql/data"]],
+  "tf-redis": [["tf-redis-data", "/data"]],
+  "tf-role-bootstrap": [],
+  "tf-search": [],
+  "tf-web": [],
+};
+const exactDependencies: Readonly<
+  Record<ServiceName, Record<string, { condition: string; required: boolean }>>
+> = {
+  "platform-api": {
+    "platform-migrate": {
+      condition: "service_completed_successfully",
+      required: true,
+    },
+    "platform-redis": { condition: "service_healthy", required: true },
+  },
+  "platform-migrate": {
+    "platform-postgres": { condition: "service_healthy", required: true },
+  },
+  "platform-postgres": {},
+  "platform-redis": {},
+  "tf-admin": {
+    "tf-api": { condition: "service_healthy", required: true },
+  },
+  "tf-api": {
+    "tf-download-redis": { condition: "service_healthy", required: true },
+    "tf-download-worker": { condition: "service_healthy", required: true },
+    "tf-integrations": { condition: "service_healthy", required: true },
+    "tf-migrate": {
+      condition: "service_completed_successfully",
+      required: true,
+    },
+    "tf-postgres": { condition: "service_healthy", required: true },
+    "tf-redis": { condition: "service_healthy", required: true },
+    "tf-search": { condition: "service_healthy", required: true },
+  },
+  "tf-baseline": {
+    "tf-role-bootstrap": {
+      condition: "service_completed_successfully",
+      required: true,
+    },
+  },
+  "tf-download-redis": {},
+  "tf-download-worker": {
+    "tf-download-redis": { condition: "service_healthy", required: true },
+  },
+  "tf-integrations": {
+    "tf-integrations-migrate": {
+      condition: "service_completed_successfully",
+      required: true,
+    },
+    "tf-integrations-postgres": {
+      condition: "service_healthy",
+      required: true,
+    },
+  },
+  "tf-integrations-migrate": {
+    "tf-integrations-postgres": {
+      condition: "service_healthy",
+      required: true,
+    },
+  },
+  "tf-integrations-postgres": {},
+  "tf-migrate": {
+    "tf-postgres": { condition: "service_healthy", required: true },
+  },
+  "tf-postgres": {},
+  "tf-redis": {},
+  "tf-role-bootstrap": {
+    "tf-postgres": { condition: "service_healthy", required: true },
+  },
+  "tf-search": {},
+  "tf-web": {},
+};
+const exactProfiles: Readonly<Partial<Record<ServiceName, string[]>>> = {
+  "tf-baseline": ["baseline"],
+  "tf-role-bootstrap": ["baseline"],
+};
+const hardenedServices: Readonly<
+  Partial<
+    Record<
+      ServiceName,
+      {
+        group_add?: string[];
+        tmpfs: string[];
+        user: string;
+      }
+    >
+  >
+> = {
+  "platform-api": {
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"],
+    user: "10001:10001",
+  },
+  "platform-migrate": {
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"],
+    user: "10001:10001",
+  },
+  "platform-redis": {
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"],
+    user: "999:999",
+  },
+  "tf-api": {
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"],
+    user: "10001:10001",
+  },
+  "tf-baseline": {
+    group_add: ["10002"],
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"],
+    user: "10001:10001",
+  },
+  "tf-download-redis": {
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"],
+    user: "999:999",
+  },
+  "tf-download-worker": {
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"],
+    user: "10001:10001",
+  },
+  "tf-integrations": {
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"],
+    user: "10001:10001",
+  },
+  "tf-integrations-migrate": {
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"],
+    user: "10001:10001",
+  },
+  "tf-migrate": {
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"],
+    user: "10001:10001",
+  },
+  "tf-redis": {
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"],
+    user: "999:999",
+  },
+  "tf-role-bootstrap": {
+    group_add: ["10002"],
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"],
+    user: "999:999",
+  },
+  "tf-search": {
+    tmpfs: [
+      "/tmp:rw,noexec,nosuid,size=32m",
+      "/tmp/yt-dlp:rw,noexec,nosuid,size=64m",
+    ],
+    user: "10001:10001",
+  },
 };
 
 function mount(
@@ -231,10 +558,9 @@ function serviceFixture(
   name: ServiceName,
 ): ComposeService {
   const isLongRunning = longRunningServices.has(name);
-  const network = stackName === "apollo-platform" ? "platform-edge" : "tf-edge";
-  const digest = stackName === "apollo-platform" ? platformDigest : tfDigest;
+  const imageName = serviceImageNames[name];
   const service: ComposeService = {
-    image: `ghcr.io/altis13/apollo-${name}@${digest}`,
+    image: `${imageRepositories[imageName]}@${imageDigests[imageName]}`,
     init: true,
     restart: isLongRunning ? "unless-stopped" : "no",
     stop_grace_period: "20s",
@@ -249,9 +575,30 @@ function serviceFixture(
       options: { "max-file": "5", "max-size": "10m" },
     },
     environment: { ...(exactSecretFileEnvironment[name] ?? {}) },
-    networks: { [network]: null },
+    networks: structuredClone(exactServiceNetworks[name]),
     secrets: exactSecretMounts[name].map((secret) => ({ ...secret })),
   };
+  Object.assign(service, {
+    depends_on: structuredClone(exactDependencies[name]),
+    profiles: structuredClone(exactProfiles[name] ?? []),
+    volumes: exactPersistentMounts[name].map(([source, target]) => ({
+      source,
+      target,
+      type: "volume",
+      volume: {},
+    })),
+  });
+  const hardened = hardenedServices[name];
+  if (hardened !== undefined) {
+    Object.assign(service, {
+      cap_drop: ["ALL"],
+      group_add: structuredClone(hardened.group_add ?? []),
+      read_only: true,
+      security_opt: ["no-new-privileges:true"],
+      tmpfs: structuredClone(hardened.tmpfs),
+      user: hardened.user,
+    });
+  }
 
   if (isLongRunning) {
     service.healthcheck = {
@@ -297,30 +644,72 @@ function secretDefinitions(
   );
   sources.delete("");
   return Object.fromEntries(
-    [...sources]
-      .sort()
-      .map((source) => [source, { file: `${directory}/${source}` }]),
+    [...sources].sort().map((source) => [
+      source,
+      {
+        file:
+          source === "admin_access_htpasswd"
+            ? "/var/lib/apollo-tf/admin-credentials/generation-1/admin_access_htpasswd"
+            : `${directory}/${source}`,
+      },
+    ]),
   );
 }
 
 function validInput(): ReleaseValidationInput {
   const platform = serviceMap("apollo-platform", platformServices);
   const tf = serviceMap("apollo-tf", tfServices);
-  platform["platform-postgres"].volumes = [
-    "platform-runtime-data:/var/lib/postgresql/data",
-  ];
-  tf["tf-postgres"].volumes = ["tf-runtime-data:/var/lib/postgresql/data"];
 
   return {
+    mode: "production",
+    releaseArtifact: {
+      formatVersion: 1,
+      sourceCommit,
+      images: imageNames.map((name) => ({
+        imageDigest: imageDigests[name],
+        imageReference: `${imageRepositories[name]}@${imageDigests[name]}`,
+        name,
+        repository: imageRepositories[name],
+      })),
+    },
     environment: {
       PLATFORM_API_PORT: "18200",
+      PLATFORM_ALLOWED_ORIGINS: "https://apollot.ru,https://admin.apollot.ru",
       PLATFORM_PUBLIC_ORIGIN: "https://api.apollot.ru",
+      PLATFORM_API_VERSION: "release-a",
+      PLATFORM_DEPLOYED_AT: "2026-07-28T00:00:00Z",
       PLATFORM_SECRET_DIRECTORY: "/var/lib/apollo-platform/secrets",
+      RELEASE_SOURCE_COMMIT: sourceCommit,
       TF_ADMIN_PUBLIC_ORIGIN: "https://admin.apollot.ru",
+      TF_ADMIN_CREDENTIAL_DIRECTORY:
+        "/var/lib/apollo-tf/admin-credentials/generation-1",
+      TF_ADMIN_PORT: "18203",
       TF_API_PORT: "18201",
       TF_API_PUBLIC_ORIGIN: "https://api.tf.apollot.ru",
+      TF_API_VERSION: "release-a",
+      TF_DEPLOYED_AT: "2026-07-28T00:00:00Z",
+      TF_DOWNLOAD_DEPLOYED_AT: "2026-07-28T00:00:00Z",
+      TF_DOWNLOAD_VERSION: "release-a",
+      TF_INTEGRATIONS_DEPLOYED_AT: "2026-07-28T00:00:00Z",
+      TF_INTEGRATIONS_VERSION: "release-a",
       TF_PUBLIC_ORIGIN: "https://tf.apollot.ru",
+      TF_SEARCH_DEPLOYED_AT: "2026-07-28T00:00:00Z",
+      TF_SEARCH_VERSION: "release-a",
       TF_SECRET_DIRECTORY: "/var/lib/apollo-tf/secrets",
+      TF_WEB_PORT: "18202",
+      PLATFORM_API_IMAGE: `${imageRepositories["platform-api"]}@${imageDigests["platform-api"]}`,
+      PLATFORM_POSTGRES_IMAGE: `${imageRepositories["platform-postgres"]}@${imageDigests["platform-postgres"]}`,
+      PLATFORM_REDIS_IMAGE: `${imageRepositories.redis}@${imageDigests.redis}`,
+      TF_ADMIN_IMAGE: `${imageRepositories["tf-admin"]}@${imageDigests["tf-admin"]}`,
+      TF_API_IMAGE: `${imageRepositories["tf-api"]}@${imageDigests["tf-api"]}`,
+      TF_DOWNLOAD_REDIS_IMAGE: `${imageRepositories["tf-download-redis"]}@${imageDigests["tf-download-redis"]}`,
+      TF_DOWNLOAD_WORKER_IMAGE: `${imageRepositories["tf-download-worker"]}@${imageDigests["tf-download-worker"]}`,
+      TF_INTEGRATIONS_IMAGE: `${imageRepositories["tf-integrations"]}@${imageDigests["tf-integrations"]}`,
+      TF_INTEGRATIONS_POSTGRES_IMAGE: `${imageRepositories["tf-integrations-postgres"]}@${imageDigests["tf-integrations-postgres"]}`,
+      TF_POSTGRES_IMAGE: `${imageRepositories["tf-postgres"]}@${imageDigests["tf-postgres"]}`,
+      TF_REDIS_IMAGE: `${imageRepositories.redis}@${imageDigests.redis}`,
+      TF_SEARCH_IMAGE: `${imageRepositories["tf-search"]}@${imageDigests["tf-search"]}`,
+      TF_WEB_IMAGE: `${imageRepositories["tf-web"]}@${imageDigests["tf-web"]}`,
     },
     stacks: [
       {
@@ -332,14 +721,8 @@ function validInput(): ReleaseValidationInput {
             platformServices,
             "/var/lib/apollo-platform/secrets",
           ),
-          networks: {
-            "platform-edge": { name: "apollo-platform-edge-v1" },
-          },
-          volumes: {
-            "platform-runtime-data": {
-              name: "apollo-platform-runtime-v1",
-            },
-          },
+          networks: structuredClone(exactNetworks["apollo-platform"]),
+          volumes: structuredClone(exactVolumes["apollo-platform"]),
         },
       },
       {
@@ -348,22 +731,24 @@ function validInput(): ReleaseValidationInput {
           name: "apollo-tf",
           services: tf,
           secrets: secretDefinitions(tfServices, "/var/lib/apollo-tf/secrets"),
-          networks: {
-            "tf-edge": { name: "apollo-tf-edge-v1" },
-          },
-          volumes: {
-            "tf-runtime-data": { name: "apollo-tf-runtime-v1" },
-          },
+          networks: structuredClone(exactNetworks["apollo-tf"]),
+          volumes: structuredClone(exactVolumes["apollo-tf"]),
         },
       },
     ],
-  };
+  } as ReleaseValidationInput;
 }
 
 function errorCodes(input: ReleaseValidationInput): readonly string[] {
   const result = validateCoolifyRelease(input);
   expect(result.ok).toBe(false);
   return result.ok ? [] : result.errors.map(({ code }) => code);
+}
+
+type ExactValidationInput = ReleaseValidationInput;
+
+function exactInput(): ExactValidationInput {
+  return validInput() as ExactValidationInput;
 }
 
 describe("validateCoolifyRelease", () => {
@@ -407,7 +792,7 @@ describe("validateCoolifyRelease", () => {
     input.stacks[0].compose.services["platform-postgres"].volumes = [
       {
         type: "volume",
-        source: "platform-runtime-data",
+        source: "platform-postgres-data",
         target: "/var/lib/postgresql/data",
         volume: {},
       },
@@ -725,8 +1110,8 @@ describe("validateCoolifyRelease", () => {
     const input = validInput();
     input.stacks[1].compose.networks!["tf-edge"].name =
       "apollo-platform-edge-v1";
-    input.stacks[1].compose.volumes!["tf-runtime-data"].name =
-      "apollo-platform-runtime-v1";
+    input.stacks[1].compose.volumes!["tf-postgres-data"].name =
+      "apollo-platform-postgres-v1";
     expect(errorCodes(input)).toEqual(
       expect.arrayContaining(["shared_network", "shared_volume"]),
     );
@@ -758,4 +1143,337 @@ describe("validateCoolifyRelease", () => {
       expect(errorCodes(input)).toContain("secret_mount_metadata");
     },
   );
+
+  it("rejects an omitted explicit validation mode", () => {
+    const input = exactInput();
+    delete (input as Partial<Pick<ReleaseValidationInput, "mode">>).mode;
+    expect(errorCodes(input)).toContain("invalid_validation_mode");
+  });
+
+  it("rejects an omitted or unexpected release environment key", () => {
+    const missing = exactInput();
+    delete missing.environment["TF_DOWNLOAD_DEPLOYED_AT"];
+    expect(errorCodes(missing)).toContain("release_environment_keys");
+
+    const unexpected = exactInput();
+    unexpected.environment["UNRELATED_AMBIENT_VALUE"] = "sentinel";
+    expect(errorCodes(unexpected)).toContain("release_environment_keys");
+  });
+
+  it("rejects an all-zero source commit in both environment and artifact", () => {
+    const input = exactInput();
+    input.environment["RELEASE_SOURCE_COMMIT"] = "0".repeat(40);
+    input.releaseArtifact!.sourceCommit = "0".repeat(40);
+    expect(errorCodes(input)).toContain("release_environment_value");
+  });
+
+  it("requires every production origin and ingress value to equal the approved contract", () => {
+    const input = exactInput();
+    input.environment["PLATFORM_ALLOWED_ORIGINS"] = "https://api.apollot.ru";
+    input.environment["TF_API_PORT"] = "19201";
+    expect(errorCodes(input)).toEqual(
+      expect.arrayContaining([
+        "invalid_public_origin",
+        "release_environment_value",
+      ]),
+    );
+  });
+
+  it("rejects an approved service image from an unapproved repository", () => {
+    const input = exactInput();
+    input.stacks[0].compose.services["platform-api"].image =
+      `registry.invalid/platform-api@${imageDigests["platform-api"]}`;
+    expect(errorCodes(input)).toContain("image_repository");
+  });
+
+  it("rejects exact network and volume definition drift", () => {
+    const input = exactInput();
+    input.stacks[0].compose.networks!["platform-data"].internal = false;
+    input.stacks[1].compose.volumes!["tf-downloads"].name =
+      "apollo-tf-other-v1";
+    expect(errorCodes(input)).toEqual(
+      expect.arrayContaining(["network_contract", "volume_contract"]),
+    );
+  });
+
+  it("rejects unexpected network, volume, and secret definition options", () => {
+    const input = exactInput();
+    Object.assign(input.stacks[0].compose.networks!["platform-edge"], {
+      attachable: true,
+    });
+    Object.assign(input.stacks[0].compose.volumes!["platform-postgres-data"], {
+      driver: "local",
+    });
+    Object.assign(
+      input.stacks[0].compose.secrets!["platform_runtime_database_url"],
+      { external: true },
+    );
+    expect(errorCodes(input)).toEqual(
+      expect.arrayContaining([
+        "network_contract",
+        "secret_definition_path",
+        "volume_contract",
+      ]),
+    );
+  });
+
+  it("rejects exact service network membership and route-priority drift", () => {
+    const missing = exactInput();
+    delete (
+      missing.stacks[1].compose.services["tf-api"].networks as Record<
+        string,
+        unknown
+      >
+    )["tf-data"];
+    expect(errorCodes(missing)).toContain("service_network_contract");
+
+    const priority = exactInput();
+    (
+      priority.stacks[1].compose.services["tf-search"].networks as Record<
+        string,
+        { gw_priority?: number }
+      >
+    )["tf-search-egress"].gw_priority = 2;
+    expect(errorCodes(priority)).toContain("service_network_contract");
+
+    const aliases = exactInput();
+    (
+      aliases.stacks[1].compose.services["tf-search"].networks as Record<
+        string,
+        unknown
+      >
+    )["tf-search-control"] = { aliases: ["unexpected"] };
+    expect(errorCodes(aliases)).toContain("service_network_contract");
+  });
+
+  it("rejects exact persistent mount drift and additions", () => {
+    const input = exactInput();
+    const postgresMount =
+      input.stacks[0].compose.services["platform-postgres"].volumes![0];
+    if (typeof postgresMount !== "string") {
+      postgresMount.target = "/var/lib/postgresql/other";
+    }
+    input.stacks[1].compose.services["tf-api"].volumes!.push({
+      source: "tf-downloads",
+      target: "/unexpected",
+      type: "volume",
+    });
+    expect(errorCodes(input)).toContain("persistent_mount_contract");
+
+    const options = exactInput();
+    Object.assign(
+      options.stacks[1].compose.services["tf-postgres"].volumes![0],
+      { read_only: true },
+    );
+    expect(errorCodes(options)).toContain("persistent_mount_contract");
+  });
+
+  it("rejects exact dependency and profile drift", () => {
+    const input = exactInput();
+    const api = input.stacks[1].compose.services["tf-api"] as ComposeService & {
+      depends_on: Record<string, unknown>;
+    };
+    delete api.depends_on["tf-search"];
+    const baseline = input.stacks[1].compose.services[
+      "tf-baseline"
+    ] as ComposeService & { profiles: string[] };
+    baseline.profiles = [];
+    expect(errorCodes(input)).toEqual(
+      expect.arrayContaining(["dependency_contract", "profile_contract"]),
+    );
+
+    const optionDrift = exactInput();
+    const dependency = optionDrift.stacks[0].compose.services[
+      "platform-api"
+    ] as ComposeService & {
+      depends_on: Record<string, { restart?: boolean }>;
+    };
+    dependency.depends_on["platform-redis"]!.restart = false;
+    expect(errorCodes(optionDrift)).toContain("dependency_contract");
+  });
+
+  it("rejects exact user, filesystem, capability, tmpfs, and group controls", () => {
+    const input = exactInput();
+    Object.assign(input.stacks[1].compose.services["tf-api"], {
+      cap_drop: [],
+      read_only: false,
+      security_opt: [],
+      tmpfs: ["/tmp:rw"],
+      user: "0:0",
+    });
+    Object.assign(input.stacks[1].compose.services["tf-baseline"], {
+      group_add: [],
+    });
+    expect(errorCodes(input)).toContain("security_contract");
+
+    const namespace = exactInput();
+    Object.assign(namespace.stacks[0].compose.services["platform-postgres"], {
+      network_mode: "host",
+    });
+    expect(errorCodes(namespace)).toContain("security_contract");
+  });
+
+  it("rejects every secret definition outside its exact approved source path", () => {
+    const input = exactInput();
+    input.stacks[1].compose.secrets!["admin_access_htpasswd"].file =
+      "/tmp/sentinel-admin-access";
+    input.stacks[0].compose.secrets!["platform_runtime_database_url"].file =
+      "/tmp/sentinel-platform-runtime";
+    expect(errorCodes(input)).toContain("secret_definition_path");
+    expect(JSON.stringify(validateCoolifyRelease(input))).not.toContain(
+      "sentinel",
+    );
+  });
+
+  it("matches the release source commit and every immutable image to the workflow artifact", () => {
+    const commitMismatch = exactInput();
+    commitMismatch.releaseArtifact!.sourceCommit = "b".repeat(40);
+    expect(errorCodes(commitMismatch)).toContain("source_commit_mismatch");
+
+    const imageMismatch = exactInput();
+    imageMismatch.releaseArtifact!.images.find(
+      ({ name }) => name === "tf-api",
+    )!.imageReference =
+      `ghcr.io/altis13/apollo-tf-api@sha256:${"f".repeat(64)}`;
+    expect(errorCodes(imageMismatch)).toContain("image_provenance");
+  });
+
+  it("requires the complete exact release artifact image inventory in production", () => {
+    const missing = exactInput();
+    missing.releaseArtifact!.images.pop();
+    expect(errorCodes(missing)).toContain("release_artifact");
+
+    const repository = exactInput();
+    repository.releaseArtifact!.images[0].repository =
+      "ghcr.io/other/platform-api";
+    expect(errorCodes(repository)).toContain("release_artifact");
+  });
+
+  it("accepts local repositories only in explicit loopback-local-smoke mode", () => {
+    const input = exactInput();
+    input.mode = "loopback-local-smoke";
+    delete input.releaseArtifact;
+    for (const stack of input.stacks) {
+      for (const [serviceName, service] of Object.entries(
+        stack.compose.services,
+      )) {
+        const imageName = serviceImageNames[serviceName as ServiceName];
+        service.image = `127.0.0.1:5000/${imageName}@${imageDigests[imageName]}`;
+      }
+    }
+    for (const [name, value] of Object.entries(input.environment)) {
+      if (!name.endsWith("_IMAGE")) continue;
+      const imageName = Object.entries(serviceImageNames).find(
+        ([serviceName]) =>
+          name === `${serviceName.replaceAll("-", "_").toUpperCase()}_IMAGE`,
+      )?.[1];
+      if (imageName !== undefined) {
+        input.environment[name] =
+          `127.0.0.1:5000/${imageName}@${imageDigests[imageName]}`;
+      }
+    }
+    input.environment["PLATFORM_REDIS_IMAGE"] =
+      `127.0.0.1:5000/redis@${imageDigests.redis}`;
+    input.environment["TF_REDIS_IMAGE"] =
+      `127.0.0.1:5000/redis@${imageDigests.redis}`;
+    expect(validateCoolifyRelease(input)).toMatchObject({ ok: true });
+
+    input.mode = "production";
+    expect(errorCodes(input)).toContain("release_artifact");
+  });
+});
+
+describe("validator process boundaries", () => {
+  it("excludes ambient Compose and release values from the render environment", () => {
+    const isolate = (
+      coolifyReleaseModule as typeof coolifyReleaseModule & {
+        isolatedComposeEnvironment?: (
+          release: Record<string, string>,
+          ambient: NodeJS.ProcessEnv,
+        ) => NodeJS.ProcessEnv;
+      }
+    ).isolatedComposeEnvironment;
+    const result = isolate?.(
+      { TF_API_IMAGE: "reviewed" },
+      {
+        COMPOSE_FILE: "C:\\sentinel\\compose.yml",
+        ProgramFiles: "C:\\Program Files",
+        TF_API_IMAGE: "ambient",
+        PATH: "C:\\Windows\\System32",
+      },
+    );
+    expect(result).toEqual({
+      PATH: "C:\\Windows\\System32",
+      ProgramFiles: "C:\\Program Files",
+      TF_API_IMAGE: "reviewed",
+    });
+  });
+
+  it.each([
+    "ENOENT: no such file or directory, open '/private/sentinel/release.env'",
+    "ENOENT: no such file or directory, open 'C:\\Users\\sentinel\\release.env'",
+  ])(
+    "sanitizes arbitrary validator exceptions without a path leak",
+    (message) => {
+      const sanitize = (
+        coolifyReleaseModule as typeof coolifyReleaseModule & {
+          sanitizeCoolifyReleaseError?: (error: unknown) => {
+            code: string;
+            stack?: string;
+          };
+        }
+      ).sanitizeCoolifyReleaseError;
+      const result = sanitize?.(new Error(message));
+      expect(result).toEqual({ code: "release_error" });
+      expect(JSON.stringify(result)).not.toContain("sentinel");
+    },
+  );
+
+  it("keeps only exact allowlisted validator errors", () => {
+    const sanitize = (
+      coolifyReleaseModule as typeof coolifyReleaseModule & {
+        sanitizeCoolifyReleaseError?: (error: unknown) => {
+          code: string;
+          stack?: string;
+        };
+      }
+    ).sanitizeCoolifyReleaseError;
+    expect(sanitize?.(new Error("compose_render_failed:apollo-tf"))).toEqual({
+      code: "compose_render_failed",
+      stack: "apollo-tf",
+    });
+    expect(sanitize?.(new Error("missing_env_file"))).toEqual({
+      code: "missing_env_file",
+    });
+  });
+
+  it.each([
+    "/private/posix-sentinel/release.env",
+    "C:\\Users\\windows-sentinel\\release.env",
+  ])("does not disclose a sentinel env path through the CLI", (path) => {
+    const output: string[] = [];
+    const write = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk) => {
+        output.push(String(chunk));
+        return true;
+      });
+    try {
+      expect(
+        coolifyReleaseModule.runCoolifyReleaseCli([
+          "--env-file",
+          path,
+          "--mode",
+          "loopback-local-smoke",
+        ]),
+      ).toBe(1);
+    } finally {
+      write.mockRestore();
+    }
+    expect(JSON.parse(output.join(""))).toEqual({
+      errors: [{ code: "release_error" }],
+      ok: false,
+    });
+    expect(output.join("")).not.toContain("sentinel");
+  });
 });

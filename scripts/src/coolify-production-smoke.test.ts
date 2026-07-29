@@ -663,21 +663,24 @@ function assertOwnedBuilderInspection(
   stdout: string,
   ownership: OwnedLocalBuilder,
 ): void {
-  const names = [
-    ...stdout.matchAll(/^Name:\s*(?<value>\S+)\s*$/gm),
-  ].map((match) => match.groups?.value);
+  const names = [...stdout.matchAll(/^Name:\s*(?<value>\S+)\s*$/gm)].map(
+    (match) => match.groups?.value,
+  );
   const driver = stdout.match(/^Driver:\s*(?<value>\S+)\s*$/m)?.groups?.value;
+  const driverOptions = stdout.match(/^Driver Options:\s*(?<value>.+)\s*$/m)
+    ?.groups?.value;
   const endpoints = [
     ...stdout.matchAll(/^Endpoint:\s*(?<value>\S+)\s*$/gm),
   ].map((match) => match.groups?.value);
-  const statuses = [
-    ...stdout.matchAll(/^Status:\s*(?<value>\S+)\s*$/gm),
-  ].map((match) => match.groups?.value);
+  const statuses = [...stdout.matchAll(/^Status:\s*(?<value>\S+)\s*$/gm)].map(
+    (match) => match.groups?.value,
+  );
   if (
     names[0] !== ownership.name ||
     names[1] !== `${ownership.name}0` ||
     names.length !== 2 ||
     driver !== "docker-container" ||
+    driverOptions !== 'network="host"' ||
     endpoints.length !== 1 ||
     endpoints[0] !== ownership.context ||
     statuses.length !== 1 ||
@@ -719,6 +722,8 @@ async function createOwnedLocalBuilder(
       ownership.name,
       "--driver",
       "docker-container",
+      "--driver-opt",
+      "network=host",
       "--bootstrap",
       ownership.context,
     ],
@@ -749,6 +754,20 @@ async function createOwnedLocalBuilder(
     mounts[0]?.Type !== "volume"
   ) {
     throw new Error("task-owned builder cache inventory mismatch");
+  }
+  const networkMode = JSON.parse(
+    (
+      await docker([
+        "container",
+        "inspect",
+        ownership.container,
+        "--format",
+        "{{json .HostConfig.NetworkMode}}",
+      ])
+    ).stdout.trim(),
+  ) as string;
+  if (networkMode !== "host") {
+    throw new Error("task-owned builder network inventory mismatch");
   }
   const volume = JSON.parse(
     (
@@ -1139,11 +1158,7 @@ async function prepareAdminCredentialGeneration(
     return raw.slice(0, -1);
   };
   const adminUser = await readSourceLine("admin_access_user", 2, 129);
-  const adminPassword = await readSourceLine(
-    "admin_access_password",
-    17,
-    4097,
-  );
+  const adminPassword = await readSourceLine("admin_access_password", 17, 4097);
   if (!/^[A-Za-z0-9_.@-]{1,128}$/.test(adminUser)) {
     throw new Error("admin credential source contract failed");
   }
@@ -1178,11 +1193,10 @@ async function prepareAdminCredentialGeneration(
   );
   const htpasswdTemporary = `${htpasswd}.tmp`;
   const caddyEnvironmentTemporary = `${secrets.caddyEnvironmentPath}.tmp`;
-  await writeFile(
-    htpasswdTemporary,
-    `${adminUser}:${passwordHash}`,
-    { encoding: "utf8", mode: 0o600 },
-  );
+  await writeFile(htpasswdTemporary, `${adminUser}:${passwordHash}`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
   await writeFile(
     caddyEnvironmentTemporary,
     `APOLLO_ADMIN_CADDY_USER='${adminUser}'\n` +
@@ -1224,6 +1238,7 @@ async function writeReleaseEnvironment(
     "TF_ADMIN_CREDENTIAL_DIRECTORY",
     secrets.adminCredentialDirectory.replaceAll("\\", "/"),
   );
+  values.set("RELEASE_SOURCE_COMMIT", sourceCommit);
   for (const name of [
     "PLATFORM_API_VERSION",
     "TF_API_VERSION",
@@ -1919,21 +1934,6 @@ async function verifyCaddyRouteMatrix(
   }
 }
 
-function parseWgetResponse(result: CommandResult): CaddyRouteResponse {
-  const statusMatches = [
-    ...result.stderr.matchAll(/^\s*HTTP\/\d(?:\.\d)?\s+(\d{3})\b/gm),
-  ];
-  const status = Number(statusMatches.at(-1)?.[1] ?? 0);
-  const headers: Record<string, string> = {};
-  for (const line of result.stderr.split(/\r?\n/)) {
-    const match = /^\s*([^:\s][^:]*):\s*(.*?)\s*$/.exec(line);
-    if (match !== null) {
-      headers[match[1].toLowerCase()] = match[2];
-    }
-  }
-  return { body: result.stdout, headers, status };
-}
-
 async function proveCaddyRoutes(
   docker: DockerCommand,
   root: string,
@@ -2009,8 +2009,10 @@ async function proveCaddyRoutes(
     "--network",
     `container:${forwarder}`,
     "--read-only",
-    "--env-file",
-    secrets.caddyEnvironmentPath,
+    "--entrypoint",
+    "/bin/sh",
+    "--mount",
+    `type=bind,source=${secrets.caddyEnvironmentPath},target=/run/secrets/apollo-caddy.env,readonly`,
     "--mount",
     `type=bind,source=${wrapper},target=/etc/caddy/Caddyfile,readonly`,
     "--mount",
@@ -2020,6 +2022,9 @@ async function proveCaddyRoutes(
     "--tmpfs",
     "/data:rw,noexec,nosuid,size=16m",
     caddyImage,
+    "-eu",
+    "-c",
+    "set -a; . /run/secrets/apollo-caddy.env; set +a; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile",
   ]);
   const approvedAuthorization = `Basic ${Buffer.from(
     `${secrets.adminUser}:${secrets.adminPassword}`,
@@ -2027,13 +2032,47 @@ async function proveCaddyRoutes(
   const wrongAuthorization = `Basic ${Buffer.from(
     `wrong-${runId}:wrong-${runId}`,
   ).toString("base64")}`;
-  const probeScript =
-    'auth_state="$1"; url="$2"; shift 2; ' +
-    'if [ "$auth_state" = none ]; then ' +
-    'exec wget --no-check-certificate -S -O - "$url"; fi; ' +
-    "IFS= read -r auth; " +
-    'exec wget --no-check-certificate -S -O - ' +
-    '--header "Authorization: $auth" "$url"';
+  const probeScript = [
+    'const https = require("node:https");',
+    "const [connectHost, targetUrl, authState] = process.argv.slice(1);",
+    "const target = new URL(targetUrl);",
+    'let authorization = "";',
+    "const request = () => {",
+    "  const headers = { host: target.host };",
+    '  if (authState !== "none") headers.authorization = authorization.trimEnd();',
+    "  const probe = https.request({",
+    "    hostname: connectHost,",
+    "    port: 443,",
+    "    path: `${target.pathname}${target.search}`,",
+    '    method: "GET",',
+    "    servername: target.hostname,",
+    "    rejectUnauthorized: false,",
+    "    headers,",
+    "  }, (response) => {",
+    '    let body = "";',
+    '    response.setEncoding("utf8");',
+    '    response.on("data", (chunk) => { body += chunk; });',
+    '    response.on("end", () => {',
+    "      process.stdout.write(JSON.stringify({",
+    "        body,",
+    "        headers: response.headers,",
+    "        status: response.statusCode,",
+    "      }));",
+    "    });",
+    "  });",
+    '  probe.on("error", () => {',
+    '    process.stderr.write("route probe failed\\n");',
+    "    process.exitCode = 1;",
+    "  });",
+    "  probe.end();",
+    "};",
+    'if (authState === "none") request();',
+    "else {",
+    '  process.stdin.setEncoding("utf8");',
+    '  process.stdin.on("data", (chunk) => { authorization += chunk; });',
+    '  process.stdin.on("end", request);',
+    "}",
+  ].join("\n");
   const requestRoute = async (
     request: CaddyRouteRequest,
   ): Promise<CaddyRouteResponse> => {
@@ -2047,24 +2086,48 @@ async function proveCaddyRoutes(
       "route probe",
       [
         "exec",
-        "-i",
-        forwarder,
-        "sh",
-        "-eu",
-        "-c",
+        ...(authorization === undefined ? [] : ["-i"]),
+        "apollo-platform-platform-api-1",
+        "node",
+        "-e",
         probeScript,
-        "apollo-caddy-probe",
-        request.authorization,
+        forwarder,
         `https://${request.host}${request.path}`,
+        request.authorization,
       ],
-      {
-        allowNonZero: true,
-        ...(authorization === undefined
-          ? {}
-          : { input: `${authorization}\n` }),
-      },
+      authorization === undefined ? {} : { input: `${authorization}\n` },
     );
-    return parseWgetResponse(result);
+    let parsed: {
+      readonly body?: unknown;
+      readonly headers?: unknown;
+      readonly status?: unknown;
+    };
+    try {
+      parsed = JSON.parse(result.stdout) as typeof parsed;
+    } catch {
+      throw new Error("Caddy route response failed");
+    }
+    if (
+      typeof parsed.body !== "string" ||
+      typeof parsed.status !== "number" ||
+      parsed.headers === null ||
+      typeof parsed.headers !== "object" ||
+      Array.isArray(parsed.headers)
+    ) {
+      throw new Error("Caddy route response failed");
+    }
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(parsed.headers)) {
+      if (typeof value === "string") {
+        headers[name] = value;
+      } else if (
+        Array.isArray(value) &&
+        value.every((entry): entry is string => typeof entry === "string")
+      ) {
+        headers[name] = value.join(", ");
+      }
+    }
+    return { body: parsed.body, headers, status: parsed.status };
   };
   await waitFor("Caddy route readiness", async () => {
     const response = await requestRoute({
@@ -2086,10 +2149,7 @@ async function proveNativeLinuxAdminTokenOwnership(
 ): Promise<void> {
   const dind = `apollo-native-token-proof-${runId}`;
   const proofSource = await readFile(
-    join(
-      repositoryRoot,
-      "deploy/ops/prove-admin-token-ownership.sh",
-    ),
+    join(repositoryRoot, "deploy/ops/prove-admin-token-ownership.sh"),
     "utf8",
   );
   const apiImage = `127.0.0.1:5000/tf-api@${digests["tf-api"]}`;
@@ -2747,7 +2807,7 @@ async function cleanupOwnedSmokeResources(options: {
   for (const container of helpers) {
     await attempt(() => options.docker(["rm", "-f", container]));
   }
-  if (options.envFile !== undefined) {
+  if (options.envFile !== undefined && (await pathExists(options.envFile))) {
     await attempt(() =>
       compose(
         options.docker,
@@ -3031,6 +3091,8 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
           join(repositoryRoot, "scripts/src/coolify-release.ts"),
           "--env-file",
           envFile,
+          "--mode",
+          "loopback-local-smoke",
         ],
         { env: environment },
       );
@@ -3514,7 +3576,8 @@ describe("Coolify production smoke contract", () => {
               stderr: "",
               stdout:
                 `Name: ${builderName}\n` +
-                "Driver: docker-container\n\n" +
+                "Driver: docker-container\n" +
+                'Driver Options: network="host"\n\n' +
                 "Nodes:\n" +
                 `Name: ${builderName}0\n` +
                 "Endpoint: desktop-linux\n" +
@@ -3527,6 +3590,13 @@ describe("Coolify production smoke contract", () => {
         return { exitCode: 0, stderr: "", stdout: `${builderName}\n` };
       }
       if (args[0] === "container" && args[1] === "inspect") {
+        if (args.at(-1) === "{{json .HostConfig.NetworkMode}}") {
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: '"host"\n',
+          };
+        }
         return {
           exitCode: 0,
           stderr: "",
@@ -3584,13 +3654,20 @@ describe("Coolify production smoke contract", () => {
       builderName,
       "--driver",
       "docker-container",
+      "--driver-opt",
+      "network=host",
       "--bootstrap",
       "desktop-linux",
     ]);
+    expect(commands).toContainEqual([
+      "container",
+      "inspect",
+      builderContainer,
+      "--format",
+      "{{json .HostConfig.NetworkMode}}",
+    ]);
     expect(
-      commands.filter(
-        (args) => args[0] === "buildx" && args[1] === "build",
-      ),
+      commands.filter((args) => args[0] === "buildx" && args[1] === "build"),
     ).toHaveLength(1);
   });
 
@@ -3616,7 +3693,8 @@ describe("Coolify production smoke contract", () => {
               stderr: "",
               stdout:
                 `Name: ${ownership.name}\n` +
-                "Driver: docker-container\n\n" +
+                "Driver: docker-container\n" +
+                'Driver Options: network="host"\n\n' +
                 "Nodes:\n" +
                 `Name: ${ownership.name}0\n` +
                 `Endpoint: ${ownership.context}\n` +
@@ -3813,7 +3891,7 @@ describe("Coolify production smoke contract", () => {
           cleanupOwnedSmokeResources({
             acquiredImages: new Map(),
             docker: state.docker,
-            envFile: "synthetic-release.env",
+            envFile: fileURLToPath(import.meta.url),
             fixedResourceOwnership,
             registry: undefined,
             runId: state.runId,
@@ -3881,7 +3959,7 @@ describe("Coolify production smoke contract", () => {
         cleanupOwnedSmokeResources({
           acquiredImages: new Map(),
           docker: state.docker,
-          envFile: "synthetic-release.env",
+          envFile: fileURLToPath(import.meta.url),
           fixedResourceOwnership,
           registry: undefined,
           runId: state.runId,
@@ -3913,6 +3991,24 @@ describe("Coolify production smoke contract", () => {
       volumes: 0,
     });
     expect(state.networks.has(state.unrelatedNetwork)).toBe(true);
+  });
+
+  it("skips Compose teardown before the release environment is published", async () => {
+    const state = createFakeSmokeDocker();
+    await cleanupOwnedSmokeResources({
+      acquiredImages: new Map(),
+      docker: state.docker,
+      envFile: join(
+        tmpdir(),
+        `apollo-missing-release-${randomBytes(8).toString("hex")}.env`,
+      ),
+      fixedResourceOwnership: { networks: [], volumes: [] },
+      registry: undefined,
+      runId: state.runId,
+      temporaryRootParent: undefined,
+    });
+
+    expect(state.commands.some((args) => args[0] === "compose")).toBe(false);
   });
 
   it("rejects pre-existing fixed resources without removing them", async () => {
@@ -4435,6 +4531,9 @@ describe("Coolify production smoke contract", () => {
       expect(source).toContain(`${host}:127.0.0.1`);
     }
     expect(source).toContain("https://${request.host}${request.path}");
+    expect(source).toContain('"apollo-platform-platform-api-1"');
+    expect(source).toContain('require("node:https")');
+    expect(source).not.toContain("wget --no-check-certificate");
     expect(source).toContain("verifyCaddyRouteMatrix(requestRoute)");
     expect(source).not.toContain("https://127.0.0.1");
   });
@@ -4459,11 +4558,7 @@ describe("Coolify production smoke contract", () => {
         return { exitCode: 0, stderr: "", stdout: `${passwordHash}\n` };
       };
 
-      await prepareAdminCredentialGeneration(
-        docker,
-        secrets,
-        "contract-run",
-      );
+      await prepareAdminCredentialGeneration(docker, secrets, "contract-run");
 
       expect(
         await readFile(
@@ -4489,6 +4584,10 @@ describe("Coolify production smoke contract", () => {
     const source = proveCaddyRoutes.toString();
 
     expect(source).toContain("secrets.caddyEnvironmentPath");
+    expect(source).toContain("/run/secrets/apollo-caddy.env");
+    expect(source).toContain(". /run/secrets/apollo-caddy.env");
+    expect(source).toMatch(/"--entrypoint",\s*"\/bin\/sh"/);
+    expect(source).not.toContain('"--env-file"');
     expect(source).not.toContain('"password hash"');
     expect(source).not.toContain('"hash-password"');
   });
@@ -4632,6 +4731,16 @@ describe("Coolify production smoke contract", () => {
         target: "queue-redis",
       },
     ]);
+  });
+
+  it("writes source provenance and invokes only the explicit loopback validator mode", () => {
+    expect(writeReleaseEnvironment.toString()).toContain(
+      'values.set("RELEASE_SOURCE_COMMIT", sourceCommit)',
+    );
+    const smokeSource = runCoolifyProductionSmoke.toString();
+    expect(smokeSource).toContain('"--mode"');
+    expect(smokeSource).toContain('"loopback-local-smoke"');
+    expect(smokeSource).not.toContain('"--release-manifest"');
   });
 });
 

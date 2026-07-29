@@ -33,11 +33,14 @@ describe("native-Linux shared admin token proof", () => {
     expect(source).toContain('user: "10001:10001"');
     expect(source).toContain('user: "0:0"');
     expect(source.match(/source: admin_dashboard_token/g)).toHaveLength(2);
-    expect(source).toContain(
-      "file: ${APOLLO_ADMIN_DASHBOARD_TOKEN_FILE:?}",
-    );
+    expect(source.match(/cap_drop:/g)).toHaveLength(1);
+    expect(source).toContain("file: ${APOLLO_ADMIN_DASHBOARD_TOKEN_FILE:?}");
     expect(source).not.toContain("FRESH_RELEASE_VOLUME");
     expect(source).not.toContain("apollo-tf-postgres-v1");
+    expect(source).toContain('test -f "$$file" && test -r "$$file"');
+    expect(source).toContain('test "$$size" -ge 32');
+    expect(source).toContain('test "$$size" -le 4096');
+    expect(source).not.toContain('test -f "$file"');
   });
 
   it("runs without credential or source-path disclosure in argv or output", () => {
@@ -131,9 +134,7 @@ esac
       expect(run.stdout + run.stderr).not.toContain(token);
       expect(run.stdout + run.stderr).not.toContain(shellPath(tokenPath));
       expect(compose).not.toContain(token);
-      expect(compose).toContain(
-        "file: ${APOLLO_ADMIN_DASHBOARD_TOKEN_FILE:?}",
-      );
+      expect(compose).toContain("file: ${APOLLO_ADMIN_DASHBOARD_TOKEN_FILE:?}");
       expect(compose.match(/source: admin_dashboard_token/g)).toHaveLength(6);
     } finally {
       rmSync(root, { force: true, recursive: true });

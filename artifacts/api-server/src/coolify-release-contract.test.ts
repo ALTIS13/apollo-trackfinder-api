@@ -370,9 +370,7 @@ describe("Coolify production release manifests", () => {
         expect(definition.file).toMatch(
           name === "admin_access_htpasswd"
             ? /^\$\{TF_ADMIN_CREDENTIAL_DIRECTORY:\?\}\/admin_access_htpasswd$/
-            : new RegExp(
-                `^\\$\\{${directoryVariable}:\\?\\}/[a-z0-9_]+$`,
-              ),
+            : new RegExp(`^\\$\\{${directoryVariable}:\\?\\}/[a-z0-9_]+$`),
         );
       }
       for (const service of Object.values(value.compose.services)) {
@@ -500,6 +498,13 @@ describe("Coolify production release manifests", () => {
     for (const line of imageLines) {
       expect(line).toMatch(/@sha256:0{64}$/);
     }
+    expect(source).toContain(`RELEASE_SOURCE_COMMIT=${"0".repeat(40)}`);
+    expect(source).toContain(
+      `PLATFORM_REDIS_IMAGE=docker.io/library/redis@sha256:${"0".repeat(64)}`,
+    );
+    expect(source).toContain(
+      `TF_REDIS_IMAGE=docker.io/library/redis@sha256:${"0".repeat(64)}`,
+    );
   });
 });
 
@@ -755,6 +760,34 @@ describe("Apollo immutable image release workflow", () => {
     expect(manifestDigests).toContain('sleep "$attempt"');
     expect(manifestDigests).toMatch(
       /if \[\[ "\$attempt" == "5" \]\]; then[\s\S]*exit 1[\s\S]*fi/,
+    );
+  });
+
+  it("publishes source commit, approved repositories, and full immutable references", async () => {
+    const workflow = parse(await readFile(releaseWorkflowPath, "utf8")) as {
+      readonly jobs: Record<
+        string,
+        {
+          readonly steps: readonly {
+            readonly name?: string;
+            readonly run?: string;
+          }[];
+        }
+      >;
+    };
+    const manifest = Object.values(workflow.jobs)
+      .flatMap(({ steps }) => steps)
+      .find(({ name }) => name === "Capture immutable digests")?.run;
+
+    expect(manifest).toContain('"redis docker.io/library/redis 7-bookworm"');
+    expect(manifest).toContain('--arg sourceCommit "$GITHUB_SHA"');
+    expect(manifest).toContain('--arg repository "$image"');
+    expect(manifest).toContain('--arg imageReference "$image@$digest"');
+    expect(manifest).toContain(
+      "{name: $name, repository: $repository, imageDigest: $imageDigest, imageReference: $imageReference}",
+    );
+    expect(manifest).toContain(
+      "{formatVersion: 1, sourceCommit: $sourceCommit, images: sort_by(.name)}",
     );
   });
 });
