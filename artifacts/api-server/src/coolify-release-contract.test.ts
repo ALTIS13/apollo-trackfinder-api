@@ -363,10 +363,16 @@ describe("Coolify production release manifests", () => {
       /(?:PASSWORD|SECRET|TOKEN|KEYRING|PRIVATE_JWK|OAUTH_CLIENTS|DATABASE_URL)$/;
 
     for (const { directoryVariable, value } of manifests) {
-      for (const definition of Object.values(value.compose.secrets ?? {})) {
+      for (const [name, definition] of Object.entries(
+        value.compose.secrets ?? {},
+      )) {
         expect(definition.environment).toBeUndefined();
         expect(definition.file).toMatch(
-          new RegExp(`^\\$\\{${directoryVariable}:\\?\\}/[a-z0-9_]+$`),
+          name === "admin_access_htpasswd"
+            ? /^\$\{TF_ADMIN_CREDENTIAL_DIRECTORY:\?\}\/admin_access_htpasswd$/
+            : new RegExp(
+                `^\\$\\{${directoryVariable}:\\?\\}/[a-z0-9_]+$`,
+              ),
         );
       }
       for (const service of Object.values(value.compose.services)) {
@@ -387,6 +393,47 @@ describe("Coolify production release manifests", () => {
         }
       }
     }
+  });
+
+  it("uses one derived admin htpasswd and a UID 10001-owned shared dashboard token", async () => {
+    const tf = await load(tfPath);
+    const admin = tf.compose.services["tf-admin"];
+
+    expect(admin.environment).toMatchObject({
+      ADMIN_ACCESS_HTPASSWD_FILE: "/run/secrets/admin_access_htpasswd",
+      ADMIN_DASHBOARD_TOKEN_FILE: "/run/secrets/admin_dashboard_token",
+    });
+    expect(admin.environment).not.toHaveProperty("ADMIN_ACCESS_USER_FILE");
+    expect(admin.environment).not.toHaveProperty("ADMIN_ACCESS_PASSWORD_FILE");
+    expect(admin.secrets).toEqual([
+      {
+        source: "admin_dashboard_token",
+        target: "admin_dashboard_token",
+        uid: "10001",
+        gid: "10001",
+        mode: "0400",
+      },
+      {
+        source: "admin_access_htpasswd",
+        target: "admin_access_htpasswd",
+        uid: "0",
+        gid: "0",
+        mode: "0400",
+      },
+    ]);
+    expect(tf.compose.secrets?.["admin_access_htpasswd"]?.file).toBe(
+      "${TF_ADMIN_CREDENTIAL_DIRECTORY:?}/admin_access_htpasswd",
+    );
+    expect(tf.compose.secrets?.["admin_dashboard_token"]?.file).toBe(
+      "${TF_SECRET_DIRECTORY:?}/admin_dashboard_token",
+    );
+    expect(tf.compose.secrets).not.toHaveProperty("admin_access_user");
+    expect(tf.compose.secrets).not.toHaveProperty("admin_access_password");
+
+    const releaseEnvironment = await readFile(releaseEnvironmentPath, "utf8");
+    expect(releaseEnvironment).toContain(
+      "TF_ADMIN_CREDENTIAL_DIRECTORY=/var/lib/apollo-tf/admin-credentials/replace-with-generation",
+    );
   });
 
   it("pins stable retained volume identities", async () => {

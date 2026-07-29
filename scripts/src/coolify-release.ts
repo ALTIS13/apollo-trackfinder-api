@@ -129,7 +129,6 @@ const sensitiveEnvironmentAllowlist: Readonly<Record<string, Set<string>>> = {
   "platform-migrate": new Set(["MIGRATOR_DATABASE_URL_FILE"]),
   "platform-postgres": new Set(["POSTGRES_PASSWORD_FILE"]),
   "tf-admin": new Set([
-    "ADMIN_ACCESS_PASSWORD_FILE",
     "ADMIN_DASHBOARD_TOKEN_FILE",
   ]),
   "tf-api": new Set([
@@ -268,9 +267,8 @@ const expectedSecretMounts: Readonly<
   ],
   "platform-redis": [],
   "tf-admin": [
-    secretMountContract("admin_dashboard_token", "0"),
-    secretMountContract("admin_access_user", "0"),
-    secretMountContract("admin_access_password", "0"),
+    secretMountContract("admin_dashboard_token"),
+    secretMountContract("admin_access_htpasswd", "0"),
   ],
   "tf-api": [
     secretMountContract("admin_dashboard_token"),
@@ -347,8 +345,7 @@ const expectedSecretFileEnvironment: Readonly<
     POSTGRES_PASSWORD_FILE: "/run/secrets/platform_postgres_admin_password",
   },
   "tf-admin": {
-    ADMIN_ACCESS_PASSWORD_FILE: "/run/secrets/admin_access_password",
-    ADMIN_ACCESS_USER_FILE: "/run/secrets/admin_access_user",
+    ADMIN_ACCESS_HTPASSWD_FILE: "/run/secrets/admin_access_htpasswd",
     ADMIN_DASHBOARD_TOKEN_FILE: "/run/secrets/admin_dashboard_token",
   },
   "tf-api": {

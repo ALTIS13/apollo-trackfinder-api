@@ -44,6 +44,8 @@ const socatImage =
   "docker.io/alpine/socat:1.8.0.3@sha256:beb4a68d9e4fe6b0f21ea774a0fde6c31f580dde6368939ed70100c5385b015e";
 const redisImage =
   "docker.io/library/redis:7-bookworm@sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b";
+const nativeDockerImage =
+  "docker.io/library/docker:29.1.3-dind@sha256:64d6ee47ea821c986467199baa162f5ac8cde3f57b719f18e23f3ed7a7444131";
 const temporaryRootPrefix = "apollo-coolify-production-";
 const temporaryRootMarkerName = ".apollo-task5-owner";
 const temporaryRootRecordSuffix = ".apollo-task5-owner-record";
@@ -919,8 +921,11 @@ async function writeSecretFile(
 }
 
 async function prepareSecrets(root: string): Promise<{
+  readonly adminCredentialDirectory: string;
+  readonly adminCredentialSourceDirectory: string;
   readonly adminPassword: string;
   readonly adminUser: string;
+  readonly caddyEnvironmentPath: string;
   readonly dashboardToken: string;
   readonly oauthClientSecret: string;
   readonly operatorBootstrapToken: string;
@@ -930,10 +935,20 @@ async function prepareSecrets(root: string): Promise<{
 }> {
   const platformDirectory = join(root, "platform-secrets");
   const tfDirectory = join(root, "tf-secrets");
+  const adminCredentialSourceDirectory = join(root, "admin-credential-source");
+  const adminCredentialParent = join(root, "admin-credential-generations");
+  const adminCredentialDirectory = join(
+    adminCredentialParent,
+    "local-smoke-generation",
+  );
   await mkdir(platformDirectory);
   await mkdir(tfDirectory);
+  await mkdir(adminCredentialSourceDirectory);
+  await mkdir(adminCredentialParent);
   await chmod(platformDirectory, 0o700);
   await chmod(tfDirectory, 0o700);
+  await chmod(adminCredentialSourceDirectory, 0o700);
+  await chmod(adminCredentialParent, 0o700);
 
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const privateJwk = privateKey.export({ format: "jwk" });
@@ -1009,8 +1024,6 @@ async function prepareSecrets(root: string): Promise<{
     `redis://default:${encodeURIComponent(queuePassword)}` +
     "@tf-download-redis:6379/0";
   const tfFiles: Record<string, string> = {
-    admin_access_password: adminPassword,
-    admin_access_user: adminUser,
     admin_dashboard_token: dashboardToken,
     tf_admin_database_url:
       `postgres://postgres:${encodeURIComponent(tfAdmin)}` +
@@ -1064,9 +1077,25 @@ async function prepareSecrets(root: string): Promise<{
       writeSecretFile(tfDirectory, name, value),
     ),
   );
+  await Promise.all(
+    [
+      ["admin_access_user", adminUser],
+      ["admin_access_password", adminPassword],
+    ].map(async ([name, value]) => {
+      const path = join(adminCredentialSourceDirectory, name);
+      await writeFile(path, `${value}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      await chmod(path, 0o600);
+    }),
+  );
   return {
+    adminCredentialDirectory,
+    adminCredentialSourceDirectory,
     adminPassword,
     adminUser,
+    caddyEnvironmentPath: join(adminCredentialDirectory, "caddy.env"),
     dashboardToken,
     oauthClientSecret,
     operatorBootstrapToken,
@@ -1074,11 +1103,96 @@ async function prepareSecrets(root: string): Promise<{
     rawSecrets: [
       ...Object.values(platformFiles),
       ...Object.values(tfFiles),
+      adminUser,
+      adminPassword,
       String(privateJwk.d),
       sha256(oauthClientSecret),
     ],
     tfDirectory,
   };
+}
+
+async function prepareAdminCredentialGeneration(
+  docker: DockerCommand,
+  secrets: Awaited<ReturnType<typeof prepareSecrets>>,
+  runId: string,
+): Promise<void> {
+  const readSourceLine = async (
+    name: "admin_access_password" | "admin_access_user",
+    minimumBytes: number,
+    maximumBytes: number,
+  ): Promise<string> => {
+    const raw = await readFile(
+      join(secrets.adminCredentialSourceDirectory, name),
+      "utf8",
+    );
+    const bytes = Buffer.byteLength(raw);
+    if (
+      bytes < minimumBytes ||
+      bytes > maximumBytes ||
+      !raw.endsWith("\n") ||
+      raw.slice(0, -1).includes("\n") ||
+      raw.includes("\r")
+    ) {
+      throw new Error("admin credential source contract failed");
+    }
+    return raw.slice(0, -1);
+  };
+  const adminUser = await readSourceLine("admin_access_user", 2, 129);
+  const adminPassword = await readSourceLine(
+    "admin_access_password",
+    17,
+    4097,
+  );
+  if (!/^[A-Za-z0-9_.@-]{1,128}$/.test(adminUser)) {
+    throw new Error("admin credential source contract failed");
+  }
+  await mkdir(secrets.adminCredentialDirectory);
+  await chmod(secrets.adminCredentialDirectory, 0o700);
+  const passwordHash = (
+    await docker(
+      [
+        "run",
+        "--rm",
+        "--name",
+        `apollo-release-caddy-hash-${runId}`,
+        "--label",
+        `apollo.local-release.run=${runId}`,
+        "--network",
+        "none",
+        "--read-only",
+        "-i",
+        caddyImage,
+        "caddy",
+        "hash-password",
+      ],
+      { input: `${adminPassword}\n` },
+    )
+  ).stdout.trim();
+  if (!/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(passwordHash)) {
+    throw new Error("admin credential generation failed");
+  }
+  const htpasswd = join(
+    secrets.adminCredentialDirectory,
+    "admin_access_htpasswd",
+  );
+  const htpasswdTemporary = `${htpasswd}.tmp`;
+  const caddyEnvironmentTemporary = `${secrets.caddyEnvironmentPath}.tmp`;
+  await writeFile(
+    htpasswdTemporary,
+    `${adminUser}:${passwordHash}`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+  await writeFile(
+    caddyEnvironmentTemporary,
+    `APOLLO_ADMIN_CADDY_USER='${adminUser}'\n` +
+      `APOLLO_ADMIN_CADDY_PASSWORD_HASH='${passwordHash}'\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+  await chmod(htpasswdTemporary, 0o400);
+  await chmod(caddyEnvironmentTemporary, 0o600);
+  await rename(htpasswdTemporary, htpasswd);
+  await rename(caddyEnvironmentTemporary, secrets.caddyEnvironmentPath);
 }
 
 function parseEnv(source: string): Map<string, string> {
@@ -1106,6 +1220,10 @@ async function writeReleaseEnvironment(
     secrets.platformDirectory.replaceAll("\\", "/"),
   );
   values.set("TF_SECRET_DIRECTORY", secrets.tfDirectory.replaceAll("\\", "/"));
+  values.set(
+    "TF_ADMIN_CREDENTIAL_DIRECTORY",
+    secrets.adminCredentialDirectory.replaceAll("\\", "/"),
+  );
   for (const name of [
     "PLATFORM_API_VERSION",
     "TF_API_VERSION",
@@ -1635,10 +1753,9 @@ async function proveAdmin(
   await mkdir(malformed);
   const canary = secret();
   const dashboardCanary = secret();
-  await writeFile(join(malformed, "admin_access_user"), "valid-user");
   await writeFile(
-    join(malformed, "admin_access_password"),
-    `${canary}\nsecond-line`,
+    join(malformed, "admin_access_htpasswd"),
+    `valid-user:$2a$12$${"A".repeat(53)}${canary}\nsecond-line`,
   );
   await writeFile(join(malformed, "admin_dashboard_token"), dashboardCanary);
   const name = `apollo-release-malformed-${runId}`;
@@ -1654,9 +1771,7 @@ async function proveAdmin(
         "--network",
         "none",
         "--mount",
-        `type=bind,source=${join(malformed, "admin_access_user")},target=/run/secrets/admin_access_user,readonly`,
-        "--mount",
-        `type=bind,source=${join(malformed, "admin_access_password")},target=/run/secrets/admin_access_password,readonly`,
+        `type=bind,source=${join(malformed, "admin_access_htpasswd")},target=/run/secrets/admin_access_htpasswd,readonly`,
         "--mount",
         `type=bind,source=${join(malformed, "admin_dashboard_token")},target=/run/secrets/admin_dashboard_token,readonly`,
         image,
@@ -1740,6 +1855,85 @@ async function proveLiveAdmin(
   expect(stat.stdout.trim()).toBe("root:nginx:640");
 }
 
+type CaddyRouteAuthorization = "approved" | "none" | "wrong";
+
+type CaddyRouteRequest = {
+  readonly authorization: CaddyRouteAuthorization;
+  readonly host: string;
+  readonly path: string;
+};
+
+type CaddyRouteResponse = {
+  readonly body: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly status: number;
+};
+
+const caddyRouteMatrix = [
+  { host: "api.apollot.ru", path: "/healthz" },
+  { host: "api.tf.apollot.ru", path: "/api/healthz" },
+  { host: "tf.apollot.ru", path: "/healthz" },
+  { host: "admin.apollot.ru", path: "/healthz" },
+] as const;
+
+const requiredCaddySecurityHeaders: Readonly<Record<string, string>> = {
+  "referrer-policy": "no-referrer",
+  "strict-transport-security": "max-age=31536000; includeSubDomains",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+};
+
+async function verifyCaddyRouteMatrix(
+  request: (probe: CaddyRouteRequest) => Promise<CaddyRouteResponse>,
+): Promise<void> {
+  for (const authorization of [
+    "none",
+    "wrong",
+    "approved",
+  ] as const satisfies readonly CaddyRouteAuthorization[]) {
+    for (const route of caddyRouteMatrix) {
+      const response = await request({ authorization, ...route });
+      const shouldReject =
+        route.host === "admin.apollot.ru" && authorization !== "approved";
+      if (response.status !== (shouldReject ? 401 : 200)) {
+        throw new Error("Caddy route authorization contract failed");
+      }
+      if (!shouldReject && !response.body.includes("ok")) {
+        throw new Error("Caddy upstream acceptance contract failed");
+      }
+      const normalizedHeaders = Object.fromEntries(
+        Object.entries(response.headers).map(([name, value]) => [
+          name.toLowerCase(),
+          value.trim(),
+        ]),
+      );
+      if (
+        Object.entries(requiredCaddySecurityHeaders).some(
+          ([name, value]) => normalizedHeaders[name] !== value,
+        ) ||
+        "server" in normalizedHeaders
+      ) {
+        throw new Error("Caddy security header contract failed");
+      }
+    }
+  }
+}
+
+function parseWgetResponse(result: CommandResult): CaddyRouteResponse {
+  const statusMatches = [
+    ...result.stderr.matchAll(/^\s*HTTP\/\d(?:\.\d)?\s+(\d{3})\b/gm),
+  ];
+  const status = Number(statusMatches.at(-1)?.[1] ?? 0);
+  const headers: Record<string, string> = {};
+  for (const line of result.stderr.split(/\r?\n/)) {
+    const match = /^\s*([^:\s][^:]*):\s*(.*?)\s*$/.exec(line);
+    if (match !== null) {
+      headers[match[1].toLowerCase()] = match[2];
+    }
+  }
+  return { body: result.stdout, headers, status };
+}
+
 async function proveCaddyRoutes(
   docker: DockerCommand,
   root: string,
@@ -1800,36 +1994,10 @@ async function proveCaddyRoutes(
     "apollo-tf-edge-v1",
     forwarder,
   ]);
-  const passwordHash = (
-    await caddyCommand(
-      "password hash",
-      [
-        "run",
-        "--name",
-        `apollo-release-caddy-hash-${runId}`,
-        "--label",
-        `apollo.local-release.run=${runId}`,
-        "--network",
-        "none",
-        "--read-only",
-        "-i",
-        caddyImage,
-        "caddy",
-        "hash-password",
-      ],
-      { input: `${secrets.adminPassword}\n` },
-    )
-  ).stdout.trim();
   const wrapper = join(root, "Caddyfile");
-  const caddyEnv = join(root, "caddy.env");
   await writeFile(
     wrapper,
     "{\n\tadmin off\n\tlocal_certs\n}\n\nimport /etc/caddy/apollo.caddyfile\n",
-  );
-  await writeFile(
-    caddyEnv,
-    `APOLLO_ADMIN_CADDY_USER=${secrets.adminUser}\n` +
-      `APOLLO_ADMIN_CADDY_PASSWORD_HASH=${passwordHash}\n`,
   );
   await caddyCommand("start", [
     "run",
@@ -1842,7 +2010,7 @@ async function proveCaddyRoutes(
     `container:${forwarder}`,
     "--read-only",
     "--env-file",
-    caddyEnv,
+    secrets.caddyEnvironmentPath,
     "--mount",
     `type=bind,source=${wrapper},target=/etc/caddy/Caddyfile,readonly`,
     "--mount",
@@ -1853,39 +2021,215 @@ async function proveCaddyRoutes(
     "/data:rw,noexec,nosuid,size=16m",
     caddyImage,
   ]);
-  const probes = [
-    ["api.apollot.ru", "/healthz", "ok"],
-    ["api.tf.apollot.ru", "/api/healthz", "ok"],
-    ["tf.apollot.ru", "/healthz", "ok"],
-  ] as const;
-  for (const [host, path, expectedBody] of probes) {
-    await waitFor(`Caddy route ${host}`, async () => {
-      const result = await docker([
-        "exec",
-        forwarder,
-        "wget",
-        "--no-check-certificate",
-        "-qO-",
-        `https://${host}${path}`,
-      ]);
-      return result.stdout.includes(expectedBody);
-    });
-  }
-  const authorization = `Basic ${Buffer.from(
+  const approvedAuthorization = `Basic ${Buffer.from(
     `${secrets.adminUser}:${secrets.adminPassword}`,
   ).toString("base64")}`;
-  const adminProbe =
-    "IFS= read -r auth; exec wget --no-check-certificate " +
-    '--header "Authorization: $auth" -qO- ' +
-    "https://admin.apollot.ru/healthz";
-  const admin = await caddyCommand(
-    "admin route",
-    ["exec", "-i", forwarder, "sh", "-eu", "-c", adminProbe],
-    {
-      input: `${authorization}\n`,
-    },
+  const wrongAuthorization = `Basic ${Buffer.from(
+    `wrong-${runId}:wrong-${runId}`,
+  ).toString("base64")}`;
+  const probeScript =
+    'auth_state="$1"; url="$2"; shift 2; ' +
+    'if [ "$auth_state" = none ]; then ' +
+    'exec wget --no-check-certificate -S -O - "$url"; fi; ' +
+    "IFS= read -r auth; " +
+    'exec wget --no-check-certificate -S -O - ' +
+    '--header "Authorization: $auth" "$url"';
+  const requestRoute = async (
+    request: CaddyRouteRequest,
+  ): Promise<CaddyRouteResponse> => {
+    const authorization =
+      request.authorization === "approved"
+        ? approvedAuthorization
+        : request.authorization === "wrong"
+          ? wrongAuthorization
+          : undefined;
+    const result = await caddyCommand(
+      "route probe",
+      [
+        "exec",
+        "-i",
+        forwarder,
+        "sh",
+        "-eu",
+        "-c",
+        probeScript,
+        "apollo-caddy-probe",
+        request.authorization,
+        `https://${request.host}${request.path}`,
+      ],
+      {
+        allowNonZero: true,
+        ...(authorization === undefined
+          ? {}
+          : { input: `${authorization}\n` }),
+      },
+    );
+    return parseWgetResponse(result);
+  };
+  await waitFor("Caddy route readiness", async () => {
+    const response = await requestRoute({
+      authorization: "none",
+      host: "api.apollot.ru",
+      path: "/healthz",
+    });
+    return response.status === 200 && response.body.includes("ok");
+  });
+  await verifyCaddyRouteMatrix(requestRoute);
+}
+
+async function proveNativeLinuxAdminTokenOwnership(
+  docker: DockerCommand,
+  registryContainer: string,
+  runId: string,
+  digests: Readonly<Record<string, string>>,
+  dashboardToken: string,
+): Promise<void> {
+  const dind = `apollo-native-token-proof-${runId}`;
+  const proofSource = await readFile(
+    join(
+      repositoryRoot,
+      "deploy/ops/prove-admin-token-ownership.sh",
+    ),
+    "utf8",
   );
-  expect(admin.stdout).toContain("ok");
+  const apiImage = `127.0.0.1:5000/tf-api@${digests["tf-api"]}`;
+  const adminImage = `127.0.0.1:5000/tf-admin@${digests["tf-admin"]}`;
+  let proofError: unknown;
+  try {
+    await docker(
+      [
+        "run",
+        "-d",
+        "--name",
+        dind,
+        "--label",
+        `apollo.local-release.run=${runId}`,
+        "--privileged",
+        "--network",
+        `container:${registryContainer}`,
+        "--env",
+        "DOCKER_TLS_CERTDIR=",
+        "--tmpfs",
+        "/var/lib/docker:rw,nosuid,nodev,size=4g",
+        "--tmpfs",
+        "/proof:rw,nosuid,nodev,noexec,size=8m",
+        nativeDockerImage,
+        "--host=unix:///var/run/docker.sock",
+        "--insecure-registry=127.0.0.1:5000",
+      ],
+      { timeoutMs: 10 * 60_000 },
+    );
+    await waitFor(
+      "native Linux Docker daemon",
+      async () =>
+        (
+          await docker(
+            ["exec", dind, "docker", "info", "--format", "{{.ServerVersion}}"],
+            { allowNonZero: true },
+          )
+        ).exitCode === 0,
+      120_000,
+    );
+    const composeVersion = await docker(
+      ["exec", dind, "docker", "compose", "version"],
+      { allowNonZero: true },
+    );
+    if (composeVersion.exitCode !== 0) {
+      throw new Error("native Linux proof Compose preflight failed");
+    }
+    await docker(
+      [
+        "exec",
+        "-i",
+        dind,
+        "sh",
+        "-eu",
+        "-c",
+        "umask 077; mkdir /proof/locks; " +
+          "cat > /proof/prove-admin-token-ownership.sh; " +
+          "chmod 0700 /proof/prove-admin-token-ownership.sh",
+      ],
+      { input: proofSource },
+    );
+    await docker(
+      [
+        "exec",
+        "-i",
+        dind,
+        "sh",
+        "-eu",
+        "-c",
+        "umask 077; cat > /proof/admin_dashboard_token; " +
+          "chown 10001:10001 /proof/admin_dashboard_token; " +
+          "chmod 0400 /proof/admin_dashboard_token",
+      ],
+      { input: dashboardToken },
+    );
+    await docker(
+      [
+        "exec",
+        "-i",
+        dind,
+        "sh",
+        "-eu",
+        "-c",
+        "umask 077; cat > /proof/proof.env; chmod 0600 /proof/proof.env",
+      ],
+      {
+        input:
+          "APOLLO_ADMIN_DASHBOARD_TOKEN_FILE=/proof/admin_dashboard_token\n" +
+          `APOLLO_NATIVE_PROOF_ID=native-${runId}\n` +
+          "APOLLO_NATIVE_PROOF_LOCK_PARENT=/proof/locks\n" +
+          `APOLLO_TF_ADMIN_IMAGE=${adminImage}\n` +
+          `APOLLO_TF_API_IMAGE=${apiImage}\n`,
+      },
+    );
+    for (const image of [apiImage, adminImage]) {
+      await docker(["exec", dind, "docker", "pull", image], {
+        timeoutMs: 10 * 60_000,
+      });
+    }
+    const result = await docker([
+      "exec",
+      dind,
+      "sh",
+      "-eu",
+      "-c",
+      "set -a; . /proof/proof.env; set +a; " +
+        "exec sh /proof/prove-admin-token-ownership.sh",
+    ]);
+    if (
+      result.stdout !== "native-admin-token-proof: complete\n" ||
+      result.stderr !== ""
+    ) {
+      throw new Error("native Linux proof output contract failed");
+    }
+  } catch (error) {
+    proofError = error;
+  }
+  let cleanupError: unknown;
+  try {
+    await docker(["rm", "-f", dind]);
+    if (
+      (
+        await docker(["container", "inspect", dind], {
+          allowNonZero: true,
+        })
+      ).exitCode === 0
+    ) {
+      throw new Error("native Linux proof cleanup audit failed");
+    }
+  } catch (error) {
+    cleanupError = error;
+  }
+  if (proofError !== undefined && cleanupError !== undefined) {
+    throw new AggregateError(
+      [proofError, cleanupError],
+      "native Linux proof and cleanup failed",
+    );
+  }
+  if (proofError !== undefined) throw proofError;
+  if (cleanupError !== undefined) throw cleanupError;
 }
 
 async function proveProfiledEntrypoints(
@@ -1899,6 +2243,11 @@ async function proveProfiledEntrypoints(
   const profileRoot = join(root, "profiled-entrypoints");
   await mkdir(profileRoot);
   const profileSecrets = await prepareSecrets(profileRoot);
+  await prepareAdminCredentialGeneration(
+    docker,
+    profileSecrets,
+    `profile-${runId}`,
+  );
   const profileEnv = join(profileRoot, "release.env");
   await writeReleaseEnvironment(
     profileEnv,
@@ -2548,7 +2897,13 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
       registry = `localhost:${registryPort}`;
 
       stage = "image-inventory";
-      for (const image of [registryImage, caddyImage, socatImage, redisImage]) {
+      for (const image of [
+        registryImage,
+        caddyImage,
+        socatImage,
+        redisImage,
+        nativeDockerImage,
+      ]) {
         acquiredImages.set(image, await imagePresent(docker, image));
       }
       await mkdir(source);
@@ -2600,6 +2955,8 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
         const response = await fetch(`http://${registry}/v2/`);
         return response.ok;
       });
+      stage = "admin-credential-generation";
+      await prepareAdminCredentialGeneration(docker, secrets, runId);
 
       for (const target of productionTargets) {
         stage = `build-${target.image}`;
@@ -2676,6 +3033,14 @@ async function runCoolifyProductionSmoke(): Promise<unknown> {
           envFile,
         ],
         { env: environment },
+      );
+      stage = "native-linux-admin-token-ownership";
+      await proveNativeLinuxAdminTokenOwnership(
+        docker,
+        registryContainer,
+        runId,
+        digests,
+        secrets.dashboardToken,
       );
       stage = "profiled-entrypoints";
       profileRawSecrets = await proveProfiledEntrypoints(
@@ -3353,11 +3718,11 @@ describe("Coolify production smoke contract", () => {
     const docker: DockerCommand = async (args) => {
       if (args[0] === "run") {
         const mount = args.find((value) =>
-          value.includes("admin_access_password"),
+          value.includes("admin_access_htpasswd"),
         );
-        if (mount === undefined) throw new Error("password mount missing");
+        if (mount === undefined) throw new Error("htpasswd mount missing");
         const source = /source=([^,]+)/.exec(mount)?.[1];
-        if (source === undefined) throw new Error("password source missing");
+        if (source === undefined) throw new Error("htpasswd source missing");
         canary = (await readFile(source, "utf8")).split(/\r?\n/, 1)[0];
         return { exitCode: 1, stderr: "", stdout: "" };
       }
@@ -4012,6 +4377,33 @@ describe("Coolify production smoke contract", () => {
     expect(source).toContain('stage = "profiled-entrypoints"');
   });
 
+  it("runs the native-Linux shared-token proof before any profiled or production containers", () => {
+    const source = runCoolifyProductionSmoke.toString();
+    const nativeProof = source.indexOf(
+      'stage = "native-linux-admin-token-ownership"',
+    );
+    const profiledProof = source.indexOf('stage = "profiled-entrypoints"');
+
+    expect(nativeProof).toBeGreaterThan(-1);
+    expect(profiledProof).toBeGreaterThan(nativeProof);
+    expect(source).toContain("proveNativeLinuxAdminTokenOwnership");
+  });
+
+  it("uses a disposable native filesystem and the deployable proof contract", () => {
+    const source = proveNativeLinuxAdminTokenOwnership.toString();
+
+    expect(source).toContain('"--privileged"');
+    expect(source).toContain('"--tmpfs"');
+    expect(source).toContain('"/var/lib/docker:');
+    expect(source).toContain("network");
+    expect(source).toContain("container:${registryContainer}");
+    expect(source).toContain("prove-admin-token-ownership.sh");
+    expect(source).toContain("admin_dashboard_token");
+    expect(source).toContain("chown 10001:10001");
+    expect(source).not.toContain('["volume", "create"');
+    expect(source).not.toContain("apollo-tf-postgres-v1");
+  });
+
   it("starts the route forwarder through a shell entrypoint", () => {
     const source = proveCaddyRoutes.toString();
 
@@ -4042,8 +4434,8 @@ describe("Coolify production smoke contract", () => {
     ]) {
       expect(source).toContain(`${host}:127.0.0.1`);
     }
-    expect(source).toContain("https://${host}${path}");
-    expect(source).toContain("https://admin.apollot.ru/healthz");
+    expect(source).toContain("https://${request.host}${request.path}");
+    expect(source).toContain("verifyCaddyRouteMatrix(requestRoute)");
     expect(source).not.toContain("https://127.0.0.1");
   });
 
@@ -4051,6 +4443,111 @@ describe("Coolify production smoke contract", () => {
     const source = proveCaddyRoutes.toString();
 
     expect(source).toMatch(/input:\s*`\$\{authorization\}\n`/);
+  });
+
+  it("derives one protected credential generation for both nginx and Caddy", async () => {
+    const root = await mkdtemp(join(tmpdir(), "apollo-caddy-generation-"));
+    const passwordHash = `$2a$12$${"A".repeat(53)}`;
+    const calls: {
+      readonly args: readonly string[];
+      readonly input: string | undefined;
+    }[] = [];
+    try {
+      const secrets = await prepareSecrets(root);
+      const docker: DockerCommand = async (args, options) => {
+        calls.push({ args: [...args], input: options?.input });
+        return { exitCode: 0, stderr: "", stdout: `${passwordHash}\n` };
+      };
+
+      await prepareAdminCredentialGeneration(
+        docker,
+        secrets,
+        "contract-run",
+      );
+
+      expect(
+        await readFile(
+          join(secrets.adminCredentialDirectory, "admin_access_htpasswd"),
+          "utf8",
+        ),
+      ).toBe(`${secrets.adminUser}:${passwordHash}`);
+      expect(await readFile(secrets.caddyEnvironmentPath, "utf8")).toBe(
+        `APOLLO_ADMIN_CADDY_USER='${secrets.adminUser}'\n` +
+          `APOLLO_ADMIN_CADDY_PASSWORD_HASH='${passwordHash}'\n`,
+      );
+      expect(calls).toHaveLength(1);
+      expect(calls[0].args).toContain("hash-password");
+      expect(calls[0].input).toBe(`${secrets.adminPassword}\n`);
+      expect(calls[0].args.join(" ")).not.toContain(secrets.adminUser);
+      expect(calls[0].args.join(" ")).not.toContain(secrets.adminPassword);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("makes the live Caddy proof consume the credential generation without rehashing", () => {
+    const source = proveCaddyRoutes.toString();
+
+    expect(source).toContain("secrets.caddyEnvironmentPath");
+    expect(source).not.toContain('"password hash"');
+    expect(source).not.toContain('"hash-password"');
+  });
+
+  it("requires all four Caddy routes in unauthenticated, wrong-auth, and authenticated states with every security header", async () => {
+    const calls: {
+      authorization: "approved" | "none" | "wrong";
+      host: string;
+      path: string;
+    }[] = [];
+    await verifyCaddyRouteMatrix(async (request) => {
+      calls.push(request);
+      const rejected =
+        request.host === "admin.apollot.ru" &&
+        request.authorization !== "approved";
+      return {
+        body: rejected ? "" : "ok\n",
+        headers: {
+          "referrer-policy": "no-referrer",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "x-content-type-options": "nosniff",
+          "x-frame-options": "DENY",
+        },
+        status: rejected ? 401 : 200,
+      };
+    });
+
+    expect(calls).toEqual(
+      ["none", "wrong", "approved"].flatMap((authorization) =>
+        [
+          ["api.apollot.ru", "/healthz"],
+          ["api.tf.apollot.ru", "/api/healthz"],
+          ["tf.apollot.ru", "/healthz"],
+          ["admin.apollot.ru", "/healthz"],
+        ].map(([host, path]) => ({ authorization, host, path })),
+      ),
+    );
+  });
+
+  it("fails the Caddy matrix when any required response header is absent", async () => {
+    await expect(
+      verifyCaddyRouteMatrix(async (request) => ({
+        body:
+          request.host === "admin.apollot.ru" &&
+          request.authorization !== "approved"
+            ? ""
+            : "ok\n",
+        headers: {
+          "referrer-policy": "no-referrer",
+          "strict-transport-security": "max-age=31536000; includeSubDomains",
+          "x-content-type-options": "nosniff",
+        },
+        status:
+          request.host === "admin.apollot.ru" &&
+          request.authorization !== "approved"
+            ? 401
+            : 200,
+      })),
+    ).rejects.toThrow("Caddy security header contract failed");
   });
 
   it("records digest-qualified local image references for exact cleanup", () => {

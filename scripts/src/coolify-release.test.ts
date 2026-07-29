@@ -85,9 +85,8 @@ const exactSecretMounts = {
   ],
   "platform-redis": [],
   "tf-admin": [
-    mount("admin_dashboard_token", "0"),
-    mount("admin_access_user", "0"),
-    mount("admin_access_password", "0"),
+    mount("admin_dashboard_token"),
+    mount("admin_access_htpasswd", "0"),
   ],
   "tf-api": [
     mount("admin_dashboard_token"),
@@ -158,8 +157,7 @@ const exactSecretFileEnvironment: Readonly<
     POSTGRES_PASSWORD_FILE: "/run/secrets/platform_postgres_admin_password",
   },
   "tf-admin": {
-    ADMIN_ACCESS_PASSWORD_FILE: "/run/secrets/admin_access_password",
-    ADMIN_ACCESS_USER_FILE: "/run/secrets/admin_access_user",
+    ADMIN_ACCESS_HTPASSWD_FILE: "/run/secrets/admin_access_htpasswd",
     ADMIN_DASHBOARD_TOKEN_FILE: "/run/secrets/admin_dashboard_token",
   },
   "tf-api": {
@@ -442,8 +440,7 @@ describe("validateCoolifyRelease", () => {
       ["apollo-platform", "platform-api", "DATABASE_URL_FILE"],
       ["apollo-platform", "platform-migrate", "MIGRATOR_DATABASE_URL_FILE"],
       ["apollo-platform", "platform-postgres", "POSTGRES_PASSWORD_FILE"],
-      ["apollo-tf", "tf-admin", "ADMIN_ACCESS_PASSWORD_FILE"],
-      ["apollo-tf", "tf-admin", "ADMIN_ACCESS_USER_FILE"],
+      ["apollo-tf", "tf-admin", "ADMIN_ACCESS_HTPASSWD_FILE"],
       ["apollo-tf", "tf-admin", "ADMIN_DASHBOARD_TOKEN_FILE"],
       ["apollo-tf", "tf-api", "ADMIN_DASHBOARD_TOKEN_FILE"],
       ["apollo-tf", "tf-api", "APOLLO_TF_CLIENT_SECRET_FILE"],

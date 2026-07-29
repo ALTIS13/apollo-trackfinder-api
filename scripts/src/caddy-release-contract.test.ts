@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -23,6 +24,10 @@ const validatorPath = resolve(
 const protectedCommandPath = resolve(
   repositoryRoot,
   "deploy/caddy/caddy-protected-command.sh",
+);
+const credentialGeneratorPath = resolve(
+  repositoryRoot,
+  "deploy/caddy/prepare-admin-credentials.sh",
 );
 const rolloutPath = resolve(
   repositoryRoot,
@@ -123,6 +128,130 @@ describe("Apollo Caddy release include", () => {
     }
     expect(source).toContain("exactly one LF-terminated line");
     expect(source).toContain("bcrypt");
+  });
+
+  it("derives the nginx htpasswd and Caddy handoff from one protected source without credential argv", () => {
+    const root = mkdtempSync(join(tmpdir(), "apollo-admin-credentials-"));
+    const sourceDirectory = join(root, "source");
+    const generationParent = join(root, "generations");
+    const bin = join(root, "bin");
+    const generation = "release-contract-001";
+    const commandLog = join(root, "commands.log");
+    const username = "release-contract-user";
+    const password = "synthetic-contract-password-value";
+    const bcrypt = `$2a$12$${"A".repeat(53)}`;
+    const executable =
+      process.platform === "win32"
+        ? "C:\\Program Files\\Git\\bin\\bash.exe"
+        : "bash";
+    try {
+      for (const directory of [sourceDirectory, generationParent, bin]) {
+        mkdirSync(directory);
+      }
+      writeFileSync(join(sourceDirectory, "admin_access_user"), `${username}\n`, {
+        mode: 0o600,
+      });
+      writeFileSync(
+        join(sourceDirectory, "admin_access_password"),
+        `${password}\n`,
+        { mode: 0o600 },
+      );
+      writeFileSync(
+        join(bin, "caddy"),
+        `#!/bin/sh
+set -eu
+printf 'caddy %s\n' "$*" >> "$APOLLO_COMMAND_LOG"
+[ "$#" -eq 1 ] && [ "$1" = hash-password ]
+cat >/dev/null
+printf '%s\n' '${bcrypt}'
+`,
+        { mode: 0o700 },
+      );
+      writeFileSync(
+        join(bin, "stat"),
+        `#!/bin/sh
+set -eu
+case "$*" in
+  *admin_access_user|*admin_access_password) printf '0:0:600\n' ;;
+  *) exec /usr/bin/stat "$@" ;;
+esac
+`,
+        { mode: 0o700 },
+      );
+      writeFileSync(
+        join(bin, "chown"),
+        `#!/bin/sh
+set -eu
+printf 'chown %s\n' "$*" >> "$APOLLO_COMMAND_LOG"
+`,
+        { mode: 0o700 },
+      );
+      chmodSync(join(bin, "caddy"), 0o700);
+      chmodSync(join(bin, "stat"), 0o700);
+      chmodSync(join(bin, "chown"), 0o700);
+
+      const run = spawnSync(
+        executable,
+        [
+          "-ceu",
+          'PATH="$APOLLO_TEST_BIN:$PATH"; export PATH; exec "$1"',
+          "sh",
+          shellPath(credentialGeneratorPath),
+        ],
+        {
+          cwd: repositoryRoot,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            APOLLO_ADMIN_CREDENTIAL_GENERATION: generation,
+            APOLLO_ADMIN_GENERATION_PARENT: shellPath(generationParent),
+            APOLLO_ADMIN_SOURCE_DIRECTORY: shellPath(sourceDirectory),
+            APOLLO_COMMAND_LOG: shellPath(commandLog),
+            APOLLO_TEST_BIN: shellPath(bin),
+          },
+          windowsHide: true,
+        },
+      );
+
+      expect({
+        signal: run.signal,
+        status: run.status,
+        stderr: run.stderr,
+        stdout: run.stdout,
+      }).toEqual({
+        signal: null,
+        status: 0,
+        stderr: "",
+        stdout: "admin-credential-generation: complete\n",
+      });
+      const outputDirectory = join(generationParent, generation);
+      const htpasswd = readFileSync(
+        join(outputDirectory, "admin_access_htpasswd"),
+        "utf8",
+      );
+      const caddyEnvironment = readFileSync(
+        join(outputDirectory, "caddy.env"),
+        "utf8",
+      );
+      expect(htpasswd).toBe(`${username}:${bcrypt}`);
+      expect(caddyEnvironment).toBe(
+        `APOLLO_ADMIN_CADDY_USER='${username}'\n` +
+          `APOLLO_ADMIN_CADDY_PASSWORD_HASH='${bcrypt}'\n`,
+      );
+      expect(htpasswd).not.toContain(password);
+      expect(caddyEnvironment).not.toContain(password);
+      expect(readFileSync(commandLog, "utf8")).toBe(
+        "caddy hash-password\n" +
+          "chown root:root " +
+          `${shellPath(join(outputDirectory, "admin_access_htpasswd.tmp"))}\n` +
+          "chown root:caddy " +
+          `${shellPath(join(outputDirectory, "caddy.env.tmp"))}\n` +
+          "chown root:caddy " +
+          `${shellPath(outputDirectory)}\n`,
+      );
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
   });
 
   it.each([

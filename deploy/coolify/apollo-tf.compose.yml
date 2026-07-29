@@ -625,23 +625,17 @@ services:
     ports:
       - "127.0.0.1:${TF_ADMIN_PORT:?}:80"
     environment:
-      ADMIN_ACCESS_PASSWORD_FILE: /run/secrets/admin_access_password
-      ADMIN_ACCESS_USER_FILE: /run/secrets/admin_access_user
+      ADMIN_ACCESS_HTPASSWD_FILE: /run/secrets/admin_access_htpasswd
       ADMIN_DASHBOARD_TOKEN_FILE: /run/secrets/admin_dashboard_token
       APOLLO_API_UPSTREAM: http://tf-api:8080
     secrets:
       - source: admin_dashboard_token
         target: admin_dashboard_token
-        uid: "0"
-        gid: "0"
+        uid: "10001"
+        gid: "10001"
         mode: "0400"
-      - source: admin_access_user
-        target: admin_access_user
-        uid: "0"
-        gid: "0"
-        mode: "0400"
-      - source: admin_access_password
-        target: admin_access_password
+      - source: admin_access_htpasswd
+        target: admin_access_htpasswd
         uid: "0"
         gid: "0"
         mode: "0400"
@@ -658,10 +652,8 @@ services:
       start_period: 5s
 
 secrets:
-  admin_access_password:
-    file: ${TF_SECRET_DIRECTORY:?}/admin_access_password
-  admin_access_user:
-    file: ${TF_SECRET_DIRECTORY:?}/admin_access_user
+  admin_access_htpasswd:
+    file: ${TF_ADMIN_CREDENTIAL_DIRECTORY:?}/admin_access_htpasswd
   admin_dashboard_token:
     file: ${TF_SECRET_DIRECTORY:?}/admin_dashboard_token
   tf_admin_database_url:

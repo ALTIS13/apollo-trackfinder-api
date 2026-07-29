@@ -131,6 +131,9 @@ describe("admin dashboard delivery contracts", () => {
       'ADMIN_DASHBOARD_TOKEN_FILE="/run/secrets/admin_dashboard_token"',
     );
     expect(nginxRuntimeDefaults).toContain(
+      'ADMIN_ACCESS_HTPASSWD_FILE="/run/secrets/admin_access_htpasswd"',
+    );
+    expect(nginxRuntimeDefaults).toContain(
       'ADMIN_ACCESS_USER_FILE="/run/secrets/admin_access_user"',
     );
     expect(nginxRuntimeDefaults).toContain(
@@ -141,6 +144,12 @@ describe("admin dashboard delivery contracts", () => {
     );
     expect(nginxRuntimeDefaults).toContain(
       'read_secret_file "$ADMIN_DASHBOARD_TOKEN_FILE" 32 4096',
+    );
+    expect(nginxRuntimeDefaults).toContain(
+      'read_secret_file "$ADMIN_ACCESS_HTPASSWD_FILE" 62 260',
+    );
+    expect(nginxRuntimeDefaults).toContain(
+      "grep -Eq '^[A-Za-z0-9_.@-]{1,128}:\\$2[aby]\\$[0-9]{2}\\$[./A-Za-z0-9]{53}$'",
     );
     expect(nginxRuntimeDefaults).toContain(
       'read_secret_file "$ADMIN_ACCESS_USER_FILE" 1 128',
@@ -162,8 +171,11 @@ describe("admin dashboard delivery contracts", () => {
       /case "\$admin_access_user" in[\s\S]*""\|\*\[!a-zA-Z0-9_.@-\]\*/,
     );
     expect(nginxRuntimeDefaults).toContain("chmod 640 /etc/nginx/.htpasswd");
+    expect(nginxRuntimeDefaults).toContain(
+      "printf '%s\\n' \"$admin_access_htpasswd\" > /etc/nginx/.htpasswd",
+    );
     expect(nginxRuntimeDefaults).toMatch(
-      /unset\s+admin_dashboard_token\s+admin_access_user\s+admin_access_password\s+admin_password_hash/,
+      /unset\s+admin_dashboard_token\s+admin_access_htpasswd[\s\S]*unset\s+admin_access_user\s+admin_access_password\s+admin_password_hash/,
     );
     expect(nginxRuntimeDefaults).toContain(
       "printf '%s\\n' \"$admin_access_password\" | mkpasswd -P 0 -m sha512",
