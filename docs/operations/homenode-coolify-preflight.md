@@ -16,7 +16,7 @@ The final fix wave validated the production manifests, exact provenance
 validator, custom image targets, file-backed secret contracts, application
 flows, persistence, and the complete Caddy matrix locally from
 `d0f74122d9e415d7cb9571be678188657f1ce7eb`. The proof used a task-owned local
-Buildx builder and only `127.0.0.1:18200..18203`, dispatched no workflow, and
+Buildx builder and only `127.0.0.1:18200..18203`, performed no publication, and
 passed production smoke `43/43` in `987.59s` with exact cleanup zero. It also
 exercised the exact `baseline` profile
 one-shot contracts against a separate disposable database, restored granted
@@ -33,10 +33,10 @@ That manifest is a local ignored proof input, not a deployable or tracked
 release artifact. The invocation fails with exactly `19 image_provenance`,
 `18 placeholder_image_digest`, `1 release_artifact`, and
 `1 release_environment_value`, with `0 environment_contract` and no other
-category. An approved release must replace every image with a
-workflow-produced immutable reference, set the exact source commit, and pass
-production validation against the downloaded release manifest. The complete
-rollout and rollback order is in
+category. An approved release must use the operator-produced immutable
+references, set the exact source commit, and pass production validation against
+the completed private release env and generated manifest. The complete rollout
+and rollback order is in
 `docs/operations/apollo-production-rollout.md`.
 
 Fresh supporting validation passed pinned Caddy `10/10` in `16.30s`,
@@ -53,7 +53,7 @@ included the hostile rendered-environment matrix and the tracked exact
 newline-free, binary-safe credential verifier, including silent embedded-NUL
 rejection. The independent task-owned resource inventory was zero. One
 unrelated concurrently created ambient image and one anonymous ambient volume
-were preserved. No workflow, registry publication, retained-volume access, or
+were preserved. No registry publication, retained-volume access, or
 remote mutation occurred.
 
 The preflight's remote observation remains read-only. The retained legacy class

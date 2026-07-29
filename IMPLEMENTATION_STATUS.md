@@ -6,7 +6,7 @@ Last updated: 2026-07-29.
 
 Status: `LOCAL_RELEASE_VALIDATED`. The exact local image source is
 `d0f74122d9e415d7cb9571be678188657f1ce7eb`; this status does not claim a
-deployment, workflow dispatch, GHCR publication, or remote change.
+deployment, operator publication, GHCR publication, or remote change.
 
 - The production package consists of
   `deploy/coolify/apollo-platform.compose.yml`,
@@ -45,8 +45,8 @@ deployment, workflow dispatch, GHCR publication, or remote change.
   verifier also compares exact source and reconstructed byte counts, so an
   embedded NUL or any other binary normalization fails silently before
   credential equality can pass.
-- Production validation now requires the exact workflow artifact source commit,
-  repository, digest, and immutable reference for every image and renders
+- Production validation now requires the completed operator manifest source
+  commit, repository, digest, and immutable reference for every image and renders
   Compose from an isolated allowlist. The explicit local mode remains separate.
   The checked-in env was validated in explicit `production` mode against the
   local ignored Task 3 zero-placeholder manifest at
@@ -84,8 +84,8 @@ deployment, workflow dispatch, GHCR publication, or remote change.
 - The observed legacy volume remains only `DETACHED_UNKNOWN`: unnamed,
   unmounted, unstarted, unmodified, and absent from tracked manifests.
 - The final fix wave did not contact or mutate HomeNode, Coolify, host Caddy,
-  UFW, DNS, GitHub settings/workflows, GHCR, any remote database/volume, or the
-  detached legacy volume. The release workflow was not dispatched.
+  UFW, DNS, GitHub settings, GHCR, any remote database/volume, or the detached
+  legacy volume. The operator publisher was not run.
 
 ## TF immutable migrations release candidate
 

@@ -10,11 +10,17 @@ const releaseDirectory = join(repositoryRoot, "deploy", "coolify");
 const platformPath = join(releaseDirectory, "apollo-platform.compose.yml");
 const tfPath = join(releaseDirectory, "apollo-tf.compose.yml");
 const releaseEnvironmentPath = join(releaseDirectory, "release.env.example");
-const releaseWorkflowPath = join(
+const operatorReleasePath = join(
   repositoryRoot,
-  ".github",
-  "workflows",
-  "apollo-release-images.yml",
+  "scripts",
+  "src",
+  "operator-release.ts",
+);
+const releaseImagesPath = join(
+  repositoryRoot,
+  "scripts",
+  "src",
+  "release-images.ts",
 );
 const productionDockerfiles = [
   "artifacts/platform-api/Dockerfile",
@@ -508,286 +514,75 @@ describe("Coolify production release manifests", () => {
   });
 });
 
-describe("Apollo immutable image release workflow", () => {
-  it("publishes every production target from manual or version-tag releases", async () => {
-    const workflow = parse(await readFile(releaseWorkflowPath, "utf8")) as {
-      readonly jobs: {
-        readonly build: {
-          readonly strategy: {
-            readonly matrix: {
-              readonly include: readonly Record<string, string>[];
-            };
-          };
-        };
-      };
-      readonly on: {
-        readonly push: { readonly tags: readonly string[] };
-        readonly workflow_dispatch: unknown;
-      };
-    };
-
-    expect(Object.keys(workflow.on).sort()).toEqual([
-      "push",
-      "workflow_dispatch",
+describe("Apollo operator image publication", () => {
+  it("uses the shared catalog and root publisher entry point", async () => {
+    const [catalog, packageJsonSource, publisher] = await Promise.all([
+      readFile(releaseImagesPath, "utf8"),
+      readFile(join(repositoryRoot, "package.json"), "utf8"),
+      readFile(operatorReleasePath, "utf8"),
     ]);
-    expect(workflow.on.push.tags).toEqual(["v*"]);
-    expect(workflow.jobs.build.strategy.matrix.include).toEqual([
-      {
-        dockerfile: "artifacts/platform-api/Dockerfile",
-        image: "ghcr.io/altis13/apollo-platform-api",
-        name: "platform-api",
-        target: "runtime",
-      },
-      {
-        dockerfile: "artifacts/platform-api/Dockerfile",
-        image: "ghcr.io/altis13/apollo-platform-postgres",
-        name: "platform-postgres",
-        target: "postgres-role-init",
-      },
-      {
-        dockerfile: "artifacts/api-server/Dockerfile",
-        image: "ghcr.io/altis13/apollo-tf-api",
-        name: "tf-api",
-        target: "runner",
-      },
-      {
-        dockerfile: "artifacts/api-server/Dockerfile",
-        image: "ghcr.io/altis13/apollo-tf-postgres",
-        name: "tf-postgres",
-        target: "postgres-role-init",
-      },
-      {
-        dockerfile: "artifacts/music-player/Dockerfile",
-        image: "ghcr.io/altis13/apollo-tf-web",
-        name: "tf-web",
-        target: "runner",
-      },
-      {
-        dockerfile: "artifacts/admin-dashboard/Dockerfile",
-        image: "ghcr.io/altis13/apollo-tf-admin",
-        name: "tf-admin",
-        target: "default",
-      },
-      {
-        dockerfile: "artifacts/tf-search/Dockerfile",
-        image: "ghcr.io/altis13/apollo-tf-search",
-        name: "tf-search",
-        target: "runner",
-      },
-      {
-        dockerfile: "artifacts/tf-integrations/Dockerfile",
-        image: "ghcr.io/altis13/apollo-tf-integrations",
-        name: "tf-integrations",
-        target: "runner",
-      },
-      {
-        dockerfile: "artifacts/tf-integrations/Dockerfile",
-        image: "ghcr.io/altis13/apollo-tf-integrations-postgres",
-        name: "tf-integrations-postgres",
-        target: "postgres-role-init",
-      },
-      {
-        dockerfile: "artifacts/tf-download-worker/Dockerfile",
-        image: "ghcr.io/altis13/apollo-tf-download-worker",
-        name: "tf-download-worker",
-        target: "runner",
-      },
-      {
-        dockerfile: "artifacts/tf-download-worker/Dockerfile",
-        image: "ghcr.io/altis13/apollo-tf-download-redis",
-        name: "tf-download-redis",
-        target: "queue-redis",
-      },
-    ]);
-  });
-
-  it("grants exact least privilege per job and requires validation before build", async () => {
-    const workflow = parse(await readFile(releaseWorkflowPath, "utf8")) as {
-      readonly jobs: Record<
-        "build" | "manifest" | "validate",
-        {
-          readonly needs?: string;
-          readonly permissions?: Record<string, string>;
-        }
-      >;
-      readonly permissions?: Record<string, string>;
+    const packageJson = JSON.parse(packageJsonSource) as {
+      readonly scripts?: Record<string, string>;
     };
 
-    expect(workflow.permissions).toBeUndefined();
-    expect(workflow.jobs.validate.permissions).toEqual({
-      contents: "read",
-    });
-    expect(workflow.jobs.build.permissions).toEqual({
-      contents: "read",
-      packages: "write",
-    });
-    expect(workflow.jobs.manifest.permissions).toEqual({
-      packages: "read",
-    });
-    expect(workflow.jobs.build.needs).toBe("validate");
-  });
-
-  it("runs every affected suite and typecheck before any image push", async () => {
-    const workflow = parse(await readFile(releaseWorkflowPath, "utf8")) as {
-      readonly jobs: {
-        readonly build: { readonly needs?: string };
-        readonly validate: {
-          readonly steps: readonly {
-            readonly name?: string;
-            readonly run?: string;
-          }[];
-        };
-      };
-    };
-    const validation = workflow.jobs.validate.steps.find(
-      ({ name }) => name === "Validate source",
+    expect(packageJson.scripts?.["release:publish"]).toBe(
+      "node --experimental-strip-types -- scripts/src/operator-release.ts",
     );
-    expect(
-      validation?.run
-        ?.trim()
-        .split(/\r?\n/)
-        .map((line) => line.trim()),
-    ).toEqual([
-      "pnpm --filter @workspace/scripts test",
-      "pnpm --filter @workspace/platform-api exec vitest run --maxWorkers=2",
-      "pnpm --filter @workspace/api-server exec vitest run --maxWorkers=1",
-      "pnpm --filter @workspace/admin-dashboard exec vitest run --maxWorkers=2",
-      "pnpm --filter @workspace/music-player exec vitest run --maxWorkers=2",
-      "pnpm --filter @workspace/tf-search exec vitest run --maxWorkers=2",
-      "pnpm --filter @workspace/tf-integrations exec vitest run --maxWorkers=2",
-      "pnpm --filter @workspace/tf-download-worker exec vitest run --maxWorkers=2",
-      "pnpm run typecheck",
-    ]);
-    expect(workflow.jobs.build.needs).toBe("validate");
-  });
-
-  it("uses pinned actions, GITHUB_TOKEN, attestations, digest capture, and one final manifest artifact", async () => {
-    const source = await readFile(releaseWorkflowPath, "utf8");
-    const workflow = parse(source) as {
-      readonly jobs: Record<
-        string,
-        {
-          readonly env?: Record<string, string>;
-          readonly steps: readonly {
-            readonly id?: string;
-            readonly name?: string;
-            readonly run?: string;
-            readonly uses?: string;
-            readonly with?: Record<string, unknown>;
-          }[];
-        }
-      >;
-    };
-    const steps = Object.values(workflow.jobs).flatMap(({ steps }) => steps);
-    const actionUses = steps
-      .map(({ uses }) => uses)
-      .filter((uses): uses is string => uses !== undefined);
-
-    expect(actionUses.length).toBeGreaterThan(0);
-    for (const uses of actionUses) {
-      expect(uses).toMatch(/^[^@\s]+@[a-f0-9]{40}$/);
+    expect(publisher).toContain('} from "./release-images.js";');
+    expect(publisher).toContain("operatorReleaseImageTargets");
+    const catalogEntries = catalog.slice(
+      catalog.indexOf("export const releaseImageCatalog"),
+      catalog.indexOf(
+        "] as const satisfies readonly ReleaseImageCatalogEntry[]",
+      ),
+    );
+    expect(catalogEntries.match(/kind: "custom"/g) ?? []).toHaveLength(11);
+    expect(catalogEntries).toContain('kind: "external"');
+    expect(catalogEntries).toContain('name: "redis"');
+    expect(catalogEntries).toContain('repository: "docker.io/library/redis"');
+    for (const name of [
+      "platform-api",
+      "platform-postgres",
+      "tf-api",
+      "tf-postgres",
+      "tf-web",
+      "tf-admin",
+      "tf-search",
+      "tf-integrations",
+      "tf-integrations-postgres",
+      "tf-download-worker",
+      "tf-download-redis",
+    ]) {
+      expect(catalogEntries).toContain(`name: "${name}"`);
     }
-    expect(source).not.toContain("pull_request:");
-    expect(source).not.toMatch(/secrets\.(?!GITHUB_TOKEN\b)[A-Z0-9_]+/);
-    expect(source).toContain("secrets.GITHUB_TOKEN");
-
-    const buildStep = steps.find(({ uses }) =>
-      uses?.startsWith("docker/build-push-action@"),
-    );
-    expect(buildStep?.with).toMatchObject({
-      provenance: "mode=max",
-      push: true,
-      sbom: true,
-    });
-    expect(buildStep?.id).toBe("build");
-    expect(source).toContain("steps.build.outputs.digest");
-    expect(source).toContain("docker buildx imagetools inspect");
-    expect(workflow.jobs.build?.env).toEqual({
-      DOCKER_BUILD_RECORD_UPLOAD: "false",
-    });
-
-    const validationIndex = steps.findIndex(
-      ({ name }) => name === "Validate source",
-    );
-    const pushIndex = steps.findIndex(({ uses }) =>
-      uses?.startsWith("docker/build-push-action@"),
-    );
-    expect(validationIndex).toBeGreaterThanOrEqual(0);
-    expect(pushIndex).toBeGreaterThan(validationIndex);
-
-    const uploads = steps.filter(({ uses }) =>
-      uses?.startsWith("actions/upload-artifact@"),
-    );
-    expect(uploads).toHaveLength(1);
-    expect(uploads[0]?.with).toMatchObject({
-      name: "apollo-release-manifest",
-      path: "apollo-release-manifest.json",
-    });
-    const manifestStep = steps.find(
-      ({ name }) => name === "Capture immutable digests",
-    );
-    expect(manifestStep?.run).not.toMatch(
-      /(?:password|token|secret|private|database_url|redis_url)"?\s*:/i,
-    );
   });
 
-  it("accepts only exact lowercase image digests and bounds GHCR manifest visibility retries", async () => {
-    const workflow = parse(await readFile(releaseWorkflowPath, "utf8")) as {
-      readonly jobs: Record<
-        string,
-        {
-          readonly steps: readonly {
-            readonly name?: string;
-            readonly run?: string;
-          }[];
-        }
-      >;
-    };
-    const steps = Object.values(workflow.jobs).flatMap(({ steps }) => steps);
-    const buildDigest = steps.find(
-      ({ name }) => name === "Record resulting digest",
-    )?.run;
-    const manifestDigests = steps.find(
-      ({ name }) => name === "Capture immutable digests",
-    )?.run;
+  it("validates the source archive before publication and preserves OCI evidence", async () => {
+    const publisher = await readFile(operatorReleasePath, "utf8");
 
-    expect(buildDigest).toContain('[[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]');
-    expect(buildDigest).not.toContain('case "$digest"');
-    expect(manifestDigests).toContain("for attempt in 1 2 3 4 5; do");
-    expect(manifestDigests).toContain(
-      "GHCR manifest digest unavailable after 5 attempts",
+    expect(publisher).toContain('"git",\n      [\n        "archive",');
+    expect(publisher).toContain(
+      '"tar",\n      ["-xf", archivePath, "-C", validationRoot]',
     );
-    expect(manifestDigests).toContain('sleep "$attempt"');
-    expect(manifestDigests).toMatch(
-      /if \[\[ "\$attempt" == "5" \]\]; then[\s\S]*exit 1[\s\S]*fi/,
+    expect(publisher).toContain(
+      "for (const validation of sourceValidationCommands)",
     );
-  });
-
-  it("publishes source commit, approved repositories, and full immutable references", async () => {
-    const workflow = parse(await readFile(releaseWorkflowPath, "utf8")) as {
-      readonly jobs: Record<
-        string,
-        {
-          readonly steps: readonly {
-            readonly name?: string;
-            readonly run?: string;
-          }[];
-        }
-      >;
-    };
-    const manifest = Object.values(workflow.jobs)
-      .flatMap(({ steps }) => steps)
-      .find(({ name }) => name === "Capture immutable digests")?.run;
-
-    expect(manifest).toContain('"redis docker.io/library/redis 7-bookworm"');
-    expect(manifest).toContain('--arg sourceCommit "$GITHUB_SHA"');
-    expect(manifest).toContain('--arg repository "$image"');
-    expect(manifest).toContain('--arg imageReference "$image@$digest"');
-    expect(manifest).toContain(
-      "{name: $name, repository: $repository, imageDigest: $imageDigest, imageReference: $imageReference}",
+    expect(publisher).toContain('"--provenance",\n          "mode=max"');
+    expect(publisher).toContain('"--sbom",\n          "true"');
+    expect(publisher).toContain(
+      "`org.opencontainers.image.source=${sourceRepository}`",
     );
-    expect(manifest).toContain(
-      "{formatVersion: 1, sourceCommit: $sourceCommit, images: sort_by(.name)}",
+    expect(publisher).toContain(
+      "`org.opencontainers.image.revision=${options.sourceCommit}`",
+    );
+    expect(publisher).toContain(
+      "`org.opencontainers.image.version=${options.releaseId}`",
+    );
+    expect(publisher).toContain(
+      "const digestPattern = /^sha256:[a-f0-9]{64}$/;",
+    );
+    expect(publisher).toContain(
+      "imageReference: `${target.repository}@${digest}`",
     );
   });
 });

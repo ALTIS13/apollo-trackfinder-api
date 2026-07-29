@@ -1672,4 +1672,52 @@ describe("operator release CLI", () => {
       "node --experimental-strip-types -- scripts/src/operator-release.ts",
     );
   });
+
+  it("binds production publication guidance to the operator publisher", async () => {
+    const releaseWorkflow = join(
+      workspaceRoot,
+      ".github",
+      "workflows",
+      "apollo-release-images.yml",
+    );
+    const rolloutRunbook = await readFile(
+      join(workspaceRoot, "docs", "operations", "apollo-production-rollout.md"),
+      "utf8",
+    );
+    const guidanceSources = await Promise.all(
+      [
+        "IMPLEMENTATION_STATUS.md",
+        "docs/operations/apollo-production-rollout.md",
+        "docs/operations/homenode-coolify-preflight.md",
+        "docs/operations/apollo-backup-restore.md",
+      ].map((path) => readFile(join(workspaceRoot, path), "utf8")),
+    );
+    const musicPlayerDockerfile = await readFile(
+      join(workspaceRoot, "artifacts", "music-player", "Dockerfile"),
+      "utf8",
+    );
+
+    expect(await pathExists(releaseWorkflow)).toBe(false);
+    expect(rolloutRunbook).toContain(
+      "$env:CR_PAT | docker login ghcr.io -u ALTIS13 --password-stdin",
+    );
+    expect(rolloutRunbook).toContain("Remove-Item Env:\\CR_PAT");
+    expect(rolloutRunbook).toContain(
+      "pnpm release:publish -- --mode production --release-id v0.1.0-rc.1 --source-commit $approvedSourceCommit",
+    );
+    expect(rolloutRunbook).toContain(
+      "pnpm release:validate -- --env-file '<PRIVATE_RELEASE_ENV>' --mode production --release-manifest '.ops-private/releases/v0.1.0-rc.1/apollo-release-manifest.json'",
+    );
+    expect(rolloutRunbook).toContain(
+      "public GHCR images allow anonymous HomeNode/Coolify pulls",
+    );
+    expect(rolloutRunbook).toMatch(
+      /package\s+visibility checked after first publication/,
+    );
+    expect(rolloutRunbook).toContain("classic PAT with `write:packages`");
+    expect(rolloutRunbook).not.toMatch(/ghp_[A-Za-z0-9_]+/);
+    expect(guidanceSources.join("\n")).not.toMatch(/workflow-produced/i);
+    expect(musicPlayerDockerfile).toContain("RUN npm install -g pnpm@10.33.2");
+    expect(musicPlayerDockerfile).not.toContain("RUN npm install -g pnpm\n");
+  });
 });

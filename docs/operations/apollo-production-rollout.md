@@ -105,16 +105,31 @@ loopback registry, and resolved these registry digests:
 | `TF_WEB_IMAGE`                           | `tf-web`                   | `sha256:b279663a21e27158b0077e42b2cbacd2453282f5632f4c5c430b48b01d54a327` |
 
 The disposable registry and all references were removed. These digests are
-local evidence, not deployable GHCR references. An approved release workflow
-must build the same source commit and produce `apollo-release-manifest.json`
-with `formatVersion`, `sourceCommit`, and every exact logical name,
-repository, digest, and full immutable reference. Set
-`RELEASE_SOURCE_COMMIT` in the release env to that same commit, then validate
-the downloaded artifact and env together:
+local evidence, not deployable GHCR references. The operator-run publisher is
+the only active publication procedure. It validates the source archive before
+building the approved source commit and writes `apollo-release-manifest.json`,
+`release-images.env`, and its completion marker under the ignored private
+release directory.
 
-```sh
-pnpm release:validate -- --env-file '<RELEASE_ENV>' --mode production --release-manifest '<APOLLO_RELEASE_MANIFEST>'
+Before running the publisher, place `CR_PAT` only in the current PowerShell
+environment. It is a classic PAT with `write:packages`; it is never persisted
+in project files and must be revoked or rotated independently. The publisher
+accepts no credentials or registry options, so authenticate outside it:
+
+```powershell
+$env:CR_PAT | docker login ghcr.io -u ALTIS13 --password-stdin
+Remove-Item Env:\CR_PAT
+$approvedSourceCommit = git rev-parse HEAD
+pnpm release:publish -- --mode production --release-id v0.1.0-rc.1 --source-commit $approvedSourceCommit
+pnpm release:validate -- --env-file '<PRIVATE_RELEASE_ENV>' --mode production --release-manifest '.ops-private/releases/v0.1.0-rc.1/apollo-release-manifest.json'
 ```
+
+Set `RELEASE_SOURCE_COMMIT` in the completed private release env to the same
+commit and validate it with the generated manifest. Current GitHub
+documentation reports Container Registry storage/bandwidth as free and states
+that public GHCR images allow anonymous HomeNode/Coolify pulls, with package
+visibility checked after first publication. The operator must recheck that
+policy before future releases.
 
 Production mode requires the artifact and exact approved repositories. The
 separate `loopback-local-smoke` mode accepts only loopback repositories and no
@@ -337,4 +352,4 @@ at `1 passed / 71 skipped` in `19.08s` and `18.54s`, full scripts
 player `118 passed` in `6.28s`, and root typecheck in `18.4s`. The scripts gate
 included both the hostile rendered-environment matrix and the binary-safe
 newline-free credential verifier with silent embedded-NUL rejection. No
-release workflow was dispatched.
+operator publication was run.

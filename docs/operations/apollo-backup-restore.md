@@ -36,7 +36,7 @@ That manifest is a local ignored proof input, not a deployable or tracked
 release artifact. The invocation failed closed with exactly
 `19 image_provenance`, `18 placeholder_image_digest`, `1 release_artifact`,
 and `1 release_environment_value`, with `0 environment_contract` and no other
-category. No workflow, registry publication, retained-volume access, or remote
+category. No registry publication, retained-volume access, or remote
 mutation occurred while recording this local evidence. The same exact-source
 release matrix passed the tracked binary-safe newline-free admin credential
 verifier, including silent rejection of embedded NUL contamination.
