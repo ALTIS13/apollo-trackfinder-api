@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -39,6 +39,39 @@ function runScript(script: string, env: NodeJS.ProcessEnv, args: string[] = []):
   });
 }
 
+async function runScriptAsync(
+  script: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ status: number | null; stderr: string; stdout: string }> {
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawn(bash, [posixPath(script)], {
+      cwd: worktree,
+      env,
+      windowsHide: true,
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.once("error", rejectRun);
+    child.once("close", (status) =>
+      resolveRun({
+        status,
+        stderr: Buffer.concat(stderr).toString("utf8"),
+        stdout: Buffer.concat(stdout).toString("utf8"),
+      }),
+    );
+  });
+}
+
+async function waitForFile(path: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error("test synchronization timed out");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+}
+
 function writeExecutable(path: string, contents: string): void {
   writeFileSync(path, contents, { encoding: "utf8", mode: 0o755 });
   chmodSync(path, 0o755);
@@ -51,13 +84,13 @@ function contractEnvironment(root: string, overrides: NodeJS.ProcessEnv = {}): N
   writeFileSync(passfile, "test-only-passfile\n", { encoding: "utf8", mode: 0o600 });
   execFileSync(bash, ["-lc", `mkdir -p '${posixPath(bin)}' '${posixPath(destination)}'`]);
   const log = join(root, "commands.log");
-  writeExecutable(join(bin, "pg_dump"), "#!/bin/sh\nprintf 'pg_dump %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_PG_DUMP_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nprintf 'task4-custom-dump'\n");
+  writeExecutable(join(bin, "pg_dump"), "#!/bin/sh\nprintf 'pg_dump %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${1:-}\" = --version ]; then printf 'pg_dump (PostgreSQL) %s.0\\n' \"${FAKE_PG_DUMP_MAJOR:-16}\"; exit 0; fi\nif [ -n \"${FAKE_PG_DUMP_STARTED_FILE:-}\" ]; then : > \"$FAKE_PG_DUMP_STARTED_FILE\"; fi\nif [ -n \"${FAKE_PG_DUMP_RELEASE_FILE:-}\" ]; then while [ ! -e \"$FAKE_PG_DUMP_RELEASE_FILE\" ]; do sleep 0.02; done; fi\nif [ \"${FAKE_PG_DUMP_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nprintf 'task4-custom-dump'\n");
   writeExecutable(join(bin, "age"), "#!/bin/sh\nprintf 'age %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_AGE_FAIL:-}\" = 1 ]; then cat >/dev/null; printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nprintf 'age:'\ncat\n");
-  writeExecutable(join(bin, "psql"), "#!/bin/sh\nprintf 'psql %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_PSQL_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nif [ -n \"${FAKE_TARGET_RESULT:-}\" ]; then printf '%s\\n' \"$FAKE_TARGET_RESULT\"; fi\nif [ -n \"${FAKE_TARGET_PROBE:-}\" ]; then case \"$*\" in *\"$FAKE_TARGET_PROBE\"*) printf '1\\n' ;; esac; fi\nif [ \"${FAKE_TARGET_NOT_EMPTY:-}\" = 1 ]; then printf '1\\n'; fi\n");
-  writeExecutable(join(bin, "pg_restore"), "#!/bin/sh\nprintf 'pg_restore %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_PG_RESTORE_FAIL:-}\" = 1 ]; then cat >/dev/null; printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\ncat > \"$FAKE_RESTORE_INPUT\"\n");
+  writeExecutable(join(bin, "psql"), "#!/bin/sh\nprintf 'psql %s\\n' \"$*\" >> \"$FAKE_LOG\"\ncase \"$*\" in *\"SHOW server_version_num\"*) printf '%s0000\\n' \"${FAKE_PG_SERVER_MAJOR:-16}\"; exit 0 ;; esac\nif [ \"${FAKE_PSQL_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nif [ -n \"${FAKE_TARGET_RESULT:-}\" ]; then printf '%s\\n' \"$FAKE_TARGET_RESULT\"; fi\nif [ -n \"${FAKE_TARGET_PROBE:-}\" ]; then case \"$*\" in *\"$FAKE_TARGET_PROBE\"*) printf '1\\n' ;; esac; fi\nif [ \"${FAKE_TARGET_NOT_EMPTY:-}\" = 1 ]; then printf '1\\n'; fi\n");
+  writeExecutable(join(bin, "pg_restore"), "#!/bin/sh\nprintf 'pg_restore %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${1:-}\" = --version ]; then printf 'pg_restore (PostgreSQL) %s.0\\n' \"${FAKE_PG_RESTORE_MAJOR:-16}\"; exit 0; fi\nif [ \"${FAKE_PG_RESTORE_FAIL:-}\" = 1 ]; then cat >/dev/null; printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\ncat > \"$FAKE_RESTORE_INPUT\"\n");
   writeExecutable(join(bin, "sha256sum"), "#!/bin/sh\nprintf 'sha256sum %s\\n' \"$*\" >> \"$FAKE_LOG\"\nif [ \"${FAKE_SHA256_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nprintf '%s  %s\\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \"$1\"\n");
   writeExecutable(join(bin, "mktemp"), "#!/bin/sh\nif [ \"${FAKE_MKTEMP_FAIL:-}\" = 1 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; exit 1; fi\nexec /usr/bin/mktemp \"$@\"\n");
-  writeExecutable(join(bin, "docker"), "#!/bin/sh\nprintf 'docker %s\\n' \"$*\" >> \"$FAKE_LOG\"\ncase \"$1\" in volume) if [ \"${FAKE_DOCKER_FRESH:-}\" = 1 ]; then printf '{\\\"com.apollo.release\\\":\\\"fresh\\\"}\\n'; else printf '{}\\n'; fi ;; ps) if [ \"${FAKE_DOCKER_ATTACHED:-}\" = 1 ]; then printf 'task-owned-container\\n'; fi ;; esac\n");
+  writeExecutable(join(bin, "docker"), "#!/bin/sh\nprintf 'docker %s\\n' \"$*\" >> \"$FAKE_LOG\"\ncase \"$1\" in volume) printf '%s\\n' \"$3\" ;; ps) if [ \"${FAKE_DOCKER_ATTACHED:-}\" = 1 ]; then printf 'task-owned-container\\n'; fi ;; esac\n");
   return {
     ...process.env,
     PATH: `${bin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
@@ -75,6 +108,17 @@ function contractEnvironment(root: string, overrides: NodeJS.ProcessEnv = {}): N
     FAKE_SENSITIVE: ["sensitive", "tool", "output"].join("-"),
     ...overrides,
   };
+}
+
+function claimDirectory(env: NodeJS.ProcessEnv): string {
+  return join(
+    env.APOLLO_BACKUP_DESTINATION!,
+    `.${env.APOLLO_BACKUP_RELEASE_ID}.apollo-backup-claim`,
+  );
+}
+
+function claimState(env: NodeJS.ProcessEnv): Record<string, unknown> {
+  return JSON.parse(readFileSync(join(claimDirectory(env), "state.json"), "utf8"));
 }
 
 function withBashFunctions(root: string, env: NodeJS.ProcessEnv, functions: string): NodeJS.ProcessEnv {
@@ -162,11 +206,81 @@ describe("encrypted PostgreSQL backup contract", () => {
     const artifacts = backupArtifacts(env.APOLLO_BACKUP_DESTINATION!);
     expect(readFileSync(artifacts.dump, "utf8")).toBe("age:task4-custom-dump");
     expect(readdirSync(env.APOLLO_BACKUP_DESTINATION!).sort()).toEqual(
-      [basename(artifacts.checksum), basename(artifacts.dump), basename(artifacts.metadata)].sort(),
+      [
+        basename(artifacts.checksum),
+        basename(artifacts.dump),
+        basename(artifacts.metadata),
+        basename(claimDirectory(env)),
+      ].sort(),
     );
+    expect(claimState(env)).toMatchObject({
+      release_id: "release-task4-001",
+      state: "complete",
+    });
     const commandLog = readFileSync(env.FAKE_LOG!, "utf8");
     expect(commandLog).toContain("pg_dump --format=custom --no-owner --no-privileges");
     expect(commandLog).toContain("age -r");
+  });
+
+  it.each([
+    ["apollo-platform", "apollo_platform", "16"],
+    ["apollo-tf", "apollo_trackfinder", "16"],
+    ["apollo-tf-integrations", "apollo_tf_integrations", "17"],
+  ])(
+    "enforces PostgreSQL %s client and server major for %s",
+    (stack, database, major) => {
+      if (!requireScript(backupScript)) return;
+      const root = temporaryRoot();
+      const env = contractEnvironment(root, {
+        APOLLO_BACKUP_STACK: stack,
+        APOLLO_BACKUP_PGDATABASE: database,
+        FAKE_PG_DUMP_MAJOR: major,
+        FAKE_PG_SERVER_MAJOR: major,
+      });
+      const result = runScript(backupScript, env);
+
+      expect(result.status, output(result)).toBe(0);
+      const log = readFileSync(env.FAKE_LOG!, "utf8");
+      expect(log).toContain("pg_dump --version");
+      expect(log).toContain("SHOW server_version_num");
+      expect(
+        JSON.parse(
+          readFileSync(
+            backupArtifacts(env.APOLLO_BACKUP_DESTINATION!).metadata,
+            "utf8",
+          ),
+        ),
+      ).toMatchObject({
+        postgres_client_major: Number(major),
+        postgres_server_major: Number(major),
+      });
+    },
+  );
+
+  it.each([
+    ["client", { FAKE_PG_DUMP_MAJOR: "16", FAKE_PG_SERVER_MAJOR: "17" }],
+    ["server", { FAKE_PG_DUMP_MAJOR: "17", FAKE_PG_SERVER_MAJOR: "16" }],
+  ])("rejects an integrations PostgreSQL %s major mismatch", (_kind, overrides) => {
+    if (!requireScript(backupScript)) return;
+    const root = temporaryRoot();
+    const env = contractEnvironment(root, {
+      APOLLO_BACKUP_STACK: "apollo-tf-integrations",
+      APOLLO_BACKUP_PGDATABASE: "apollo_tf_integrations",
+      ...overrides,
+    });
+    const result = runScript(backupScript, env);
+
+    expect(result.status).not.toBe(0);
+    expect(output(result)).toBe("backup: version failed\n");
+    expect(
+      readdirSync(env.APOLLO_BACKUP_DESTINATION!).filter((name) =>
+        /\.(?:dump\.age|sha256|json)$/.test(name),
+      ),
+    ).toEqual([]);
+    expect(claimState(env)).toMatchObject({
+      failed_stage: "version",
+      state: "quarantined",
+    });
   });
 
   it("removes all partial backup artifacts when encryption fails", () => {
@@ -176,7 +290,13 @@ describe("encrypted PostgreSQL backup contract", () => {
     const result = runScript(backupScript, env);
     expect(result.status).not.toBe(0);
     expect(output(result)).toBe("backup: encrypt failed\n");
-    expect(readdirSync(env.APOLLO_BACKUP_DESTINATION!)).toEqual([]);
+    expect(readdirSync(env.APOLLO_BACKUP_DESTINATION!)).toEqual([
+      basename(claimDirectory(env)),
+    ]);
+    expect(claimState(env)).toMatchObject({
+      failed_stage: "encrypt",
+      state: "quarantined",
+    });
   });
 
   it.each([
@@ -212,15 +332,15 @@ describe("encrypted PostgreSQL backup contract", () => {
     expect(output(result).includes(env.FAKE_SENSITIVE!)).toBe(false);
   });
 
-  it("uses atomic renames and requests 0600 for final artifacts", () => {
+  it("uses no-overwrite publication and requests 0600 for final artifacts", () => {
     if (!requireScript(backupScript)) return;
     const root = temporaryRoot();
-    const env = withBashFunctions(root, contractEnvironment(root), "chmod() { printf 'chmod %s\\n' \"$*\" >> \"$FAKE_LOG\"; }\nmv() { printf 'mv %s\\n' \"$*\" >> \"$FAKE_LOG\"; /usr/bin/mv \"$@\"; }\n");
+    const env = withBashFunctions(root, contractEnvironment(root), "chmod() { printf 'chmod %s\\n' \"$*\" >> \"$FAKE_LOG\"; }\nln() { printf 'ln %s\\n' \"$*\" >> \"$FAKE_LOG\"; /usr/bin/ln \"$@\"; }\n");
     const result = runScript(backupScript, env);
     expect(result.status).toBe(0);
     const artifacts = backupArtifacts(env.APOLLO_BACKUP_DESTINATION!);
     const log = readFileSync(env.FAKE_LOG!, "utf8");
-    expect(log.match(/^mv /gm)).toHaveLength(3);
+    expect(log.match(/^ln /gm)).toHaveLength(6);
     const finalChmod = log.split("\n").find((line) => line.startsWith("chmod 600") && line.includes(basename(artifacts.dump)));
     expect(finalChmod).toContain("chmod 600");
     expect(finalChmod).toContain(basename(artifacts.checksum));
@@ -239,13 +359,21 @@ describe("encrypted PostgreSQL backup contract", () => {
         mkdir -p /work/bin /work/backups
         cat > /work/bin/pg_dump <<'EOF'
 #!/bin/sh
+if [ "\${1:-}" = --version ]; then
+  printf 'pg_dump (PostgreSQL) 16.0\\n'
+  exit 0
+fi
 printf 'task4-custom-dump'
+EOF
+        cat > /work/bin/psql <<'EOF'
+#!/bin/sh
+printf '160000\\n'
 EOF
         cat > /work/bin/age <<'EOF'
 #!/bin/sh
 cat
 EOF
-        chmod 755 /work/bin/pg_dump /work/bin/age
+        chmod 755 /work/bin/pg_dump /work/bin/psql /work/bin/age
         printf 'host:5432:apollo_trackfinder:backup_operator:mode-test\\n' > /work/pgpass
         chmod 600 /work/pgpass
         /repo/deploy/ops/backup-postgres.sh
@@ -271,16 +399,90 @@ EOF
     expect(dockerExists(["volume", "inspect", volume])).toBe(false);
   });
 
-  it("removes published artifacts when an atomic rename fails", () => {
+  it("removes only invocation-owned published artifacts when publication fails", () => {
     if (!requireScript(backupScript)) return;
     const root = temporaryRoot();
-    const env = withBashFunctions(root, contractEnvironment(root), "mv_count=0\nmv() { mv_count=$((mv_count + 1)); if [ \"$mv_count\" -eq 2 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; return 1; fi; /usr/bin/mv \"$@\"; }\n");
+    const env = withBashFunctions(root, contractEnvironment(root), "ln_count=0\nln() { ln_count=$((ln_count + 1)); if [ \"$ln_count\" -eq 4 ]; then printf '%s\\n' \"$FAKE_SENSITIVE\" >&2; return 1; fi; /usr/bin/ln \"$@\"; }\n");
     const result = runScript(backupScript, env);
     expect(result.status).not.toBe(0);
     expect(output(result)).toBe("backup: commit failed\n");
     expect(output(result).includes(env.FAKE_SENSITIVE!)).toBe(false);
-    expect(readdirSync(env.APOLLO_BACKUP_DESTINATION!)).toEqual([]);
+    expect(readdirSync(env.APOLLO_BACKUP_DESTINATION!)).toEqual([
+      basename(claimDirectory(env)),
+    ]);
+    expect(claimState(env)).toMatchObject({
+      failed_stage: "commit",
+      state: "quarantined",
+    });
   });
+
+  it("fails closed on a stale release claim without touching its review record", () => {
+    if (!requireScript(backupScript)) return;
+    const root = temporaryRoot();
+    const env = contractEnvironment(root);
+    const claim = claimDirectory(env);
+    execFileSync(bash, ["-lc", `mkdir '${posixPath(claim)}'`]);
+    const staleState =
+      '{"format_version":1,"release_id":"release-task4-001","state":"active"}\n';
+    writeFileSync(join(claim, "state.json"), staleState, { mode: 0o600 });
+
+    const result = runScript(backupScript, env);
+
+    expect(result.status).not.toBe(0);
+    expect(output(result)).toBe("backup: claim failed\n");
+    expect(readFileSync(join(claim, "state.json"), "utf8")).toBe(staleState);
+    expect(existsSync(env.FAKE_LOG!)).toBe(false);
+  });
+
+  it.each([
+    ["successful owner", false, "complete"],
+    ["failing owner", true, "quarantined"],
+  ])(
+    "preserves same-release evidence across a concurrent %s interleaving",
+    async (_name, ownerFails, expectedState) => {
+      if (!requireScript(backupScript)) return;
+      const root = temporaryRoot();
+      const started = join(root, "pg-dump-started");
+      const release = join(root, "pg-dump-release");
+      const env = contractEnvironment(root, {
+        FAKE_AGE_FAIL: ownerFails ? "1" : "",
+        FAKE_PG_DUMP_RELEASE_FILE: posixPath(release),
+        FAKE_PG_DUMP_STARTED_FILE: posixPath(started),
+      });
+      const owner = runScriptAsync(backupScript, env);
+      await waitForFile(started);
+
+      const contender = runScript(backupScript, {
+        ...env,
+        FAKE_AGE_FAIL: ownerFails ? "" : "1",
+        FAKE_PG_DUMP_RELEASE_FILE: "",
+        FAKE_PG_DUMP_STARTED_FILE: "",
+      });
+      writeFileSync(release, "continue\n");
+      const ownerResult = await owner;
+
+      expect(contender.status).not.toBe(0);
+      expect(output(contender)).toBe("backup: claim failed\n");
+      expect(ownerResult.status).toBe(ownerFails ? 1 : 0);
+      expect(ownerResult.stdout + ownerResult.stderr).toBe(
+        ownerFails ? "backup: encrypt failed\n" : "backup: complete\n",
+      );
+      expect(claimState(env)).toMatchObject({ state: expectedState });
+      const finalNames = readdirSync(env.APOLLO_BACKUP_DESTINATION!).filter(
+        (name) => /\.(?:dump\.age|sha256|json)$/.test(name),
+      );
+      expect(finalNames).toHaveLength(ownerFails ? 0 : 3);
+      if (!ownerFails) {
+        expect(
+          readFileSync(
+            backupArtifacts(env.APOLLO_BACKUP_DESTINATION!).dump,
+            "utf8",
+          ),
+        ).toBe("age:task4-custom-dump");
+      }
+    },
+    20_000,
+  );
 
   it("writes metadata without connection, destination, credential, or recipient values", () => {
     if (!requireScript(backupScript)) return;
@@ -364,6 +566,65 @@ EOF
     expect(result.status).not.toBe(0);
     expect(output(result)).toBe("verify: checksum failed\n");
     expect(output(result).includes(env.FAKE_SENSITIVE!)).toBe(false);
+  });
+
+  it("enforces PostgreSQL 17 restore client and target server for integrations evidence", () => {
+    if (!requireScript(backupScript) || !requireScript(restoreScript)) return;
+    const root = temporaryRoot();
+    const env = contractEnvironment(root, {
+      APOLLO_BACKUP_STACK: "apollo-tf-integrations",
+      APOLLO_BACKUP_PGDATABASE: "apollo_tf_integrations",
+      FAKE_PG_DUMP_MAJOR: "17",
+      FAKE_PG_RESTORE_MAJOR: "17",
+      FAKE_PG_SERVER_MAJOR: "17",
+    });
+    expect(runScript(backupScript, env).status).toBe(0);
+    const artifacts = backupArtifacts(env.APOLLO_BACKUP_DESTINATION!);
+    const result = runScript(
+      restoreScript,
+      restoreEnvironment(root, env, artifacts, {
+        APOLLO_RESTORE_PGDATABASE: "apollo_tf_integrations",
+        APOLLO_RESTORE_EXPECTED_STACK: "apollo-tf-integrations",
+        APOLLO_RESTORE_EXPECTED_DATABASE: "apollo_tf_integrations",
+      }),
+    );
+
+    expect(result.status, output(result)).toBe(0);
+    const log = readFileSync(env.FAKE_LOG!, "utf8");
+    expect(log).toContain("pg_restore --version");
+    expect(log).toContain("SHOW server_version_num");
+  });
+
+  it.each([
+    ["client", { FAKE_PG_RESTORE_MAJOR: "16", FAKE_PG_SERVER_MAJOR: "17" }],
+    ["server", { FAKE_PG_RESTORE_MAJOR: "17", FAKE_PG_SERVER_MAJOR: "16" }],
+  ])("rejects an integrations restore %s major mismatch", (_kind, overrides) => {
+    if (!requireScript(backupScript) || !requireScript(restoreScript)) return;
+    const root = temporaryRoot();
+    const env = contractEnvironment(root, {
+      APOLLO_BACKUP_STACK: "apollo-tf-integrations",
+      APOLLO_BACKUP_PGDATABASE: "apollo_tf_integrations",
+      FAKE_PG_DUMP_MAJOR: "17",
+      FAKE_PG_SERVER_MAJOR: "17",
+    });
+    expect(runScript(backupScript, env).status).toBe(0);
+    const result = runScript(
+      restoreScript,
+      restoreEnvironment(
+        root,
+        { ...env, ...overrides },
+        backupArtifacts(env.APOLLO_BACKUP_DESTINATION!),
+        {
+          APOLLO_RESTORE_PGDATABASE: "apollo_tf_integrations",
+          APOLLO_RESTORE_EXPECTED_STACK: "apollo-tf-integrations",
+          APOLLO_RESTORE_EXPECTED_DATABASE: "apollo_tf_integrations",
+        },
+      ),
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(output(result)).toBe("restore: version failed\n");
+    expect(existsSync(env.FAKE_RESTORE_INPUT!)).toBe(false);
   });
 
   it.each([
@@ -516,13 +777,13 @@ EOF
     expect(readFileSync(env.FAKE_LOG!, "utf8")).not.toMatch(/docker (create|run|start|compose)/);
   });
 
-  it("recognizes a fresh release volume from metadata only", () => {
+  it("never treats a static release label as proof of freshness", () => {
     if (!requireScript(classifyScript)) return;
     const root = temporaryRoot();
     const env = contractEnvironment(root, { FAKE_DOCKER_FRESH: "1" });
     const result = runScript(classifyScript, env, ["fresh-release-volume"]);
     expect(result.status).toBe(0);
-    expect(output(result)).toBe("FRESH_RELEASE_VOLUME\n");
+    expect(output(result)).toBe("DETACHED_UNKNOWN\n");
     expect(readFileSync(env.FAKE_LOG!, "utf8")).not.toMatch(/docker (create|run|start|compose)/);
   });
 });
@@ -537,7 +798,9 @@ function docker(args: string[], options: { input?: string; env?: NodeJS.ProcessE
       dockerArgs.splice(
         runIndex + 1,
         0,
-        ...Object.entries(options.env).flatMap(([name, value]) => ["-e", `${name}=${value ?? ""}`]),
+        ...Object.entries(options.env).flatMap(([name, value]) =>
+          name === "PATH" ? ["-e", `PATH=${value ?? ""}`] : ["-e", name],
+        ),
       );
     }
   }
@@ -545,7 +808,11 @@ function docker(args: string[], options: { input?: string; env?: NodeJS.ProcessE
     cwd: worktree,
     encoding: "utf8",
     input: options.input,
-    env: process.env,
+    env: {
+      ...process.env,
+      ...options.env,
+      PATH: process.env.PATH,
+    },
   });
   if (result.status !== 0) throw new Error("docker command failed");
   return result.stdout.trim();
@@ -563,11 +830,18 @@ function dockerClientArgs(network: string, root: string, image: string, proofVol
   return ["run", "--rm", "-i", "--label", label, "--network", network, "-v", `${root.replaceAll("\\", "/")}:/work`, "-v", `${worktree.replaceAll("\\", "/")}:/work/repo:ro`, "-v", `${proofVolume}:/backup`, "-w", "/work", image];
 }
 
-describe.runIf(dockerProofEnabled)("PostgreSQL 16 encrypted restore proof", () => {
-  it("restores marker schema and data after the disposable source is destroyed", () => {
-    if (!requireScript(backupScript) || !requireScript(restoreScript)) return;
+function runPostgresBackupRestoreProof(options: {
+  readonly baseImage: string;
+  readonly database: "apollo_tf_integrations" | "apollo_trackfinder";
+  readonly evidencePrefix: string;
+  readonly major: 16 | 17;
+  readonly stack: "apollo-tf" | "apollo-tf-integrations";
+}): void {
+  if (!requireScript(backupScript) || !requireScript(restoreScript)) return;
     const root = temporaryRoot();
-    const runId = `apollo-task4-${randomBytes(6).toString("hex")}`;
+    const runId =
+      `apollo-pg${options.major}-proof-` +
+      randomBytes(6).toString("hex");
     const network = `${runId}-network`;
     const source = `${runId}-source`;
     const target = `${runId}-target`;
@@ -577,45 +851,102 @@ describe.runIf(dockerProofEnabled)("PostgreSQL 16 encrypted restore proof", () =
     const image = `${runId}-client`;
     const label = `com.apollo.task4=${runId}`;
     const password = randomBytes(24).toString("base64url");
-    const releaseId = "task4-disposable-proof-001";
+    const releaseId = `${options.evidencePrefix}-001`;
     let sourceDestroyed = false;
 
     try {
-      writeFileSync(join(root, "Dockerfile"), "FROM postgres:16\nRUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* && curl -fsSL https://github.com/FiloSottile/age/releases/download/v1.2.1/age-v1.2.1-linux-amd64.tar.gz | tar -xz --strip-components=1 -C /usr/local/bin age/age age/age-keygen\n", { encoding: "utf8" });
+      writeFileSync(
+        join(root, "Dockerfile"),
+        `FROM ${options.baseImage}\n` +
+          "RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* && curl -fsSL https://github.com/FiloSottile/age/releases/download/v1.2.1/age-v1.2.1-linux-amd64.tar.gz | tar -xz --strip-components=1 -C /usr/local/bin age/age age/age-keygen\n",
+        { encoding: "utf8" },
+      );
       docker(["build", "--label", label, "-t", image, root]);
       docker(["network", "create", "--label", label, network]);
       docker(["volume", "create", "--label", label, sourceVolume]);
       docker(["volume", "create", "--label", label, targetVolume]);
       docker(["volume", "create", "--label", label, proofVolume]);
-      docker([...dockerClientArgs(network, root, image, proofVolume, label), "sh", "-ceu", "umask 077; mkdir -p /backup/data; IFS= read -r password; printf '%s\\n' \"$password\" > /backup/postgres-password; printf 'source:5432:apollo_trackfinder:postgres:%s\\ntarget:5432:apollo_trackfinder:postgres:%s\\n' \"$password\" \"$password\" > /backup/pgpass"], { input: `${password}\n` });
-      docker(["run", "-d", "--name", source, "--label", label, "--network", network, "--network-alias", "source", "-e", "POSTGRES_DB=apollo_trackfinder", "-e", "POSTGRES_USER=postgres", "-e", "POSTGRES_PASSWORD_FILE=/run/secrets/postgres-password", "-v", `${sourceVolume}:/var/lib/postgresql/data`, "-v", `${proofVolume}:/run/secrets:ro`, "postgres:16"]);
+      docker(
+        [
+          ...dockerClientArgs(network, root, image, proofVolume, label),
+          "sh",
+          "-ceu",
+          `umask 077; mkdir -p /backup/data; IFS= read -r password; printf '%s\\n' "$password" > /backup/postgres-password; printf 'source:5432:${options.database}:postgres:%s\\ntarget:5432:${options.database}:postgres:%s\\n' "$password" "$password" > /backup/pgpass`,
+        ],
+        { input: `${password}\n` },
+      );
+      docker([
+        "run",
+        "-d",
+        "--name",
+        source,
+        "--label",
+        label,
+        "--network",
+        network,
+        "--network-alias",
+        "source",
+        "-e",
+        `POSTGRES_DB=${options.database}`,
+        "-e",
+        "POSTGRES_USER=postgres",
+        "-e",
+        "POSTGRES_PASSWORD_FILE=/run/secrets/postgres-password",
+        "-v",
+        `${sourceVolume}:/var/lib/postgresql/data`,
+        "-v",
+        `${proofVolume}:/run/secrets:ro`,
+        options.baseImage,
+      ]);
       for (let attempt = 0; attempt < 30; attempt += 1) {
-        const ready = spawnSync("docker", [...dockerClientArgs(network, root, image, proofVolume, label), "pg_isready", "-h", "source", "-U", "postgres", "-d", "apollo_trackfinder"], { encoding: "utf8" });
+        const ready = spawnSync("docker", [...dockerClientArgs(network, root, image, proofVolume, label), "pg_isready", "-h", "source", "-U", "postgres", "-d", options.database], { encoding: "utf8" });
         if (ready.status === 0) break;
         if (attempt === 29) throw new Error("source readiness timed out");
         execFileSync(bash, ["-lc", "sleep 1"]);
       }
-      docker([...dockerClientArgs(network, root, image, proofVolume, label), "sh", "-ceu", "psql -h source -U postgres -d apollo_trackfinder -c \"CREATE TABLE task4_marker (marker text primary key); INSERT INTO task4_marker VALUES ('restore-marker')\""], { env: { PGPASSFILE: "/backup/pgpass" } });
+      docker([...dockerClientArgs(network, root, image, proofVolume, label), "sh", "-ceu", `psql -h source -U postgres -d ${options.database} -c "CREATE TABLE task4_marker (marker text primary key); INSERT INTO task4_marker VALUES ('restore-marker')"`], { env: { PGPASSFILE: "/backup/pgpass" } });
       const recipient = docker([...dockerClientArgs(network, root, image, proofVolume, label), "sh", "-ceu", "age-keygen -o /backup/identity >/dev/null; age-keygen -y /backup/identity"]);
       docker([...dockerClientArgs(network, root, image, proofVolume, label), "sh", "-ceu", "/work/repo/deploy/ops/backup-postgres.sh"], {
         env: {
           PGPASSFILE: "/backup/pgpass",
           APOLLO_BACKUP_PGHOST: "source",
           APOLLO_BACKUP_PGPORT: "5432",
-          APOLLO_BACKUP_PGDATABASE: "apollo_trackfinder",
+          APOLLO_BACKUP_PGDATABASE: options.database,
           APOLLO_BACKUP_PGUSER: "postgres",
-          APOLLO_BACKUP_STACK: "apollo-tf",
+          APOLLO_BACKUP_STACK: options.stack,
           APOLLO_BACKUP_RELEASE_ID: releaseId,
           APOLLO_BACKUP_DESTINATION: "/backup/data",
           APOLLO_BACKUP_AGE_RECIPIENT: recipient,
         },
       });
-      expect(docker([...dockerClientArgs(network, root, image, proofVolume, label), "sh", "-ceu", "stat -c '%a' /backup/data/task4-disposable-proof-001.dump.age /backup/data/task4-disposable-proof-001.sha256 /backup/data/task4-disposable-proof-001.json | sort -u"])).toBe("600");
+      expect(docker([...dockerClientArgs(network, root, image, proofVolume, label), "sh", "-ceu", `stat -c '%a' /backup/data/${releaseId}.dump.age /backup/data/${releaseId}.sha256 /backup/data/${releaseId}.json | sort -u`])).toBe("600");
       docker(["rm", "-fv", source]);
       sourceDestroyed = true;
-      docker(["run", "-d", "--name", target, "--label", label, "--network", network, "--network-alias", "target", "-e", "POSTGRES_DB=apollo_trackfinder", "-e", "POSTGRES_USER=postgres", "-e", "POSTGRES_PASSWORD_FILE=/run/secrets/postgres-password", "-v", `${targetVolume}:/var/lib/postgresql/data`, "-v", `${proofVolume}:/run/secrets:ro`, "postgres:16"]);
+      docker([
+        "run",
+        "-d",
+        "--name",
+        target,
+        "--label",
+        label,
+        "--network",
+        network,
+        "--network-alias",
+        "target",
+        "-e",
+        `POSTGRES_DB=${options.database}`,
+        "-e",
+        "POSTGRES_USER=postgres",
+        "-e",
+        "POSTGRES_PASSWORD_FILE=/run/secrets/postgres-password",
+        "-v",
+        `${targetVolume}:/var/lib/postgresql/data`,
+        "-v",
+        `${proofVolume}:/run/secrets:ro`,
+        options.baseImage,
+      ]);
       for (let attempt = 0; attempt < 30; attempt += 1) {
-        const ready = spawnSync("docker", [...dockerClientArgs(network, root, image, proofVolume, label), "pg_isready", "-h", "target", "-U", "postgres", "-d", "apollo_trackfinder"], { encoding: "utf8" });
+        const ready = spawnSync("docker", [...dockerClientArgs(network, root, image, proofVolume, label), "pg_isready", "-h", "target", "-U", "postgres", "-d", options.database], { encoding: "utf8" });
         if (ready.status === 0) break;
         if (attempt === 29) throw new Error("target readiness timed out");
         execFileSync(bash, ["-lc", "sleep 1"]);
@@ -623,22 +954,22 @@ describe.runIf(dockerProofEnabled)("PostgreSQL 16 encrypted restore proof", () =
       docker([...dockerClientArgs(network, root, image, proofVolume, label), "sh", "-ceu", "/work/repo/deploy/ops/restore-postgres.sh"], {
         env: {
           PGPASSFILE: "/backup/pgpass",
-          APOLLO_RESTORE_BACKUP: "/backup/data/task4-disposable-proof-001.dump.age",
-          APOLLO_RESTORE_CHECKSUM: "/backup/data/task4-disposable-proof-001.sha256",
-          APOLLO_RESTORE_METADATA: "/backup/data/task4-disposable-proof-001.json",
+          APOLLO_RESTORE_BACKUP: `/backup/data/${releaseId}.dump.age`,
+          APOLLO_RESTORE_CHECKSUM: `/backup/data/${releaseId}.sha256`,
+          APOLLO_RESTORE_METADATA: `/backup/data/${releaseId}.json`,
           APOLLO_RESTORE_AGE_IDENTITY: "/backup/identity",
           APOLLO_RESTORE_PGHOST: "target",
           APOLLO_RESTORE_PGPORT: "5432",
-          APOLLO_RESTORE_PGDATABASE: "apollo_trackfinder",
+          APOLLO_RESTORE_PGDATABASE: options.database,
           APOLLO_RESTORE_PGUSER: "postgres",
-          APOLLO_RESTORE_EXPECTED_STACK: "apollo-tf",
-          APOLLO_RESTORE_EXPECTED_DATABASE: "apollo_trackfinder",
+          APOLLO_RESTORE_EXPECTED_STACK: options.stack,
+          APOLLO_RESTORE_EXPECTED_DATABASE: options.database,
           APOLLO_RESTORE_EXPECTED_RELEASE_ID: releaseId,
           APOLLO_RESTORE_DISPOSABLE: "1",
         },
       });
-      const marker = docker([...dockerClientArgs(network, root, image, proofVolume, label), "psql", "-Atqc", "SELECT marker FROM task4_marker", "-h", "target", "-U", "postgres", "-d", "apollo_trackfinder"], { env: { PGPASSFILE: "/backup/pgpass" } });
-      const schemaCount = docker([...dockerClientArgs(network, root, image, proofVolume, label), "psql", "-Atqc", "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'task4_marker'", "-h", "target", "-U", "postgres", "-d", "apollo_trackfinder"], { env: { PGPASSFILE: "/backup/pgpass" } });
+      const marker = docker([...dockerClientArgs(network, root, image, proofVolume, label), "psql", "-Atqc", "SELECT marker FROM task4_marker", "-h", "target", "-U", "postgres", "-d", options.database], { env: { PGPASSFILE: "/backup/pgpass" } });
+      const schemaCount = docker([...dockerClientArgs(network, root, image, proofVolume, label), "psql", "-Atqc", "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'task4_marker'", "-h", "target", "-U", "postgres", "-d", options.database], { env: { PGPASSFILE: "/backup/pgpass" } });
       expect(marker).toBe("restore-marker");
       expect(schemaCount).toBe("1");
       expect(sourceDestroyed).toBe(true);
@@ -656,5 +987,30 @@ describe.runIf(dockerProofEnabled)("PostgreSQL 16 encrypted restore proof", () =
       expect(docker(["image", "ls", "-q", "--filter", `label=${label}`])).toBe("");
       expect(dockerExists(["volume", "inspect", proofVolume])).toBe(false);
     }
-  }, 180_000);
+}
+
+describe.runIf(dockerProofEnabled)("PostgreSQL 16 encrypted restore proof", () => {
+  it("restores PostgreSQL 16 marker schema and data after source destruction", () => {
+    runPostgresBackupRestoreProof({
+      baseImage:
+        "docker.io/library/postgres:16-bookworm@sha256:92620daddcd947f8d5ab5ba66e848702fe443d87fed30c4cea8e389fd78dfc55",
+      database: "apollo_trackfinder",
+      evidencePrefix: "pg16-disposable-proof",
+      major: 16,
+      stack: "apollo-tf",
+    });
+  }, 240_000);
+});
+
+describe.runIf(dockerProofEnabled)("PostgreSQL 17 encrypted restore proof", () => {
+  it("restores PostgreSQL 17 integrations schema and data after source destruction", () => {
+    runPostgresBackupRestoreProof({
+      baseImage:
+        "docker.io/library/postgres:17-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394",
+      database: "apollo_tf_integrations",
+      evidencePrefix: "pg17-integrations-disposable-proof",
+      major: 17,
+      stack: "apollo-tf-integrations",
+    });
+  }, 240_000);
 });

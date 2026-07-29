@@ -45,11 +45,32 @@ valid_stack_database() {
   esac
 }
 
+expected_postgres_major() {
+  case "$1:$2" in
+    apollo-platform:apollo_platform|apollo-tf:apollo_trackfinder)
+      expected_major=16
+      ;;
+    apollo-tf-integrations:apollo_tf_integrations)
+      expected_major=17
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+server_major() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -ge 100000 ] || return 1
+  server_version_value=$1
+  parsed_server_major=$((server_version_value / 10000))
+}
+
 if [ "$#" -ne 0 ] || ! require_value PGPASSFILE || ! require_value APOLLO_RESTORE_BACKUP || ! require_value APOLLO_RESTORE_CHECKSUM || ! require_value APOLLO_RESTORE_METADATA || ! require_value APOLLO_RESTORE_AGE_IDENTITY || ! require_value APOLLO_RESTORE_PGHOST || ! require_value APOLLO_RESTORE_PGPORT || ! require_value APOLLO_RESTORE_PGDATABASE || ! require_value APOLLO_RESTORE_PGUSER || ! require_value APOLLO_RESTORE_EXPECTED_STACK || ! require_value APOLLO_RESTORE_EXPECTED_DATABASE || ! require_value APOLLO_RESTORE_EXPECTED_RELEASE_ID || ! require_value APOLLO_RESTORE_DISPOSABLE; then
   exit 1
 fi
 
-[ "$APOLLO_RESTORE_DISPOSABLE" = 1 ] && [ -r "$PGPASSFILE" ] && [ -r "$APOLLO_RESTORE_BACKUP" ] && [ -r "$APOLLO_RESTORE_CHECKSUM" ] && [ -r "$APOLLO_RESTORE_METADATA" ] && [ -r "$APOLLO_RESTORE_AGE_IDENTITY" ] && safe_host "$APOLLO_RESTORE_PGHOST" && safe_port "$APOLLO_RESTORE_PGPORT" && safe_identifier "$APOLLO_RESTORE_PGDATABASE" && safe_identifier "$APOLLO_RESTORE_PGUSER" && safe_identifier "$APOLLO_RESTORE_EXPECTED_DATABASE" && safe_release_id "$APOLLO_RESTORE_EXPECTED_RELEASE_ID" && valid_stack_database "$APOLLO_RESTORE_EXPECTED_STACK" "$APOLLO_RESTORE_EXPECTED_DATABASE" && [ "$APOLLO_RESTORE_PGDATABASE" = "$APOLLO_RESTORE_EXPECTED_DATABASE" ] || exit 1
+[ "$APOLLO_RESTORE_DISPOSABLE" = 1 ] && [ -r "$PGPASSFILE" ] && [ -r "$APOLLO_RESTORE_BACKUP" ] && [ -r "$APOLLO_RESTORE_CHECKSUM" ] && [ -r "$APOLLO_RESTORE_METADATA" ] && [ -r "$APOLLO_RESTORE_AGE_IDENTITY" ] && safe_host "$APOLLO_RESTORE_PGHOST" && safe_port "$APOLLO_RESTORE_PGPORT" && safe_identifier "$APOLLO_RESTORE_PGDATABASE" && safe_identifier "$APOLLO_RESTORE_PGUSER" && safe_identifier "$APOLLO_RESTORE_EXPECTED_DATABASE" && safe_release_id "$APOLLO_RESTORE_EXPECTED_RELEASE_ID" && valid_stack_database "$APOLLO_RESTORE_EXPECTED_STACK" "$APOLLO_RESTORE_EXPECTED_DATABASE" && expected_postgres_major "$APOLLO_RESTORE_EXPECTED_STACK" "$APOLLO_RESTORE_EXPECTED_DATABASE" && [ "$APOLLO_RESTORE_PGDATABASE" = "$APOLLO_RESTORE_EXPECTED_DATABASE" ] || exit 1
 command -v age >/dev/null 2>&1 && command -v psql >/dev/null 2>&1 && command -v pg_restore >/dev/null 2>&1 || exit 1
 
 stage=verify
@@ -57,6 +78,20 @@ case "$0" in */*) script_directory=${0%/*} ;; *) script_directory=. ;; esac
 if ! APOLLO_BACKUP_FILE="$APOLLO_RESTORE_BACKUP" APOLLO_BACKUP_CHECKSUM_FILE="$APOLLO_RESTORE_CHECKSUM" APOLLO_BACKUP_METADATA_FILE="$APOLLO_RESTORE_METADATA" APOLLO_BACKUP_EXPECTED_STACK="$APOLLO_RESTORE_EXPECTED_STACK" APOLLO_BACKUP_EXPECTED_DATABASE="$APOLLO_RESTORE_EXPECTED_DATABASE" APOLLO_BACKUP_EXPECTED_RELEASE_ID="$APOLLO_RESTORE_EXPECTED_RELEASE_ID" "$script_directory/verify-backup.sh" >/dev/null 2>&1; then
   exit 1
 fi
+
+stage=version
+client_version=$(pg_restore --version 2>/dev/null) || exit 1
+case "$client_version" in
+  "pg_restore (PostgreSQL) $expected_major."*) ;;
+  *) exit 1 ;;
+esac
+server_version_num=$(
+  psql -h "$APOLLO_RESTORE_PGHOST" -p "$APOLLO_RESTORE_PGPORT" \
+    -U "$APOLLO_RESTORE_PGUSER" -d "$APOLLO_RESTORE_PGDATABASE" \
+    -Atqc "SHOW server_version_num" 2>/dev/null
+) || exit 1
+server_major "$server_version_num" || exit 1
+[ "$parsed_server_major" -eq "$expected_major" ] || exit 1
 
 stage=target-check
 existing=$(psql -h "$APOLLO_RESTORE_PGHOST" -p "$APOLLO_RESTORE_PGPORT" -U "$APOLLO_RESTORE_PGUSER" -d "$APOLLO_RESTORE_PGDATABASE" -Atqc "SELECT 1 FROM (SELECT 1 FROM pg_namespace WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_class WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_type WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_proc WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_extension WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_am WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_cast WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_collation WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_conversion WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_default_acl WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_event_trigger WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_foreign_data_wrapper WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_foreign_server WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_user_mapping WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_language WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_operator WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_opclass WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_opfamily WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_policy WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_publication WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_subscription WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_rewrite WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_transform WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_trigger WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_ts_config WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_ts_dict WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_ts_parser WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_ts_template WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_statistic_ext WHERE oid >= 16384 UNION ALL SELECT 1 FROM pg_largeobject_metadata WHERE oid >= 16384) AS user_objects LIMIT 1" 2>/dev/null) || exit 1

@@ -33,6 +33,20 @@ valid_stack_database() {
   esac
 }
 
+expected_postgres_major() {
+  case "$1:$2" in
+    apollo-platform:apollo_platform|apollo-tf:apollo_trackfinder)
+      expected_major=16
+      ;;
+    apollo-tf-integrations:apollo_tf_integrations)
+      expected_major=17
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 read_one_line() {
   file_value=
   line_count=0
@@ -48,7 +62,7 @@ if [ "$#" -ne 0 ] || ! require_value APOLLO_BACKUP_FILE || ! require_value APOLL
   exit 1
 fi
 
-[ -r "$APOLLO_BACKUP_FILE" ] && [ -r "$APOLLO_BACKUP_CHECKSUM_FILE" ] && [ -r "$APOLLO_BACKUP_METADATA_FILE" ] && safe_identifier "$APOLLO_BACKUP_EXPECTED_DATABASE" && safe_release_id "$APOLLO_BACKUP_EXPECTED_RELEASE_ID" && valid_stack_database "$APOLLO_BACKUP_EXPECTED_STACK" "$APOLLO_BACKUP_EXPECTED_DATABASE" || exit 1
+[ -r "$APOLLO_BACKUP_FILE" ] && [ -r "$APOLLO_BACKUP_CHECKSUM_FILE" ] && [ -r "$APOLLO_BACKUP_METADATA_FILE" ] && safe_identifier "$APOLLO_BACKUP_EXPECTED_DATABASE" && safe_release_id "$APOLLO_BACKUP_EXPECTED_RELEASE_ID" && valid_stack_database "$APOLLO_BACKUP_EXPECTED_STACK" "$APOLLO_BACKUP_EXPECTED_DATABASE" && expected_postgres_major "$APOLLO_BACKUP_EXPECTED_STACK" "$APOLLO_BACKUP_EXPECTED_DATABASE" || exit 1
 command -v sha256sum >/dev/null 2>&1 || exit 1
 
 stage=metadata
@@ -57,7 +71,7 @@ expected_checksum=$file_value
 expected_checksum=${expected_checksum%"$(printf '\r')"}
 case "$expected_checksum" in ''|*[!0123456789abcdef]* ) exit 1 ;; esac
 [ "${#expected_checksum}" -eq 64 ] || exit 1
-expected_metadata=$(printf '{"format_version":1,"stack":"%s","database":"%s","release_id":"%s","encrypted_sha256":"%s"}' "$APOLLO_BACKUP_EXPECTED_STACK" "$APOLLO_BACKUP_EXPECTED_DATABASE" "$APOLLO_BACKUP_EXPECTED_RELEASE_ID" "$expected_checksum")
+expected_metadata=$(printf '{"format_version":2,"stack":"%s","database":"%s","release_id":"%s","postgres_client_major":%s,"postgres_server_major":%s,"encrypted_sha256":"%s"}' "$APOLLO_BACKUP_EXPECTED_STACK" "$APOLLO_BACKUP_EXPECTED_DATABASE" "$APOLLO_BACKUP_EXPECTED_RELEASE_ID" "$expected_major" "$expected_major" "$expected_checksum")
 read_one_line "$APOLLO_BACKUP_METADATA_FILE" || exit 1
 file_value=${file_value%"$(printf '\r')"}
 [ "$file_value" = "$expected_metadata" ] || exit 1
