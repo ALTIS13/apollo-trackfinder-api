@@ -5,7 +5,7 @@ Last updated: 2026-07-29.
 ## Coolify production release package
 
 Status: `LOCAL_RELEASE_VALIDATED`. The exact local image source is
-`385aac57350ac86523dd7393c39c398ea54d37c7`; this status does not claim a
+`a8132c251aedf2f28477f0018e98bbbdeed532f4`; this status does not claim a
 deployment, workflow dispatch, GHCR publication, or remote change.
 
 - The production package consists of
@@ -16,7 +16,7 @@ deployment, workflow dispatch, GHCR publication, or remote change.
 - The opt-in production smoke built and pushed all 11 custom Linux/amd64
   targets plus pinned Redis to a disposable local registry, resolved 12
   registry digests, validated a temporary non-zero digest env, and started the
-  exact two-stack package from commit `385aac5`.
+  exact two-stack package from commit `a8132c2`.
 - The live proof passed registration/bootstrap/login, invitation redemption,
   entitlement revoke/grant, real Platform-to-TF OAuth, degraded and restored
   granted search, queued download/cancel, signed heartbeat
@@ -34,7 +34,7 @@ deployment, workflow dispatch, GHCR publication, or remote change.
 - The checked-in env fails closed with exactly 18
   `placeholder_image_digest` errors. The generated local env validated before
   either stack started and was removed afterward.
-- Both Docker opt-ins pass: production package `27/27`, Caddy contract `5/5`.
+- Both Docker opt-ins pass: production package `28/28`, Caddy contract `7/7`.
   Final owned-resource inventory is zero for containers, networks, volumes,
   localhost image references, registry files, and temporary secrets; no broad
   prune was used.
