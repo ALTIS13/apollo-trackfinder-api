@@ -29,7 +29,11 @@ disposable proof IDs are `pg16-disposable-proof-001` and
 owned-resource cleanup. Production backup/restore evidence is `NOT_RECORDED`;
 neither local ID approves a production migration or data write.
 
-The paired checked-in placeholder validation failed closed with exactly
+The paired checked-in placeholder env was validated in explicit `production` mode
+against the local ignored Task 3 zero-placeholder manifest at
+`.superpowers/sdd/2026-07-29-release-contract-closure/placeholder-release-manifest.json`.
+That manifest is a local ignored proof input, not a deployable or tracked
+release artifact. The invocation failed closed with exactly
 `19 image_provenance`, `18 placeholder_image_digest`, `1 release_artifact`,
 and `1 release_environment_value`, with `0 environment_contract` and no other
 category. No workflow, registry publication, retained-volume access, or remote

@@ -45,7 +45,11 @@ deployment, workflow dispatch, GHCR publication, or remote change.
 - Production validation now requires the exact workflow artifact source commit,
   repository, digest, and immutable reference for every image and renders
   Compose from an isolated allowlist. The explicit local mode remains separate.
-  The checked-in env fails closed with `19 image_provenance`,
+  The checked-in env was validated in explicit `production` mode against the
+  local ignored Task 3 zero-placeholder manifest at
+  `.superpowers/sdd/2026-07-29-release-contract-closure/placeholder-release-manifest.json`.
+  That manifest is a local ignored proof input, not a deployable or tracked
+  release artifact. The invocation fails closed with `19 image_provenance`,
   `18 placeholder_image_digest`, `1 release_artifact`, and
   `1 release_environment_value` errors, with `0 environment_contract` and no
   other category.

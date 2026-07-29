@@ -316,8 +316,11 @@ container, network, volume, image reference, builder, cache, registry file,
 temporary path, and repository `.tmp` item.
 
 The checked-in `deploy/coolify/release.env.example` intentionally contains zero
-digests and a zero source commit. With the explicit zero-placeholder manifest,
-it fails closed with exactly `19 image_provenance`,
+digests and a zero source commit. It was validated in explicit `production` mode
+against the local ignored Task 3 zero-placeholder manifest at
+`.superpowers/sdd/2026-07-29-release-contract-closure/placeholder-release-manifest.json`.
+That manifest is a local ignored proof input, not a deployable or tracked
+release artifact. The invocation fails closed with exactly `19 image_provenance`,
 `18 placeholder_image_digest`, `1 release_artifact`, and
 `1 release_environment_value`, with `0 environment_contract` and no other
 category. It must never be used for deployment. Fresh supporting validation
