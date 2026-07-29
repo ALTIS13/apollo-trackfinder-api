@@ -5,7 +5,7 @@ Last updated: 2026-07-29.
 ## Coolify production release package
 
 Status: `LOCAL_RELEASE_VALIDATED`. The exact local image source is
-`7ac1bcdfa51bf39f5a9c242276bef5b369d05e89`; this status does not claim a
+`044c80adeffa7999063498472410bd57707265d5`; this status does not claim a
 deployment, workflow dispatch, GHCR publication, or remote change.
 
 - The production package consists of
@@ -16,7 +16,7 @@ deployment, workflow dispatch, GHCR publication, or remote change.
 - The opt-in production smoke built and pushed all 11 custom Linux/amd64
   targets plus pinned Redis to a disposable local registry, resolved 12
   registry digests, validated a temporary non-zero digest env, and started the
-  exact two-stack package from commit `7ac1bcd`.
+  exact two-stack package from commit `044c80a`.
 - The live proof passed registration/bootstrap/login, invitation redemption,
   entitlement revoke/grant, real Platform-to-TF OAuth, degraded and restored
   granted search, queued download/cancel, signed heartbeat
@@ -34,11 +34,11 @@ deployment, workflow dispatch, GHCR publication, or remote change.
 - The checked-in env fails closed with exactly 18
   `placeholder_image_digest` errors. The generated local env validated before
   either stack started and was removed afterward.
-- Both Docker opt-ins pass: production package `28/28`, Caddy contract `7/7`.
+- Both Docker opt-ins pass: production package `33/33`, Caddy contract `7/7`.
   Final owned-resource inventory is zero for containers, networks, volumes,
   localhost image references, registry files, temporary secrets, repository
-  `.tmp`, OS-temp owned roots, and durable ownership records; no broad prune
-  was used.
+  `.tmp`, OS-temp owned roots, and durable pending/active ownership records;
+  no broad prune was used.
 - Local backup/restore evidence is `TASK4-77b2e21-89`. Production evidence is
   `NOT_RECORDED`, native-Linux secret ownership remains to be proved on the
   target, and every remote resource/migration/Caddy/hostname action still

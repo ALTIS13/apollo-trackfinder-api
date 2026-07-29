@@ -15,7 +15,7 @@ a remote change.
 Task 5 validated the production manifests, digest validator, custom image
 targets, file-backed secret contracts, application flows, persistence, and
 Caddy routes locally from
-`7ac1bcdfa51bf39f5a9c242276bef5b369d05e89`. The proof used only
+`044c80adeffa7999063498472410bd57707265d5`. The proof used only
 `127.0.0.1:18200..18203`, dispatched no workflow, and left exact cleanup zero.
 It also exercised the exact `baseline` profile one-shot contracts against a
 separate disposable database, restored granted search after restart, and held

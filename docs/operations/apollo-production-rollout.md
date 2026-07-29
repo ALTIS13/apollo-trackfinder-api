@@ -4,7 +4,7 @@ Status: `LOCAL_RELEASE_VALIDATED`
 
 This is an owner-reviewable rollout plan, not a deployment record. Task 5
 validated the exact package locally from source commit
-`7ac1bcdfa51bf39f5a9c242276bef5b369d05e89`. HomeNode, Coolify, the host
+`044c80adeffa7999063498472410bd57707265d5`. HomeNode, Coolify, the host
 Caddy configuration, UFW, DNS, GitHub settings, GHCR, remote databases, and
 remote volumes were not contacted or mutated.
 
@@ -79,23 +79,23 @@ stop the admin container without output disclosure.
 ## Image Evidence
 
 The local proof built all custom targets for Linux/amd64 from
-`7ac1bcdfa51bf39f5a9c242276bef5b369d05e89`, pushed them to a disposable
+`044c80adeffa7999063498472410bd57707265d5`, pushed them to a disposable
 loopback registry, and resolved these registry digests:
 
 | Release variable                         | Target                     | Local proof digest                                                        |
 | ---------------------------------------- | -------------------------- | ------------------------------------------------------------------------- |
-| `PLATFORM_API_IMAGE`                     | `platform-api`             | `sha256:fed668e42501ef79883e68f57b3272db0a89bec1bff06f994e1ce2999396e000` |
-| `PLATFORM_POSTGRES_IMAGE`                | `platform-postgres`        | `sha256:65a97c309f40c6b7e0bc703bcea670b8405414d17446a94159684ad636f03f5e` |
+| `PLATFORM_API_IMAGE`                     | `platform-api`             | `sha256:11f242916fee5cd495daf674dbc3d6ae8ac03b92383dbacb49076e338eaa6535` |
+| `PLATFORM_POSTGRES_IMAGE`                | `platform-postgres`        | `sha256:016be377d9396ae0bb0d69a58a029d48da970cd4e7f4270a51a73199dbb86de0` |
 | `PLATFORM_REDIS_IMAGE`, `TF_REDIS_IMAGE` | pinned Redis mirror        | `sha256:fe24fa2bcb59930f8863cf36a472df24efaccd8be4ee98ffe528f06d57d68dc2` |
-| `TF_ADMIN_IMAGE`                         | `tf-admin`                 | `sha256:b815694b72e6b4154bfd61e9b61460a288f04693a7a77eeab9be2cfd638ee4cf` |
-| `TF_API_IMAGE`                           | `tf-api`                   | `sha256:bc6a621fe166fed6e0f8e275831999417f2f8d02a99dcae95b348338885e2f54` |
-| `TF_DOWNLOAD_REDIS_IMAGE`                | `tf-download-redis`        | `sha256:6e780f8010605ad1406b65281111dadd28dbb60256fabd19f9ce0c90b9d0b1f3` |
-| `TF_DOWNLOAD_WORKER_IMAGE`               | `tf-download-worker`       | `sha256:fd3c55fdb0dba146382b2d9e2709f547ca6372b63b04b4aca8ffe1140ab716d8` |
-| `TF_INTEGRATIONS_IMAGE`                  | `tf-integrations`          | `sha256:b2162d1f931d35eb55f8d21ffc0896b0387646a40cffe364fc140d1f139beb2c` |
-| `TF_INTEGRATIONS_POSTGRES_IMAGE`         | `tf-integrations-postgres` | `sha256:c0c7698fe176ce450b18e453c64dc4c900024038e4267cdd4a28541843d61090` |
-| `TF_POSTGRES_IMAGE`                      | `tf-postgres`              | `sha256:b0ab603a91784feca00a37fcc6ed91c02b105dd4a5831f0b4274a81a8d141c59` |
-| `TF_SEARCH_IMAGE`                        | `tf-search`                | `sha256:005bfd7322098d42c416a696282443c39ac1cb78f66284378fef7b9d683a9199` |
-| `TF_WEB_IMAGE`                           | `tf-web`                   | `sha256:343cf46b92a8ddb226227f5e2d3856d499e47f137d1dd817ccda2822aa5e48e9` |
+| `TF_ADMIN_IMAGE`                         | `tf-admin`                 | `sha256:3ea01bf6f50b27be11a7bf009a84cca13b656ac7d015dddfc5ca5fa2304050c1` |
+| `TF_API_IMAGE`                           | `tf-api`                   | `sha256:ca143866eb8bf9a171d12dcddaac64c51faf049513c4259ce6be17d76c1b8157` |
+| `TF_DOWNLOAD_REDIS_IMAGE`                | `tf-download-redis`        | `sha256:88d978c31c812623c4265603b07f72e0e2d9a99815e113f7cdf0d339244dafa3` |
+| `TF_DOWNLOAD_WORKER_IMAGE`               | `tf-download-worker`       | `sha256:e1a35e1eea1cd2227dccfc5a8e2e88b02f6768f90e708010cac4811a0f85dd49` |
+| `TF_INTEGRATIONS_IMAGE`                  | `tf-integrations`          | `sha256:dc32949c2a1c641b912a28a0141cef3f96358196a525be383b9d8dcf24fa1d05` |
+| `TF_INTEGRATIONS_POSTGRES_IMAGE`         | `tf-integrations-postgres` | `sha256:3654224fca4fb6ecf8037ea183f34ac1d6a5f4288edb819b32e521b50110a75a` |
+| `TF_POSTGRES_IMAGE`                      | `tf-postgres`              | `sha256:79bc94be55955036a28aa9c71df54916255620f45caedeb2d24bbc9f47d6e7a4` |
+| `TF_SEARCH_IMAGE`                        | `tf-search`                | `sha256:8643a8065fda8ad55f3720502ce43641df1417f6e086c55a25d892280b42601d` |
+| `TF_WEB_IMAGE`                           | `tf-web`                   | `sha256:9b770d1622ca9bbb867bfc6b2bdf375322a6df225e7be316bf6d49c8b1a13d5c` |
 
 The disposable registry and all references were removed. These digests are
 local evidence, not deployable GHCR references. An approved release workflow
