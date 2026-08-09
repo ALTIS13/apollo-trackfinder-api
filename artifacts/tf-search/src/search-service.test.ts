@@ -455,6 +455,71 @@ describe("search service", () => {
     expect(JSON.stringify(service)).not.toContain("Different");
   });
 
+  it("rejects preview media before ranking and reports parser quality telemetry", async () => {
+    let now = Date.parse("2026-08-10T00:00:00.000Z");
+    const service = createSearchService({
+      now: () => now,
+      providers: [
+        provider("yt", [track("youtube", { id: "yt_full" })]),
+        provider("dz", [
+          track("deezer", {
+            id: "dz_preview",
+            sourceUrl:
+              "https://cdns-preview-a.dzcdn.net/stream/c-a-preview.mp3",
+          }),
+        ]),
+      ],
+    });
+
+    const response = await service.search(
+      command({ sources: ["yt", "dz"], maxResults: 21 }),
+    );
+
+    expect(response.results.map((result) => result.id)).toEqual(["yt_full"]);
+    expect(service.parserTelemetry()).toEqual([
+      {
+        source: "yt",
+        status: "healthy",
+        requestsPerMinute: 1,
+        failuresPerMinute: 0,
+        previewsRejectedPerMinute: 0,
+        lastCheckedAt: "2026-08-10T00:00:00.000Z",
+      },
+      {
+        source: "sc",
+        status: "unknown",
+        requestsPerMinute: 0,
+        failuresPerMinute: 0,
+        previewsRejectedPerMinute: 0,
+      },
+      {
+        source: "bc",
+        status: "unknown",
+        requestsPerMinute: 0,
+        failuresPerMinute: 0,
+        previewsRejectedPerMinute: 0,
+      },
+      {
+        source: "dz",
+        status: "warning",
+        requestsPerMinute: 1,
+        failuresPerMinute: 0,
+        previewsRejectedPerMinute: 1,
+        lastCheckedAt: "2026-08-10T00:00:00.000Z",
+      },
+    ]);
+
+    now += 60_000;
+    expect(
+      service.parserTelemetry().every(
+        (parser) =>
+          parser.status === "unknown" &&
+          parser.requestsPerMinute === 0 &&
+          parser.previewsRejectedPerMinute === 0,
+      ),
+    ).toBe(true);
+  });
+
   it("does not add failure observations for cached hits", async () => {
     let shouldFail = false;
     const service = createSearchService({
