@@ -21,18 +21,20 @@ Last updated: 2026-08-10.
 - Final-review fix matrix прошла `159/159`: `tf-search` 26, Platform DB 22, Platform API 33, admin contract 7, `tf-integrations` 19, `tf-api` 21, admin UI 31. Platform API subset выполнен против свежего PostgreSQL с migrations `0001..0006` и production runtime role.
 - Package typecheck прошёл для Platform DB, `platform-api`, `tf-search`, admin contract, `tf-integrations`, `tf-api` и admin dashboard.
 - Production build прошёл для `tf-search`, `tf-api`, `platform-api`, `tf-integrations` и admin dashboard; локальный production preview отвечает `HTTP 200` на `127.0.0.1:4187`.
-- Final review findings C1, I1-I6 и M1 закрыты одной fix wave поверх `6c2f14b`; max-100 и unknown-key duplicate tests остаются принятым non-blocking deferred-minor disposition.
+- Final review findings C1, I1-I6 и M1 закрыты commit `d2c93c14558347a003afeba73274bae2a6eb9f00`; scoped re-review подтвердил все девять пунктов как `ADDRESSED`, новых Critical/Important нет, `READY TO MERGE: YES`. Max-100 и unknown-key duplicate tests остаются принятым non-blocking deferred-minor disposition.
+- После re-review на exact head свежо прошли `151/151` focused tests, `7/7` package typecheck и `5/5` production builds; отдельный fresh PostgreSQL runtime-role RLS proof прошёл `8/8`.
 - Визуальный smoke во встроенном браузере не выполнен: browser-control endpoint недоступен в текущем контексте. Standalone Playwright не использовался без разрешения владельца.
 
 ### Commit/push
 
 - Ветка: `codex/feat/admin-parser-observability`, remote: `https://github.com/ALTIS13/Apollo.TF.git`.
-- Локальные commits этапа до final fix: `685cc14`, `ef6d900`, `0194230`, `84e4d27`, `649598b`, `1122e3a`, `6c2f14b`. Final-review fixes составляют один логический commit поверх `6c2f14b`.
-- Push/PR отложены до whole-branch review; HomeNode и production rollout не выполнялись.
+- Commits этапа: `685cc14`, `ef6d900`, `0194230`, `84e4d27`, `649598b`, `1122e3a`, `6c2f14b`, `d2c93c1`; этот publication-status commit является docs-only завершением ветки.
+- Ветка опубликована в `origin/codex/feat/admin-parser-observability`. Создан stacked PR `#4` к `codex/feat/operator-release-publisher`, потому что базовый PR `#3` ещё открыт: `https://github.com/ALTIS13/Apollo.TF/pull/4`.
+- GitHub workflow файлов в репозитории нет; Actions и billing не использовались. HomeNode и production rollout не выполнялись.
 
 ### Следующий логичный этап реализации
 
-- Выполнить финальный re-review fix commit, затем опубликовать feature branch и stacked PR без GitHub Actions; удалённый rollout остаётся отдельным этапом.
+- После merge базового PR `#3` перенести/перенацелить PR `#4` на `main`, выполнить merged-result validation и только затем готовить локальный полный web/server release stack к read-only Coolify/HomeNode preflight.
 - После работоспособной серверной и admin-инфраструктуры отдельно проектировать клиентскую зону и плеер в стиле Spotify/старой Yandex Music; Android остаётся отложен.
 
 ## Operator-owned release publisher

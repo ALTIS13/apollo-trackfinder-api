@@ -120,4 +120,4 @@
 
 - [x] Run focused tests named in Tasks 1-4, package-local typechecks, and builds.
 - [ ] Run one local admin-dashboard desktop visual smoke-check without touching remote infrastructure.
-- [ ] Inspect `git diff --check`, commit logical slices, push the feature branch, and update the existing implementation-status document with exact commit IDs and deferred player work.
+- [x] Inspect `git diff --check`, commit logical slices, push the feature branch, and update the existing implementation-status document with exact commit IDs and deferred player work.
