@@ -21,12 +21,20 @@ import type {
   InternalRequestAuthenticator,
   VerifiedInternalRequest,
 } from "./internal-auth.js";
+import {
+  TF_INTEGRATIONS_ADMIN_OVERVIEW_PATH,
+  integrationsAdminOverviewRequestSchema,
+  integrationsAdminOverviewResponseSchema,
+  type TfIntegrationsAdminOverviewService,
+} from "./admin-overview.js";
 
 const BODY_LIMIT = 64 * 1024;
 const DEFAULT_READINESS_TIMEOUT_MS = 2_000;
 const COMMAND_TIMEOUT_MS = 8_000;
 const MAX_COMMAND_TIMEOUT_MS = 9_000;
 const MAX_CONCURRENT_COMMANDS = 32;
+const INTERNAL_ADMIN_REPLAY_PARTITION =
+  "00000000-0000-4000-8000-000000000000";
 
 export interface TfIntegrationsCommandService {
   execute(
@@ -49,6 +57,7 @@ export interface CreateTfIntegrationsAppOptions {
   readonly service: TfIntegrationsCommandService;
   readonly auth: InternalRequestAuthenticator;
   readonly readiness: TfIntegrationsReadiness;
+  readonly adminOverview?: TfIntegrationsAdminOverviewService;
   readonly commandTimeoutMs?: number;
   readonly maxConcurrentCommands?: number;
   readonly shutdownSignal?: AbortSignal;
@@ -105,7 +114,9 @@ function requirePermittedRoute(
   const path = requestTarget(req);
   if (
     (req.method === "GET" && (path === "/healthz" || path === "/readyz")) ||
-    (req.method === "POST" && path === TF_INTEGRATIONS_COMMAND_PATH)
+    (req.method === "POST" &&
+      (path === TF_INTEGRATIONS_COMMAND_PATH ||
+        path === TF_INTEGRATIONS_ADMIN_OVERVIEW_PATH))
   ) {
     next();
     return;
@@ -294,6 +305,50 @@ export function createTfIntegrationsApp(
       status: ready ? "ok" : "unavailable",
     });
   });
+
+  app.post(
+    TF_INTEGRATIONS_ADMIN_OVERVIEW_PATH,
+    rejectUnsupportedTransport,
+    express.raw({ type: () => true, limit: BODY_LIMIT, inflate: false }),
+    async (req, res) => {
+      const proof = authenticate(req, options.auth);
+      if (proof === undefined) {
+        res.status(401).json({ error: "unauthorized" });
+        return;
+      }
+      const claim = options.auth.claim(INTERNAL_ADMIN_REPLAY_PARTITION, proof);
+      if (claim !== "accepted") {
+        res.status(claim === "capacity_exhausted" ? 503 : 401).json({
+          error:
+            claim === "capacity_exhausted"
+              ? "integrations_unavailable"
+              : "unauthorized",
+        });
+        return;
+      }
+      const request = integrationsAdminOverviewRequestSchema.safeParse(
+        parseJsonBody(rawBody(req)),
+      );
+      if (!request.success) {
+        res.status(400).json({ error: "invalid_request" });
+        return;
+      }
+      if (options.adminOverview === undefined || !(await isReady(options.readiness))) {
+        res.status(503).json({ error: "integrations_unavailable" });
+        return;
+      }
+      try {
+        const response = integrationsAdminOverviewResponseSchema.parse(
+          await options.adminOverview.load(request.data),
+        );
+        res.status(200).type("application/json").send(JSON.stringify(response));
+      } catch {
+        if (!res.headersSent && !res.destroyed) {
+          res.status(503).json({ error: "integrations_unavailable" });
+        }
+      }
+    },
+  );
 
   app.post(
     TF_INTEGRATIONS_COMMAND_PATH,

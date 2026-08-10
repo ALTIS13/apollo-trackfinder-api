@@ -1208,6 +1208,60 @@ describe("PostgresPlatformRepository", () => {
     expect(client.queries[1]!.text).toMatch(/revoked_at is null/i);
   });
 
+  it("reads the capability-gated bounded account overview projection", async () => {
+    const client = new RecordingClient([
+      [
+        {
+          total: "3",
+          active_now: "1",
+          pending: "1",
+          suspended: "1",
+          account_id: accountId,
+          email: accountRow.email,
+          display_name: accountRow.display_name,
+          status: "active",
+          latest_activity_at: now,
+          active_session_count: "1",
+          module_keys: ["tf.search"],
+        },
+      ],
+    ]);
+    const repository = new PostgresPlatformRepository();
+
+    await expect(
+      repository.getAdminAccountOverview(
+        asPoolClient(client),
+        accountId,
+        now,
+        100,
+      ),
+    ).resolves.toEqual({
+      total: 3,
+      activeNow: 1,
+      pending: 1,
+      suspended: 1,
+      accounts: [
+        {
+          id: accountId,
+          email: accountRow.email,
+          displayName: accountRow.display_name,
+          status: "active",
+          latestActivityAt: now,
+          activeSessionCount: 1,
+          moduleKeys: ["tf.search"],
+        },
+      ],
+    });
+
+    expect(client.queries[0]?.text).toMatch(
+      /from apollo_platform\.admin_account_overview\(\$1, \$2, \$3\)/i,
+    );
+    expect(client.queries[0]?.values).toEqual([accountId, now, 100]);
+    expect(client.queries[0]?.text).not.toMatch(
+      /session_digest|password_hash|provider_user_id|token_digest/i,
+    );
+  });
+
   it("keeps token and session repository APIs digest-only", async () => {
     const repositorySource = await readFile(
       new URL("./repository.ts", import.meta.url),

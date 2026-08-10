@@ -156,6 +156,8 @@ describe("Apollo TF admin dashboard", () => {
       ["Топология", "#topology"],
       ["Инциденты", "#incidents"],
       ["Деплойменты", "#deployments"],
+      ["Парсеры", "#parsers"],
+      ["Пользователи", "#accounts"],
       ["Провайдеры", "#providers"],
     ];
     for (const [name, href] of expectedAnchors) {
@@ -163,7 +165,7 @@ describe("Apollo TF admin dashboard", () => {
     }
   });
 
-  it("keeps deployment and provider operating data visible as semantic tables", () => {
+  it("keeps deployment, parser, and provider operating data visible as semantic tables", () => {
     render(<App />);
 
     const deployments = screen.getByRole("table", {
@@ -174,6 +176,19 @@ describe("Apollo TF admin dashboard", () => {
     expect(deployments).toHaveTextContent("2.14.1");
     expect(deployments).toHaveTextContent("Доступно обновление");
     expect(deployments).toHaveTextContent("Последний деплой");
+
+    const parsers = screen.getByRole("table", {
+      name: "Состояние поисковых парсеров",
+    });
+    expect(parsers).toHaveTextContent("YouTube");
+    expect(parsers).toHaveTextContent("2.14.0");
+    expect(parsers).toHaveTextContent("Запросы/мин");
+    expect(parsers).toHaveTextContent("Ошибки/мин");
+    expect(parsers).toHaveTextContent("Демо отклонено/мин");
+
+    const accounts = screen.getByRole("region", { name: "Пользователи" });
+    expect(accounts).toHaveTextContent("Spotify в списке: 2");
+    expect(accounts).toHaveTextContent("Яндекс в списке: 1");
 
     const providers = screen.getByRole("table", {
       name: "Состояние провайдеров",
@@ -237,9 +252,11 @@ describe("Apollo TF admin dashboard", () => {
       ),
     ).toBeVisible();
     expect(
-      within(screen.getByRole("row", { name: /Spotify/ })).getByText(
-        "Не проверялся",
-      ),
+      within(
+        within(
+          screen.getByRole("table", { name: "Состояние провайдеров" }),
+        ).getByRole("row", { name: /Spotify/ }),
+      ).getByText("Не проверялся"),
     ).toBeVisible();
   });
 
@@ -250,13 +267,31 @@ describe("Apollo TF admin dashboard", () => {
     const topology = screen.getByRole("region", { name: "Топология сервисов" });
 
     expect(metrics).toContainElement(screen.getByText("Активные модули"));
-    expect(metrics).toContainElement(screen.getByText("Поисков в минуту"));
-    expect(metrics).toContainElement(screen.getByText("Глубина очереди"));
-    expect(metrics).toContainElement(screen.getByText("Доля ошибок"));
+    expect(metrics).toContainElement(screen.getByText("Активные пользователи"));
+    expect(metrics).toContainElement(
+      screen.getByText("Предупреждения парсеров"),
+    );
+    expect(metrics).toContainElement(screen.getByText("Открытые инциденты"));
     expect(
       metrics.compareDocumentPosition(topology) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  it("renders account dependency failure distinctly from an available zero", () => {
+    const snapshot = {
+      ...demoSnapshot,
+      accountSummary: { availability: "unavailable" },
+      accounts: [],
+    } as unknown as DashboardSnapshot;
+
+    render(<App adapter={createAdapter(async () => snapshot, snapshot)} />);
+
+    const accounts = screen.getByRole("region", { name: "Пользователи" });
+    expect(accounts).toHaveTextContent("Данные аккаунтов недоступны");
+    expect(
+      within(accounts).queryByRole("table", { name: "Пользователи" }),
+    ).not.toBeInTheDocument();
   });
 
   it("filters incidents when a service is selected", async () => {

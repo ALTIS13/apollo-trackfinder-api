@@ -1,4 +1,4 @@
-import { Activity, Boxes, ListTodo, ShieldAlert } from "lucide-react";
+import { Activity, Boxes, Siren, TriangleAlert, Users } from "lucide-react";
 import type { DashboardMetric } from "../types/dashboard";
 
 interface SummaryStripProps {
@@ -7,9 +7,9 @@ interface SummaryStripProps {
 
 const metricIcons = {
   "active-modules": Boxes,
-  "searches-per-minute": Activity,
-  "queue-depth": ListTodo,
-  "error-rate": ShieldAlert,
+  "active-users": Users,
+  "parser-warnings": TriangleAlert,
+  "open-incidents": Siren,
 } as const;
 
 function MetricTrend({ values }: { values: number[] }) {
@@ -31,10 +31,17 @@ export function SummaryStrip({ metrics }: SummaryStripProps) {
   return (
     <section className="summary-strip" id="summary" aria-label="Сводка">
       {metrics.map((metric) => {
-        const Icon = metricIcons[metric.id as keyof typeof metricIcons] ?? Activity;
+        const Icon =
+          metricIcons[metric.id as keyof typeof metricIcons] ?? Activity;
         return (
-          <article className="summary-metric" data-metric={metric.id} key={metric.id}>
-            <span className="metric-icon" aria-hidden="true"><Icon /></span>
+          <article
+            className="summary-metric"
+            data-metric={metric.id}
+            key={metric.id}
+          >
+            <span className="metric-icon" aria-hidden="true">
+              <Icon />
+            </span>
             <span className="metric-label">{metric.label}</span>
             <strong>{metric.value}</strong>
             <span className="metric-change">{metric.change}</span>

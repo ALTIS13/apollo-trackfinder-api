@@ -16,10 +16,12 @@ import { OperatorSessionService } from "./domain/operator-sessions.js";
 import { PostgresPlatformRepository } from "./domain/postgres-repository.js";
 import { RegistrationService } from "./domain/registration.js";
 import { UserSessionService } from "./domain/user-sessions.js";
+import { PlatformAdminOverviewService } from "./domain/admin-overview.js";
 import { createPlatformLogger } from "./logger.js";
 import { RedisRateLimitStore, SharedRateLimiter } from "./http/rate-limit.js";
 import { createMigrationReadinessProbe } from "./readiness.js";
 import { parsePlatformRuntimeConfig } from "./runtime-config.js";
+import { HmacPlatformInternalAdminAuthenticator } from "./routes/internal-admin.js";
 import {
   RedisConnectionReadiness,
   combineRuntimeReadiness,
@@ -84,6 +86,15 @@ async function start(): Promise<void> {
       config.nodeEnv !== "production" && config.developmentTokenEcho,
     logger,
     trustProxyHops: config.trustProxyHops,
+    internalAdminOverview: new PlatformAdminOverviewService(
+      pool,
+      repository,
+      clock,
+    ),
+    internalAdminAuth: new HmacPlatformInternalAdminAuthenticator(
+      config.oauthClients,
+      config.introspectionClientId,
+    ),
   });
   const server = createServer(app);
   const port = config.port;

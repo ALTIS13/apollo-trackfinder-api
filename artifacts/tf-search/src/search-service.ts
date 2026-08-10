@@ -9,6 +9,7 @@ import type {
   TfSearchSuggestionsResponse,
 } from "@workspace/tf-search-contract";
 import { BoundedSearchCache, type SearchCacheIdentity } from "./cache.js";
+import { filterCompleteMedia } from "./media-completeness.js";
 import { rank } from "./ranker.js";
 
 export type InternalTrack = TfSearchResult;
@@ -28,6 +29,20 @@ export interface SearchService {
     readonly requestsPerMinute: number;
     readonly status: "healthy" | "warning" | "degraded";
   };
+  parserTelemetry?: () => readonly ParserTelemetrySnapshot[];
+}
+
+export interface RuntimeSearchService extends SearchService {
+  parserTelemetry(): readonly ParserTelemetrySnapshot[];
+}
+
+export interface ParserTelemetrySnapshot {
+  readonly source: TfSearchSource;
+  readonly status: "healthy" | "warning" | "degraded" | "unknown";
+  readonly requestsPerMinute: number;
+  readonly failuresPerMinute: number;
+  readonly previewsRejectedPerMinute: number;
+  readonly lastCheckedAt?: string;
 }
 
 interface SearchLogger {
@@ -44,6 +59,32 @@ interface SearchServiceOptions {
 const ALL_SOURCES: readonly TfSearchSource[] = ["yt", "sc", "bc", "dz"];
 const ROLLING_WINDOW_SECONDS = 60;
 type ProviderStatus = "ok" | "failed" | "skipped";
+
+const RESULT_SOURCE_TO_PROVIDER: Readonly<
+  Record<InternalTrack["source"], TfSearchSource>
+> = {
+  youtube: "yt",
+  soundcloud: "sc",
+  bandcamp: "bc",
+  deezer: "dz",
+};
+
+interface ParserRollingTelemetry {
+  readonly bucketSeconds: Int32Array;
+  readonly requests: Int32Array;
+  readonly failures: Int32Array;
+  readonly previewsRejected: Int32Array;
+  lastCheckedAt?: number;
+}
+
+function createParserRollingTelemetry(): ParserRollingTelemetry {
+  return {
+    bucketSeconds: new Int32Array(ROLLING_WINDOW_SECONDS).fill(-1),
+    requests: new Int32Array(ROLLING_WINDOW_SECONDS),
+    failures: new Int32Array(ROLLING_WINDOW_SECONDS),
+    previewsRejected: new Int32Array(ROLLING_WINDOW_SECONDS),
+  };
+}
 
 function cacheIdentity(command: TfSearchCommand): SearchCacheIdentity {
   return {
@@ -82,7 +123,7 @@ export function toPublicSearchResult(result: InternalTrack): Omit<InternalTrack,
   return publicResult;
 }
 
-class SearchServiceImpl implements SearchService {
+class SearchServiceImpl implements RuntimeSearchService {
   private readonly providers: ReadonlyMap<TfSearchSource, SearchProvider>;
   private readonly cache: BoundedSearchCache;
   private readonly now: () => number;
@@ -91,6 +132,9 @@ class SearchServiceImpl implements SearchService {
   private readonly partialFailureBuckets = new Int32Array(ROLLING_WINDOW_SECONDS);
   private readonly totalFailureBuckets = new Int32Array(ROLLING_WINDOW_SECONDS);
   private readonly bucketSeconds = new Int32Array(ROLLING_WINDOW_SECONDS).fill(-1);
+  private readonly parserBuckets = new Map<TfSearchSource, ParserRollingTelemetry>(
+    ALL_SOURCES.map((source) => [source, createParserRollingTelemetry()]),
+  );
 
   constructor(options: SearchServiceOptions) {
     this.providers = new Map(options.providers.map((provider) => [provider.source, provider]));
@@ -138,16 +182,25 @@ class SearchServiceImpl implements SearchService {
         providerStatus[source] = "ok";
         succeededProviders += 1;
         results.push(...outcome.value.results);
+        this.recordParserAttempt(source, false);
       } else {
         providerStatus[source] = "failed";
         failedProviders += 1;
+        this.recordParserAttempt(source, true);
         this.logger?.warn({ source, errorClass: "provider_failure" });
       }
     }
 
     if (failedProviders > 0) this.recordFailure(succeededProviders === 0);
 
-    const ranked = rank(results, { artist: command.artist, title: command.title }, medianOriginalDuration(results), {
+    const completeMedia = filterCompleteMedia(results);
+    for (const rejection of completeMedia.rejected) {
+      this.recordParserRejections(
+        RESULT_SOURCE_TO_PROVIDER[rejection.source],
+        rejection.count,
+      );
+    }
+    const ranked = rank(completeMedia.accepted, { artist: command.artist, title: command.title }, medianOriginalDuration(completeMedia.accepted), {
       mode: command.mode,
       queryText: query,
     }).slice(0, command.maxResults);
@@ -198,20 +251,30 @@ class SearchServiceImpl implements SearchService {
         providerStatus[source] = "ok";
         succeededProviders += 1;
         results.push(...outcome.value.results.slice(0, command.limitPerSource));
+        this.recordParserAttempt(source, false);
       } else {
         providerStatus[source] = "failed";
         failedProviders += 1;
+        this.recordParserAttempt(source, true);
         this.logger?.warn({ source, errorClass: "provider_failure" });
       }
     }
 
     if (failedProviders > 0) this.recordFailure(succeededProviders === 0);
 
+    const completeMedia = filterCompleteMedia(results);
+    for (const rejection of completeMedia.rejected) {
+      this.recordParserRejections(
+        RESULT_SOURCE_TO_PROVIDER[rejection.source],
+        rejection.count,
+      );
+    }
+
     return {
       schemaVersion: 1,
       requestId: command.requestId,
       query: command.artist,
-      results: results.slice(0, 40),
+      results: completeMedia.accepted.slice(0, 40),
       sources: command.sources,
       providerStatus,
     };
@@ -251,6 +314,50 @@ class SearchServiceImpl implements SearchService {
     return { requestsPerMinute, status };
   }
 
+  parserTelemetry(): readonly ParserTelemetrySnapshot[] {
+    const now = this.now();
+    const nowSecond = Math.floor(now / 1_000);
+    return ALL_SOURCES.map((source) => {
+      const telemetry = this.parserBuckets.get(source)!;
+      let requestsPerMinute = 0;
+      let failuresPerMinute = 0;
+      let previewsRejectedPerMinute = 0;
+      for (let index = 0; index < ROLLING_WINDOW_SECONDS; index += 1) {
+        if (
+          telemetry.bucketSeconds[index]! <
+            nowSecond - (ROLLING_WINDOW_SECONDS - 1) ||
+          telemetry.bucketSeconds[index]! > nowSecond
+        ) {
+          telemetry.requests[index] = 0;
+          telemetry.failures[index] = 0;
+          telemetry.previewsRejected[index] = 0;
+          continue;
+        }
+        requestsPerMinute += telemetry.requests[index]!;
+        failuresPerMinute += telemetry.failures[index]!;
+        previewsRejectedPerMinute += telemetry.previewsRejected[index]!;
+      }
+      const status =
+        requestsPerMinute === 0
+          ? "unknown"
+          : failuresPerMinute >= 3
+            ? "degraded"
+            : failuresPerMinute > 0 || previewsRejectedPerMinute > 0
+              ? "warning"
+              : "healthy";
+      return {
+        source,
+        status,
+        requestsPerMinute,
+        failuresPerMinute,
+        previewsRejectedPerMinute,
+        ...(telemetry.lastCheckedAt === undefined
+          ? {}
+          : { lastCheckedAt: new Date(telemetry.lastCheckedAt).toISOString() }),
+      };
+    });
+  }
+
   private recordRequest(): void {
     const second = Math.floor(this.now() / 1_000);
     const bucketIndex = this.ensureBucket(second);
@@ -266,6 +373,44 @@ class SearchServiceImpl implements SearchService {
     }
   }
 
+  private recordParserAttempt(source: TfSearchSource, failed: boolean): void {
+    const now = this.now();
+    const telemetry = this.parserBuckets.get(source)!;
+    const bucketIndex = this.ensureParserBucket(
+      telemetry,
+      Math.floor(now / 1_000),
+    );
+    telemetry.requests[bucketIndex] += 1;
+    if (failed) telemetry.failures[bucketIndex] += 1;
+    telemetry.lastCheckedAt = now;
+  }
+
+  private recordParserRejections(source: TfSearchSource, count: number): void {
+    if (!Number.isSafeInteger(count) || count <= 0) return;
+    const telemetry = this.parserBuckets.get(source)!;
+    const bucketIndex = this.ensureParserBucket(
+      telemetry,
+      Math.floor(this.now() / 1_000),
+    );
+    telemetry.previewsRejected[bucketIndex] += count;
+  }
+
+  private ensureParserBucket(
+    telemetry: ParserRollingTelemetry,
+    second: number,
+  ): number {
+    const bucketIndex =
+      ((second % ROLLING_WINDOW_SECONDS) + ROLLING_WINDOW_SECONDS) %
+      ROLLING_WINDOW_SECONDS;
+    if (telemetry.bucketSeconds[bucketIndex] !== second) {
+      telemetry.bucketSeconds[bucketIndex] = second;
+      telemetry.requests[bucketIndex] = 0;
+      telemetry.failures[bucketIndex] = 0;
+      telemetry.previewsRejected[bucketIndex] = 0;
+    }
+    return bucketIndex;
+  }
+
   private ensureBucket(second: number): number {
     const bucketIndex = ((second % ROLLING_WINDOW_SECONDS) + ROLLING_WINDOW_SECONDS) % ROLLING_WINDOW_SECONDS;
     if (this.bucketSeconds[bucketIndex] !== second) {
@@ -278,6 +423,6 @@ class SearchServiceImpl implements SearchService {
   }
 }
 
-export function createSearchService(options: SearchServiceOptions): SearchService {
+export function createSearchService(options: SearchServiceOptions): RuntimeSearchService {
   return new SearchServiceImpl(options);
 }

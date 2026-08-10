@@ -16,10 +16,34 @@ import {
 const validSnapshot = {
   generatedAt: "2026-07-14T12:00:00.000Z",
   metrics: [
-    { id: "active", label: "Active", value: "1", change: "0", trend: [1] },
-    { id: "search", label: "Search", value: "0", change: "0", trend: [0] },
-    { id: "queue", label: "Queue", value: "0", change: "0", trend: [0] },
-    { id: "errors", label: "Errors", value: "0%", change: "0", trend: [0] },
+    {
+      id: "active-modules",
+      label: "Active modules",
+      value: "1",
+      change: "0",
+      trend: [1],
+    },
+    {
+      id: "active-users",
+      label: "Active users",
+      value: "0",
+      change: "0",
+      trend: [0],
+    },
+    {
+      id: "parser-warnings",
+      label: "Parser warnings",
+      value: "0",
+      change: "0",
+      trend: [0],
+    },
+    {
+      id: "open-incidents",
+      label: "Open incidents",
+      value: "0",
+      change: "0",
+      trend: [0],
+    },
   ],
   modules: [
     {
@@ -33,6 +57,20 @@ const validSnapshot = {
   edges: [],
   incidents: [],
   providers: [],
+  parsers: [],
+  accountSummary: {
+    availability: "available",
+    total: 0,
+    activeNow: 0,
+    pending: 0,
+    suspended: 0,
+    connectionSummary: {
+      availability: "available",
+      spotifyConnectedInList: 0,
+      yandexConnectedInList: 0,
+    },
+  },
+  accounts: [],
 } as const;
 
 const servers: Server[] = [];

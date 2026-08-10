@@ -7,6 +7,10 @@ import {
 } from "../lib/admin-telemetry.js";
 import { loadAdminDashboardToken } from "../lib/admin-dashboard-token.js";
 import { moduleHeartbeatService } from "../lib/module-heartbeat.js";
+import {
+  loadRuntimeAdminAccountOverview,
+  unavailableAdminAccountOverview,
+} from "../lib/admin-account-overview-client.js";
 
 const DATABASE_PROBE_TIMEOUT_MS = 1_000;
 const DATABASE_PROBE_CACHE_MS = 5_000;
@@ -85,13 +89,16 @@ function parseOptionalIsoDate(value: string | undefined): string | undefined {
 }
 
 async function loadRuntimeSnapshot(): Promise<unknown> {
-  const [queueTelemetry, { isRedisAvailable }, databaseReady] =
+  const [queueTelemetry, { isRedisAvailable }, databaseReady, accountOverview] =
     await Promise.all([
       import("../lib/background-queue.js").then(
         ({ getDownloadQueueTelemetry }) => getDownloadQueueTelemetry(),
       ),
       import("../lib/redis.js"),
       probeDatabase(),
+      loadRuntimeAdminAccountOverview(process.env).catch(
+        () => unavailableAdminAccountOverview,
+      ),
     ]);
 
   return createAdminDashboardSnapshot({
@@ -103,6 +110,7 @@ async function loadRuntimeSnapshot(): Promise<unknown> {
     isDatabaseReady: () => databaseReady,
     isRedisAvailable,
     getModuleHeartbeats: () => moduleHeartbeatService.snapshot(),
+    accountOverview,
   });
 }
 

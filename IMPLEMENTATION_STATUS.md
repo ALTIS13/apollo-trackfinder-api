@@ -1,6 +1,41 @@
 # Apollo TF implementation status
 
-Last updated: 2026-07-29.
+Last updated: 2026-08-10.
+
+## Admin parser and account observability checkpoint
+
+### Что сделано
+
+- `tf-search` отбрасывает обрезанные demo/preview результаты до ranking и cache write по явному preview URL, маркеру в названии или сильному отклонению длительности от медианы оригиналов.
+- Signed heartbeat `search-media` передаёт ограниченную телеметрию YouTube, SoundCloud, Bandcamp и Deezer: версия, статус, запросы, ошибки и отклонённые demo за 60 секунд. `tf-api` агрегирует её в строгий admin snapshot.
+- В админ-панель добавлена секция `Парсеры` с версиями, состоянием и счётчиками качества без изменения принятой топологии и инцидентов.
+- `platform-api` отдаёт подписанную read-only сводку максимум 100 последних аккаунтов с 15-минутной активностью, сессиями и module entitlements. `tf-integrations` отдаёт только состояние Spotify/Yandex, display name и время обновления для запрошенных account IDs.
+- Cross-account overview выполняется фиксированной SQL-проекцией с лимитом 100. FORCE RLS остаётся включённым, runtime и migrator остаются `NOBYPASSRLS`, а read-only доступ требует transaction-local контекст и живую capability `platform.accounts.manage`; обычный runtime без этого контекста по-прежнему не видит чужие строки и не получает broad mutation.
+- `tf-api` остаётся единственной browser-facing границей: недоступный Platform помечает account section как `unavailable`, а не как нулевой; при недоступности integrations пользовательские строки сохраняются, а подключения и их list-scoped summary становятся `unavailable`. Токены, provider user IDs, session digests, password data, HMAC/client secrets и DB credentials в snapshot не попадают.
+- В админ-панель добавлена секция `Пользователи`: lifecycle status, последняя активность, активные сессии, доступные модули, Spotify/Yandex и компактные итоговые счётчики. Spotify/Yandex counters явно относятся только к аккаунтам `в списке`.
+- Верхняя сводка соответствует утверждённому дизайну: активные модули, активные пользователи, предупреждения парсеров и открытые инциденты. Кириллические preview-маркеры и обычная медиана для чётных duration sets исправлены; internal overview responses читаются потоково с ранней отменой после 128 KiB.
+- HomeNode, Coolify, Caddy, UFW, DNS, Docker, Android и GitHub Actions не изменялись.
+
+### Validation
+
+- Final-review fix matrix прошла `159/159`: `tf-search` 26, Platform DB 22, Platform API 33, admin contract 7, `tf-integrations` 19, `tf-api` 21, admin UI 31. Platform API subset выполнен против свежего PostgreSQL с migrations `0001..0006` и production runtime role.
+- Package typecheck прошёл для Platform DB, `platform-api`, `tf-search`, admin contract, `tf-integrations`, `tf-api` и admin dashboard.
+- Production build прошёл для `tf-search`, `tf-api`, `platform-api`, `tf-integrations` и admin dashboard; локальный production preview отвечает `HTTP 200` на `127.0.0.1:4187`.
+- Final review findings C1, I1-I6 и M1 закрыты commit `d2c93c14558347a003afeba73274bae2a6eb9f00`; scoped re-review подтвердил все девять пунктов как `ADDRESSED`, новых Critical/Important нет, `READY TO MERGE: YES`. Max-100 и unknown-key duplicate tests остаются принятым non-blocking deferred-minor disposition.
+- После re-review на exact head свежо прошли `151/151` focused tests, `7/7` package typecheck и `5/5` production builds; отдельный fresh PostgreSQL runtime-role RLS proof прошёл `8/8`.
+- Визуальный smoke во встроенном браузере не выполнен: browser-control endpoint недоступен в текущем контексте. Standalone Playwright не использовался без разрешения владельца.
+
+### Commit/push
+
+- Ветка: `codex/feat/admin-parser-observability`, remote: `https://github.com/ALTIS13/Apollo.TF.git`.
+- Commits этапа: `685cc14`, `ef6d900`, `0194230`, `84e4d27`, `649598b`, `1122e3a`, `6c2f14b`, `d2c93c1`; этот publication-status commit является docs-only завершением ветки.
+- Ветка опубликована в `origin/codex/feat/admin-parser-observability`. Создан stacked PR `#4` к `codex/feat/operator-release-publisher`, потому что базовый PR `#3` ещё открыт: `https://github.com/ALTIS13/Apollo.TF/pull/4`.
+- GitHub workflow файлов в репозитории нет; Actions и billing не использовались. HomeNode и production rollout не выполнялись.
+
+### Следующий логичный этап реализации
+
+- После merge базового PR `#3` перенести/перенацелить PR `#4` на `main`, выполнить merged-result validation и только затем готовить локальный полный web/server release stack к read-only Coolify/HomeNode preflight.
+- После работоспособной серверной и admin-инфраструктуры отдельно проектировать клиентскую зону и плеер в стиле Spotify/старой Yandex Music; Android остаётся отложен.
 
 ## Operator-owned release publisher
 

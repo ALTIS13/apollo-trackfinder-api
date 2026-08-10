@@ -8,6 +8,7 @@ import {
   withPlatformTransaction,
 } from "@workspace/platform-db";
 
+import { PlatformAdminOverviewService } from "./admin-overview.js";
 import type { Account } from "./repository.js";
 import { PostgresPlatformRepository } from "./postgres-repository.js";
 
@@ -378,5 +379,131 @@ describePostgres("PostgresPlatformRepository forced-RLS bootstrap", () => {
         [moduleId],
       );
     }
+  });
+
+  test("exposes only the bounded operator overview while ordinary runtime stays isolated", async () => {
+    const now = new Date();
+    await withPlatformTransaction(runtime, async (client) => {
+      await setAccountContext(client, firstAccount.id);
+      await repository.updateAccountStatus(client, {
+        accountId: firstAccount.id,
+        status: "active",
+        changedAt: now,
+      });
+      await repository.insertOperatorCapabilities(client, {
+        accountId: firstAccount.id,
+        capabilities: ["platform.accounts.manage"],
+        grantedByAccountId: null,
+        reason: "admin overview integration",
+      });
+    });
+    await withPlatformTransaction(runtime, async (client) => {
+      await setAccountContext(client, secondAccount.id);
+      await repository.updateAccountStatus(client, {
+        accountId: secondAccount.id,
+        status: "active",
+        changedAt: now,
+      });
+    });
+
+    const roleSecurity = await migrator.query<{
+      rolname: string;
+      rolbypassrls: boolean;
+    }>(`
+      select rolname, rolbypassrls
+      from pg_roles
+      where rolname in ('apollo_platform_migrator', 'apollo_platform_runtime')
+      order by rolname
+    `);
+    const functionSecurity = await migrator.query<{
+      owner: string;
+      security_definer: boolean;
+    }>(`
+      select pg_get_userbyid(proowner) as owner,
+             prosecdef as security_definer
+      from pg_proc
+      where oid = 'apollo_platform.admin_account_overview(uuid,timestamptz,integer)'::regprocedure
+    `);
+    expect(roleSecurity.rows).toEqual([
+      { rolname: "apollo_platform_migrator", rolbypassrls: false },
+      { rolname: "apollo_platform_runtime", rolbypassrls: false },
+    ]);
+    expect(functionSecurity.rows).toEqual([
+      {
+        owner: "apollo_platform_migrator",
+        security_definer: true,
+      },
+    ]);
+
+    await expect(
+      withPlatformTransaction(runtime, async (client) => {
+        const accounts = await client.query(
+          "select id from apollo_platform.accounts",
+        );
+        const sessions = await client.query(
+          "select session_digest from apollo_platform.auth_sessions",
+        );
+        const mutation = await client.query(
+          "update apollo_platform.accounts set display_name = display_name",
+        );
+        return [accounts.rowCount, sessions.rowCount, mutation.rowCount];
+      }),
+    ).resolves.toEqual([0, 0, 0]);
+    await expect(
+      runtime.query(
+        "select * from apollo_platform.admin_account_overview($1, $2, $3)",
+        [secondAccount.id, now, 100],
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      runtime.query(
+        "select * from apollo_platform.admin_account_overview($1, $2, $3)",
+        [firstAccount.id, now, null],
+      ),
+    ).rejects.toMatchObject({ code: "22023" });
+
+    const overview = await new PlatformAdminOverviewService(
+      runtime,
+      repository,
+      () => now,
+    ).load();
+
+    expect(overview).toMatchObject({
+      total: 2,
+      activeNow: 2,
+      pending: 0,
+      suspended: 0,
+    });
+    expect(overview.accounts.map(({ id }) => id).sort()).toEqual(
+      [firstAccount.id, secondAccount.id].sort(),
+    );
+    expect(
+      overview.accounts.map((account) => Object.keys(account).sort()),
+    ).toEqual([
+      [
+        "activeSessionCount",
+        "displayName",
+        "email",
+        "id",
+        "latestActivityAt",
+        "moduleKeys",
+        "status",
+      ],
+      [
+        "activeSessionCount",
+        "displayName",
+        "email",
+        "id",
+        "latestActivityAt",
+        "moduleKeys",
+        "status",
+      ],
+    ]);
+    expect(JSON.stringify(overview)).not.toMatch(
+      /session_digest|password|provider_user|token_digest/i,
+    );
+    await expect(
+      runtime.query("select id from apollo_platform.accounts"),
+    ).resolves.toMatchObject({ rowCount: 0 });
   });
 });

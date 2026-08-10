@@ -253,6 +253,38 @@ describe("runPlatformMigrations", () => {
     expect(sql).not.toMatch(/for update|with check|grant\s|bypassrls/i);
   });
 
+  test("ships a capability-gated read-only admin overview projection", async () => {
+    const sql = await readFile(
+      new URL("../migrations/0006_admin_account_overview.sql", import.meta.url),
+      "utf8",
+    );
+
+    expect(sql.match(/for select to apollo_platform_migrator/gi)).toHaveLength(
+      3,
+    );
+    expect(sql).toMatch(
+      /current_setting\('app\.operator_overview_capability', true\)[\s\S]*platform\.accounts\.manage/i,
+    );
+    expect(sql).toMatch(
+      /operator_role\.capability = 'platform\.accounts\.manage'[\s\S]*operator_role\.revoked_at is null/i,
+    );
+    expect(sql).toMatch(
+      /create function apollo_platform\.admin_account_overview[\s\S]*security definer[\s\S]*set row_security = on/i,
+    );
+    expect(sql).toMatch(
+      /account_limit is null[\s\S]*account_limit < 1 or account_limit > 100/i,
+    );
+    expect(sql).toMatch(
+      /revoke all on function apollo_platform\.admin_account_overview[\s\S]*from public/i,
+    );
+    expect(sql).toMatch(
+      /grant execute on function apollo_platform\.admin_account_overview[\s\S]*to apollo_platform_runtime/i,
+    );
+    expect(sql).not.toMatch(
+      /disable row level security|no force row level security|bypassrls|grant\s+(?:insert|update|delete)/i,
+    );
+  });
+
   test("applies numeric SQL migrations with immutable checksums and one transaction each", async () => {
     const directory = await fixtureDirectory({
       "0002_second.sql": "select 'second migration';",

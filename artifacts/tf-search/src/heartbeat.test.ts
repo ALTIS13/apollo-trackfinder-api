@@ -21,6 +21,16 @@ describe("TF search heartbeat", () => {
       deployedAt: "2026-07-24T11:00:00.000Z",
       ready: () => true,
       telemetry: () => ({ requestsPerMinute: 7, status: "warning" }),
+      parserTelemetry: () => [
+        {
+          source: "dz",
+          status: "warning",
+          requestsPerMinute: 3,
+          failuresPerMinute: 0,
+          previewsRejectedPerMinute: 2,
+          lastCheckedAt: "2026-07-24T11:59:58.000Z",
+        },
+      ],
       fetch,
     });
 
@@ -30,7 +40,7 @@ describe("TF search heartbeat", () => {
     expect(init).toMatchObject({ method: "POST", redirect: "error" });
     expect(init?.headers).toMatchObject({ "content-type": "application/json" });
     expect(init?.body).toBe(
-      '{"schemaVersion":1,"status":"warning","version":"build-1","deployedAt":"2026-07-24T11:00:00.000Z","requestsPerMinute":7}',
+      '{"schemaVersion":1,"status":"warning","version":"build-1","deployedAt":"2026-07-24T11:00:00.000Z","requestsPerMinute":7,"parsers":[{"source":"dz","status":"warning","requestsPerMinute":3,"failuresPerMinute":0,"previewsRejectedPerMinute":2,"lastCheckedAt":"2026-07-24T11:59:58.000Z"}]}',
     );
     const headers = init?.headers as Record<string, string>;
     expect(headers["x-apollo-heartbeat-signature"]).toBe(

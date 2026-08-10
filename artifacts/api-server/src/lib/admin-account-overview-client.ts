@@ -1,0 +1,397 @@
+import { randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
+
+import { createSignedBodySignature } from "@workspace/module-runtime-contract";
+import { z } from "zod";
+
+const PLATFORM_PATH = "/v1/internal/admin/overview";
+const INTEGRATIONS_PATH = "/v1/internal/admin/connections";
+const MAX_RESPONSE_BYTES = 128 * 1024;
+const TIMEOUT_MS = 3_000;
+
+const accountIdSchema = z.string().uuid();
+const platformAccountSchema = z
+  .object({
+    id: accountIdSchema,
+    email: z.string().email().max(320),
+    displayName: z.string().trim().min(1).max(256),
+    status: z.enum(["pending", "active", "suspended", "deleted"]),
+    latestActivityAt: z.string().datetime({ offset: true }).optional(),
+    activeSessionCount: z.number().int().nonnegative().max(1_000_000),
+    moduleKeys: z.array(z.string().trim().min(1).max(128)).max(64),
+  })
+  .strict();
+const platformOverviewSchema = z
+  .object({
+    total: z.number().int().nonnegative().max(1_000_000_000),
+    activeNow: z.number().int().nonnegative().max(1_000_000_000),
+    pending: z.number().int().nonnegative().max(1_000_000_000),
+    suspended: z.number().int().nonnegative().max(1_000_000_000),
+    accounts: z.array(platformAccountSchema).max(100),
+  })
+  .strict();
+const integrationsOverviewSchema = z
+  .object({
+    connections: z
+      .array(
+        z
+          .object({
+            accountId: accountIdSchema,
+            provider: z.enum(["spotify", "yandex"]),
+            displayName: z.string().trim().min(1).max(256),
+            updatedAt: z.string().datetime({ offset: true }),
+          })
+          .strict(),
+      )
+      .max(200),
+  })
+  .strict();
+
+type PlatformOverview = z.infer<typeof platformOverviewSchema>;
+type IntegrationsOverview = z.infer<typeof integrationsOverviewSchema>;
+
+export interface AdminPlatformOverviewGateway {
+  load(): Promise<PlatformOverview>;
+}
+
+export interface AdminIntegrationsOverviewGateway {
+  load(accountIds: readonly string[]): Promise<IntegrationsOverview>;
+}
+
+export interface AdminAccountOverview {
+  readonly accountSummary:
+    | { readonly availability: "unavailable" }
+    | {
+        readonly availability: "available";
+        readonly total: number;
+        readonly activeNow: number;
+        readonly pending: number;
+        readonly suspended: number;
+        readonly connectionSummary:
+          | { readonly availability: "unavailable" }
+          | {
+              readonly availability: "available";
+              readonly spotifyConnectedInList: number;
+              readonly yandexConnectedInList: number;
+            };
+      };
+  readonly accounts: readonly (z.infer<typeof platformAccountSchema> & {
+    readonly spotify: {
+      readonly state: "connected" | "disconnected" | "unavailable";
+      readonly displayName?: string;
+      readonly updatedAt?: string;
+    };
+    readonly yandex: {
+      readonly state: "connected" | "disconnected" | "unavailable";
+      readonly displayName?: string;
+      readonly updatedAt?: string;
+    };
+  })[];
+}
+
+export const unavailableAdminAccountOverview: AdminAccountOverview =
+  Object.freeze({
+    accountSummary: Object.freeze({ availability: "unavailable" }),
+    accounts: Object.freeze([]),
+  });
+
+export async function createAdminAccountOverview(dependencies: {
+  readonly platform: AdminPlatformOverviewGateway;
+  readonly integrations: AdminIntegrationsOverviewGateway;
+}): Promise<AdminAccountOverview> {
+  const platform = platformOverviewSchema.parse(
+    await dependencies.platform.load(),
+  );
+  let connections: IntegrationsOverview["connections"] | undefined;
+  try {
+    connections = integrationsOverviewSchema.parse(
+      await dependencies.integrations.load(
+        platform.accounts.map((account) => account.id),
+      ),
+    ).connections;
+  } catch {
+    connections = undefined;
+  }
+  const connectionsByAccount = new Map(
+    connections?.map((connection) => [
+      `${connection.accountId}:${connection.provider}`,
+      connection,
+    ]) ?? [],
+  );
+  const connected = (accountId: string, provider: "spotify" | "yandex") => {
+    if (connections === undefined) return { state: "unavailable" as const };
+    const connection = connectionsByAccount.get(`${accountId}:${provider}`);
+    return connection === undefined
+      ? { state: "disconnected" as const }
+      : {
+          state: "connected" as const,
+          displayName: connection.displayName,
+          updatedAt: connection.updatedAt,
+        };
+  };
+  const accounts = platform.accounts.map((account) => ({
+    ...account,
+    spotify: connected(account.id, "spotify"),
+    yandex: connected(account.id, "yandex"),
+  }));
+  return {
+    accountSummary: {
+      availability: "available",
+      total: platform.total,
+      activeNow: platform.activeNow,
+      pending: platform.pending,
+      suspended: platform.suspended,
+      connectionSummary:
+        connections === undefined
+          ? { availability: "unavailable" }
+          : {
+              availability: "available",
+              spotifyConnectedInList: accounts.filter(
+                (account) => account.spotify.state === "connected",
+              ).length,
+              yandexConnectedInList: accounts.filter(
+                (account) => account.yandex.state === "connected",
+              ).length,
+            },
+    },
+    accounts,
+  };
+}
+
+export interface AdminAccountOverviewClientConfig {
+  readonly platformOrigin: string;
+  readonly platformClientId: string;
+  readonly platformClientSecret: string;
+  readonly integrationsOrigin: string;
+  readonly integrationsSecret: string;
+}
+
+const privateServiceNamePattern = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+function required(env: NodeJS.ProcessEnv, name: string): string {
+  const value = env[name]?.trim();
+  if (value === undefined || value.length === 0)
+    throw new Error("invalid runtime configuration");
+  return value;
+}
+
+function isPrivateServiceHostname(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "[::1]" ||
+    hostname === "::1" ||
+    privateServiceNamePattern.test(hostname)
+  );
+}
+
+function parseExactOrigin(value: string, allowInsecureHttp: boolean): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("invalid runtime configuration");
+  }
+  if (
+    parsed.origin !== value ||
+    parsed.username !== "" ||
+    parsed.password !== ""
+  ) {
+    throw new Error("invalid runtime configuration");
+  }
+  if (parsed.protocol === "https:") return parsed.origin;
+  if (
+    parsed.protocol !== "http:" ||
+    !allowInsecureHttp ||
+    !isPrivateServiceHostname(parsed.hostname)
+  ) {
+    throw new Error("invalid runtime configuration");
+  }
+  return parsed.origin;
+}
+
+async function secret(path: string): Promise<string> {
+  const value = (await readFile(path, "utf8")).trim();
+  if (value.length < 32 || value.length > 512)
+    throw new Error("invalid runtime configuration");
+  return value;
+}
+
+export async function parseAdminAccountOverviewClientConfig(
+  env: NodeJS.ProcessEnv,
+): Promise<AdminAccountOverviewClientConfig> {
+  return {
+    platformOrigin: parseExactOrigin(
+      required(env, "APOLLO_PLATFORM_API_ORIGIN"),
+      env["APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP"] === "true",
+    ),
+    platformClientId: required(env, "APOLLO_TF_CLIENT_ID"),
+    platformClientSecret: await secret(
+      required(env, "APOLLO_TF_CLIENT_SECRET_FILE"),
+    ),
+    integrationsOrigin: parseExactOrigin(
+      required(env, "TF_INTEGRATIONS_ORIGIN"),
+      env["TF_INTEGRATIONS_ALLOW_INSECURE_HTTP"] === "true",
+    ),
+    integrationsSecret: await secret(
+      required(env, "TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE"),
+    ),
+  };
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Cancellation is best-effort; callers receive only a generic failure.
+  }
+}
+
+async function readJson(response: Response): Promise<unknown> {
+  const length = response.headers.get("content-length");
+  if (
+    length !== null &&
+    (!/^\d+$/.test(length) || Number(length) > MAX_RESPONSE_BYTES)
+  ) {
+    await cancelResponseBody(response);
+    throw new Error("overview unavailable");
+  }
+  if (response.body === null) throw new Error("overview unavailable");
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new Error("overview unavailable");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // A cancelled read may retain the lock until its pending pull settles.
+    }
+  }
+
+  try {
+    return JSON.parse(
+      Buffer.concat(
+        chunks.map((chunk) => Buffer.from(chunk)),
+        size,
+      ).toString("utf8"),
+    ) as unknown;
+  } catch {
+    await cancelResponseBody(response);
+    throw new Error("overview unavailable");
+  }
+}
+
+class SignedOverviewGateway {
+  constructor(
+    private readonly origin: string,
+    private readonly secret: string,
+    private readonly authorization?: string,
+    private readonly fetchImplementation: typeof fetch = fetch,
+  ) {}
+
+  async post(path: string, body: unknown): Promise<unknown> {
+    const rawBody = Buffer.from(JSON.stringify(body), "utf8");
+    const timestamp = String(Math.floor(Date.now() / 1_000));
+    const nonce = randomBytes(32).toString("base64url");
+    const signature = createSignedBodySignature({
+      method: "POST",
+      path,
+      timestamp,
+      nonce,
+      rawBody,
+      secret: this.secret,
+    });
+    const response = await this.fetchImplementation(
+      new URL(path, this.origin),
+      {
+        method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+        headers: {
+          accept: "application/json",
+          "accept-encoding": "identity",
+          "content-type": "application/json",
+          ...(this.authorization === undefined
+            ? {}
+            : { authorization: this.authorization }),
+          "x-apollo-internal-timestamp": timestamp,
+          "x-apollo-internal-nonce": nonce,
+          "x-apollo-internal-signature": signature,
+        },
+        body: rawBody.toString("utf8"),
+      },
+    );
+    if (response.status !== 200) {
+      await cancelResponseBody(response);
+      throw new Error("overview unavailable");
+    }
+    return readJson(response);
+  }
+}
+
+export class HttpAdminPlatformOverviewClient implements AdminPlatformOverviewGateway {
+  readonly #gateway: SignedOverviewGateway;
+
+  constructor(
+    config: Pick<
+      AdminAccountOverviewClientConfig,
+      "platformOrigin" | "platformClientId" | "platformClientSecret"
+    >,
+  ) {
+    this.#gateway = new SignedOverviewGateway(
+      config.platformOrigin,
+      config.platformClientSecret,
+      `Basic ${Buffer.from(`${config.platformClientId}:${config.platformClientSecret}`, "utf8").toString("base64")}`,
+    );
+  }
+
+  async load(): Promise<PlatformOverview> {
+    return platformOverviewSchema.parse(
+      await this.#gateway.post(PLATFORM_PATH, {}),
+    );
+  }
+}
+
+export class HttpAdminIntegrationsOverviewClient implements AdminIntegrationsOverviewGateway {
+  readonly #gateway: SignedOverviewGateway;
+
+  constructor(
+    config: Pick<
+      AdminAccountOverviewClientConfig,
+      "integrationsOrigin" | "integrationsSecret"
+    >,
+  ) {
+    this.#gateway = new SignedOverviewGateway(
+      config.integrationsOrigin,
+      config.integrationsSecret,
+    );
+  }
+
+  async load(accountIds: readonly string[]): Promise<IntegrationsOverview> {
+    return integrationsOverviewSchema.parse(
+      await this.#gateway.post(INTEGRATIONS_PATH, { accountIds }),
+    );
+  }
+}
+
+export async function loadRuntimeAdminAccountOverview(
+  env: NodeJS.ProcessEnv,
+): Promise<AdminAccountOverview> {
+  const config = await parseAdminAccountOverviewClientConfig(env);
+  return createAdminAccountOverview({
+    platform: new HttpAdminPlatformOverviewClient(config),
+    integrations: new HttpAdminIntegrationsOverviewClient(config),
+  });
+}

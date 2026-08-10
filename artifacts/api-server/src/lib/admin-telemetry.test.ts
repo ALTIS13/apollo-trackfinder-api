@@ -177,20 +177,30 @@ describe("createAdminDashboardSnapshot", () => {
       isDatabaseReady: () => true,
       isRedisAvailable: () => false,
       getModuleHeartbeats: () => [],
+      accountOverview: {
+        accountSummary: {
+          availability: "available",
+          total: 7,
+          activeNow: 3,
+          pending: 1,
+          suspended: 1,
+          connectionSummary: {
+            availability: "available",
+            spotifyConnectedInList: 2,
+            yandexConnectedInList: 1,
+          },
+        },
+        accounts: [],
+      },
     });
 
     expect(parseDashboardSnapshot(snapshot)).toEqual(snapshot);
-    expect(snapshot.metrics).toHaveLength(4);
-    expect(
-      snapshot.metrics.find((metric) => metric.id === "searches-per-minute")
-        ?.value,
-    ).toBe("1");
-    expect(
-      snapshot.metrics.find((metric) => metric.id === "queue-depth")?.value,
-    ).toBe("7");
-    expect(
-      snapshot.metrics.find((metric) => metric.id === "error-rate")?.value,
-    ).toBe("50.0%");
+    expect(snapshot.metrics.map(({ id, value }) => ({ id, value }))).toEqual([
+      { id: "active-modules", value: "3" },
+      { id: "active-users", value: "3" },
+      { id: "parser-warnings", value: "0" },
+      { id: "open-incidents", value: "0" },
+    ]);
     expect(
       snapshot.modules.find((module) => module.id === "postgresql")?.status,
     ).toBe("healthy");
@@ -204,13 +214,11 @@ describe("createAdminDashboardSnapshot", () => {
       snapshot.modules.find((module) => module.id === "public-web")?.status,
     ).toBe("unknown");
     expect(
-      snapshot.modules.find(
-        (module) => module.id === "account-integrations",
-      )?.status,
+      snapshot.modules.find((module) => module.id === "account-integrations")
+        ?.status,
     ).toBe("unknown");
     expect(
-      snapshot.modules.find((module) => module.id === "search-media")
-        ?.status,
+      snapshot.modules.find((module) => module.id === "search-media")?.status,
     ).toBe("unknown");
     expect(
       snapshot.modules.find((module) => module.id === "public-web")
@@ -247,9 +255,7 @@ describe("createAdminDashboardSnapshot", () => {
     });
 
     expect(parseDashboardSnapshot(snapshot)).toEqual(snapshot);
-    expect(
-      snapshot.metrics.find((metric) => metric.id === "queue-depth")?.value,
-    ).toBe("Нет данных");
+    expect(snapshot.accountSummary).toEqual({ availability: "unavailable" });
     expect(
       snapshot.modules.find((module) => module.id === "download-worker")
         ?.status,
@@ -279,6 +285,23 @@ describe("createAdminDashboardSnapshot", () => {
           deployedAt: "2026-07-15T04:30:00.000Z",
           lastHeartbeatAt: "2026-07-15T04:31:02.000Z",
           requestsPerMinute: 77,
+          parsers: [
+            {
+              source: "yt",
+              status: "healthy" as const,
+              requestsPerMinute: 12,
+              failuresPerMinute: 0,
+              previewsRejectedPerMinute: 1,
+              lastCheckedAt: "2026-07-15T04:31:01.000Z",
+            },
+            {
+              source: "dz",
+              status: "warning" as const,
+              requestsPerMinute: 9,
+              failuresPerMinute: 0,
+              previewsRejectedPerMinute: 4,
+            },
+          ],
         },
         {
           moduleId: "core-api",
@@ -313,6 +336,48 @@ describe("createAdminDashboardSnapshot", () => {
     expect(
       snapshot.metrics.find((metric) => metric.id === "active-modules")?.value,
     ).toBe("5");
+    expect(
+      snapshot.metrics.find((metric) => metric.id === "parser-warnings")?.value,
+    ).toBe("1");
+    expect(snapshot.parsers).toEqual([
+      {
+        id: "youtube",
+        name: "YouTube",
+        status: "healthy",
+        version: "3.0.0",
+        requestsPerMinute: 12,
+        failuresPerMinute: 0,
+        previewsRejectedPerMinute: 1,
+        lastCheckedAt: "2026-07-15T04:31:01.000Z",
+      },
+      {
+        id: "soundcloud",
+        name: "SoundCloud",
+        status: "unknown",
+        version: "3.0.0",
+        requestsPerMinute: 0,
+        failuresPerMinute: 0,
+        previewsRejectedPerMinute: 0,
+      },
+      {
+        id: "bandcamp",
+        name: "Bandcamp",
+        status: "unknown",
+        version: "3.0.0",
+        requestsPerMinute: 0,
+        failuresPerMinute: 0,
+        previewsRejectedPerMinute: 0,
+      },
+      {
+        id: "deezer",
+        name: "Deezer",
+        status: "warning",
+        version: "3.0.0",
+        requestsPerMinute: 9,
+        failuresPerMinute: 0,
+        previewsRejectedPerMinute: 4,
+      },
+    ]);
   });
 
   it("keeps managed missing or stale state unknown without fabricated heartbeat data", async () => {

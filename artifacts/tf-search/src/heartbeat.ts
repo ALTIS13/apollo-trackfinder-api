@@ -13,6 +13,7 @@ export interface HeartbeatOptions {
   readonly deployedAt?: string;
   readonly ready: () => boolean;
   readonly telemetry: SearchService["telemetry"];
+  readonly parserTelemetry?: NonNullable<SearchService["parserTelemetry"]>;
   readonly fetch?: typeof globalThis.fetch;
   readonly now?: () => number;
   readonly createNonce?: () => string;
@@ -45,6 +46,7 @@ export function startSearchHeartbeat(options: HeartbeatOptions): SearchHeartbeat
     try {
       if (stopped || !options.ready()) return;
       const telemetry = options.telemetry();
+      const parsers = options.parserTelemetry?.();
       const rawBody = Buffer.from(
         JSON.stringify({
           schemaVersion: 1,
@@ -52,6 +54,7 @@ export function startSearchHeartbeat(options: HeartbeatOptions): SearchHeartbeat
           version: options.version,
           ...(options.deployedAt === undefined ? {} : { deployedAt: options.deployedAt }),
           requestsPerMinute: telemetry.requestsPerMinute,
+          ...(parsers === undefined ? {} : { parsers }),
         }),
         "utf8",
       );

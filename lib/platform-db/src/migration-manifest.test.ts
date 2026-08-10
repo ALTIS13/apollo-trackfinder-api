@@ -13,6 +13,7 @@ describe("PLATFORM_MIGRATION_MANIFEST", () => {
       "0003_runtime_migration_history_read.sql",
       "0004_authorization_code_binding.sql",
       "0005_authorization_code_digest_read.sql",
+      "0006_admin_account_overview.sql",
     ]);
   });
 

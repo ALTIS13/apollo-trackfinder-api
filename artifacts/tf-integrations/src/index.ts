@@ -4,6 +4,7 @@ import {
   createIntegrationsPool,
   PostgresProviderAccountRepository,
   probeIntegrationsDatabase,
+  type AdminConnectionSummaryRepository,
   type ProviderAccountRepository,
 } from "@workspace/tf-integrations-db";
 
@@ -24,6 +25,7 @@ import {
   type TfIntegrationsHeartbeatOptions,
 } from "./heartbeat.js";
 import { HmacInternalRequestAuthenticator } from "./internal-auth.js";
+import { TfIntegrationsAdminOverviewService } from "./admin-overview.js";
 import { createSmokeFixtureProviders } from "./providers/smoke-fixtures.js";
 import { SpotifyProvider } from "./providers/spotify.js";
 import { YandexProvider } from "./providers/yandex.js";
@@ -120,12 +122,20 @@ export async function startTfIntegrationsRuntime(
     }
 
     const service = dependencies.createService(config, repository);
+    const adminRepository = repository as Partial<AdminConnectionSummaryRepository>;
     const app = createTfIntegrationsApp({
       service,
       auth: new HmacInternalRequestAuthenticator({
         secret: config.internalAuthSecret,
       }),
       readiness,
+      ...(typeof adminRepository.listAdminConnectionSummaries !== "function"
+        ? {}
+        : {
+            adminOverview: new TfIntegrationsAdminOverviewService(
+              adminRepository as AdminConnectionSummaryRepository,
+            ),
+          }),
       shutdownSignal: commandAbortController.signal,
     });
     listener = app.listen(config.port);

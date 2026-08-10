@@ -35,6 +35,7 @@ async function start(): Promise<void> {
     ...(config.deployedAt === undefined ? {} : { deployedAt: config.deployedAt }),
     ready: () => initialized,
     telemetry: () => service.telemetry(),
+    parserTelemetry: () => service.parserTelemetry(),
   });
   logger.info({ port: config.port }, "TF search listening");
 

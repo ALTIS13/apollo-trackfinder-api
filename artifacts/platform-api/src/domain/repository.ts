@@ -32,6 +32,24 @@ export interface Account {
   readonly updatedAt: Date;
 }
 
+export interface AdminAccountOverviewAccount {
+  readonly id: string;
+  readonly email: string;
+  readonly displayName: string;
+  readonly status: AccountStatus;
+  readonly latestActivityAt: Date | null;
+  readonly activeSessionCount: number;
+  readonly moduleKeys: readonly string[];
+}
+
+export interface AdminAccountOverview {
+  readonly total: number;
+  readonly activeNow: number;
+  readonly pending: number;
+  readonly suspended: number;
+  readonly accounts: readonly AdminAccountOverviewAccount[];
+}
+
 export interface CreateAccountInput {
   readonly normalizedEmail: string;
   readonly displayName: string;
@@ -316,6 +334,15 @@ export interface AuthorizationBindingRepository {
     client: PoolClient,
     input: ConsumeAuthorizationCodeInput,
   ): Promise<AuthorizationCode | null>;
+}
+
+export interface AdminAccountOverviewRepository {
+  getAdminAccountOverview(
+    client: PoolClient,
+    operatorAccountId: string,
+    now: Date,
+    limit: number,
+  ): Promise<AdminAccountOverview>;
 }
 
 export interface PlatformRepository {

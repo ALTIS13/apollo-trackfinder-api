@@ -38,6 +38,13 @@ export interface ProviderAccountRecord {
   readonly providerLogin?: string;
 }
 
+export interface AdminConnectionSummary {
+  readonly accountId: string;
+  readonly provider: Provider;
+  readonly displayName: string;
+  readonly updatedAt: Date;
+}
+
 export type ProviderAccountWrite = Omit<ProviderAccountRecord, "generation">;
 
 export interface ProviderAccountRepository {
@@ -62,6 +69,12 @@ export interface ProviderAccountRepository {
     context: TfIntegrationsCommandContext,
   ): Promise<boolean>;
   isMigrationCurrent(): Promise<boolean>;
+}
+
+export interface AdminConnectionSummaryRepository {
+  listAdminConnectionSummaries(
+    accountIds: readonly string[],
+  ): Promise<readonly AdminConnectionSummary[]>;
 }
 
 export type IntegrationsStorageErrorCode =
@@ -243,6 +256,13 @@ interface ProviderAccountRow extends QueryResultRow {
   provider_login: unknown;
 }
 
+interface AdminConnectionSummaryRow extends QueryResultRow {
+  account_id: unknown;
+  provider: unknown;
+  display_name: unknown;
+  updated_at: unknown;
+}
+
 function mapRow(row: ProviderAccountRow): ProviderAccountRecord {
   try {
     const parsedEnvelope =
@@ -271,7 +291,29 @@ function mapRow(row: ProviderAccountRow): ProviderAccountRecord {
   }
 }
 
-export class PostgresProviderAccountRepository implements ProviderAccountRepository {
+function mapAdminConnectionSummary(
+  row: AdminConnectionSummaryRow,
+): AdminConnectionSummary {
+  try {
+    return Object.freeze({
+      accountId: validateAccountId(row.account_id),
+      provider: validateProvider(row.provider),
+      displayName: validateMetadata(row.display_name, 500),
+      updatedAt: (() => {
+        if (!(row.updated_at instanceof Date) || Number.isNaN(row.updated_at.getTime())) {
+          throw storageError("storage_unavailable");
+        }
+        return row.updated_at;
+      })(),
+    });
+  } catch {
+    throw storageError("storage_unavailable");
+  }
+}
+
+export class PostgresProviderAccountRepository
+  implements ProviderAccountRepository, AdminConnectionSummaryRepository
+{
   readonly #pool: Pool;
   readonly #createGeneration: () => string;
 
@@ -546,6 +588,38 @@ export class PostgresProviderAccountRepository implements ProviderAccountReposit
       );
       return result.rowCount === 1;
     });
+  }
+
+  async listAdminConnectionSummaries(
+    accountIds: readonly string[],
+  ): Promise<readonly AdminConnectionSummary[]> {
+    if (accountIds.length > 100 || new Set(accountIds).size !== accountIds.length) {
+      throw storageError("constraint_violation");
+    }
+    const validatedAccountIds = accountIds.map(validateAccountId);
+    if (validatedAccountIds.length === 0) return Object.freeze([]);
+    try {
+      const result = await this.#pool.query<AdminConnectionSummaryRow>(
+        `select account_id, provider, display_name, updated_at
+         from apollo_tf_integrations.provider_accounts
+         where account_id = any($1::uuid[])
+         order by account_id, provider`,
+        [validatedAccountIds],
+      );
+      return Object.freeze(result.rows.map(mapAdminConnectionSummary));
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        ((error as { readonly code?: unknown }).code ===
+          "constraint_violation" ||
+          (error as { readonly code?: unknown }).code === "storage_unavailable")
+      ) {
+        throw error;
+      }
+      throw mapStorageError(error);
+    }
   }
 
   async isMigrationCurrent(): Promise<boolean> {
