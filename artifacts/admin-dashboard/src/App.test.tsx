@@ -156,6 +156,7 @@ describe("Apollo TF admin dashboard", () => {
       ["Топология", "#topology"],
       ["Инциденты", "#incidents"],
       ["Деплойменты", "#deployments"],
+      ["Парсеры", "#parsers"],
       ["Провайдеры", "#providers"],
     ];
     for (const [name, href] of expectedAnchors) {
@@ -163,7 +164,7 @@ describe("Apollo TF admin dashboard", () => {
     }
   });
 
-  it("keeps deployment and provider operating data visible as semantic tables", () => {
+  it("keeps deployment, parser, and provider operating data visible as semantic tables", () => {
     render(<App />);
 
     const deployments = screen.getByRole("table", {
@@ -174,6 +175,15 @@ describe("Apollo TF admin dashboard", () => {
     expect(deployments).toHaveTextContent("2.14.1");
     expect(deployments).toHaveTextContent("Доступно обновление");
     expect(deployments).toHaveTextContent("Последний деплой");
+
+    const parsers = screen.getByRole("table", {
+      name: "Состояние поисковых парсеров",
+    });
+    expect(parsers).toHaveTextContent("YouTube");
+    expect(parsers).toHaveTextContent("2.14.0");
+    expect(parsers).toHaveTextContent("Запросы/мин");
+    expect(parsers).toHaveTextContent("Ошибки/мин");
+    expect(parsers).toHaveTextContent("Демо отклонено/мин");
 
     const providers = screen.getByRole("table", {
       name: "Состояние провайдеров",

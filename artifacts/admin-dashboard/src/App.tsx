@@ -3,6 +3,7 @@ import { AdminSidebar } from "./components/AdminSidebar";
 import { CommandBar } from "./components/CommandBar";
 import { DeploymentsTable } from "./components/DeploymentsTable";
 import { IncidentRail } from "./components/IncidentRail";
+import { ParserTable } from "./components/ParserTable";
 import { ProviderTable } from "./components/ProviderTable";
 import { SummaryStrip } from "./components/SummaryStrip";
 import { TopologyPanel } from "./components/TopologyPanel";
@@ -71,6 +72,7 @@ export default function App({ adapter = demoDashboardAdapter }: AppProps) {
                 <div className="detail-tables">
                   <DeploymentsTable modules={dashboard.snapshot.modules} />
                   <ProviderTable providers={dashboard.snapshot.providers} />
+                  <ParserTable parsers={dashboard.snapshot.parsers} />
                 </div>
               </div>
             </>

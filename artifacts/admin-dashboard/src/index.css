@@ -1230,6 +1230,11 @@ svg {
   background: rgba(77, 157, 255, 0.13);
 }
 
+.panel-title-icon.parser {
+  color: var(--color-healthy);
+  background: rgba(45, 204, 113, 0.12);
+}
+
 .panel-title-icon svg {
   width: 15px;
 }
@@ -1322,6 +1327,19 @@ time {
 
 .available-version {
   color: var(--color-warning);
+}
+
+.parsers-panel {
+  grid-column: 1 / -1;
+}
+
+.parser-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.parser-count[data-alert="true"] {
+  color: var(--color-warning);
+  font-weight: 650;
 }
 
 .status-cell {
@@ -1565,6 +1583,10 @@ tr:has(.status-cell[data-status="unknown"]) .provider-trend-bars span {
 
   .providers-panel table {
     min-width: 560px;
+  }
+
+  .parsers-panel table {
+    min-width: 680px;
   }
 }
 

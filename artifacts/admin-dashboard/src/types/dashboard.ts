@@ -8,6 +8,7 @@ export type {
   IncidentDiagnostic,
   IncidentSeverity,
   IncidentStatus,
+  ParserHealth,
   ProviderHealth,
   ServiceEdge,
   ServiceModule,

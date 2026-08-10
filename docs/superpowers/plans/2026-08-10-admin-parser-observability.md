@@ -76,9 +76,9 @@
 **Interfaces:**
 - Consumes: `snapshot.parsers` from Task 2.
 
-- [ ] Add one component-level assertion that the parser section renders status, version, requests, failures, and demo rejection values from the snapshot.
-- [ ] Add the `Парсеры` navigation target and table without changing topology geometry or incident behavior.
-- [ ] Run only `App.test.tsx`, admin-dashboard typecheck, and build.
+- [x] Add one component-level assertion that the parser section renders status, version, requests, failures, and demo rejection values from the snapshot.
+- [x] Add the `Парсеры` navigation target and table without changing topology geometry or incident behavior.
+- [x] Run only `App.test.tsx`, admin-dashboard typecheck, and build.
 
 ### Task 4: Read-Only Account And Connection Overview
 

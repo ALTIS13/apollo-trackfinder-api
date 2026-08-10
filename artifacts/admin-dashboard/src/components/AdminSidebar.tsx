@@ -4,6 +4,7 @@ import {
   Network,
   RadioTower,
   Rocket,
+  ScanSearch,
   TriangleAlert,
 } from "lucide-react";
 
@@ -16,6 +17,7 @@ const navigationItems = [
   { href: "#topology", label: "Топология", icon: Network },
   { href: "#incidents", label: "Инциденты", icon: TriangleAlert },
   { href: "#deployments", label: "Деплойменты", icon: Rocket },
+  { href: "#parsers", label: "Парсеры", icon: ScanSearch },
   { href: "#providers", label: "Провайдеры", icon: RadioTower },
 ] as const;
 
