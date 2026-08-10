@@ -58,10 +58,10 @@
 - Adds required `parsers` array to `DashboardSnapshot`.
 - Keeps heartbeat `schemaVersion: 1` because the field is backward-compatible and optional on ingest.
 
-- [ ] Add one contract test that accepts four unique bounded parser entries and rejects duplicates or negative counters.
-- [ ] Thread accepted parser telemetry through heartbeat storage and snapshot observations.
-- [ ] Map `search-media` heartbeat parser entries into the dashboard snapshot; absent telemetry yields four `unknown` parser rows.
-- [ ] Run only the changed contract, heartbeat, and admin-telemetry test files plus their package typechecks.
+- [x] Add one contract test that accepts four unique bounded parser entries and rejects duplicates or negative counters.
+- [x] Thread accepted parser telemetry through heartbeat storage and snapshot observations.
+- [x] Map `search-media` heartbeat parser entries into the dashboard snapshot; absent telemetry yields four `unknown` parser rows.
+- [x] Run only the changed contract, heartbeat, and admin-telemetry test files plus their package typechecks.
 
 ### Task 3: Render Live Parser State
 

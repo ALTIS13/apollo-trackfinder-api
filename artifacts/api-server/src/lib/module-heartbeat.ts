@@ -7,6 +7,7 @@ import {
   hasMatchingSignedBodySignature,
   isValidModuleHeartbeatSecret,
   moduleHeartbeatPayloadSchema,
+  type ModuleParserTelemetry,
 } from "@workspace/module-runtime-contract";
 export {
   createModuleHeartbeatSignature,
@@ -63,6 +64,7 @@ export interface ModuleHeartbeatObservation {
   deployedAt?: string;
   lastHeartbeatAt?: string;
   requestsPerMinute: number;
+  parsers?: readonly ModuleParserTelemetry[];
 }
 
 export type ModuleHeartbeatIngestResult =
@@ -86,6 +88,7 @@ interface AcceptedHeartbeat {
   version: string;
   deployedAt?: string;
   requestsPerMinute: number;
+  parsers?: readonly ModuleParserTelemetry[];
 }
 
 export function isCanonicalModuleHeartbeatPath(path: string): boolean {
@@ -239,6 +242,9 @@ export class ModuleHeartbeatService {
         ? {}
         : { deployedAt: payload.data.deployedAt }),
       requestsPerMinute: payload.data.requestsPerMinute ?? 0,
+      ...(payload.data.parsers === undefined
+        ? {}
+        : { parsers: payload.data.parsers }),
     });
 
     return { kind: "accepted", receivedAt: new Date(receivedAt).toISOString() };
@@ -264,6 +270,17 @@ export class ModuleHeartbeatService {
         ? heartbeat.receivedAt
         : heartbeat.receivedMonotonicAt;
       const fresh = at - receivedAt <= HEARTBEAT_FRESHNESS_MS;
+      const parsers = heartbeat.parsers?.map((parser) =>
+        fresh
+          ? parser
+          : {
+              ...parser,
+              status: "unknown" as const,
+              requestsPerMinute: 0,
+              failuresPerMinute: 0,
+              previewsRejectedPerMinute: 0,
+            },
+      );
       return {
         moduleId,
         managed: true,
@@ -274,6 +291,7 @@ export class ModuleHeartbeatService {
           : { deployedAt: heartbeat.deployedAt }),
         lastHeartbeatAt: new Date(heartbeat.receivedAt).toISOString(),
         requestsPerMinute: fresh ? heartbeat.requestsPerMinute : 0,
+        ...(parsers === undefined ? {} : { parsers }),
       };
     });
   }

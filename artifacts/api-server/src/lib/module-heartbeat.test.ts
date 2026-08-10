@@ -142,6 +142,30 @@ describe("ModuleHeartbeatService", () => {
     ]);
   });
 
+  it("preserves bounded parser telemetry in the search-media observation", () => {
+    const { service } = createService();
+    const parsers = [
+      {
+        source: "dz",
+        status: "warning",
+        requestsPerMinute: 3,
+        failuresPerMinute: 0,
+        previewsRejectedPerMinute: 2,
+        lastCheckedAt: "2026-07-15T04:31:01.000Z",
+      },
+    ] as const;
+
+    expect(
+      service.ingest(
+        createHeartbeatInput({
+          nonce: nonceFor("parser-telemetry"),
+          rawBody: Buffer.from(JSON.stringify({ ...validPayload, parsers })),
+        }),
+      ),
+    ).toMatchObject({ kind: "accepted" });
+    expect(service.snapshot()[0]).toMatchObject({ parsers });
+  });
+
   it("rejects a signature when the signed raw body changes", () => {
     const { service } = createService();
     const signed = createHeartbeatInput();

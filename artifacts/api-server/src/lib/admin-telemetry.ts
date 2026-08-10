@@ -314,6 +314,17 @@ export async function createAdminDashboardSnapshot(
     ["bandcamp", "Bandcamp"],
     ["deezer", "Deezer"],
   ] as const;
+  const parserDefinitions = [
+    ["yt", "youtube", "YouTube"],
+    ["sc", "soundcloud", "SoundCloud"],
+    ["bc", "bandcamp", "Bandcamp"],
+    ["dz", "deezer", "Deezer"],
+  ] as const;
+  const searchHeartbeat = managedHeartbeats.get("search-media");
+  const parserTelemetry = new Map(
+    searchHeartbeat?.parsers?.map((parser) => [parser.source, parser]) ?? [],
+  );
+  const parserVersion = searchHeartbeat?.version ?? "unknown";
 
   return parseDashboardSnapshot({
     generatedAt,
@@ -358,6 +369,22 @@ export async function createAdminDashboardSnapshot(
       latencyMs: 0,
       latencyTrendMs: [0],
     })),
+    parsers: parserDefinitions.map(([source, id, name]) => {
+      const parser = parserTelemetry.get(source);
+      return {
+        id,
+        name,
+        status: parser?.status ?? "unknown",
+        version: parserVersion,
+        requestsPerMinute: parser?.requestsPerMinute ?? 0,
+        failuresPerMinute: parser?.failuresPerMinute ?? 0,
+        previewsRejectedPerMinute:
+          parser?.previewsRejectedPerMinute ?? 0,
+        ...(parser?.lastCheckedAt === undefined
+          ? {}
+          : { lastCheckedAt: parser.lastCheckedAt }),
+      };
+    }),
   });
 }
 

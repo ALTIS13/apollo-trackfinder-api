@@ -79,6 +79,19 @@ const providerSchema = z
   })
   .strict();
 
+const parserSchema = z
+  .object({
+    id: z.enum(["youtube", "soundcloud", "bandcamp", "deezer"]),
+    name: labelSchema,
+    status: healthStatusSchema,
+    version: z.string().trim().min(1).max(128),
+    requestsPerMinute: nonNegativeIntegerSchema.max(1_000_000),
+    failuresPerMinute: nonNegativeIntegerSchema.max(1_000_000),
+    previewsRejectedPerMinute: nonNegativeIntegerSchema.max(1_000_000),
+    lastCheckedAt: timestampSchema.optional(),
+  })
+  .strict();
+
 export const dashboardSnapshotSchema = z
   .object({
     generatedAt: timestampSchema,
@@ -87,12 +100,19 @@ export const dashboardSnapshotSchema = z
     edges: z.array(edgeSchema).max(512),
     incidents: z.array(incidentSchema).max(512),
     providers: z.array(providerSchema).max(128),
+    parsers: z.array(parserSchema).max(4),
   })
   .strict()
   .superRefine((snapshot, context) => {
     const uniqueIds = (
       items: ReadonlyArray<{ id: string }>,
-      collection: "metrics" | "modules" | "edges" | "incidents" | "providers",
+      collection:
+        | "metrics"
+        | "modules"
+        | "edges"
+        | "incidents"
+        | "providers"
+        | "parsers",
     ) => {
       const ids = new Set<string>();
       items.forEach((item, index) => {
@@ -116,6 +136,7 @@ export const dashboardSnapshotSchema = z
       snapshot.incidents.map((incident) => [incident.id, incident]),
     );
     uniqueIds(snapshot.providers, "providers");
+    uniqueIds(snapshot.parsers, "parsers");
 
     const directedEdgeRelations = new Set<string>();
     snapshot.edges.forEach((edge, index) => {
@@ -200,6 +221,7 @@ export type ServiceEdge = z.infer<typeof edgeSchema>;
 export type IncidentDiagnostic = z.infer<typeof incidentDiagnosticSchema>;
 export type Incident = z.infer<typeof incidentSchema>;
 export type ProviderHealth = z.infer<typeof providerSchema>;
+export type ParserHealth = z.infer<typeof parserSchema>;
 export type DashboardSnapshot = z.infer<typeof dashboardSnapshotSchema>;
 export type IncidentSeverity = Incident["severity"];
 export type IncidentStatus = Incident["status"];

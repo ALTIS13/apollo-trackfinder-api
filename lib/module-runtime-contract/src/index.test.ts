@@ -5,6 +5,7 @@ import {
   createSignedBodySignature,
   hasMatchingSignedBodySignature,
   isValidModuleHeartbeatSecret,
+  moduleHeartbeatPayloadSchema,
 } from "./index";
 
 const rawBody = Buffer.from('{"schemaVersion":1}', "utf8");
@@ -122,5 +123,46 @@ describe("module runtime contract", () => {
     ]) {
       expect(isValidModuleHeartbeatSecret(secret)).toBe(false);
     }
+  });
+
+  it("accepts bounded unique parser telemetry and rejects malformed counters", () => {
+    const payload = {
+      schemaVersion: 1,
+      status: "warning",
+      version: "build-1",
+      parsers: [
+        {
+          source: "yt",
+          status: "healthy",
+          requestsPerMinute: 4,
+          failuresPerMinute: 0,
+          previewsRejectedPerMinute: 0,
+          lastCheckedAt: "2026-08-10T00:00:00.000Z",
+        },
+        {
+          source: "dz",
+          status: "warning",
+          requestsPerMinute: 3,
+          failuresPerMinute: 0,
+          previewsRejectedPerMinute: 2,
+        },
+      ],
+    } as const;
+
+    expect(moduleHeartbeatPayloadSchema.parse(payload)).toEqual(payload);
+    expect(
+      moduleHeartbeatPayloadSchema.safeParse({
+        ...payload,
+        parsers: [...payload.parsers, payload.parsers[0]],
+      }).success,
+    ).toBe(false);
+    expect(
+      moduleHeartbeatPayloadSchema.safeParse({
+        ...payload,
+        parsers: [
+          { ...payload.parsers[0], previewsRejectedPerMinute: -1 },
+        ],
+      }).success,
+    ).toBe(false);
   });
 });

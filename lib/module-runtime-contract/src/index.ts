@@ -23,19 +23,51 @@ export const canonicalNonceSchema: z.ZodString = z
   // A 43-character base64url encoding of 32 bytes has two zero pad bits in its final character.
   .regex(/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/);
 
+const moduleHealthStatusSchema = z.enum([
+  "healthy",
+  "warning",
+  "degraded",
+  "unknown",
+]);
+const parserTelemetrySchema = z
+  .object({
+    source: z.enum(["yt", "sc", "bc", "dz"]),
+    status: moduleHealthStatusSchema,
+    requestsPerMinute: z.number().finite().int().min(0).max(1_000_000),
+    failuresPerMinute: z.number().finite().int().min(0).max(1_000_000),
+    previewsRejectedPerMinute: z
+      .number()
+      .finite()
+      .int()
+      .min(0)
+      .max(1_000_000),
+    lastCheckedAt: z.string().datetime({ offset: true }).optional(),
+  })
+  .strict();
+const parserTelemetryListSchema = z
+  .array(parserTelemetrySchema)
+  .max(4)
+  .refine(
+    (parsers) =>
+      new Set(parsers.map((parser) => parser.source)).size === parsers.length,
+    { message: "Parser telemetry sources must be unique" },
+  );
+
 const moduleHeartbeatPayloadObjectSchema = z
   .object({
     schemaVersion: z.literal(1),
-    status: z.enum(["healthy", "warning", "degraded", "unknown"]),
+    status: moduleHealthStatusSchema,
     version: z.string().trim().min(1).max(128),
     deployedAt: z.string().datetime({ offset: true }).optional(),
     requestsPerMinute: z.number().finite().min(0).max(1_000_000).optional(),
+    parsers: parserTelemetryListSchema.optional(),
   })
   .strict();
 
 export type ModuleHeartbeatPayload = z.infer<
   typeof moduleHeartbeatPayloadObjectSchema
 >;
+export type ModuleParserTelemetry = z.infer<typeof parserTelemetrySchema>;
 
 export const moduleHeartbeatPayloadSchema: z.ZodType<ModuleHeartbeatPayload> =
   moduleHeartbeatPayloadObjectSchema;

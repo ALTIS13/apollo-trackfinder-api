@@ -52,6 +52,18 @@ const validSnapshot = {
     },
   ],
   providers: [],
+  parsers: [
+    {
+      id: "youtube",
+      name: "YouTube",
+      status: "healthy",
+      version: "1.0.0",
+      requestsPerMinute: 4,
+      failuresPerMinute: 0,
+      previewsRejectedPerMinute: 1,
+      lastCheckedAt: "2026-07-14T11:59:30.000Z",
+    },
+  ],
 } as const;
 
 describe("admin dashboard contract", () => {
@@ -75,6 +87,18 @@ describe("admin dashboard contract", () => {
         modules: [{ ...snapshot.modules[0], lastHeartbeatAt: "not-a-time" }],
       }),
     ).toThrow("Invalid admin dashboard snapshot");
+  });
+
+  it("accepts bounded parser state and rejects duplicate parser IDs", () => {
+    expect(parseDashboardSnapshot(validSnapshot).parsers).toEqual(
+      validSnapshot.parsers,
+    );
+    expect(() =>
+      parseDashboardSnapshot({
+        ...validSnapshot,
+        parsers: [validSnapshot.parsers[0], validSnapshot.parsers[0]],
+      }),
+    ).toThrow("Duplicate parsers ID");
   });
 
   it("rejects an incident linked from a healthy edge", () => {

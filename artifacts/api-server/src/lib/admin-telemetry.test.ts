@@ -279,6 +279,23 @@ describe("createAdminDashboardSnapshot", () => {
           deployedAt: "2026-07-15T04:30:00.000Z",
           lastHeartbeatAt: "2026-07-15T04:31:02.000Z",
           requestsPerMinute: 77,
+          parsers: [
+            {
+              source: "yt",
+              status: "healthy" as const,
+              requestsPerMinute: 12,
+              failuresPerMinute: 0,
+              previewsRejectedPerMinute: 1,
+              lastCheckedAt: "2026-07-15T04:31:01.000Z",
+            },
+            {
+              source: "dz",
+              status: "warning" as const,
+              requestsPerMinute: 9,
+              failuresPerMinute: 0,
+              previewsRejectedPerMinute: 4,
+            },
+          ],
         },
         {
           moduleId: "core-api",
@@ -313,6 +330,45 @@ describe("createAdminDashboardSnapshot", () => {
     expect(
       snapshot.metrics.find((metric) => metric.id === "active-modules")?.value,
     ).toBe("5");
+    expect(snapshot.parsers).toEqual([
+      {
+        id: "youtube",
+        name: "YouTube",
+        status: "healthy",
+        version: "3.0.0",
+        requestsPerMinute: 12,
+        failuresPerMinute: 0,
+        previewsRejectedPerMinute: 1,
+        lastCheckedAt: "2026-07-15T04:31:01.000Z",
+      },
+      {
+        id: "soundcloud",
+        name: "SoundCloud",
+        status: "unknown",
+        version: "3.0.0",
+        requestsPerMinute: 0,
+        failuresPerMinute: 0,
+        previewsRejectedPerMinute: 0,
+      },
+      {
+        id: "bandcamp",
+        name: "Bandcamp",
+        status: "unknown",
+        version: "3.0.0",
+        requestsPerMinute: 0,
+        failuresPerMinute: 0,
+        previewsRejectedPerMinute: 0,
+      },
+      {
+        id: "deezer",
+        name: "Deezer",
+        status: "warning",
+        version: "3.0.0",
+        requestsPerMinute: 9,
+        failuresPerMinute: 0,
+        previewsRejectedPerMinute: 4,
+      },
+    ]);
   });
 
   it("keeps managed missing or stale state unknown without fabricated heartbeat data", async () => {
