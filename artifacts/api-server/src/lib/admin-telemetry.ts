@@ -4,6 +4,8 @@ import {
   type DashboardAccount,
   type AccountSummary,
   type HealthStatus,
+  type Incident,
+  type ParserHealth,
   type ServiceEdge,
   type ServiceModule,
 } from "@workspace/admin-dashboard-contract";
@@ -332,16 +334,37 @@ export async function createAdminDashboardSnapshot(
   );
   const parserVersion = searchHeartbeat?.version ?? "unknown";
   const accountOverview = dependencies.accountOverview ?? {
-    accountSummary: {
-      total: 0,
-      activeNow: 0,
-      pending: 0,
-      suspended: 0,
-      spotifyConnected: 0,
-      yandexConnected: 0,
-    },
+    accountSummary: { availability: "unavailable" as const },
     accounts: [],
   };
+  const parsers: ParserHealth[] = parserDefinitions.map(
+    ([source, id, name]) => {
+      const parser = parserTelemetry.get(source);
+      return {
+        id,
+        name,
+        status: parser?.status ?? "unknown",
+        version: parserVersion,
+        requestsPerMinute: parser?.requestsPerMinute ?? 0,
+        failuresPerMinute: parser?.failuresPerMinute ?? 0,
+        previewsRejectedPerMinute: parser?.previewsRejectedPerMinute ?? 0,
+        ...(parser?.lastCheckedAt === undefined
+          ? {}
+          : { lastCheckedAt: parser.lastCheckedAt }),
+      };
+    },
+  );
+  const incidents: Incident[] = [];
+  const activeUsers =
+    accountOverview.accountSummary.availability === "available"
+      ? accountOverview.accountSummary.activeNow
+      : undefined;
+  const parserWarnings = parsers.filter(
+    (parser) => parser.status === "warning",
+  ).length;
+  const openIncidents = incidents.filter(
+    (incident) => incident.status === "open",
+  ).length;
 
   return parseDashboardSnapshot({
     generatedAt,
@@ -354,31 +377,33 @@ export async function createAdminDashboardSnapshot(
         trend: [activeModules],
       },
       {
-        id: "searches-per-minute",
-        label: "Поисков в минуту",
-        value: String(requestTelemetry.searchesPerMinute),
-        change: "Окно 60 секунд",
-        trend: requestTelemetry.searchTrend,
-      },
-      {
-        id: "queue-depth",
-        label: "Глубина очереди",
-        value: queueDepth === undefined ? "Нет данных" : String(queueDepth),
+        id: "active-users",
+        label: "Активные пользователи",
+        value: activeUsers === undefined ? "Нет данных" : String(activeUsers),
         change:
-          queueDepth === undefined ? "Очередь недоступна" : "Текущее состояние",
-        trend: [queueDepth ?? 0],
+          activeUsers === undefined
+            ? "Аккаунты недоступны"
+            : "За последние 15 минут",
+        trend: [activeUsers ?? 0],
       },
       {
-        id: "error-rate",
-        label: "Доля ошибок",
-        value: `${requestTelemetry.errorRatePercent.toFixed(1)}%`,
-        change: "HTTP 5xx за 60 секунд",
-        trend: requestTelemetry.errorRateTrend,
+        id: "parser-warnings",
+        label: "Предупреждения парсеров",
+        value: String(parserWarnings),
+        change: "Текущее состояние",
+        trend: [parserWarnings],
+      },
+      {
+        id: "open-incidents",
+        label: "Открытые инциденты",
+        value: String(openIncidents),
+        change: "Текущее состояние",
+        trend: [openIncidents],
       },
     ],
     modules: overlaidModules,
     edges,
-    incidents: [],
+    incidents,
     providers: providerNames.map(([id, name]) => ({
       id,
       name,
@@ -386,22 +411,7 @@ export async function createAdminDashboardSnapshot(
       latencyMs: 0,
       latencyTrendMs: [0],
     })),
-    parsers: parserDefinitions.map(([source, id, name]) => {
-      const parser = parserTelemetry.get(source);
-      return {
-        id,
-        name,
-        status: parser?.status ?? "unknown",
-        version: parserVersion,
-        requestsPerMinute: parser?.requestsPerMinute ?? 0,
-        failuresPerMinute: parser?.failuresPerMinute ?? 0,
-        previewsRejectedPerMinute:
-          parser?.previewsRejectedPerMinute ?? 0,
-        ...(parser?.lastCheckedAt === undefined
-          ? {}
-          : { lastCheckedAt: parser.lastCheckedAt }),
-      };
-    }),
+    parsers,
     accountSummary: accountOverview.accountSummary,
     accounts: accountOverview.accounts,
   });

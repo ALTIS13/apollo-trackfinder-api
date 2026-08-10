@@ -1329,7 +1329,8 @@ time {
   color: var(--color-warning);
 }
 
-.parsers-panel {
+.parsers-panel,
+.accounts-panel {
   grid-column: 1 / -1;
 }
 

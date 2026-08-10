@@ -20,7 +20,7 @@ export interface RejectedMediaSummary {
 }
 
 const TITLE_MARKER_PATTERN =
-  /(?:\b(?:demo|preview|snippet|teaser|sample)\b|\b(?:30|45|60)\s*(?:s|sec|secs|second|seconds)\b|\b(?:демо|превью|отрывок|фрагмент|тизер)\b)/iu;
+  /(?<![\p{L}\p{N}])(?:(?:demo|preview|snippet|teaser|sample|демо|превью|отрывок|фрагмент|тизер)|(?:30|45|60)\s*(?:s|sec|secs|second|seconds|сек|секунда|секунды|секунд))(?![\p{L}\p{N}])/iu;
 const SOURCE_ORDER: readonly TfSearchResultSource[] = [
   "youtube",
   "soundcloud",
@@ -53,7 +53,10 @@ function hasExplicitPreviewSignal(track: InternalTrack): boolean {
 function median(values: readonly number[]): number | undefined {
   if (values.length === 0) return undefined;
   const sorted = [...values].sort((left, right) => left - right);
-  return sorted[Math.floor(sorted.length / 2)];
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1
+    ? sorted[middle]
+    : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
 function referenceOriginalDuration(
@@ -93,9 +96,7 @@ export function assessMediaCompleteness(
   return { complete: true };
 }
 
-export function filterCompleteMedia(
-  tracks: readonly InternalTrack[],
-): {
+export function filterCompleteMedia(tracks: readonly InternalTrack[]): {
   readonly accepted: InternalTrack[];
   readonly rejected: RejectedMediaSummary[];
 } {

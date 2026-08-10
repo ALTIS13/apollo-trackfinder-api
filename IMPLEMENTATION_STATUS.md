@@ -10,27 +10,29 @@ Last updated: 2026-08-10.
 - Signed heartbeat `search-media` передаёт ограниченную телеметрию YouTube, SoundCloud, Bandcamp и Deezer: версия, статус, запросы, ошибки и отклонённые demo за 60 секунд. `tf-api` агрегирует её в строгий admin snapshot.
 - В админ-панель добавлена секция `Парсеры` с версиями, состоянием и счётчиками качества без изменения принятой топологии и инцидентов.
 - `platform-api` отдаёт подписанную read-only сводку максимум 100 последних аккаунтов с 15-минутной активностью, сессиями и module entitlements. `tf-integrations` отдаёт только состояние Spotify/Yandex, display name и время обновления для запрошенных account IDs.
-- `tf-api` остаётся единственной browser-facing границей: при недоступности integrations пользовательские строки сохраняются, а подключения становятся `unavailable`. Токены, provider user IDs, session digests, password data, HMAC/client secrets и DB credentials в snapshot не попадают.
-- В админ-панель добавлена секция `Пользователи`: lifecycle status, последняя активность, активные сессии, доступные модули, Spotify/Yandex и компактные итоговые счётчики.
+- Cross-account overview выполняется фиксированной SQL-проекцией с лимитом 100. FORCE RLS остаётся включённым, runtime и migrator остаются `NOBYPASSRLS`, а read-only доступ требует transaction-local контекст и живую capability `platform.accounts.manage`; обычный runtime без этого контекста по-прежнему не видит чужие строки и не получает broad mutation.
+- `tf-api` остаётся единственной browser-facing границей: недоступный Platform помечает account section как `unavailable`, а не как нулевой; при недоступности integrations пользовательские строки сохраняются, а подключения и их list-scoped summary становятся `unavailable`. Токены, provider user IDs, session digests, password data, HMAC/client secrets и DB credentials в snapshot не попадают.
+- В админ-панель добавлена секция `Пользователи`: lifecycle status, последняя активность, активные сессии, доступные модули, Spotify/Yandex и компактные итоговые счётчики. Spotify/Yandex counters явно относятся только к аккаунтам `в списке`.
+- Верхняя сводка соответствует утверждённому дизайну: активные модули, активные пользователи, предупреждения парсеров и открытые инциденты. Кириллические preview-маркеры и обычная медиана для чётных duration sets исправлены; internal overview responses читаются потоково с ранней отменой после 128 KiB.
 - HomeNode, Coolify, Caddy, UFW, DNS, Docker, Android и GitHub Actions не изменялись.
 
 ### Validation
 
-- Финальная выборочная матрица прошла `208/208`: `tf-search` 32, module runtime contract 11, admin contract 6, `tf-api` 72, Platform 25, integrations DB 14, integrations service 18, admin UI 30.
-- Package typecheck прошёл для `tf-search`, `tf-api`, `platform-api`, integrations DB, `tf-integrations` и admin dashboard.
+- Final-review fix matrix прошла `159/159`: `tf-search` 26, Platform DB 22, Platform API 33, admin contract 7, `tf-integrations` 19, `tf-api` 21, admin UI 31. Platform API subset выполнен против свежего PostgreSQL с migrations `0001..0006` и production runtime role.
+- Package typecheck прошёл для Platform DB, `platform-api`, `tf-search`, admin contract, `tf-integrations`, `tf-api` и admin dashboard.
 - Production build прошёл для `tf-search`, `tf-api`, `platform-api`, `tf-integrations` и admin dashboard; локальный production preview отвечает `HTTP 200` на `127.0.0.1:4187`.
-- Task 4 независимый review потребовал три исправления; commit `1122e3a` закрыл вывод Spotify/Yandex totals, HTTPS origin compatibility и прямое HMAC/replay coverage. Scoped re-review: все три findings `ADDRESSED`, новых Critical/Important нет.
+- Final review findings C1, I1-I6 и M1 закрыты одной fix wave поверх `6c2f14b`; max-100 и unknown-key duplicate tests остаются принятым non-blocking deferred-minor disposition.
 - Визуальный smoke во встроенном браузере не выполнен: browser-control endpoint недоступен в текущем контексте. Standalone Playwright не использовался без разрешения владельца.
 
 ### Commit/push
 
 - Ветка: `codex/feat/admin-parser-observability`, remote: `https://github.com/ALTIS13/Apollo.TF.git`.
-- Локальные commits этапа: `685cc14`, `ef6d900`, `0194230`, `84e4d27`, `649598b`, `1122e3a`.
+- Локальные commits этапа до final fix: `685cc14`, `ef6d900`, `0194230`, `84e4d27`, `649598b`, `1122e3a`, `6c2f14b`. Final-review fixes составляют один логический commit поверх `6c2f14b`.
 - Push/PR отложены до whole-branch review; HomeNode и production rollout не выполнялись.
 
 ### Следующий логичный этап реализации
 
-- Выполнить whole-branch review, опубликовать feature branch и stacked PR без GitHub Actions, затем подготовить локальный web/server release stack к проверке перед Coolify.
+- Выполнить финальный re-review fix commit, затем опубликовать feature branch и stacked PR без GitHub Actions; удалённый rollout остаётся отдельным этапом.
 - После работоспособной серверной и admin-инфраструктуры отдельно проектировать клиентскую зону и плеер в стиле Spotify/старой Yandex Music; Android остаётся отложен.
 
 ## Operator-owned release publisher

@@ -23,6 +23,8 @@ The current admin snapshot already contains module heartbeat status, deployed ve
 
 An unavailable dependency degrades only its section to stale/unavailable; it does not erase the last usable module topology.
 
+The Platform overview executes as one fixed, maximum-100-row PostgreSQL projection. FORCE RLS remains enabled, the runtime and migrator roles remain `NOBYPASSRLS`, and cross-account reads are enabled only for the projection's transaction-local `platform.accounts.manage` context. Ordinary runtime queries remain account-isolated and the projection has no mutation path.
+
 ## Demo And Preview Detection
 
 Every parser result passes through a default media-completeness gate before ranking and caching. A result is rejected when any of these bounded rules match:
@@ -43,7 +45,7 @@ An active user is an `active` account with at least one non-revoked, unexpired s
 - active session count and granted module keys;
 - Spotify/Yandex connection state and provider display name only.
 
-Provider access/refresh tokens, session digests, password data, and provider user IDs are never returned. Summary counters include total, active now, pending, suspended, Spotify connected, and Yandex connected.
+Provider access/refresh tokens, session digests, password data, and provider user IDs are never returned. Lifecycle counters include global total, active now, pending, and suspended values. Spotify and Yandex counters are explicitly scoped to the at-most-100 accounts in the displayed list. Platform failure marks the account section unavailable instead of synthesizing zero totals; integrations-only failure preserves account rows and marks connection cells and list-scoped connection counters unavailable.
 
 ## Admin Layout
 

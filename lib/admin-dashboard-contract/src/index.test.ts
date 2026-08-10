@@ -4,10 +4,34 @@ import { parseDashboardSnapshot } from "./index";
 const validSnapshot = {
   generatedAt: "2026-07-14T12:00:00.000Z",
   metrics: [
-    { id: "active", label: "Active", value: "1", change: "0", trend: [1] },
-    { id: "search", label: "Search", value: "0", change: "0", trend: [0] },
-    { id: "queue", label: "Queue", value: "0", change: "0", trend: [0] },
-    { id: "errors", label: "Errors", value: "0%", change: "0", trend: [0] },
+    {
+      id: "active-modules",
+      label: "Active modules",
+      value: "1",
+      change: "0",
+      trend: [1],
+    },
+    {
+      id: "active-users",
+      label: "Active users",
+      value: "1",
+      change: "0",
+      trend: [1],
+    },
+    {
+      id: "parser-warnings",
+      label: "Parser warnings",
+      value: "0",
+      change: "0",
+      trend: [0],
+    },
+    {
+      id: "open-incidents",
+      label: "Open incidents",
+      value: "1",
+      change: "0",
+      trend: [1],
+    },
   ],
   modules: [
     {
@@ -65,12 +89,16 @@ const validSnapshot = {
     },
   ],
   accountSummary: {
+    availability: "available",
     total: 1,
     activeNow: 1,
     pending: 0,
     suspended: 0,
-    spotifyConnected: 0,
-    yandexConnected: 0,
+    connectionSummary: {
+      availability: "available",
+      spotifyConnectedInList: 0,
+      yandexConnectedInList: 0,
+    },
   },
   accounts: [
     {
@@ -119,6 +147,43 @@ describe("admin dashboard contract", () => {
         parsers: [validSnapshot.parsers[0], validSnapshot.parsers[0]],
       }),
     ).toThrow("Duplicate parsers ID");
+  });
+
+  it("distinguishes an unavailable account section from an available zero", () => {
+    const unavailable = {
+      ...validSnapshot,
+      accountSummary: { availability: "unavailable" },
+      accounts: [],
+    } as const;
+    const availableZero = {
+      ...validSnapshot,
+      accountSummary: {
+        availability: "available",
+        total: 0,
+        activeNow: 0,
+        pending: 0,
+        suspended: 0,
+        connectionSummary: {
+          availability: "available",
+          spotifyConnectedInList: 0,
+          yandexConnectedInList: 0,
+        },
+      },
+      accounts: [],
+    } as const;
+
+    expect(parseDashboardSnapshot(unavailable).accountSummary).toEqual({
+      availability: "unavailable",
+    });
+    expect(parseDashboardSnapshot(availableZero).accountSummary).toEqual(
+      availableZero.accountSummary,
+    );
+    expect(() =>
+      parseDashboardSnapshot({
+        ...unavailable,
+        accounts: validSnapshot.accounts,
+      }),
+    ).toThrow("Unavailable account summaries cannot include account rows");
   });
 
   it("rejects an incident linked from a healthy edge", () => {

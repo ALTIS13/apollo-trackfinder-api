@@ -187,8 +187,8 @@ describe("Apollo TF admin dashboard", () => {
     expect(parsers).toHaveTextContent("Демо отклонено/мин");
 
     const accounts = screen.getByRole("region", { name: "Пользователи" });
-    expect(accounts).toHaveTextContent("Spotify подключено: 2");
-    expect(accounts).toHaveTextContent("Яндекс подключено: 1");
+    expect(accounts).toHaveTextContent("Spotify в списке: 2");
+    expect(accounts).toHaveTextContent("Яндекс в списке: 1");
 
     const providers = screen.getByRole("table", {
       name: "Состояние провайдеров",
@@ -256,9 +256,7 @@ describe("Apollo TF admin dashboard", () => {
         within(
           screen.getByRole("table", { name: "Состояние провайдеров" }),
         ).getByRole("row", { name: /Spotify/ }),
-      ).getByText(
-        "Не проверялся",
-      ),
+      ).getByText("Не проверялся"),
     ).toBeVisible();
   });
 
@@ -269,13 +267,31 @@ describe("Apollo TF admin dashboard", () => {
     const topology = screen.getByRole("region", { name: "Топология сервисов" });
 
     expect(metrics).toContainElement(screen.getByText("Активные модули"));
-    expect(metrics).toContainElement(screen.getByText("Поисков в минуту"));
-    expect(metrics).toContainElement(screen.getByText("Глубина очереди"));
-    expect(metrics).toContainElement(screen.getByText("Доля ошибок"));
+    expect(metrics).toContainElement(screen.getByText("Активные пользователи"));
+    expect(metrics).toContainElement(
+      screen.getByText("Предупреждения парсеров"),
+    );
+    expect(metrics).toContainElement(screen.getByText("Открытые инциденты"));
     expect(
       metrics.compareDocumentPosition(topology) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  it("renders account dependency failure distinctly from an available zero", () => {
+    const snapshot = {
+      ...demoSnapshot,
+      accountSummary: { availability: "unavailable" },
+      accounts: [],
+    } as unknown as DashboardSnapshot;
+
+    render(<App adapter={createAdapter(async () => snapshot, snapshot)} />);
+
+    const accounts = screen.getByRole("region", { name: "Пользователи" });
+    expect(accounts).toHaveTextContent("Данные аккаунтов недоступны");
+    expect(
+      within(accounts).queryByRole("table", { name: "Пользователи" }),
+    ).not.toBeInTheDocument();
   });
 
   it("filters incidents when a service is selected", async () => {

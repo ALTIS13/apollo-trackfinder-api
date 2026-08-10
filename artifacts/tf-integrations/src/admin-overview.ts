@@ -1,10 +1,9 @@
 import { z } from "zod";
 
-import type {
-  AdminConnectionSummaryRepository,
-} from "@workspace/tf-integrations-db";
+import type { AdminConnectionSummaryRepository } from "@workspace/tf-integrations-db";
 
 const accountIdSchema = z.string().uuid();
+const DISPLAY_NAME_LIMIT = 256;
 
 export const TF_INTEGRATIONS_ADMIN_OVERVIEW_PATH =
   "/v1/internal/admin/connections";
@@ -30,7 +29,7 @@ export const integrationsAdminOverviewResponseSchema = z
           .object({
             accountId: accountIdSchema,
             provider: z.enum(["spotify", "yandex"]),
-            displayName: z.string().trim().min(1).max(500),
+            displayName: z.string().trim().min(1).max(DISPLAY_NAME_LIMIT),
             updatedAt: z.string().datetime({ offset: true }),
           })
           .strict(),
@@ -60,7 +59,7 @@ export class TfIntegrationsAdminOverviewService {
       connections: connections.map((connection) => ({
         accountId: connection.accountId,
         provider: connection.provider,
-        displayName: connection.displayName,
+        displayName: connection.displayName.trim().slice(0, DISPLAY_NAME_LIMIT),
         updatedAt: connection.updatedAt.toISOString(),
       })),
     });

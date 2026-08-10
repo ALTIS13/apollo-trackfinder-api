@@ -339,6 +339,7 @@ export interface AuthorizationBindingRepository {
 export interface AdminAccountOverviewRepository {
   getAdminAccountOverview(
     client: PoolClient,
+    operatorAccountId: string,
     now: Date,
     limit: number,
   ): Promise<AdminAccountOverview>;

@@ -175,20 +175,17 @@ interface AccountRow extends QueryResultRow {
   readonly updated_at: Date;
 }
 
-interface AdminAccountSummaryRow extends QueryResultRow {
+interface AdminAccountOverviewRow extends QueryResultRow {
   readonly total: string | number;
   readonly active_now: string | number;
   readonly pending: string | number;
   readonly suspended: string | number;
-}
-
-interface AdminAccountRow extends QueryResultRow {
-  readonly account_id: string;
-  readonly email: string;
-  readonly display_name: string;
-  readonly status: string;
+  readonly account_id: string | null;
+  readonly email: string | null;
+  readonly display_name: string | null;
+  readonly status: string | null;
   readonly latest_activity_at: Date | null;
-  readonly active_session_count: string | number;
+  readonly active_session_count: string | number | null;
   readonly module_keys: readonly string[] | null;
 }
 
@@ -346,7 +343,19 @@ function requireNonNegativeInteger(value: string | number): number {
   return parsed;
 }
 
-function mapAdminAccount(row: AdminAccountRow): AdminAccountOverviewAccount {
+function mapAdminAccount(
+  row: AdminAccountOverviewRow,
+): AdminAccountOverviewAccount | null {
+  if (row.account_id === null) return null;
+  if (
+    row.email === null ||
+    row.display_name === null ||
+    row.status === null ||
+    row.active_session_count === null ||
+    row.module_keys === null
+  ) {
+    throw new TypeError("Invalid admin overview account");
+  }
   return {
     id: row.account_id,
     email: row.email,
@@ -654,6 +663,7 @@ export class PostgresPlatformRepository
 
   async getAdminAccountOverview(
     client: PoolClient,
+    operatorAccountId: string,
     now: Date,
     limit: number,
   ): Promise<AdminAccountOverview> {
@@ -663,67 +673,23 @@ export class PostgresPlatformRepository
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw new TypeError("Invalid admin overview limit");
     }
-    const activeSince = new Date(now.getTime() - 15 * 60 * 1_000);
-    const [summary, accounts] = await Promise.all([
-      execute<AdminAccountSummaryRow>(
-        client,
-        `with active_sessions as (
-           select account_id
-           from apollo_platform.auth_sessions
-           where revoked_at is null
-             and expires_at > $1
-             and last_seen_at >= $2
-         )
-         select count(*) as total,
-                count(*) filter (where status = 'active' and exists (
-                  select 1 from active_sessions where active_sessions.account_id = accounts.id
-                )) as active_now,
-                count(*) filter (where status = 'pending') as pending,
-                count(*) filter (where status = 'suspended') as suspended
-         from apollo_platform.accounts`,
-        [now, activeSince],
-      ),
-      execute<AdminAccountRow>(
-        client,
-        `with active_sessions as (
-           select account_id, count(*)::integer as active_session_count
-           from apollo_platform.auth_sessions
-           where revoked_at is null
-             and expires_at > $1
-             and last_seen_at >= $2
-           group by account_id
-         )
-         select account.id as account_id, account.email, account.display_name,
-                account.status, max(session.last_seen_at) as latest_activity_at,
-                coalesce(active_sessions.active_session_count, 0) as active_session_count,
-                coalesce(
-                  array_agg(distinct module.module_key) filter (
-                    where entitlement.revoked_at is null
-                      and (entitlement.expires_at is null or entitlement.expires_at > $1)
-                      and module.state = 'active'
-                  ),
-                  '{}'
-                ) as module_keys
-         from apollo_platform.accounts as account
-         left join apollo_platform.auth_sessions as session
-           on session.account_id = account.id
-         left join active_sessions on active_sessions.account_id = account.id
-         left join apollo_platform.account_module_entitlements as entitlement
-           on entitlement.account_id = account.id
-         left join apollo_platform.modules as module on module.id = entitlement.module_id
-         group by account.id, active_sessions.active_session_count
-         order by latest_activity_at desc nulls last, account.id
-         limit $3`,
-        [now, activeSince, limit],
-      ),
-    ]);
-    const counts = requireRow(summary.rows);
+    const result = await execute<AdminAccountOverviewRow>(
+      client,
+      `select total, active_now, pending, suspended, account_id, email,
+              display_name, status, latest_activity_at,
+              active_session_count, module_keys
+       from apollo_platform.admin_account_overview($1, $2, $3)`,
+      [operatorAccountId, now, limit],
+    );
+    const counts = requireRow(result.rows);
     return {
       total: requireNonNegativeInteger(counts.total),
       activeNow: requireNonNegativeInteger(counts.active_now),
       pending: requireNonNegativeInteger(counts.pending),
       suspended: requireNonNegativeInteger(counts.suspended),
-      accounts: Object.freeze(accounts.rows.map(mapAdminAccount)),
+      accounts: Object.freeze(
+        result.rows.map(mapAdminAccount).filter((account) => account !== null),
+      ),
     };
   }
 

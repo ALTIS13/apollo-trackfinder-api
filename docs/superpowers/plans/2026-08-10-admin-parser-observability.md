@@ -22,12 +22,14 @@
 ### Task 1: Reject Demo And Preview Tracks
 
 **Files:**
+
 - Create: `artifacts/tf-search/src/media-completeness.ts`
 - Create: `artifacts/tf-search/src/media-completeness.test.ts`
 - Modify: `artifacts/tf-search/src/search-service.ts`
 - Modify: `artifacts/tf-search/src/search-service.test.ts`
 
 **Interfaces:**
+
 - Produces: `assessMediaCompleteness(track, referenceDuration): MediaCompletenessAssessment`
 - Produces: `filterCompleteMedia(tracks): { accepted; rejected }`
 - Extends: `SearchService.telemetry()` with per-source rolling parser counters.
@@ -42,6 +44,7 @@
 ### Task 2: Transport Parser Telemetry To The Admin Snapshot
 
 **Files:**
+
 - Modify: `lib/module-runtime-contract/src/index.ts`
 - Modify: `lib/module-runtime-contract/src/index.test.ts`
 - Modify: `artifacts/tf-search/src/heartbeat.ts`
@@ -54,6 +57,7 @@
 - Modify: `artifacts/api-server/src/lib/admin-telemetry.test.ts`
 
 **Interfaces:**
+
 - Extends heartbeat payload with optional bounded `parsers` entries.
 - Adds required `parsers` array to `DashboardSnapshot`.
 - Keeps heartbeat `schemaVersion: 1` because the field is backward-compatible and optional on ingest.
@@ -66,6 +70,7 @@
 ### Task 3: Render Live Parser State
 
 **Files:**
+
 - Create: `artifacts/admin-dashboard/src/components/ParserTable.tsx`
 - Modify: `artifacts/admin-dashboard/src/App.tsx`
 - Modify: `artifacts/admin-dashboard/src/components/AdminSidebar.tsx`
@@ -74,6 +79,7 @@
 - Modify: `artifacts/admin-dashboard/src/App.test.tsx`
 
 **Interfaces:**
+
 - Consumes: `snapshot.parsers` from Task 2.
 
 - [x] Add one component-level assertion that the parser section renders status, version, requests, failures, and demo rejection values from the snapshot.
@@ -83,6 +89,7 @@
 ### Task 4: Read-Only Account And Connection Overview
 
 **Files:**
+
 - Modify: `artifacts/platform-api/src/domain/repository.ts`
 - Modify: `artifacts/platform-api/src/domain/postgres-repository.ts`
 - Create: `artifacts/platform-api/src/domain/admin-overview.ts`
@@ -97,14 +104,16 @@
 - Create: `artifacts/admin-dashboard/src/components/AccountsTable.tsx`
 
 **Interfaces:**
+
 - Platform overview returns at most 100 recent accounts and 15-minute activity counts.
 - Integrations overview accepts at most 100 canonical account IDs and returns only provider, display name, and updated timestamp.
 - Dashboard snapshot adds `accountSummary` and `accounts` with bounded strict schemas.
+- Account summary availability is explicit; provider counters are scoped to the displayed account list.
 
-- [x] Add one repository test for active-session aggregation and one integrations test for bounded account-ID lookup.
+- [x] Add one real PostgreSQL runtime-role test for the capability-gated bounded projection and one integrations test for bounded account-ID lookup.
 - [x] Add signed internal endpoints using existing module-runtime canonical request signatures.
-- [x] Add one tf-api aggregation test proving unavailable integrations degrade connection fields without losing account rows.
-- [x] Render the `Пользователи` section and compact summary without exposing secrets or provider user IDs.
+- [x] Add tf-api aggregation tests proving Platform failure is explicitly unavailable and integrations failure degrades connection fields without losing account rows.
+- [x] Render the `Пользователи` section and compact summary with list-scoped provider counts, without exposing secrets or provider user IDs.
 - [x] Run only the touched Platform, Integrations, API, contract, and dashboard tests plus package typechecks/builds.
 
 ### Task 5: Final Selective Validation And Publication

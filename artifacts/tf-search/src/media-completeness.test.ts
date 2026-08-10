@@ -29,8 +29,7 @@ describe("media completeness gate", () => {
       track({
         id: "dz_preview",
         source: "deezer",
-        sourceUrl:
-          "https://cdns-preview-a.dzcdn.net/stream/c-a-preview.mp3",
+        sourceUrl: "https://cdns-preview-a.dzcdn.net/stream/c-a-preview.mp3",
       }),
       210,
       "provider_preview_url",
@@ -42,19 +41,32 @@ describe("media completeness gate", () => {
       "title_marker",
     ],
     [
+      "Cyrillic title marker",
+      track({ id: "yt_demo_ru", title: "Трек (демо)" }),
+      210,
+      "title_marker",
+    ],
+    [
+      "Russian duration marker",
+      track({ id: "yt_30_seconds_ru", title: "Трек 30 сек" }),
+      210,
+      "title_marker",
+    ],
+    [
       "duration outlier",
       track({ id: "sc_short", source: "soundcloud", duration: 72 }),
       210,
       "duration_outlier",
     ],
     ["full track", track(), 210, undefined],
-  ] as const)("classifies %s", (_label, candidate, referenceDuration, reason) => {
-    expect(assessMediaCompleteness(candidate, referenceDuration)).toEqual(
-      reason === undefined
-        ? { complete: true }
-        : { complete: false, reason },
-    );
-  });
+  ] as const)(
+    "classifies %s",
+    (_label, candidate, referenceDuration, reason) => {
+      expect(assessMediaCompleteness(candidate, referenceDuration)).toEqual(
+        reason === undefined ? { complete: true } : { complete: false, reason },
+      );
+    },
+  );
 
   it("filters rejected media and reports bounded counts by source and reason", () => {
     const result = filterCompleteMedia([
@@ -62,8 +74,7 @@ describe("media completeness gate", () => {
       track({
         id: "dz_preview",
         source: "deezer",
-        sourceUrl:
-          "https://cdns-preview-a.dzcdn.net/stream/c-a-preview.mp3",
+        sourceUrl: "https://cdns-preview-a.dzcdn.net/stream/c-a-preview.mp3",
       }),
       track({
         id: "sc_short",
@@ -87,5 +98,20 @@ describe("media completeness gate", () => {
         count: 1,
       },
     ]);
+  });
+
+  it("averages the middle durations for an even-sized reference set", () => {
+    const result = filterCompleteMedia([
+      track({ id: "reference_120", duration: 120 }),
+      track({ id: "reference_180", duration: 180 }),
+      track({ id: "candidate_90", type: "remix", duration: 90 }),
+    ]);
+
+    expect(result.accepted.map((candidate) => candidate.id)).toEqual([
+      "reference_120",
+      "reference_180",
+      "candidate_90",
+    ]);
+    expect(result.rejected).toEqual([]);
   });
 });

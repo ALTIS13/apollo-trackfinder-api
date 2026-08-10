@@ -233,16 +233,18 @@ describe("platform internal admin overview route", () => {
 
   it("rejects wrong Basic client credentials", async () => {
     const body = Buffer.from("{}", "utf8");
+    const wrongClientApp = app();
     const wrongClient = await request(
-      app().instance,
+      wrongClientApp.instance,
       PLATFORM_ADMIN_OVERVIEW_PATH,
       body,
       signedHeaders(PLATFORM_ADMIN_OVERVIEW_PATH, body, {
         basicClientId: "unexpected-client",
       }),
     );
+    const wrongSecretApp = app();
     const wrongSecret = await request(
-      app().instance,
+      wrongSecretApp.instance,
       PLATFORM_ADMIN_OVERVIEW_PATH,
       body,
       signedHeaders(PLATFORM_ADMIN_OVERVIEW_PATH, body, {
@@ -252,6 +254,8 @@ describe("platform internal admin overview route", () => {
 
     expect(wrongClient.status).toBe(401);
     expect(wrongSecret.status).toBe(401);
+    expect(wrongClientApp.load).not.toHaveBeenCalled();
+    expect(wrongSecretApp.load).not.toHaveBeenCalled();
   });
 
   it("rejects a fresh request when replay capacity is exhausted", async () => {

@@ -1,8 +1,10 @@
 import type { Pool } from "pg";
 import { z } from "zod";
+import { withPlatformTransaction } from "@workspace/platform-db";
 
 import type {
   AdminAccountOverviewRepository,
+  PlatformRepository,
 } from "./repository.js";
 
 const ACCOUNT_LIMIT = 100;
@@ -34,7 +36,8 @@ export type PlatformAdminOverview = z.infer<typeof platformAdminOverviewSchema>;
 export class PlatformAdminOverviewService {
   constructor(
     private readonly pool: Pool,
-    private readonly repository: AdminAccountOverviewRepository,
+    private readonly repository: AdminAccountOverviewRepository &
+      Pick<PlatformRepository, "getRegistrationSettings">,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
@@ -43,10 +46,15 @@ export class PlatformAdminOverviewService {
     if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
       throw new Error("admin overview clock unavailable");
     }
-    const client = await this.pool.connect();
-    try {
+    return withPlatformTransaction(this.pool, async (client) => {
+      const settings = await this.repository.getRegistrationSettings(client);
+      const operatorAccountId = settings?.operatorBootstrapAccountId;
+      if (operatorAccountId === null || operatorAccountId === undefined) {
+        throw new Error("admin overview operator unavailable");
+      }
       const overview = await this.repository.getAdminAccountOverview(
         client,
+        operatorAccountId,
         now,
         ACCOUNT_LIMIT,
       );
@@ -67,8 +75,6 @@ export class PlatformAdminOverviewService {
           moduleKeys: account.moduleKeys,
         })),
       });
-    } finally {
-      client.release();
-    }
+    });
   }
 }

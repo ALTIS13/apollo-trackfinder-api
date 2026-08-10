@@ -1208,7 +1208,7 @@ describe("PostgresPlatformRepository", () => {
     expect(client.queries[1]!.text).toMatch(/revoked_at is null/i);
   });
 
-  it("aggregates recent accounts from active sessions and current grants", async () => {
+  it("reads the capability-gated bounded account overview projection", async () => {
     const client = new RecordingClient([
       [
         {
@@ -1216,10 +1216,6 @@ describe("PostgresPlatformRepository", () => {
           active_now: "1",
           pending: "1",
           suspended: "1",
-        },
-      ],
-      [
-        {
           account_id: accountId,
           email: accountRow.email,
           display_name: accountRow.display_name,
@@ -1233,7 +1229,12 @@ describe("PostgresPlatformRepository", () => {
     const repository = new PostgresPlatformRepository();
 
     await expect(
-      repository.getAdminAccountOverview(asPoolClient(client), now, 100),
+      repository.getAdminAccountOverview(
+        asPoolClient(client),
+        accountId,
+        now,
+        100,
+      ),
     ).resolves.toEqual({
       total: 3,
       activeNow: 1,
@@ -1253,20 +1254,12 @@ describe("PostgresPlatformRepository", () => {
     });
 
     expect(client.queries[0]?.text).toMatch(
-      /auth_sessions[\s\S]*revoked_at is null[\s\S]*expires_at > \$1[\s\S]*last_seen_at >= \$2/i,
+      /from apollo_platform\.admin_account_overview\(\$1, \$2, \$3\)/i,
     );
-    expect(client.queries[0]?.values).toEqual([
-      now,
-      new Date(now.getTime() - 15 * 60 * 1_000),
-    ]);
-    expect(client.queries[1]?.text).toMatch(
-      /array_agg\(distinct module\.module_key[\s\S]*order by latest_activity_at desc nulls last[\s\S]*limit \$3/i,
+    expect(client.queries[0]?.values).toEqual([accountId, now, 100]);
+    expect(client.queries[0]?.text).not.toMatch(
+      /session_digest|password_hash|provider_user_id|token_digest/i,
     );
-    expect(client.queries[1]?.values).toEqual([
-      now,
-      new Date(now.getTime() - 15 * 60 * 1_000),
-      100,
-    ]);
   });
 
   it("keeps token and session repository APIs digest-only", async () => {

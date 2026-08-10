@@ -101,13 +101,21 @@ const accountConnectionSchema = z
   .strict()
   .superRefine((connection, context) => {
     const connected = connection.state === "connected";
-    if (connected && (connection.displayName === undefined || connection.updatedAt === undefined)) {
+    if (
+      connected &&
+      (connection.displayName === undefined ||
+        connection.updatedAt === undefined)
+    ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         message: "Connected account providers require display metadata",
       });
     }
-    if (!connected && (connection.displayName !== undefined || connection.updatedAt !== undefined)) {
+    if (
+      !connected &&
+      (connection.displayName !== undefined ||
+        connection.updatedAt !== undefined)
+    ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         message: "Disconnected account providers cannot expose metadata",
@@ -115,16 +123,30 @@ const accountConnectionSchema = z
     }
   });
 
-const accountSummarySchema = z
-  .object({
-    total: nonNegativeIntegerSchema.max(1_000_000_000),
-    activeNow: nonNegativeIntegerSchema.max(1_000_000_000),
-    pending: nonNegativeIntegerSchema.max(1_000_000_000),
-    suspended: nonNegativeIntegerSchema.max(1_000_000_000),
-    spotifyConnected: nonNegativeIntegerSchema.max(1_000_000_000),
-    yandexConnected: nonNegativeIntegerSchema.max(1_000_000_000),
-  })
-  .strict();
+const accountConnectionSummarySchema = z.discriminatedUnion("availability", [
+  z
+    .object({
+      availability: z.literal("available"),
+      spotifyConnectedInList: nonNegativeIntegerSchema.max(100),
+      yandexConnectedInList: nonNegativeIntegerSchema.max(100),
+    })
+    .strict(),
+  z.object({ availability: z.literal("unavailable") }).strict(),
+]);
+
+const accountSummarySchema = z.discriminatedUnion("availability", [
+  z
+    .object({
+      availability: z.literal("available"),
+      total: nonNegativeIntegerSchema.max(1_000_000_000),
+      activeNow: nonNegativeIntegerSchema.max(1_000_000_000),
+      pending: nonNegativeIntegerSchema.max(1_000_000_000),
+      suspended: nonNegativeIntegerSchema.max(1_000_000_000),
+      connectionSummary: accountConnectionSummarySchema,
+    })
+    .strict(),
+  z.object({ availability: z.literal("unavailable") }).strict(),
+]);
 
 const accountSchema = z
   .object({
@@ -189,6 +211,17 @@ export const dashboardSnapshotSchema = z
     uniqueIds(snapshot.providers, "providers");
     uniqueIds(snapshot.parsers, "parsers");
     uniqueIds(snapshot.accounts, "accounts");
+
+    if (
+      snapshot.accountSummary.availability === "unavailable" &&
+      snapshot.accounts.length > 0
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Unavailable account summaries cannot include account rows",
+        path: ["accounts"],
+      });
+    }
 
     const directedEdgeRelations = new Set<string>();
     snapshot.edges.forEach((edge, index) => {
