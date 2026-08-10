@@ -1,6 +1,6 @@
 # Codex reference for Apollo TF
 
-Last updated: 2026-07-14.
+Last updated: 2026-08-10.
 
 ## Project context
 
@@ -12,7 +12,7 @@ Apollo Track Finder (Apollo TF) is a pnpm workspace for a music search/player sy
 - `lib/api-spec`: OpenAPI source of truth. Do not edit this directory casually; update generated clients through the established API generation flow.
 - `lib/api-client-react`, `lib/api-zod`, `lib/db`: shared clients, validation, and database packages.
 
-GitHub repository: `https://github.com/ALTIS13/apollo-trackfinder-api`.
+GitHub repository: `https://github.com/ALTIS13/Apollo.TF`.
 Local checkout remote `origin` points to that repo. Do not print credential-bearing remote URLs.
 
 ## Authorization and safety boundaries

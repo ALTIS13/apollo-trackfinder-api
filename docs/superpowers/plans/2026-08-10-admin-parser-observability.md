@@ -101,14 +101,14 @@
 - Integrations overview accepts at most 100 canonical account IDs and returns only provider, display name, and updated timestamp.
 - Dashboard snapshot adds `accountSummary` and `accounts` with bounded strict schemas.
 
-- [ ] Add one repository test for active-session aggregation and one integrations test for bounded account-ID lookup.
-- [ ] Add signed internal endpoints using existing module-runtime canonical request signatures.
-- [ ] Add one tf-api aggregation test proving unavailable integrations degrade connection fields without losing account rows.
-- [ ] Render the `Пользователи` section and compact summary without exposing secrets or provider user IDs.
-- [ ] Run only the touched Platform, Integrations, API, contract, and dashboard tests plus package typechecks/builds.
+- [x] Add one repository test for active-session aggregation and one integrations test for bounded account-ID lookup.
+- [x] Add signed internal endpoints using existing module-runtime canonical request signatures.
+- [x] Add one tf-api aggregation test proving unavailable integrations degrade connection fields without losing account rows.
+- [x] Render the `Пользователи` section and compact summary without exposing secrets or provider user IDs.
+- [x] Run only the touched Platform, Integrations, API, contract, and dashboard tests plus package typechecks/builds.
 
 ### Task 5: Final Selective Validation And Publication
 
-- [ ] Run focused tests named in Tasks 1-4, package-local typechecks, and builds.
+- [x] Run focused tests named in Tasks 1-4, package-local typechecks, and builds.
 - [ ] Run one local admin-dashboard desktop visual smoke-check without touching remote infrastructure.
 - [ ] Inspect `git diff --check`, commit logical slices, push the feature branch, and update the existing implementation-status document with exact commit IDs and deferred player work.
