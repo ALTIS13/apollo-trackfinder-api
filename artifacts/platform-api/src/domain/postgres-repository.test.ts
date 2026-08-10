@@ -1208,6 +1208,67 @@ describe("PostgresPlatformRepository", () => {
     expect(client.queries[1]!.text).toMatch(/revoked_at is null/i);
   });
 
+  it("aggregates recent accounts from active sessions and current grants", async () => {
+    const client = new RecordingClient([
+      [
+        {
+          total: "3",
+          active_now: "1",
+          pending: "1",
+          suspended: "1",
+        },
+      ],
+      [
+        {
+          account_id: accountId,
+          email: accountRow.email,
+          display_name: accountRow.display_name,
+          status: "active",
+          latest_activity_at: now,
+          active_session_count: "1",
+          module_keys: ["tf.search"],
+        },
+      ],
+    ]);
+    const repository = new PostgresPlatformRepository();
+
+    await expect(
+      repository.getAdminAccountOverview(asPoolClient(client), now, 100),
+    ).resolves.toEqual({
+      total: 3,
+      activeNow: 1,
+      pending: 1,
+      suspended: 1,
+      accounts: [
+        {
+          id: accountId,
+          email: accountRow.email,
+          displayName: accountRow.display_name,
+          status: "active",
+          latestActivityAt: now,
+          activeSessionCount: 1,
+          moduleKeys: ["tf.search"],
+        },
+      ],
+    });
+
+    expect(client.queries[0]?.text).toMatch(
+      /auth_sessions[\s\S]*revoked_at is null[\s\S]*expires_at > \$1[\s\S]*last_seen_at >= \$2/i,
+    );
+    expect(client.queries[0]?.values).toEqual([
+      now,
+      new Date(now.getTime() - 15 * 60 * 1_000),
+    ]);
+    expect(client.queries[1]?.text).toMatch(
+      /array_agg\(distinct module\.module_key[\s\S]*order by latest_activity_at desc nulls last[\s\S]*limit \$3/i,
+    );
+    expect(client.queries[1]?.values).toEqual([
+      now,
+      new Date(now.getTime() - 15 * 60 * 1_000),
+      100,
+    ]);
+  });
+
   it("keeps token and session repository APIs digest-only", async () => {
     const repositorySource = await readFile(
       new URL("./repository.ts", import.meta.url),

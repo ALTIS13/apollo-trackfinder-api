@@ -6,6 +6,9 @@ import type { PoolClient, QueryResult, QueryResultRow } from "pg";
 
 import type {
   Account,
+  AdminAccountOverviewRepository,
+  AdminAccountOverview,
+  AdminAccountOverviewAccount,
   AccountEntitlement,
   AddInvitationGrantsInput,
   AuthorizationBindingRepository,
@@ -172,6 +175,23 @@ interface AccountRow extends QueryResultRow {
   readonly updated_at: Date;
 }
 
+interface AdminAccountSummaryRow extends QueryResultRow {
+  readonly total: string | number;
+  readonly active_now: string | number;
+  readonly pending: string | number;
+  readonly suspended: string | number;
+}
+
+interface AdminAccountRow extends QueryResultRow {
+  readonly account_id: string;
+  readonly email: string;
+  readonly display_name: string;
+  readonly status: string;
+  readonly latest_activity_at: Date | null;
+  readonly active_session_count: string | number;
+  readonly module_keys: readonly string[] | null;
+}
+
 interface CredentialRow extends QueryResultRow {
   readonly account_id: string;
   readonly password_hash: string;
@@ -318,6 +338,29 @@ function mapAccount(row: AccountRow): Account {
   };
 }
 
+function requireNonNegativeInteger(value: string | number): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new TypeError("Invalid admin overview count");
+  }
+  return parsed;
+}
+
+function mapAdminAccount(row: AdminAccountRow): AdminAccountOverviewAccount {
+  return {
+    id: row.account_id,
+    email: row.email,
+    displayName: row.display_name,
+    status: row.status as AccountStatus,
+    latestActivityAt:
+      row.latest_activity_at === null
+        ? null
+        : requireTimestamp(row.latest_activity_at),
+    activeSessionCount: requireNonNegativeInteger(row.active_session_count),
+    moduleKeys: Object.freeze([...(row.module_keys ?? [])]),
+  };
+}
+
 function mapCredential(row: CredentialRow): Credential {
   return {
     accountId: row.account_id,
@@ -460,7 +503,10 @@ function mapAuditEvent(row: AuditEventRow): AuditEvent {
 }
 
 export class PostgresPlatformRepository
-  implements PlatformRepository, AuthorizationBindingRepository
+  implements
+    PlatformRepository,
+    AuthorizationBindingRepository,
+    AdminAccountOverviewRepository
 {
   async getRegistrationSettings(
     client: PoolClient,
@@ -604,6 +650,81 @@ export class PostgresPlatformRepository
       [input.accountId, input.verifiedAt],
     );
     return mapAccount(requireRow(result.rows));
+  }
+
+  async getAdminAccountOverview(
+    client: PoolClient,
+    now: Date,
+    limit: number,
+  ): Promise<AdminAccountOverview> {
+    if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+      throw new TypeError("Invalid admin overview time");
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new TypeError("Invalid admin overview limit");
+    }
+    const activeSince = new Date(now.getTime() - 15 * 60 * 1_000);
+    const [summary, accounts] = await Promise.all([
+      execute<AdminAccountSummaryRow>(
+        client,
+        `with active_sessions as (
+           select account_id
+           from apollo_platform.auth_sessions
+           where revoked_at is null
+             and expires_at > $1
+             and last_seen_at >= $2
+         )
+         select count(*) as total,
+                count(*) filter (where status = 'active' and exists (
+                  select 1 from active_sessions where active_sessions.account_id = accounts.id
+                )) as active_now,
+                count(*) filter (where status = 'pending') as pending,
+                count(*) filter (where status = 'suspended') as suspended
+         from apollo_platform.accounts`,
+        [now, activeSince],
+      ),
+      execute<AdminAccountRow>(
+        client,
+        `with active_sessions as (
+           select account_id, count(*)::integer as active_session_count
+           from apollo_platform.auth_sessions
+           where revoked_at is null
+             and expires_at > $1
+             and last_seen_at >= $2
+           group by account_id
+         )
+         select account.id as account_id, account.email, account.display_name,
+                account.status, max(session.last_seen_at) as latest_activity_at,
+                coalesce(active_sessions.active_session_count, 0) as active_session_count,
+                coalesce(
+                  array_agg(distinct module.module_key) filter (
+                    where entitlement.revoked_at is null
+                      and (entitlement.expires_at is null or entitlement.expires_at > $1)
+                      and module.state = 'active'
+                  ),
+                  '{}'
+                ) as module_keys
+         from apollo_platform.accounts as account
+         left join apollo_platform.auth_sessions as session
+           on session.account_id = account.id
+         left join active_sessions on active_sessions.account_id = account.id
+         left join apollo_platform.account_module_entitlements as entitlement
+           on entitlement.account_id = account.id
+         left join apollo_platform.modules as module on module.id = entitlement.module_id
+         group by account.id, active_sessions.active_session_count
+         order by latest_activity_at desc nulls last, account.id
+         limit $3`,
+        [now, activeSince, limit],
+      ),
+    ]);
+    const counts = requireRow(summary.rows);
+    return {
+      total: requireNonNegativeInteger(counts.total),
+      activeNow: requireNonNegativeInteger(counts.active_now),
+      pending: requireNonNegativeInteger(counts.pending),
+      suspended: requireNonNegativeInteger(counts.suspended),
+      accounts: Object.freeze(accounts.rows.map(mapAdminAccount)),
+    };
   }
 
   async createCredential(

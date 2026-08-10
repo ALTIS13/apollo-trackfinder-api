@@ -295,6 +295,31 @@ export const demoSnapshot: DashboardSnapshot = {
       lastCheckedAt: "2026-07-14T09:27:10.000Z",
     },
   ],
+  accountSummary: {
+    total: 3,
+    activeNow: 2,
+    pending: 1,
+    suspended: 0,
+    spotifyConnected: 2,
+    yandexConnected: 1,
+  },
+  accounts: [
+    {
+      id: "10000000-0000-4000-8000-000000000001",
+      email: "operator@apollo.tf",
+      displayName: "Apollo Operator",
+      status: "active",
+      latestActivityAt: "2026-07-14T09:29:54.000Z",
+      activeSessionCount: 2,
+      moduleKeys: ["tf.search"],
+      spotify: {
+        state: "connected",
+        displayName: "Apollo Music",
+        updatedAt: "2026-07-14T09:10:00.000Z",
+      },
+      yandex: { state: "disconnected" },
+    },
+  ],
 };
 
 export const demoDashboardAdapter: DashboardSnapshotAdapter = {

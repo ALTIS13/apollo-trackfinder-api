@@ -92,6 +92,54 @@ const parserSchema = z
   })
   .strict();
 
+const accountConnectionSchema = z
+  .object({
+    state: z.enum(["connected", "disconnected", "unavailable"]),
+    displayName: labelSchema.optional(),
+    updatedAt: timestampSchema.optional(),
+  })
+  .strict()
+  .superRefine((connection, context) => {
+    const connected = connection.state === "connected";
+    if (connected && (connection.displayName === undefined || connection.updatedAt === undefined)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Connected account providers require display metadata",
+      });
+    }
+    if (!connected && (connection.displayName !== undefined || connection.updatedAt !== undefined)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Disconnected account providers cannot expose metadata",
+      });
+    }
+  });
+
+const accountSummarySchema = z
+  .object({
+    total: nonNegativeIntegerSchema.max(1_000_000_000),
+    activeNow: nonNegativeIntegerSchema.max(1_000_000_000),
+    pending: nonNegativeIntegerSchema.max(1_000_000_000),
+    suspended: nonNegativeIntegerSchema.max(1_000_000_000),
+    spotifyConnected: nonNegativeIntegerSchema.max(1_000_000_000),
+    yandexConnected: nonNegativeIntegerSchema.max(1_000_000_000),
+  })
+  .strict();
+
+const accountSchema = z
+  .object({
+    id: z.string().uuid(),
+    email: z.string().trim().email().max(320),
+    displayName: labelSchema,
+    status: z.enum(["pending", "active", "suspended", "deleted"]),
+    latestActivityAt: timestampSchema.optional(),
+    activeSessionCount: nonNegativeIntegerSchema.max(1_000_000),
+    moduleKeys: z.array(idSchema).max(64),
+    spotify: accountConnectionSchema,
+    yandex: accountConnectionSchema,
+  })
+  .strict();
+
 export const dashboardSnapshotSchema = z
   .object({
     generatedAt: timestampSchema,
@@ -101,6 +149,8 @@ export const dashboardSnapshotSchema = z
     incidents: z.array(incidentSchema).max(512),
     providers: z.array(providerSchema).max(128),
     parsers: z.array(parserSchema).max(4),
+    accountSummary: accountSummarySchema,
+    accounts: z.array(accountSchema).max(100),
   })
   .strict()
   .superRefine((snapshot, context) => {
@@ -112,7 +162,8 @@ export const dashboardSnapshotSchema = z
         | "edges"
         | "incidents"
         | "providers"
-        | "parsers",
+        | "parsers"
+        | "accounts",
     ) => {
       const ids = new Set<string>();
       items.forEach((item, index) => {
@@ -137,6 +188,7 @@ export const dashboardSnapshotSchema = z
     );
     uniqueIds(snapshot.providers, "providers");
     uniqueIds(snapshot.parsers, "parsers");
+    uniqueIds(snapshot.accounts, "accounts");
 
     const directedEdgeRelations = new Set<string>();
     snapshot.edges.forEach((edge, index) => {
@@ -222,6 +274,9 @@ export type IncidentDiagnostic = z.infer<typeof incidentDiagnosticSchema>;
 export type Incident = z.infer<typeof incidentSchema>;
 export type ProviderHealth = z.infer<typeof providerSchema>;
 export type ParserHealth = z.infer<typeof parserSchema>;
+export type AccountConnection = z.infer<typeof accountConnectionSchema>;
+export type AccountSummary = z.infer<typeof accountSummarySchema>;
+export type DashboardAccount = z.infer<typeof accountSchema>;
 export type DashboardSnapshot = z.infer<typeof dashboardSnapshotSchema>;
 export type IncidentSeverity = Incident["severity"];
 export type IncidentStatus = Incident["status"];

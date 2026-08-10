@@ -1,6 +1,8 @@
 import {
   parseDashboardSnapshot,
   type DashboardSnapshot,
+  type DashboardAccount,
+  type AccountSummary,
   type HealthStatus,
   type ServiceEdge,
   type ServiceModule,
@@ -171,6 +173,10 @@ export interface AdminDashboardSnapshotDependencies {
   isDatabaseReady: () => boolean;
   isRedisAvailable: () => boolean;
   getModuleHeartbeats: () => ReadonlyArray<ModuleHeartbeatObservation>;
+  accountOverview?: {
+    readonly accountSummary: AccountSummary;
+    readonly accounts: readonly DashboardAccount[];
+  };
 }
 
 function combineStatus(left: HealthStatus, right: HealthStatus): HealthStatus {
@@ -325,6 +331,17 @@ export async function createAdminDashboardSnapshot(
     searchHeartbeat?.parsers?.map((parser) => [parser.source, parser]) ?? [],
   );
   const parserVersion = searchHeartbeat?.version ?? "unknown";
+  const accountOverview = dependencies.accountOverview ?? {
+    accountSummary: {
+      total: 0,
+      activeNow: 0,
+      pending: 0,
+      suspended: 0,
+      spotifyConnected: 0,
+      yandexConnected: 0,
+    },
+    accounts: [],
+  };
 
   return parseDashboardSnapshot({
     generatedAt,
@@ -385,6 +402,8 @@ export async function createAdminDashboardSnapshot(
           : { lastCheckedAt: parser.lastCheckedAt }),
       };
     }),
+    accountSummary: accountOverview.accountSummary,
+    accounts: accountOverview.accounts,
   });
 }
 

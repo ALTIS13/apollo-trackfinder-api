@@ -2,6 +2,9 @@ import type { DashboardSnapshot } from "@workspace/admin-dashboard-contract";
 
 export type {
   DashboardMetric,
+  DashboardAccount,
+  AccountConnection,
+  AccountSummary,
   DashboardSnapshot,
   HealthStatus,
   Incident,

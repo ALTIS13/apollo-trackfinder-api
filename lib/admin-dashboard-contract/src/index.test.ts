@@ -64,6 +64,26 @@ const validSnapshot = {
       lastCheckedAt: "2026-07-14T11:59:30.000Z",
     },
   ],
+  accountSummary: {
+    total: 1,
+    activeNow: 1,
+    pending: 0,
+    suspended: 0,
+    spotifyConnected: 0,
+    yandexConnected: 0,
+  },
+  accounts: [
+    {
+      id: "10000000-0000-4000-8000-000000000001",
+      email: "operator@example.com",
+      displayName: "Apollo Operator",
+      status: "active",
+      activeSessionCount: 1,
+      moduleKeys: ["tf.search"],
+      spotify: { state: "disconnected" },
+      yandex: { state: "unavailable" },
+    },
+  ],
 } as const;
 
 describe("admin dashboard contract", () => {

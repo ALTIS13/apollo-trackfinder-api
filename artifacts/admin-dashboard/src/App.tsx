@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { AdminSidebar } from "./components/AdminSidebar";
+import { AccountsTable } from "./components/AccountsTable";
 import { CommandBar } from "./components/CommandBar";
 import { DeploymentsTable } from "./components/DeploymentsTable";
 import { IncidentRail } from "./components/IncidentRail";
@@ -73,6 +74,10 @@ export default function App({ adapter = demoDashboardAdapter }: AppProps) {
                   <DeploymentsTable modules={dashboard.snapshot.modules} />
                   <ProviderTable providers={dashboard.snapshot.providers} />
                   <ParserTable parsers={dashboard.snapshot.parsers} />
+                  <AccountsTable
+                    summary={dashboard.snapshot.accountSummary}
+                    accounts={dashboard.snapshot.accounts}
+                  />
                 </div>
               </div>
             </>

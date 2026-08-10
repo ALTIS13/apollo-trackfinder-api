@@ -23,6 +23,11 @@ import {
 import { registerOAuthRoutes } from "./routes/oauth.js";
 import { registerPublicRegistrationRoutes } from "./routes/public-registration.js";
 import { registerUserSessionRoutes } from "./routes/user-sessions.js";
+import {
+  registerInternalAdminRoutes,
+  type InternalAdminOverviewService,
+  type PlatformInternalAdminAuthenticator,
+} from "./routes/internal-admin.js";
 
 export { REGISTERED_PROTECTED_PLATFORM_ROUTES } from "./routes/operator.js";
 
@@ -59,6 +64,8 @@ export interface PlatformApiDependencies {
   readonly developmentTokenEcho?: boolean;
   readonly bootstrapSecret?: string;
   readonly logger: PlatformLogger;
+  readonly internalAdminOverview?: InternalAdminOverviewService;
+  readonly internalAdminAuth?: PlatformInternalAdminAuthenticator;
 }
 
 const UUID_PATTERN =
@@ -154,6 +161,10 @@ export function createPlatformApp(
   });
   app.use(corsMiddleware(dependencies.allowedOrigins));
   app.use(bodyContentTypeMiddleware());
+  registerInternalAdminRoutes(app, {
+    overview: dependencies.internalAdminOverview,
+    auth: dependencies.internalAdminAuth,
+  });
   app.use(
     express.json({
       limit: "16kb",

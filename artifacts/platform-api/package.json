@@ -12,6 +12,7 @@
     "start": "node --enable-source-maps ./dist/index.mjs"
   },
   "dependencies": {
+    "@workspace/module-runtime-contract": "workspace:*",
     "@workspace/platform-contract": "workspace:*",
     "@workspace/platform-db": "workspace:*",
     "argon2": "^0.44.0",

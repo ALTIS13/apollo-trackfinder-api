@@ -9,6 +9,8 @@ export {
 export {
   PostgresProviderAccountRepository,
   type EncryptedTokenEnvelopeV1,
+  type AdminConnectionSummary,
+  type AdminConnectionSummaryRepository,
   type IntegrationsStorageError,
   type IntegrationsStorageErrorCode,
   type Provider,

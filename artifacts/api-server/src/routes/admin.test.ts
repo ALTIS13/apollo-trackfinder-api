@@ -33,6 +33,16 @@ const validSnapshot = {
   edges: [],
   incidents: [],
   providers: [],
+  parsers: [],
+  accountSummary: {
+    total: 0,
+    activeNow: 0,
+    pending: 0,
+    suspended: 0,
+    spotifyConnected: 0,
+    yandexConnected: 0,
+  },
+  accounts: [],
 } as const;
 
 const servers: Server[] = [];

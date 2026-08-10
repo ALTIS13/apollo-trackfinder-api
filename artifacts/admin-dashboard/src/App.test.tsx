@@ -157,6 +157,7 @@ describe("Apollo TF admin dashboard", () => {
       ["Инциденты", "#incidents"],
       ["Деплойменты", "#deployments"],
       ["Парсеры", "#parsers"],
+      ["Пользователи", "#accounts"],
       ["Провайдеры", "#providers"],
     ];
     for (const [name, href] of expectedAnchors) {
@@ -247,7 +248,11 @@ describe("Apollo TF admin dashboard", () => {
       ),
     ).toBeVisible();
     expect(
-      within(screen.getByRole("row", { name: /Spotify/ })).getByText(
+      within(
+        within(
+          screen.getByRole("table", { name: "Состояние провайдеров" }),
+        ).getByRole("row", { name: /Spotify/ }),
+      ).getByText(
         "Не проверялся",
       ),
     ).toBeVisible();
