@@ -136,20 +136,43 @@ export interface AdminAccountOverviewClientConfig {
   readonly integrationsSecret: string;
 }
 
+const privateServiceNamePattern = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name]?.trim();
   if (value === undefined || value.length === 0) throw new Error("invalid runtime configuration");
   return value;
 }
 
-function privateOrigin(value: string): string {
-  const parsed = new URL(value);
+function isPrivateServiceHostname(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "[::1]" ||
+    hostname === "::1" ||
+    privateServiceNamePattern.test(hostname)
+  );
+}
+
+function parseExactOrigin(value: string, allowInsecureHttp: boolean): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("invalid runtime configuration");
+  }
   if (
     parsed.origin !== value ||
     parsed.username !== "" ||
-    parsed.password !== "" ||
+    parsed.password !== ""
+  ) {
+    throw new Error("invalid runtime configuration");
+  }
+  if (parsed.protocol === "https:") return parsed.origin;
+  if (
     parsed.protocol !== "http:" ||
-    !["platform-api", "tf-integrations", "localhost", "127.0.0.1"].includes(parsed.hostname)
+    !allowInsecureHttp ||
+    !isPrivateServiceHostname(parsed.hostname)
   ) {
     throw new Error("invalid runtime configuration");
   }
@@ -166,10 +189,16 @@ export async function parseAdminAccountOverviewClientConfig(
   env: NodeJS.ProcessEnv,
 ): Promise<AdminAccountOverviewClientConfig> {
   return {
-    platformOrigin: privateOrigin(required(env, "APOLLO_PLATFORM_API_ORIGIN")),
+    platformOrigin: parseExactOrigin(
+      required(env, "APOLLO_PLATFORM_API_ORIGIN"),
+      env["APOLLO_TF_BRIDGE_ALLOW_INTERNAL_HTTP"] === "true",
+    ),
     platformClientId: required(env, "APOLLO_TF_CLIENT_ID"),
     platformClientSecret: await secret(required(env, "APOLLO_TF_CLIENT_SECRET_FILE")),
-    integrationsOrigin: privateOrigin(required(env, "TF_INTEGRATIONS_ORIGIN")),
+    integrationsOrigin: parseExactOrigin(
+      required(env, "TF_INTEGRATIONS_ORIGIN"),
+      env["TF_INTEGRATIONS_ALLOW_INSECURE_HTTP"] === "true",
+    ),
     integrationsSecret: await secret(required(env, "TF_INTEGRATIONS_INTERNAL_AUTH_SECRET_FILE")),
   };
 }

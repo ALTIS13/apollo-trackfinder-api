@@ -48,7 +48,7 @@ export function AccountsTable({ summary, accounts }: AccountsTableProps) {
         <span className="panel-title-icon parser" aria-hidden="true"><Users /></span>
         <div>
           <h2 id="accounts-title">Пользователи</h2>
-          <p>{summary.total} всего, {summary.activeNow} активны сейчас, {summary.pending} ожидают, {summary.suspended} приостановлены</p>
+          <p>{summary.total} всего, {summary.activeNow} активны сейчас, {summary.pending} ожидают, {summary.suspended} приостановлены, Spotify подключено: {summary.spotifyConnected}, Яндекс подключено: {summary.yandexConnected}</p>
         </div>
       </div>
       <div className="table-scroll">

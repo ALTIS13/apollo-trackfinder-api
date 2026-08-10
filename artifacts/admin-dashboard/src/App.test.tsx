@@ -186,6 +186,10 @@ describe("Apollo TF admin dashboard", () => {
     expect(parsers).toHaveTextContent("Ошибки/мин");
     expect(parsers).toHaveTextContent("Демо отклонено/мин");
 
+    const accounts = screen.getByRole("region", { name: "Пользователи" });
+    expect(accounts).toHaveTextContent("Spotify подключено: 2");
+    expect(accounts).toHaveTextContent("Яндекс подключено: 1");
+
     const providers = screen.getByRole("table", {
       name: "Состояние провайдеров",
     });

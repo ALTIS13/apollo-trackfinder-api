@@ -15,7 +15,11 @@ import {
   createTfIntegrationsApp,
   createTfIntegrationsReadiness,
 } from "./app.js";
-import { HmacInternalRequestAuthenticator } from "./internal-auth.js";
+import {
+  HmacInternalRequestAuthenticator,
+  type InternalRequestAuthenticator,
+} from "./internal-auth.js";
+import type { TfIntegrationsAdminOverviewService } from "./admin-overview.js";
 
 const commandSecret = "c".repeat(32);
 const requestId = "10000000-0000-4000-8000-000000000001";
@@ -91,11 +95,15 @@ function app(
     readonly maxConcurrentCommands?: number;
     readonly shutdownSignal?: AbortSignal;
     readonly now?: () => number;
+    readonly auth?: InternalRequestAuthenticator;
+    readonly adminOverview?: TfIntegrationsAdminOverviewService;
   } = {},
 ) {
   return createTfIntegrationsApp({
     service: service(options.execute),
-    auth: new HmacInternalRequestAuthenticator({ secret: commandSecret }),
+    auth:
+      options.auth ??
+      new HmacInternalRequestAuthenticator({ secret: commandSecret }),
     readiness:
       options.readiness ??
       createTfIntegrationsReadiness({
@@ -112,6 +120,9 @@ function app(
       ? {}
       : { shutdownSignal: options.shutdownSignal }),
     ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.adminOverview === undefined
+      ? {}
+      : { adminOverview: options.adminOverview }),
   });
 }
 
@@ -849,5 +860,37 @@ describe("TF integrations private HTTP runtime", () => {
     const ready = await request(instance, "/readyz");
     expect(ready.status).toBe(200);
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("claims the fixed admin replay partition before loading connections", async () => {
+    const proof = {} as never;
+    const auth: InternalRequestAuthenticator = {
+      verify: vi.fn(() => proof),
+      claim: vi.fn(() => "accepted" as const),
+    };
+    const load = vi.fn(async () => ({ connections: [] }));
+    const body = Buffer.from(JSON.stringify({ accountIds: [] }), "utf8");
+
+    const result = await request(
+      app({
+        auth,
+        adminOverview: {
+          load,
+        } as unknown as TfIntegrationsAdminOverviewService,
+      }),
+      "/v1/internal/admin/connections",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(auth.claim).toHaveBeenCalledWith(
+      "00000000-0000-4000-8000-000000000000",
+      proof,
+    );
+    expect(load).toHaveBeenCalledWith({ accountIds: [] });
   });
 });
